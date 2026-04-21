@@ -662,7 +662,7 @@ def main() -> None:
                 config_path = os.path.join(cwd, found[0])
                 print(f"Config file not found. Using the only .conf file discovered: {found[0]}")
             else:
-                print("Config file 'jj-dlp.conf' not found. The following .conf files were discovered:\n")
+                print("\nConfig file 'jj-dlp.conf' not found and --config <path> not specified. The following .conf files were discovered:\n\n")
                 for i, name in enumerate(found, 1):
                     print(f"  [{i}] {name}")
                 print()
