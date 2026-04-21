@@ -2,7 +2,7 @@
   
 (Assumes you already have [Python](https://www.python.org/downloads/) and [yt-dlp](https://github.com/yt-dlp/yt-dlp))
 
-Step 1:  Download jj-dlp.py and one of the conf files (click the file, click the 3 dots in the top right, click download)
+Step 1:  Download jj-dlp.py and one of the conf files (click the file > click the 3 dots in the top right > click download)
 
 Step 2:  Put the names of the streamers you want to record in the [Streamers] section of the conf file.
 
