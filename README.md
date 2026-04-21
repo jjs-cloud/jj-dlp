@@ -19,6 +19,7 @@ jj-dlp is a [yt-dlp](https://github.com/yt-dlp/yt-dlp) wrapper that allows you t
 ## Features
 
 - **Multi-streamer monitoring** — watches/records any number of channels concurrently
+- **Small footprint** — only needs to run 1 yt-dlp process when checking for live streams
 - **Stall detection** — restarts yt-dlp if the download stalls
 - **Hot config file** — start and stop recordings via the config file while the script is still running
 - **Verbosity modes** — Hide yt-dlp and/or ffmpeg output with the press of a button. (v and o)
