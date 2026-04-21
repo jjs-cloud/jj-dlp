@@ -116,7 +116,7 @@ Press **Ctrl+C** to stop. Active recordings are given up to 15 seconds to finish
 ## How It Works
 
 1. **Main loop** — loads the config, queries yt-dlp for each streamer's live status, and starts a recording thread for any streamer that is live.
-2. **Recording thread** — runs yt-dlp as a subprocess, monitors the output file size, and restarts yt-dlp automatically if a stall is detected.
+2. **Recording thread** — runs yt-dlp as a subprocess.
 3. **Config watcher thread** — polls the config file every `CONFIG_CHECK_INTERVAL` seconds and triggers an immediate live check when new streamers are added.
 4. **Block list** — checked on every config reload during an active recording; a blocked streamer's process is killed immediately.
 
