@@ -6,6 +6,8 @@ Step 2:  Put the names of the streamers you want to record automatically in the 
 
 Step 3:  Run "py jj-dlp.py --config twitch.conf" (or whatever conf file you chose) in the command prompt
 
+  Note:  If "py" doesn't work, try "python" or "python3"
+
 ---
 
 # jj-dlp
