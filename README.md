@@ -102,7 +102,7 @@ streamer3
 ## Usage
 
 ```bash
-# Use the default recorder.conf in the current directory
+# Use the default jj-dlp.conf in the current directory
 python jj-dlp.py
 
 # Specify a custom config file
