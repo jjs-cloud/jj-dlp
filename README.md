@@ -32,7 +32,7 @@ jj-dlp is a [yt-dlp](https://github.com/yt-dlp/yt-dlp) wrapper that allows you t
 ## Requirements
 
 - [Python](https://www.python.org/downloads/)
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) Must be in your system `PATH`, or you can specify the path in the jj-dlp config file
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) Must be in your system `PATH`, or you can specify the path in the jj-dlp `.conf` file
 
 ---
 
