@@ -217,7 +217,7 @@ def get_log_path(cfg: dict) -> str:
     lp = cfg.get("log_path") or ""
     if lp.strip():
         return lp
-    return os.path.join(cfg.get("output_dir", "."), "recorder.log")
+    return os.path.join(cfg.get("output_dir", "."), "jj-dlp.log")
 
 
 def get_log_file_paths(cfg: dict) -> Tuple[str, str]:
@@ -628,8 +628,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Stream recorder")
     parser.add_argument(
         "--config",
-        default="recorder.conf",
-        help="Path to config file (default: recorder.conf in current directory)"
+        default="jj-dlp.conf",
+        help="Path to config file (default: jj-dlp.conf in current directory)"
     )
 
     args = parser.parse_args()
