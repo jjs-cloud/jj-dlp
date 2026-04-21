@@ -106,7 +106,7 @@ streamer3
 python jj-dlp.py
 
 # Specify a custom config file
-python jj-dlp.py --config C:\\path\\to\\my.conf
+python jj-dlp.py --config C:\path\to\my.conf
 ```
 
 Press **Ctrl+C** to stop. Active recordings are given up to 15 seconds to finish gracefully before the process exits.
