@@ -1,6 +1,6 @@
 ## Quick Start Guide:
   
-(Assumes you already have python and yt-dlp)
+(Assumes you already have [Python](https://www.python.org/downloads/) and [yt-dlp](https://github.com/yt-dlp/yt-dlp))
 
 Step 1:  Download jj-dlp.py and one of the conf files (right click > save link as)
 
