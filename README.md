@@ -1,10 +1,14 @@
 ## Quick Start Guide:
+  
+(Assumes you already have [Python](https://www.python.org/downloads/) and [yt-dlp](https://github.com/yt-dlp/yt-dlp))
 
-Step 1:  Download jj-dlp.py and one of the conf files (right click > save link as)
+Step 1:  Download jj-dlp.py and one of the conf files (click the file > click the 3 dots in the top right > click download)
 
-Step 2:  Put the names of the streamers you want to record automatically in the [Streamers] section of the conf file.
+Step 2:  Put the names of the streamers you want to record in the [Streamers] section of the conf file.
 
 Step 3:  Run "py jj-dlp.py --config twitch.conf" (or whatever conf file you chose) in the command prompt
+
+  Note:  If "py" doesn't work, try "python" or "python3"
 
 ---
 
@@ -17,6 +21,7 @@ jj-dlp is a [yt-dlp](https://github.com/yt-dlp/yt-dlp) wrapper that allows you t
 ## Features
 
 - **Multi-streamer monitoring** — watches/records any number of channels concurrently
+- **Small footprint** — only needs to run 1 yt-dlp process when checking for live streams
 - **Stall detection** — restarts yt-dlp if the download stalls
 - **Hot config file** — start and stop recordings via the config file while the script is still running
 - **Verbosity modes** — Hide yt-dlp and/or ffmpeg output with the press of a button. (v and o)
@@ -27,7 +32,7 @@ jj-dlp is a [yt-dlp](https://github.com/yt-dlp/yt-dlp) wrapper that allows you t
 ## Requirements
 
 - [Python](https://www.python.org/downloads/)
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) Must be in your system `PATH`, or you can specify the path in the jj-dlp config file
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) Must be in your system `PATH`, or you can specify the path in the jj-dlp `.conf` file
 
 ---
 
@@ -100,11 +105,11 @@ streamer3
 ## Usage
 
 ```bash
-# Use the default recorder.conf in the current directory
+# Use the default jj-dlp.conf in the current directory
 python jj-dlp.py
 
 # Specify a custom config file
-python jj-dlp.py --config C:\\path\\to\\my.conf
+python jj-dlp.py --config C:\path\to\my.conf
 ```
 
 Press **Ctrl+C** to stop. Active recordings are given up to 15 seconds to finish gracefully before the process exits.
@@ -114,7 +119,7 @@ Press **Ctrl+C** to stop. Active recordings are given up to 15 seconds to finish
 ## How It Works
 
 1. **Main loop** — loads the config, queries yt-dlp for each streamer's live status, and starts a recording thread for any streamer that is live.
-2. **Recording thread** — runs yt-dlp as a subprocess, monitors the output file size, and restarts yt-dlp automatically if a stall is detected.
+2. **Recording thread** — runs yt-dlp as a subprocess.
 3. **Config watcher thread** — polls the config file every `CONFIG_CHECK_INTERVAL` seconds and triggers an immediate live check when new streamers are added.
 4. **Block list** — checked on every config reload during an active recording; a blocked streamer's process is killed immediately.
 
