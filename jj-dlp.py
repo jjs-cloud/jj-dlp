@@ -628,17 +628,54 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Stream recorder")
     parser.add_argument(
         "--config",
-        default="jj-dlp.conf",
+        default=None,
         help="Path to config file (default: jj-dlp.conf in current directory)"
     )
 
     args = parser.parse_args()
 
-    config_path = os.path.abspath(args.config)
-
-    if not os.path.isfile(config_path):
-        print(f"ERROR: Config file not found at: {config_path}", file=sys.stderr)
-        sys.exit(1)
+    # Determine config path: explicit flag → default name → discovery fallback
+    if args.config is not None:
+        config_path = os.path.abspath(args.config)
+        if not os.path.isfile(config_path):
+            print(f"ERROR: Config file not found at: {config_path}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        default_path = os.path.abspath("jj-dlp.conf")
+        if os.path.isfile(default_path):
+            config_path = default_path
+        else:
+            # Discover all .conf files in the current directory
+            cwd = os.getcwd()
+            found = sorted(
+                f for f in os.listdir(cwd)
+                if f.endswith(".conf") and os.path.isfile(os.path.join(cwd, f))
+            )
+            if not found:
+                print(
+                    f"ERROR: No config file found. Expected 'jj-dlp.conf' in {cwd} "
+                    "or pass --config <path>.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if len(found) == 1:
+                config_path = os.path.join(cwd, found[0])
+                print(f"Config file not found. Using the only .conf file discovered: {found[0]}")
+            else:
+                print("Config file 'jj-dlp.conf' not found. The following .conf files were discovered:\n")
+                for i, name in enumerate(found, 1):
+                    print(f"  [{i}] {name}")
+                print()
+                while True:
+                    try:
+                        raw = input(f"Select a config file [1-{len(found)}]: ").strip()
+                    except (EOFError, KeyboardInterrupt):
+                        print("\nAborted.", file=sys.stderr)
+                        sys.exit(1)
+                    if raw.isdigit() and 1 <= int(raw) <= len(found):
+                        config_path = os.path.join(cwd, found[int(raw) - 1])
+                        break
+                    print(f"  Please enter a number between 1 and {len(found)}.")
 
     initial_cfg = load_config(config_path)
 
