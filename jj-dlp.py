@@ -140,8 +140,18 @@ OUTPUT_MODE_NAMES = {
     2: "stdout only",
     3: "stderr only",
     4: "everything  (stdout+stderr shown)",
+    5: "dashboard   (live status overview)",
 }
 output_mode_lock = threading.Lock()
+
+# Dashboard state (output mode 5)
+dashboard_lock = threading.Lock()
+# Maps streamer -> epoch float when they went live (None = offline)
+dashboard_live_since: dict = {}
+# Seconds until the next full liveness check (updated by main loop)
+dashboard_next_check_in: float = 0.0
+# All known streamers for display (updated by main loop)
+dashboard_all_streamers: list = []
 
 
 def cycle_verbosity() -> None:
@@ -157,10 +167,12 @@ def cycle_verbosity() -> None:
 def cycle_output_mode() -> None:
     global OUTPUT_MODE
     with output_mode_lock:
-        OUTPUT_MODE = OUTPUT_MODE % 4 + 1
+        OUTPUT_MODE = OUTPUT_MODE % 5 + 1
+        mode = OUTPUT_MODE
         name = OUTPUT_MODE_NAMES[OUTPUT_MODE]
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] [output mode {OUTPUT_MODE}] {name}", flush=True)
+    if mode != 5:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{ts}] [output mode {mode}] {name}", flush=True)
 
 
 def _keyboard_listener() -> None:
@@ -197,9 +209,102 @@ def _keyboard_listener() -> None:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
+def _format_duration(seconds: float) -> str:
+    """Return a human-readable duration string like 2h 05m 33s."""
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m:02d}m {s:02d}s"
+    elif m:
+        return f"{m}m {s:02d}s"
+    else:
+        return f"{s}s"
+
+
+def _live_bar(seconds: float, width: int = 20) -> str:
+    """
+    Return a compact bar that grows with time-live.
+    Scale: bar fills completely after 6 hours (21600 s).
+    """
+    MAX_SECS = 6 * 3600
+    filled = min(int(width * seconds / MAX_SECS), width)
+    bar = "█" * filled + "░" * (width - filled)
+    return f"[{bar}]"
+
+
+def render_dashboard() -> None:
+    """Render a full-screen dashboard view (output mode 5)."""
+    LIVE_COLOR   = "\033[92m"   # bright green
+    OFF_COLOR    = "\033[90m"   # dark grey
+    TITLE_COLOR  = "\033[96m"   # cyan
+    WARN_COLOR   = "\033[93m"   # yellow
+    RESET        = "\033[0m"
+    CLEAR        = "\033[2J\033[H"  # clear screen + home
+
+    with dashboard_lock:
+        streamers   = list(dashboard_all_streamers)
+        live_since  = dict(dashboard_live_since)
+        next_in     = dashboard_next_check_in
+
+    now = time.time()
+    lines = []
+
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines.append(f"{TITLE_COLOR}{'─' * 52}{RESET}")
+    lines.append(f"{TITLE_COLOR}  jj-dlp dashboard  ·  {ts}{RESET}")
+    lines.append(f"{TITLE_COLOR}{'─' * 52}{RESET}")
+    lines.append("")
+
+    if not streamers:
+        lines.append(f"  {WARN_COLOR}No streamers configured.{RESET}")
+    else:
+        col_name = 18
+        for s in streamers:
+            since = live_since.get(s)
+            if since is not None:
+                elapsed   = now - since
+                dur_str   = _format_duration(elapsed)
+                bar       = _live_bar(elapsed)
+                status    = f"{LIVE_COLOR}● LIVE   {RESET}"
+                lines.append(
+                    f"  {LIVE_COLOR}{s:<{col_name}}{RESET}  {status}  "
+                    f"{LIVE_COLOR}{bar}{RESET}  {dur_str}"
+                )
+            else:
+                status = f"{OFF_COLOR}○ offline{RESET}"
+                bar    = f"{OFF_COLOR}[{'░' * 20}]{RESET}"
+                lines.append(
+                    f"  {OFF_COLOR}{s:<{col_name}}{RESET}  {status}  {bar}"
+                )
+
+    lines.append("")
+    next_in_display = max(0.0, next_in)
+    lines.append(f"  Next check in: {WARN_COLOR}{next_in_display:.0f}s{RESET}")
+    lines.append(f"{TITLE_COLOR}{'─' * 52}{RESET}")
+    lines.append(f"  {OFF_COLOR}press 'o' to exit dashboard{RESET}")
+
+    sys.stdout.write(CLEAR + "\n".join(lines) + "\n")
+    sys.stdout.flush()
+
+
+def _dashboard_renderer_thread() -> None:
+    """Continuously re-renders the dashboard while output mode 5 is active."""
+    while True:
+        time.sleep(1)
+        with output_mode_lock:
+            mode = OUTPUT_MODE
+        if mode == 5:
+            render_dashboard()
+
+
 def log(msg: str) -> None:
     with verbosity_lock:
         v = VERBOSITY
+    with output_mode_lock:
+        mode = OUTPUT_MODE
+    if mode == 5:
+        return  # dashboard owns the screen
     if v in (1, 3):
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{ts}] {msg}", flush=True)
@@ -208,6 +313,10 @@ def log(msg: str) -> None:
 def dbg(msg: str) -> None:
     with verbosity_lock:
         v = VERBOSITY
+    with output_mode_lock:
+        mode = OUTPUT_MODE
+    if mode == 5:
+        return  # dashboard owns the screen
     if v in (2, 3):
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{ts}] {msg}", flush=True)
@@ -583,6 +692,10 @@ def start_recording_if_needed(live_now: List[str], cfg: dict) -> None:
 
         for streamer in to_start:
             currently_recording.add(streamer)
+            # Track when this streamer went live for the dashboard
+            with dashboard_lock:
+                if streamer not in dashboard_live_since:
+                    dashboard_live_since[streamer] = time.time()
             t = threading.Thread(target=record_stream, args=(streamer, cfg), daemon=True)
             t.start()
             recording_threads.append(t)
@@ -692,10 +805,13 @@ def main() -> None:
                                                                       
 
     log(f"Check interval: {initial_cfg['check_interval']}s")
-    log(f"Output mode: {OUTPUT_MODE} — {OUTPUT_MODE_NAMES[OUTPUT_MODE]}  (press 'o' to cycle)\n")
+    log(f"Output mode: {OUTPUT_MODE} — {OUTPUT_MODE_NAMES[OUTPUT_MODE]}  (press 'o' to cycle through modes 1–5)\n")
 
     keyboard_thread = threading.Thread(target=_keyboard_listener, daemon=True)
     keyboard_thread.start()
+
+    dashboard_thread = threading.Thread(target=_dashboard_renderer_thread, daemon=True)
+    dashboard_thread.start()
 
     watcher_interval = initial_cfg.get("config_check_interval", 3)
     watcher_thread = threading.Thread(
@@ -725,6 +841,17 @@ def main() -> None:
                 live_now = get_live_streamers(streamers, cfg)
                 dbg(f"main: get_live_streamers returned: {live_now}")
 
+                # Update dashboard: mark offline streamers, keep live ones
+                with dashboard_lock:
+                    dashboard_all_streamers.clear()
+                    dashboard_all_streamers.extend(streamers)
+                    live_set = set(live_now)
+                    for s in streamers:
+                        if s not in live_set:
+                            dashboard_live_since.pop(s, None)
+                        elif s not in dashboard_live_since:
+                            dashboard_live_since[s] = time.time()
+
                 if live_now:
                     log(f"Live now: {', '.join(live_now)}\n")
                     start_recording_if_needed(live_now, cfg)
@@ -733,9 +860,24 @@ def main() -> None:
 
             wait_secs = cfg.get("check_interval", 60)
             log(f"Next full check in {wait_secs}s...\n")
+            # Seed dashboard countdown then count down in real time
+            deadline = time.time() + wait_secs
+            with dashboard_lock:
+                dashboard_next_check_in = wait_secs
             dbg(f"main: entering trigger_full_check_event.wait(timeout={wait_secs})")
             try:
-                triggered = trigger_full_check_event.wait(timeout=wait_secs)
+                # Poll in 1-second increments so the dashboard countdown stays accurate
+                triggered = False
+                while True:
+                    remaining = deadline - time.time()
+                    with dashboard_lock:
+                        dashboard_next_check_in = max(0.0, remaining)
+                    if remaining <= 0:
+                        break
+                    fired = trigger_full_check_event.wait(timeout=min(1.0, remaining))
+                    if fired:
+                        triggered = True
+                        break
                 dbg(f"main: wait returned — triggered={triggered} event_is_set={trigger_full_check_event.is_set()}")
                 if triggered: # If the event was set during the wait, we want to clear it and immediately loop again for a full check without waiting for the full timeout to elapse
                     trigger_full_check_event.clear()
