@@ -136,17 +136,18 @@ VERBOSITY_NAMES = {
 
 # Output mode: controls what yt-dlp subprocess output is shown in the terminal.
 # Unrelated to VERBOSITY / log() / dbg().
-#   1 = hidden      (stdout+stderr suppressed)
-#   2 = stdout only
-#   3 = stderr only
-#   4 = everything
+#   1 = dashboard   (live status overview)
+#   2 = clean       (stdout+stderr suppressed)
+#   3 = stdout only
+#   4 = stderr only
+#   5 = everything
 OUTPUT_MODE = 1
 OUTPUT_MODE_NAMES = {
-    1: "hidden      (stdout+stderr suppressed)",
-    2: "stdout only",
-    3: "stderr only",
-    4: "everything  (stdout+stderr shown)",
-    5: "dashboard   (live status overview)",
+    1: "dashboard   (live status overview)",
+    2: "clean       (stdout+stderr suppressed)",
+    3: "stdout only",
+    4: "stderr only",
+    5: "everything  (stdout+stderr shown)",
 }
 output_mode_lock = threading.Lock()
 
@@ -155,7 +156,7 @@ DEBUG_LOGS_ENABLED: bool = False
 DEBUG_LOG_PATH: str = ""
 debug_log_lock = threading.Lock()
 
-# Dashboard state (output mode 5)
+# Dashboard state (output mode 1)
 dashboard_lock = threading.Lock()
 # Maps streamer -> epoch float when they went live (None = offline)
 dashboard_live_since: dict = {}
@@ -181,7 +182,7 @@ def cycle_output_mode() -> None:
         OUTPUT_MODE = OUTPUT_MODE % 5 + 1
         mode = OUTPUT_MODE
         name = OUTPUT_MODE_NAMES[OUTPUT_MODE]
-    if mode != 5:
+    if mode != 1:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{ts}] [output mode {mode}] {name}", flush=True)
 
@@ -245,7 +246,7 @@ def _live_bar(seconds: float, width: int = 20) -> str:
 
 
 def render_dashboard() -> None:
-    """Render a full-screen dashboard view (output mode 5)."""
+    """Render a full-screen dashboard view (output mode 1)."""
     LIVE_COLOR   = "\033[92m"   # bright green
     OFF_COLOR    = "\033[90m"   # dark grey
     TITLE_COLOR  = "\033[96m"   # cyan
@@ -268,7 +269,7 @@ def render_dashboard() -> None:
     lines.append("")
 
     if not streamers:
-        lines.append(f"  {WARN_COLOR}No streamers configured.{RESET}")
+        lines.append(f"  {WARN_COLOR}Loading streamers...{RESET}")
     else:
         col_name = 18
         for s in streamers:
@@ -293,18 +294,18 @@ def render_dashboard() -> None:
     next_in_display = max(0.0, next_in)
     lines.append(f"  Next check in: {WARN_COLOR}{next_in_display:.0f}s{RESET}")
     lines.append(f"{TITLE_COLOR}{'─' * 52}{RESET}")
-    lines.append(f"  {OFF_COLOR}press 'o' to exit dashboard{RESET}")
+    lines.append(f"  {OFF_COLOR}press 'o' to cycle through output modes{RESET}")
 
     sys.stdout.write(CLEAR + "\n".join(lines) + "\n")
     sys.stdout.flush()
 
 
 def _dashboard_renderer_thread() -> None:
-    """Continuously re-renders the dashboard while output mode 5 is active."""
+    """Continuously re-renders the dashboard while output mode 1 is active."""
     while True:
         with output_mode_lock:
             mode = OUTPUT_MODE
-        if mode == 5:
+        if mode == 1:
             with dashboard_lock:
                 next_in = dashboard_next_check_in
             dbg(f"dashboard: render tick — next_check_in={next_in:.1f}s (id={id(dashboard_next_check_in)})")
@@ -317,9 +318,8 @@ def log(msg: str) -> None:
         v = VERBOSITY
     with output_mode_lock:
         mode = OUTPUT_MODE
-    if mode == 5:
+    if mode == 1:
         return  # dashboard owns the screen
-    if v in (1, 3):
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{ts}] {msg}", flush=True)
 
@@ -347,7 +347,7 @@ def dbg(msg: str) -> None:
         v = VERBOSITY
     with output_mode_lock:
         mode = OUTPUT_MODE
-    if mode == 5:
+    if mode == 1:
         return  # dashboard owns the screen
     if v in (2, 3):
         print(full, flush=True)
@@ -417,7 +417,7 @@ def _drain_pipe(pipe, log_fp, show_modes: set) -> None:
     - Prints to terminal when OUTPUT_MODE is in *show_modes*.
 
     show_modes: set of OUTPUT_MODE values that should display this stream.
-                stdout -> {2, 4}   stderr -> {3, 4}
+                stdout -> {3, 5}   stderr -> {4, 5}
     """
     try:
         for raw in pipe:
@@ -603,12 +603,12 @@ def record_stream(streamer: str, cfg: dict) -> None:
                 # current OUTPUT_MODE to decide whether to print to terminal.
                 threading.Thread(
                     target=_drain_pipe,
-                    args=(proc.stdout, log_out_fp, {2, 4}),
+                    args=(proc.stdout, log_out_fp, {3, 5}),
                     daemon=True,
                 ).start()
                 threading.Thread(
                     target=_drain_pipe,
-                    args=(proc.stderr, log_err_fp, {3, 4}),
+                    args=(proc.stderr, log_err_fp, {4, 5}),
                     daemon=True,
                 ).start()
             except Exception as e:
