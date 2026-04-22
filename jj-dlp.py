@@ -320,8 +320,8 @@ def log(msg: str) -> None:
         mode = OUTPUT_MODE
     if mode == 1:
         return  # dashboard owns the screen
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{ts}] {msg}", flush=True)
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
 
 
 def _write_debug_log(msg: str) -> None:
