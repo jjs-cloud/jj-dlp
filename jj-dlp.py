@@ -182,6 +182,8 @@ VERBOSITY_NAMES = {
 #   3 = stdout only
 #   4 = stderr only
 #   5 = everything
+#   6 = add a streamer
+#   7 = remove a streamer
 OUTPUT_MODE = 1
 OUTPUT_MODE_NAMES = {
     1: "dashboard   (live status overview)",
@@ -189,13 +191,39 @@ OUTPUT_MODE_NAMES = {
     3: "stdout only",
     4: "stderr only",
     5: "everything  (stdout+stderr shown)",
+    6: "add a streamer",
+    7: "remove a streamer",
 }
 output_mode_lock = threading.Lock()
+
+# ── Keybind Configuration ──────────────────────────────────────────────
+# Use single characters OR control codes like '\x16' (Ctrl+V)
+
+KEYBIND_VERBOSITY = "\x02"   # Ctrl+B
+KEYBIND_OUTPUT    = "\x0f"   # Ctrl+O
+KEYBIND_ADD       = "a"
+KEYBIND_REMOVE    = "r"
+
+# Optional: human-readable labels for UI
+KEYBIND_LABELS = {
+    KEYBIND_VERBOSITY: "Ctrl+B",
+    KEYBIND_OUTPUT:    "Ctrl+O",
+    KEYBIND_ADD:       "A",
+    KEYBIND_REMOVE:    "R",
+}
+# ───────────────────────────────────────────────────────────────────────
+
+
+# Shared config path (set in main, used by streamer management modes)
+_config_path: str = ""
 
 # debug.log file output (DEBUG_LOGS = true in config)
 DEBUG_LOGS_ENABLED: bool = False
 DEBUG_LOG_PATH: str = ""
 debug_log_lock = threading.Lock()
+
+# Event used to wake the streamer-management thread when mode 6/7 becomes active
+_streamer_mgmt_event = threading.Event()
 
 # Dashboard state (output mode 1)
 dashboard_lock = threading.Lock()
@@ -220,26 +248,52 @@ def cycle_verbosity() -> None:
 def cycle_output_mode() -> None:
     global OUTPUT_MODE
     with output_mode_lock:
-        OUTPUT_MODE = OUTPUT_MODE % 5 + 1
+        # Only cycle through modes 1–5
+        if OUTPUT_MODE >= 5 or OUTPUT_MODE < 1:
+            OUTPUT_MODE = 1
+        else:
+            OUTPUT_MODE += 1
+
         mode = OUTPUT_MODE
         name = OUTPUT_MODE_NAMES[OUTPUT_MODE]
+
     if mode != 1:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{ts}] [output mode {mode}] {name}", flush=True)
 
 
+def _set_output_mode(mode: int) -> None:
+    """Jump directly to a specific output mode."""
+    global OUTPUT_MODE
+    with output_mode_lock:
+        OUTPUT_MODE = mode
+    if mode in (6, 7):
+        _streamer_mgmt_event.set()
+    elif mode != 1:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        name = OUTPUT_MODE_NAMES.get(mode, "")
+        print(f"[{ts}] [output mode {mode}] {name}", flush=True)
+
+
 def _keyboard_listener() -> None:
-    """Background thread: watches keypresses to cycle verbosity (v) and output mode (o)."""
+    """Background thread: watches keypresses based on configurable keybinds."""
     if sys.platform == "win32":
         import msvcrt
         while True:
             if msvcrt.kbhit():
                 ch = msvcrt.getwch()
-                if ch in ("v", "V"):
+
+                if ch == KEYBIND_VERBOSITY:
                     cycle_verbosity()
-                elif ch in ("o", "O"):
+                elif ch == KEYBIND_OUTPUT:
                     cycle_output_mode()
+                elif ch.lower() == KEYBIND_ADD.lower():
+                    _set_output_mode(6)
+                elif ch.lower() == KEYBIND_REMOVE.lower():
+                    _set_output_mode(7)
+
             time.sleep(0.05)
+
     else:
         import tty
         import termios
@@ -247,17 +301,24 @@ def _keyboard_listener() -> None:
         try:
             old = termios.tcgetattr(fd)
         except termios.error:
-            return  # not a tty (e.g. piped input) — silently skip
+            return
+
         try:
             tty.setraw(fd)
             while True:
                 ch = sys.stdin.read(1)
-                if ch in ("v", "V"):
+
+                if ch == KEYBIND_VERBOSITY:
                     cycle_verbosity()
-                elif ch in ("o", "O"):
+                elif ch == KEYBIND_OUTPUT:
                     cycle_output_mode()
-                elif ch in ("\x03", "\x1c"):  # Ctrl-C / Ctrl-\
+                elif ch.lower() == KEYBIND_ADD.lower():
+                    _set_output_mode(6)
+                elif ch.lower() == KEYBIND_REMOVE.lower():
+                    _set_output_mode(7)
+                elif ch in ("\x03", "\x1c"):
                     os.kill(os.getpid(), __import__("signal").SIGINT)
+
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
@@ -335,8 +396,15 @@ def render_dashboard() -> None:
     next_in_display = max(0.0, next_in)
     lines.append(f"  Next check in: {WARN_COLOR}{next_in_display:.0f}s{RESET}")
     lines.append(f"{TITLE_COLOR}{'─' * 52}{RESET}")
-    lines.append(f"  {OFF_COLOR}press 'o' to cycle through output modes{RESET}")
+    
+    kb_out = KEYBIND_LABELS.get(KEYBIND_OUTPUT, KEYBIND_OUTPUT)
+    kb_add = KEYBIND_LABELS.get(KEYBIND_ADD, KEYBIND_ADD.upper())
+    kb_rem = KEYBIND_LABELS.get(KEYBIND_REMOVE, KEYBIND_REMOVE.upper())
 
+    lines.append(f"  {OFF_COLOR}press {kb_out} to cycle through output modes{RESET}")
+    lines.append(f"  {OFF_COLOR}press {kb_add} to add a streamer{RESET}")
+    lines.append(f"  {OFF_COLOR}press {kb_rem} to remove a streamer{RESET}")
+    
     sys.stdout.write(CLEAR + "\n".join(lines) + "\n")
     sys.stdout.flush()
 
@@ -354,13 +422,307 @@ def _dashboard_renderer_thread() -> None:
         time.sleep(1)
 
 
+def _modify_config_streamer(config_path: str, username: str, action: str) -> str:
+    """
+    Edit the config file in-place to add or remove a streamer.
+
+    action='add'    → remove from [Block] (if present), add to [Streamers]
+    action='remove' → remove from [Streamers], add to [Block]
+
+    Returns a human-readable result message.
+    """
+    username = username.strip().lower()
+    if not username:
+        return "No username provided."
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception as e:
+        return f"ERROR reading config: {e}"
+
+    # Parse section positions so we can do targeted insertions
+    section_starts: dict = {}  # section_name -> line index of [Section] header
+    current_section = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            current_section = stripped[1:-1]
+            section_starts[current_section] = i
+
+    def _remove_from_section(sec: str, name: str) -> bool:
+        """Remove all lines that are exactly `name` (or `name =`) from section `sec`.
+        Returns True if at least one line was removed."""
+        if sec not in section_starts:
+            return False
+        removed = False
+        # Determine the line range that belongs to this section
+        sec_line = section_starts[sec]
+        next_sec_line = len(lines)
+        for other_sec, other_line in section_starts.items():
+            if other_line > sec_line:
+                next_sec_line = min(next_sec_line, other_line)
+
+        to_delete = []
+        for i in range(sec_line + 1, next_sec_line):
+            key = lines[i].strip().split("=")[0].strip().lower()
+            if key == name:
+                to_delete.append(i)
+                removed = True
+
+        for i in reversed(to_delete):
+            del lines[i]
+            # Adjust section_starts for sections after the deleted line
+            for sec_name in list(section_starts.keys()):
+                if section_starts[sec_name] > i:
+                    section_starts[sec_name] -= 1
+
+        return removed
+
+    def _add_to_section(sec: str, name: str) -> None:
+        """Append `name` as a new key at the end of section `sec`.
+        Creates the section if it doesn't exist."""
+        if sec not in section_starts:
+            # Append a new section at the end of the file
+            lines.append(f"\n[{sec}]\n")
+            section_starts[sec] = len(lines) - 1
+
+        # Find the end of this section
+        sec_line = section_starts[sec]
+        next_sec_line = len(lines)
+        for other_sec, other_line in section_starts.items():
+            if other_line > sec_line:
+                next_sec_line = min(next_sec_line, other_line)
+
+        # Check if it's already there (case-insensitive)
+        for i in range(sec_line + 1, next_sec_line):
+            key = lines[i].strip().split("=")[0].strip().lower()
+            if key == name:
+                return  # already present
+
+        # Insert just before the next section (or EOF), after any trailing blank line
+        insert_at = next_sec_line
+        # Walk back past blank lines at the section boundary
+        while insert_at > sec_line + 1 and lines[insert_at - 1].strip() == "":
+            insert_at -= 1
+
+        lines.insert(insert_at, f"{name}\n")
+        # Update section_starts for sections after insertion
+        for sec_name in list(section_starts.keys()):
+            if section_starts[sec_name] >= insert_at:
+                section_starts[sec_name] += 1
+
+    messages = []
+    if action == "add":
+        removed_from_block = _remove_from_section("Block", username)
+        if removed_from_block:
+            messages.append(f"Unblocked '{username}'.")
+        _add_to_section("Streamers", username)
+        messages.append(f"Added '{username}' to [Streamers].")
+    elif action == "remove":
+        removed_from_streamers = _remove_from_section("Streamers", username)
+        if removed_from_streamers:
+            messages.append(f"Removed '{username}' from [Streamers].")
+        else:
+            messages.append(f"'{username}' was not found in [Streamers].")
+        _add_to_section("Block", username)
+        messages.append(f"Added '{username}' to [Block].")
+
+    try:
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+    except Exception as e:
+        return f"ERROR writing config: {e}"
+
+    return "  ".join(messages)
+
+
+def _streamer_mgmt_thread() -> None:
+    """
+    Background thread that handles output modes 6 (add streamer) and 7 (remove streamer).
+    Uses raw terminal input on Unix; falls back to normal input() on Windows.
+    """
+    TITLE_COLOR = "\033[96m"
+    OK_COLOR    = "\033[92m"
+    WARN_COLOR  = "\033[93m"
+    RESET       = "\033[0m"
+    CLEAR       = "\033[2J\033[H"
+
+    def _read_line_raw() -> str:
+        """Read a line of text from stdin in raw mode (Unix), echoing characters."""
+        if sys.platform == "win32":
+            import msvcrt
+            buf = []
+            sys.stdout.write("\n> ")
+            sys.stdout.flush()
+            while True:
+                if msvcrt.kbhit():
+                    ch = msvcrt.getwch()
+                    if ch in ("\r", "\n"):
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
+                        return "".join(buf)
+                    elif ch in ("\x08", "\x7f"):  # backspace
+                        if buf:
+                            buf.pop()
+                            sys.stdout.write("\b \b")
+                            sys.stdout.flush()
+                    elif ch == "\x03":  # Ctrl-C
+                        os.kill(os.getpid(), __import__("signal").SIGINT)
+                    elif ch in ("\x1c",):
+                        os.kill(os.getpid(), __import__("signal").SIGINT)
+                    else:
+                        buf.append(ch)
+                        sys.stdout.write(ch)
+                        sys.stdout.flush()
+                time.sleep(0.02)
+        else:
+            import tty, termios
+            fd = sys.stdin.fileno()
+            try:
+                old = termios.tcgetattr(fd)
+            except termios.error:
+                # Not a tty — fall back
+                sys.stdout.write("\n> ")
+                sys.stdout.flush()
+                return sys.stdin.readline().rstrip("\n")
+            buf = []
+            sys.stdout.write("\n> ")
+            sys.stdout.flush()
+            try:
+                tty.setraw(fd)
+                while True:
+                    ch = sys.stdin.read(1)
+                    if ch in ("\r", "\n"):
+                        sys.stdout.write("\r\n")
+                        sys.stdout.flush()
+                        return "".join(buf)
+                    elif ch in ("\x08", "\x7f"):  # backspace
+                        if buf:
+                            buf.pop()
+                            sys.stdout.write("\b \b")
+                            sys.stdout.flush()
+                    elif ch == "\x03":
+                        os.kill(os.getpid(), __import__("signal").SIGINT)
+                    elif ch in ("\x1c",):
+                        os.kill(os.getpid(), __import__("signal").SIGINT)
+                    elif ch == "o" or ch == "O":
+                        # Let 'o' pass through to cycle — restore tty first
+                        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+                        cycle_output_mode()
+                        # Re-enter raw mode
+                        tty.setraw(fd)
+                        # Signal re-draw
+                        _streamer_mgmt_event.set()
+                        return "__REDRAW__"
+                    else:
+                        buf.append(ch)
+                        sys.stdout.write(ch)
+                        sys.stdout.flush()
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+    while True:
+        _streamer_mgmt_event.wait()
+        _streamer_mgmt_event.clear()
+
+        with output_mode_lock:
+            mode = OUTPUT_MODE
+
+        if mode not in (6, 7):
+            continue
+
+        if mode == 6:
+            title = "Add a Streamer"
+            prompt = "Enter streamer username to ADD"
+            action = "add"
+        else:
+            title = "Remove a Streamer"
+            prompt = "Enter streamer username to REMOVE"
+            action = "remove"
+
+        result_msg = ""
+
+        while True:
+            with output_mode_lock:
+                current_mode = OUTPUT_MODE
+            if current_mode not in (6, 7):
+                break
+
+            # Re-draw the page
+            header = (
+                f"{CLEAR}"
+                f"{TITLE_COLOR}{'─' * 52}{RESET}\n"
+                f"{TITLE_COLOR}  jj-dlp · {title}{RESET}\n"
+                f"{TITLE_COLOR}{'─' * 52}{RESET}\n"
+            )
+            footer = (
+                f"\n{TITLE_COLOR}{'─' * 52}{RESET}\n"
+                f"  \033[90mPress 'o' to jump back to Dashboard\033[0m\n" #unnecessary, will remove
+            )
+            if result_msg:
+                body = f"  {OK_COLOR}{result_msg}{RESET}\n"
+            else:
+                body = ""
+
+            sys.stdout.write(header + body + f"  {WARN_COLOR}{prompt}:{RESET}" + footer)
+            sys.stdout.flush()
+
+            username = _read_line_raw()
+
+            # Check if mode changed while we were waiting for input
+            with output_mode_lock:
+                current_mode = OUTPUT_MODE
+            if current_mode not in (6, 7):
+                break
+
+            if username == "__REDRAW__":
+                result_msg = ""
+                continue
+
+            if not username.strip():
+                result_msg = "No username entered — try again."
+                continue
+
+            cfg_path = _config_path
+            if not cfg_path:
+                result_msg = "ERROR: config path not available."
+                continue
+
+            result_msg = _modify_config_streamer(cfg_path, username, action)
+
+            # Trigger a config reload / immediate check
+            trigger_full_check_event.set()
+
+            # Re-draw once so the user sees the confirmation message
+            header = (
+                f"{CLEAR}"
+                f"{TITLE_COLOR}{'─' * 52}{RESET}\n"
+                f"{TITLE_COLOR}  jj-dlp · {title}{RESET}\n"
+                f"{TITLE_COLOR}{'─' * 52}{RESET}\n"
+            )
+            footer = (
+                f"\n{TITLE_COLOR}{'─' * 52}{RESET}\n"
+            )
+            body = f"  {OK_COLOR}{result_msg}{RESET}\n"
+
+            sys.stdout.write(header + body + footer)
+            sys.stdout.flush()
+
+            # Wait so user can read it
+            time.sleep(1.0)
+
+            # Return to dashboard
+            _set_output_mode(1)
+            break
+
 def log(msg: str) -> None:
     with verbosity_lock:
         v = VERBOSITY
     with output_mode_lock:
         mode = OUTPUT_MODE
-    if mode == 1:
-        return  # dashboard owns the screen
+    if mode in (1, 6, 7):
+        return  # dashboard / streamer mgmt pages own the screen
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
 
@@ -388,8 +750,8 @@ def dbg(msg: str) -> None:
         v = VERBOSITY
     with output_mode_lock:
         mode = OUTPUT_MODE
-    if mode == 1:
-        return  # dashboard owns the screen
+    if mode in (1, 6, 7):
+        return  # dashboard / streamer mgmt pages own the screen
     if v in (2, 3):
         print(full, flush=True)
 
@@ -868,7 +1230,7 @@ def main() -> None:
                 config_path = os.path.join(cwd, found[0])
                 print(f"Config file not found. Using the only .conf file discovered: {found[0]}")
             else:
-                print("\nConfig file 'jj-dlp.conf' not found and --config <path> not specified. The following .conf files were discovered:\n\n")
+                print("\nThe following .conf files were discovered (skip this step by passing --config <path>):\n\n")
                 for i, name in enumerate(found, 1):
                     print(f"  [{i}] {name}")
                 print()
@@ -885,7 +1247,8 @@ def main() -> None:
 
     initial_cfg = load_config(config_path)
 
-    global VERBOSITY, DEBUG_LOGS_ENABLED, DEBUG_LOG_PATH, dashboard_next_check_in
+    global VERBOSITY, DEBUG_LOGS_ENABLED, DEBUG_LOG_PATH, dashboard_next_check_in, _config_path
+    _config_path = config_path
     with verbosity_lock:
         VERBOSITY = initial_cfg.get("verbosity", 1)
 
@@ -893,7 +1256,8 @@ def main() -> None:
         DEBUG_LOGS_ENABLED = initial_cfg.get("debug_logs", False)
         DEBUG_LOG_PATH     = get_debug_log_path(initial_cfg) if DEBUG_LOGS_ENABLED else ""
 
-    log(f"Verbosity: {VERBOSITY} — {VERBOSITY_NAMES[VERBOSITY]}  (press 'v' to cycle)")
+    kb_v = KEYBIND_LABELS.get(KEYBIND_VERBOSITY, KEYBIND_VERBOSITY)
+    log(f"Verbosity: {VERBOSITY} — {VERBOSITY_NAMES[VERBOSITY]}  (press {kb_v} to cycle)")
     log(f"Config file: {config_path}")
     log(f"Output directory: {initial_cfg['output_dir']}")
 
@@ -905,13 +1269,17 @@ def main() -> None:
                                                                       
 
     log(f"Check interval: {initial_cfg['check_interval']}s")
-    log(f"Output mode: {OUTPUT_MODE} — {OUTPUT_MODE_NAMES[OUTPUT_MODE]}  (press 'o' to cycle through modes 1–5)\n")
+    kb_o = KEYBIND_LABELS.get(KEYBIND_OUTPUT, KEYBIND_OUTPUT)
+    log(f"Output mode: {OUTPUT_MODE} — {OUTPUT_MODE_NAMES[OUTPUT_MODE]}  (press {kb_o} to cycle through modes 1–7)\n")
 
     keyboard_thread = threading.Thread(target=_keyboard_listener, daemon=True)
     keyboard_thread.start()
 
     dashboard_thread = threading.Thread(target=_dashboard_renderer_thread, daemon=True)
     dashboard_thread.start()
+
+    streamer_mgmt_thread = threading.Thread(target=_streamer_mgmt_thread, daemon=True)
+    streamer_mgmt_thread.start()
 
     watcher_interval = initial_cfg.get("config_check_interval", 3)
     watcher_thread = threading.Thread(

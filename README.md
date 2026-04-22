@@ -1,14 +1,17 @@
 ## Quick Start Guide:
   
-(Assumes you already have [Python](https://www.python.org/downloads/) and [yt-dlp](https://github.com/yt-dlp/yt-dlp))
+(Assumes you already have [python](https://www.python.org/downloads/) and [yt-dlp](https://github.com/yt-dlp/yt-dlp))
 
-Step 1:  Download jj-dlp.py and one of the conf files (click the file > click the 3 dots in the top right > click download)
+Step 1:  Download jj-dlp by clicking the green "Code" button, then "Download ZIP"
 
-Step 2:  Put the names of the streamers you want to record in the [Streamers] section of the conf file.
+Step 2:  Double click on jj-dlp.py to run it.  
 
-Step 3:  Run "py jj-dlp.py" in the command prompt.   The script will automatically find your `.conf` file.  (Make sure it's in the same folder)
-
-  Note:  If "py" doesn't work, try "python" or "python3"
+Alternatively, you can run it with the following commands:
+```
+py jj-dlp.py --config twitch.conf
+python jj-dlp.py --config twitch.conf
+python3 jj-dlp.py --config twitch.conf
+```
 
 ---
 
@@ -31,7 +34,7 @@ jj-dlp is a [yt-dlp](https://github.com/yt-dlp/yt-dlp) wrapper that allows you t
 
 ## Requirements
 
-- [Python](https://www.python.org/downloads/)
+- [python](https://www.python.org/downloads/)
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) Must be in your system `PATH`, or you can specify the path in the jj-dlp `.conf` file
 
 ---
