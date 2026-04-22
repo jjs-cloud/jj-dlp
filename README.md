@@ -4,7 +4,7 @@
 
 Step 1:  Download jj-dlp by clicking the green "Code" button, then "Download ZIP"
 
-Step 2:  Double click on jj-dlp.py to run it.  
+Step 2:  Extract the zip, and double click on jj-dlp.py to run it.  
 
 Alternatively, you can run it with the following commands:
 ```
