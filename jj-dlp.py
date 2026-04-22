@@ -13,6 +13,39 @@ import argparse
 from urllib.parse import urlparse
 
 
+
+# ── Early startup debug log ──────────────────────────────────────────────────
+# Written BEFORE config is loaded so crashes during startup are captured.
+# The log sits next to this script file: jj-dlp-startup-debug.log
+#
+# To disable either log file, set the corresponding flag to False:
+ENABLE_STARTUP_LOG: bool = False   # jj-dlp-startup-debug.log
+ENABLE_CRASH_LOG:   bool = True   # jj-dlp-crash.log
+#
+_STARTUP_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jj-dlp-startup-debug.log")
+
+def _startup_dbg(msg: str) -> None:
+    """Write a timestamped line to the startup debug log (always, unconditionally)."""
+    if not ENABLE_STARTUP_LOG:
+        return
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {msg}\n"
+    try:
+        with open(_STARTUP_LOG, "a", encoding="utf-8") as _f:
+            _f.write(line)
+    except Exception:
+        pass  # can't do much if even the log file fails
+
+def _startup_dbg_flush() -> None:
+    """Write a separator so each run is easy to spot in the log."""
+    _startup_dbg("=" * 60)
+    _startup_dbg(f"NEW RUN  argv={sys.argv}")
+    _startup_dbg(f"cwd      = {os.getcwd()}")
+    _startup_dbg(f"__file__ = {os.path.abspath(__file__)}")
+    _startup_dbg(f"python   = {sys.executable}")
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 def kill_proc(proc):
     if sys.platform == "win32":
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
@@ -22,12 +55,20 @@ def kill_proc(proc):
 
 
 def load_config(config_path: str):
+    _startup_dbg(f"load_config called with: {config_path!r}")
     if not os.path.isfile(config_path):
+        _startup_dbg(f"load_config: file NOT FOUND — {config_path!r}")
         print(f"ERROR: Config file not found at: {config_path}", file=sys.stderr)
         sys.exit(1)
 
+    _startup_dbg(f"load_config: file found, attempting configparser.read...")
     parser = configparser.ConfigParser(allow_no_value=True, interpolation=None)
-    parser.read(config_path, encoding="utf-8")
+    try:
+        parser.read(config_path, encoding="utf-8")
+    except Exception as _e:
+        _startup_dbg(f"load_config: configparser FAILED — {type(_e).__name__}: {_e}")
+        raise
+    _startup_dbg(f"load_config: configparser read OK, sections={parser.sections()}")
 
     streamers = []
     if parser.has_section("Streamers"):
@@ -776,6 +817,18 @@ def config_watcher(config_path: str, poll_interval: int = 3) -> None:
 
 
 def main() -> None:
+    # ── Double-click / drag-and-drop fix ─────────────────────────────────────
+    # When launched by double-clicking on Windows, the CWD is whatever Explorer
+    # happens to use (often C:\Windows\system32), not the script's own folder.
+    # Change to the script's directory immediately so config discovery, relative
+    # OUTPUT_DIR paths, and log files all resolve correctly.
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    if os.getcwd() != _script_dir:
+        os.chdir(_script_dir)
+        _startup_dbg(f"CWD changed to script directory: {_script_dir}")
+    # ─────────────────────────────────────────────────────────────────────────
+
+    _startup_dbg_flush()  # DBG: log every startup attempt to jj-dlp-startup-debug.log
     parser = argparse.ArgumentParser(description="Stream recorder")
     parser.add_argument(
         "--config",
@@ -798,10 +851,12 @@ def main() -> None:
         else:
             # Discover all .conf files in the current directory
             cwd = os.getcwd()
+            _startup_dbg(f"config discovery: cwd={cwd!r}")
             found = sorted(
                 f for f in os.listdir(cwd)
                 if f.endswith(".conf") and os.path.isfile(os.path.join(cwd, f))
             )
+            _startup_dbg(f"config discovery: .conf files found={found}")
             if not found:
                 print(
                     f"ERROR: No config file found. Expected 'jj-dlp.conf' in {cwd} "
@@ -963,4 +1018,20 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as _top_e:
+        import traceback
+        _startup_dbg(f"UNCAUGHT EXCEPTION in main(): {type(_top_e).__name__}: {_top_e}")
+        _startup_dbg(traceback.format_exc())
+        # Also write to a visible file next to the script so nothing is lost
+        if ENABLE_CRASH_LOG:
+            _crash_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jj-dlp-crash.log")
+            try:
+                with open(_crash_path, "a", encoding="utf-8") as _cf:
+                    _cf.write(f"\n{'='*60}\n")
+                    _cf.write(f"CRASH at {datetime.now()}\n")
+                    _cf.write(traceback.format_exc())
+            except Exception:
+                pass
+        raise  # re-raise so the normal Python error is still printed
