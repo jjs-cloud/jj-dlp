@@ -225,6 +225,9 @@ debug_log_lock = threading.Lock()
 # Event used to wake the streamer-management thread when mode 6/7 becomes active
 _streamer_mgmt_event = threading.Event()
 
+# When set, the keyboard listener must not read from stdin (mgmt thread owns it)
+_stdin_owned_by_mgmt = threading.Event()
+
 # Dashboard state (output mode 1)
 dashboard_lock = threading.Lock()
 # Maps streamer -> epoch float when they went live (None = offline)
@@ -268,11 +271,14 @@ def _set_output_mode(mode: int) -> None:
     with output_mode_lock:
         OUTPUT_MODE = mode
     if mode in (6, 7):
+        _stdin_owned_by_mgmt.set()
         _streamer_mgmt_event.set()
-    elif mode != 1:
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        name = OUTPUT_MODE_NAMES.get(mode, "")
-        print(f"[{ts}] [output mode {mode}] {name}", flush=True)
+    else:
+        _stdin_owned_by_mgmt.clear()
+        if mode != 1:
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            name = OUTPUT_MODE_NAMES.get(mode, "")
+            print(f"[{ts}] [output mode {mode}] {name}", flush=True)
 
 
 def _keyboard_listener() -> None:
@@ -280,6 +286,10 @@ def _keyboard_listener() -> None:
     if sys.platform == "win32":
         import msvcrt
         while True:
+            # Yield stdin to the streamer-mgmt thread while it owns it
+            if _stdin_owned_by_mgmt.is_set():
+                time.sleep(0.05)
+                continue
             if msvcrt.kbhit():
                 ch = msvcrt.getwch()
 
@@ -306,6 +316,15 @@ def _keyboard_listener() -> None:
         try:
             tty.setraw(fd)
             while True:
+                # Yield stdin to the streamer-mgmt thread while it owns it.
+                # We must restore normal tty settings so _read_line_raw can
+                # take over, then re-enter raw mode when control returns to us.
+                if _stdin_owned_by_mgmt.is_set():
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old)
+                    _stdin_owned_by_mgmt.wait()  # block until mgmt releases stdin
+                    tty.setraw(fd)
+                    continue
+
                 ch = sys.stdin.read(1)
 
                 if ch == KEYBIND_VERBOSITY:
