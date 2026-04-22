@@ -69,6 +69,10 @@ def load_config(config_path: str):
     log_path = general.get("LOG_PATH", "").strip().strip('\"\'')
     split_logs = general.get("SPLIT_LOGS", "false").strip().lower() == "true"
 
+    debug_logs = general.get("DEBUG_LOGS", "false").strip().lower() == "true"
+    debug_log_path_raw = general.get("DEBUG_LOG_PATH", "").strip().strip('\"\'')
+    debug_log_path = debug_log_path_raw if debug_log_path_raw else ""
+
     yt_dlp_path_raw = general.get("YT_DLP_PATH", "").strip().strip('"\'')
     yt_dlp_path = yt_dlp_path_raw if yt_dlp_path_raw else "yt-dlp"
 
@@ -107,6 +111,8 @@ def load_config(config_path: str):
         "logging_enabled": logging_enabled,
         "log_path": log_path,
         "split_logs": split_logs,
+        "debug_logs": debug_logs,
+        "debug_log_path": debug_log_path,
         "site_tmpl": site_tmpl,
         "username_idx": username_idx,
         "config_path": config_path,
@@ -143,6 +149,11 @@ OUTPUT_MODE_NAMES = {
     5: "dashboard   (live status overview)",
 }
 output_mode_lock = threading.Lock()
+
+# debug.log file output (DEBUG_LOGS = true in config)
+DEBUG_LOGS_ENABLED: bool = False
+DEBUG_LOG_PATH: str = ""
+debug_log_lock = threading.Lock()
 
 # Dashboard state (output mode 5)
 dashboard_lock = threading.Lock()
@@ -291,11 +302,14 @@ def render_dashboard() -> None:
 def _dashboard_renderer_thread() -> None:
     """Continuously re-renders the dashboard while output mode 5 is active."""
     while True:
-        time.sleep(1)
         with output_mode_lock:
             mode = OUTPUT_MODE
         if mode == 5:
+            with dashboard_lock:
+                next_in = dashboard_next_check_in
+            dbg(f"dashboard: render tick — next_check_in={next_in:.1f}s (id={id(dashboard_next_check_in)})")
             render_dashboard()
+        time.sleep(1)
 
 
 def log(msg: str) -> None:
@@ -310,7 +324,25 @@ def log(msg: str) -> None:
         print(f"[{ts}] {msg}", flush=True)
 
 
+def _write_debug_log(msg: str) -> None:
+    """Append a dbg() message to debug.log regardless of OUTPUT_MODE or VERBOSITY."""
+    with debug_log_lock:
+        enabled = DEBUG_LOGS_ENABLED
+        path    = DEBUG_LOG_PATH
+    if not enabled or not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
+            f.flush()
+    except Exception:
+        pass
+
+
 def dbg(msg: str) -> None:
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    full = f"[{ts}] {msg}"
+    _write_debug_log(full)
     with verbosity_lock:
         v = VERBOSITY
     with output_mode_lock:
@@ -318,8 +350,14 @@ def dbg(msg: str) -> None:
     if mode == 5:
         return  # dashboard owns the screen
     if v in (2, 3):
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{ts}] {msg}", flush=True)
+        print(full, flush=True)
+
+
+def get_debug_log_path(cfg: dict) -> str:
+    p = cfg.get("debug_log_path") or ""
+    if p.strip():
+        return p
+    return os.path.join(cfg.get("output_dir", "."), "debug.log")
 
 
 def get_log_path(cfg: dict) -> str:
@@ -792,9 +830,13 @@ def main() -> None:
 
     initial_cfg = load_config(config_path)
 
-    global VERBOSITY
+    global VERBOSITY, DEBUG_LOGS_ENABLED, DEBUG_LOG_PATH, dashboard_next_check_in
     with verbosity_lock:
         VERBOSITY = initial_cfg.get("verbosity", 1)
+
+    with debug_log_lock:
+        DEBUG_LOGS_ENABLED = initial_cfg.get("debug_logs", False)
+        DEBUG_LOG_PATH     = get_debug_log_path(initial_cfg) if DEBUG_LOGS_ENABLED else ""
 
     log(f"Verbosity: {VERBOSITY} — {VERBOSITY_NAMES[VERBOSITY]}  (press 'v' to cycle)")
     log(f"Config file: {config_path}")
@@ -802,6 +844,9 @@ def main() -> None:
 
     if initial_cfg["logging_enabled"]:
         log(f"Log file: {get_log_path(initial_cfg)}")
+
+    if initial_cfg.get("debug_logs"):
+        log(f"Debug log: {get_debug_log_path(initial_cfg)}")
                                                                       
 
     log(f"Check interval: {initial_cfg['check_interval']}s")
@@ -832,6 +877,12 @@ def main() -> None:
                 known_streamers.clear()
                 known_streamers.update(streamers)
 
+            # While the liveness check is running the countdown has no meaning —
+            # zero it so the dashboard shows 0s (i.e. "checking now").
+            with dashboard_lock:
+                dashboard_next_check_in = 0.0
+            dbg(f"dashboard: [WRITE] zeroed before liveness check (id={id(dashboard_next_check_in)})")
+
             dbg(f"main: top of loop — streamers={streamers} currently_recording={currently_recording} event_is_set={trigger_full_check_event.is_set()}")
 
             if not streamers:
@@ -852,6 +903,8 @@ def main() -> None:
                         elif s not in dashboard_live_since:
                             dashboard_live_since[s] = time.time()
 
+                dbg(f"dashboard: state updated — live={list(live_set)} all={streamers}")
+
                 if live_now:
                     log(f"Live now: {', '.join(live_now)}\n")
                     start_recording_if_needed(live_now, cfg)
@@ -860,26 +913,39 @@ def main() -> None:
 
             wait_secs = cfg.get("check_interval", 60)
             log(f"Next full check in {wait_secs}s...\n")
-            # Seed dashboard countdown then count down in real time
+
+            # Seed the dashboard countdown and record the deadline BEFORE we enter
+            # the wait loop.  This means the display shows the full interval
+            # immediately after the liveness check, rather than a stale 0.
             deadline = time.time() + wait_secs
             with dashboard_lock:
-                dashboard_next_check_in = wait_secs
-            dbg(f"main: entering trigger_full_check_event.wait(timeout={wait_secs})")
+                dashboard_next_check_in = float(wait_secs)
+            dbg(f"dashboard: [WRITE] seeded to {wait_secs}s (id={id(dashboard_next_check_in)}, deadline={deadline:.3f})")
+
+            dbg(f"main: entering wait loop (timeout={wait_secs}s)")
             try:
-                # Poll in 1-second increments so the dashboard countdown stays accurate
                 triggered = False
                 while True:
                     remaining = deadline - time.time()
                     with dashboard_lock:
                         dashboard_next_check_in = max(0.0, remaining)
+                    dbg(f"dashboard: countdown tick — remaining={remaining:.1f}s")
                     if remaining <= 0:
+                        # Zero it out explicitly so the display shows 0 cleanly
+                        # while the next liveness check runs.
+                        with dashboard_lock:
+                            dashboard_next_check_in = 0.0
+                        dbg("dashboard: countdown reached 0 — breaking wait loop")
                         break
                     fired = trigger_full_check_event.wait(timeout=min(1.0, remaining))
                     if fired:
                         triggered = True
+                        with dashboard_lock:
+                            dashboard_next_check_in = 0.0
+                        dbg("dashboard: early trigger received — countdown zeroed")
                         break
                 dbg(f"main: wait returned — triggered={triggered} event_is_set={trigger_full_check_event.is_set()}")
-                if triggered: # If the event was set during the wait, we want to clear it and immediately loop again for a full check without waiting for the full timeout to elapse
+                if triggered:
                     trigger_full_check_event.clear()
                     dbg("main: event cleared, looping immediately for full check")
                 else:
