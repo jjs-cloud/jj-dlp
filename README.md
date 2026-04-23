@@ -45,7 +45,7 @@ jj-dlp is a [yt-dlp](https://github.com/yt-dlp/yt-dlp) wrapper that allows you t
 
 The script is driven by a `.conf` file. By default it looks for `jj-dlp.conf` in the current directory.  You can also use the `--config` option to specify a `.conf` file.
 
-### Example `jj-dlp.conf`
+### Example `twitch.conf`
 
 ```ini
 [General]
