@@ -196,6 +196,26 @@ OUTPUT_MODE_NAMES = {
 }
 output_mode_lock = threading.Lock()
 
+# ── FFmpeg Error Monitoring ────────────────────────────────────────────
+# Strings to watch for in ffmpeg's stderr output. If any of these appear
+# more than FFMPEG_ERROR_RESTART_THRESHOLD times during a single recording
+# session, yt-dlp will be killed and restarted automatically.
+#
+# Add new patterns here as new ffmpeg errors are identified.
+# Matching is case-insensitive and uses substring search (not regex).
+FFMPEG_ERROR_PATTERNS: List[str] = [
+    "timestamp discontinuity",
+    "Packet corrupt",
+    # Add more patterns below as needed, e.g.:
+    # "av_interleaved_write_frame",
+    # "application provided invalid",
+]
+
+# How many total pattern matches (across all patterns) must occur before
+# yt-dlp is restarted. Set to 0 to disable ffmpeg error monitoring.
+FFMPEG_ERROR_RESTART_THRESHOLD: int = 1000
+# ──────────────────────────────────────────────────────────────────────
+
 # ── Keybind Configuration ──────────────────────────────────────────────
 # Use single characters OR control codes like '\x16' (Ctrl+V)
 
@@ -832,14 +852,24 @@ def open_log_streams(cfg: dict):
     return subprocess.PIPE, subprocess.PIPE, _close, log_out_fp, log_err_fp
 
 
-def _drain_pipe(pipe, log_fp, show_modes: set) -> None:
+def _drain_pipe(pipe, log_fp, show_modes: set,
+                ffmpeg_error_counter=None,
+                ffmpeg_error_event=None,
+                streamer: str = "") -> None:
     """
     Read lines from *pipe* until EOF.
     - Writes each line to *log_fp* if provided.
     - Prints to terminal when OUTPUT_MODE is in *show_modes*.
+    - If ffmpeg_error_counter and ffmpeg_error_event are provided, scans each
+      line for FFMPEG_ERROR_PATTERNS and increments the shared counter.
+      When the counter exceeds FFMPEG_ERROR_RESTART_THRESHOLD, sets the event
+      to signal record_stream to kill and restart yt-dlp.
 
     show_modes: set of OUTPUT_MODE values that should display this stream.
                 stdout -> {3, 5}   stderr -> {4, 5}
+    ffmpeg_error_counter: a single-element list [int] so it can be mutated
+                          across threads without a lock (GIL-safe for += 1).
+    ffmpeg_error_event:   threading.Event set when the threshold is crossed.
     """
     try:
         for raw in pipe:
@@ -854,6 +884,23 @@ def _drain_pipe(pipe, log_fp, show_modes: set) -> None:
                 mode = OUTPUT_MODE
             if mode in show_modes:
                 print(line, flush=True)
+
+            # FFmpeg error pattern monitoring
+            if (ffmpeg_error_counter is not None
+                    and ffmpeg_error_event is not None
+                    and FFMPEG_ERROR_RESTART_THRESHOLD > 0
+                    and not ffmpeg_error_event.is_set()):
+                line_lower = line.lower()
+                for pattern in FFMPEG_ERROR_PATTERNS:
+                    if pattern.lower() in line_lower:
+                        ffmpeg_error_counter[0] += 1
+                        dbg(f"ffmpeg_monitor [{streamer}]: pattern '{pattern}' matched "
+                            f"(count={ffmpeg_error_counter[0]}/{FFMPEG_ERROR_RESTART_THRESHOLD})")
+                        if ffmpeg_error_counter[0] >= FFMPEG_ERROR_RESTART_THRESHOLD:
+                            log(f"ffmpeg_monitor [{streamer}]: error threshold reached "
+                                f"({ffmpeg_error_counter[0]} matches) — signalling restart.")
+                            ffmpeg_error_event.set()
+                        break  # only count once per line even if multiple patterns match
     except Exception:
         pass
 
@@ -1020,17 +1067,30 @@ def record_stream(streamer: str, cfg: dict) -> None:
             try:
                 proc = subprocess.Popen(cmd, stdout=out_target, stderr=err_target)
                 proc_start_time = time.time()
+
+                # Shared ffmpeg error counter and signal event for this yt-dlp session.
+                # A single-element list is used so both drain threads can safely
+                # increment it under the GIL without an explicit lock.
+                ffmpeg_error_counter = [0]
+                ffmpeg_error_event = threading.Event()
+
                 # Drain subprocess pipes in background threads so the main
                 # record loop is never blocked.  Each drainer respects the
                 # current OUTPUT_MODE to decide whether to print to terminal.
                 threading.Thread(
                     target=_drain_pipe,
                     args=(proc.stdout, log_out_fp, {3, 5}),
+                    kwargs={"ffmpeg_error_counter": ffmpeg_error_counter,
+                            "ffmpeg_error_event": ffmpeg_error_event,
+                            "streamer": streamer},
                     daemon=True,
                 ).start()
                 threading.Thread(
                     target=_drain_pipe,
                     args=(proc.stderr, log_err_fp, {4, 5}),
+                    kwargs={"ffmpeg_error_counter": ffmpeg_error_counter,
+                            "ffmpeg_error_event": ffmpeg_error_event,
+                            "streamer": streamer},
                     daemon=True,
                 ).start()
             except Exception as e:
@@ -1076,6 +1136,18 @@ def record_stream(streamer: str, cfg: dict) -> None:
                 poll_interval = cfg.get("config_check_interval", 3)
                 time.sleep(poll_interval)
                 seconds_since_check += poll_interval
+
+                # Check if ffmpeg error threshold was crossed by a drain thread
+                if ffmpeg_error_event.is_set():
+                    log(f"\n\nffmpeg_monitor [{streamer}]: restarting yt-dlp due to ffmpeg errors "
+                        f"(threshold={FFMPEG_ERROR_RESTART_THRESHOLD}).\n\n")
+                    kill_proc(proc)
+                    try:
+                        close_logs()
+                    except Exception:
+                        pass
+                    time.sleep(5)
+                    break
 
                 if seconds_since_check >= stall_check_interval:
                     seconds_since_check = 0
