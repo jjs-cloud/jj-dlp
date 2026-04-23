@@ -28,8 +28,8 @@ jj-dlp is a [yt-dlp](https://github.com/yt-dlp/yt-dlp) wrapper that allows you t
 - **Small footprint** — only needs to run 1 yt-dlp process when checking for live streams
 - **Stall detection** — restarts yt-dlp if the download stalls
 - **Error detection** — restarts yt-dlp if ffmpeg recieves certain errors
-- **Hot config file** — start and stop recordings via the config file while the script is still running
-- **Verbosity modes** — Hide yt-dlp and/or ffmpeg output with the press of a button. (v and o)
+- **Hot config file** — modify the config file while the script is still running
+- **Verbosity modes** — Easily hide yt-dlp and/or ffmpeg output, or show debug messages.
 - **Cross-platform** — works on Linux, Windows, and Mac (probably)
 
 ---
