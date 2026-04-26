@@ -110,6 +110,8 @@ def load_config(config_path: str):
     log_path = general.get("LOG_PATH", "").strip().strip('\"\'')
     split_logs = general.get("SPLIT_LOGS", "false").strip().lower() == "true"
 
+    popup_notifications = general.get("POPUP_NOTIFICATIONS", "true").strip().lower() == "true"
+
     debug_logs = general.get("DEBUG_LOGS", "false").strip().lower() == "true"
     debug_log_path_raw = general.get("DEBUG_LOG_PATH", "").strip().strip('\"\'')
     debug_log_path = debug_log_path_raw if debug_log_path_raw else ""
@@ -162,6 +164,7 @@ def load_config(config_path: str):
         "logging_enabled": logging_enabled,
         "log_path": log_path,
         "split_logs": split_logs,
+        "popup_notifications": popup_notifications,
         "debug_logs": debug_logs,
         "debug_log_path": debug_log_path,
         "site_tmpl": site_tmpl,
@@ -275,6 +278,58 @@ dashboard_next_check_in: float = 0.0
 dashboard_all_streamers: list = []
 # Set when shutting down so the renderer stops immediately without waiting for its sleep to expire
 _dashboard_stop_event = threading.Event()
+
+
+# ── Popup notification ────────────────────────────────────────────────────────
+def _show_live_popup(streamer: str, source: str = "poll") -> None:
+    """
+    Show a non-blocking tkinter popup when a streamer goes live.
+    source: 'poll' (normal yt-dlp loop) or 'eventsub' (Twitch EventSub push).
+    Runs in its own daemon thread so it never blocks the main loop.
+    tkinter is optional — if unavailable, the popup is silently skipped.
+    """
+    dbg(f"popup: _show_live_popup called — streamer={streamer!r}  source={source!r}")
+
+    def _run():
+        dbg(f"popup: thread started — streamer={streamer!r}  source={source!r}")
+        try:
+            import tkinter as tk
+            dbg(f"popup: tkinter imported OK")
+
+            root = tk.Tk()
+            root.withdraw()  # hide the blank root window
+
+            win = tk.Toplevel(root)
+            win.title("jj-dlp — Stream Live")
+            win.resizable(False, False)
+            win.attributes("-topmost", True)
+
+            label_text = f"🔴  {streamer}  is now LIVE"
+            source_text = f"via {'EventSub' if source == 'eventsub' else 'poll check'}"
+
+            tk.Label(win, text=label_text,
+                     font=("Segoe UI", 16, "bold"), padx=20, pady=10).pack()
+            tk.Label(win, text=source_text,
+                     font=("Segoe UI", 10), fg="gray", padx=20).pack()
+            tk.Button(win, text="Dismiss", command=win.destroy,
+                      padx=12, pady=4).pack(pady=(4, 12))
+
+            dbg(f"popup: window created — scheduling auto-close in 15s")
+            # Auto-close after 15 seconds
+            win.after(15000, win.destroy)
+
+            dbg(f"popup: entering mainloop")
+            root.mainloop()
+            dbg(f"popup: mainloop exited for streamer={streamer!r}")
+        except ImportError:
+            dbg("popup: tkinter not available — skipping popup notification")
+        except Exception as e:
+            dbg(f"popup: exception in _run — {type(e).__name__}: {e}")
+
+    t = threading.Thread(target=_run, daemon=True, name=f"popup-{streamer}")
+    t.start()
+    dbg(f"popup: daemon thread launched (name={t.name!r})")
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 def cycle_verbosity() -> None:
@@ -475,11 +530,11 @@ def render_dashboard() -> None:
         else:
             lines.append(f"  Webhook server:   {OFF_COLOR}○ {srv_status}{RESET}")
 
-        # Per-streamer subscription status
+        # Subscription count status
         if sub_ids:
-            sub_names = ", ".join(sorted(sub_ids.keys()))
+            sub_count = len(sub_ids)
             lines.append(
-                f"  Subscriptions:    {LIVE_COLOR}● active — {sub_names}{RESET}"
+                f"  Subscriptions:    {LIVE_COLOR}● {sub_count} active{RESET}"
             )
         else:
             lines.append(f"  Subscriptions:    {WARN_COLOR}○ none yet (subscribing...){RESET}")
@@ -1295,6 +1350,12 @@ def start_recording_if_needed(live_now: List[str], cfg: dict) -> None:
             with dashboard_lock:
                 if streamer not in dashboard_live_since:
                     dashboard_live_since[streamer] = time.time()
+            # Show popup notification (poll path)
+            if cfg.get("popup_notifications", True):
+                dbg(f"popup: [poll] triggering popup for {streamer!r}")
+                _show_live_popup(streamer, source="poll")
+            else:
+                dbg(f"popup: [poll] popup disabled via config — skipping for {streamer!r}")
             t = threading.Thread(target=record_stream, args=(streamer, cfg), daemon=True)
             t.start()
             recording_threads.append(t)
@@ -1635,6 +1696,12 @@ def _eventsub_handle_request(method: str, path: str, headers: dict,
 
             if in_streamers and not is_blocked:
                 dbg(f"[Twitch] http_handler: calling start_recording_if_needed([{broadcaster_login!r}])")
+                # Show popup notification (EventSub path)
+                if current_cfg.get("popup_notifications", True):
+                    dbg(f"popup: [eventsub] triggering popup for {broadcaster_login!r}")
+                    _show_live_popup(broadcaster_login, source="eventsub")
+                else:
+                    dbg(f"popup: [eventsub] popup disabled via config — skipping for {broadcaster_login!r}")
                 start_recording_if_needed([broadcaster_login], current_cfg)
                 dbg(f"[Twitch] http_handler: start_recording_if_needed returned")
             else:
