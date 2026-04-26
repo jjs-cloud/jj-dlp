@@ -256,6 +256,8 @@ dashboard_live_since: dict = {}
 dashboard_next_check_in: float = 0.0
 # All known streamers for display (updated by main loop)
 dashboard_all_streamers: list = []
+# Set when shutting down so the renderer stops immediately without waiting for its sleep to expire
+_dashboard_stop_event = threading.Event()
 
 
 def cycle_verbosity() -> None:
@@ -450,7 +452,7 @@ def render_dashboard() -> None:
 
 def _dashboard_renderer_thread() -> None:
     """Continuously re-renders the dashboard while output mode 1 is active."""
-    while True:
+    while not _dashboard_stop_event.is_set():
         with output_mode_lock:
             mode = OUTPUT_MODE
         if mode == 1:
@@ -458,7 +460,8 @@ def _dashboard_renderer_thread() -> None:
                 next_in = dashboard_next_check_in
             dbg(f"dashboard: render tick — next_check_in={next_in:.1f}s (id={id(dashboard_next_check_in)})")
             render_dashboard()
-        time.sleep(1)
+        # Use event.wait instead of time.sleep so shutdown can interrupt immediately
+        _dashboard_stop_event.wait(timeout=1)
 
 
 def _modify_config_streamer(config_path: str, username: str, action: str) -> str:
@@ -1469,11 +1472,34 @@ def main() -> None:
                 time.sleep(wait_secs)
 
     except KeyboardInterrupt:
-        log("Shutting down...")
+        # Signal the dashboard renderer to stop immediately (no waiting for its sleep to expire)
+        _dashboard_stop_event.set()
+
+        TITLE_COLOR = "\033[96m"
+        WARN_COLOR  = "\033[93m"
+        OK_COLOR    = "\033[92m"
+        RESET       = "\033[0m"
+        CLEAR       = "\033[2J\033[H"
+
+        active_recordings = [t for t in recording_threads if t.is_alive()]
+
+        sys.stdout.write(CLEAR)
+        sys.stdout.write(f"{TITLE_COLOR}{'─' * 52}{RESET}\n")
+        sys.stdout.write(f"{TITLE_COLOR}  jj-dlp  ·  Shutting down...{RESET}\n")
+        sys.stdout.write(f"{TITLE_COLOR}{'─' * 52}{RESET}\n\n")
+
+        if active_recordings:
+            sys.stdout.write(
+                f"  {WARN_COLOR}Waiting for {len(active_recordings)} active recording(s) to finish...{RESET}\n\n"
+            )
+        sys.stdout.flush()
+
         for t in recording_threads:
             if t.is_alive():
-                t.join(timeout=15) # Wait 15 seconds for each thread to finish gracefully
-        log("Goodbye!")
+                t.join(timeout=15)  # Wait 15 seconds for each thread to finish gracefully
+
+        sys.stdout.write(f"  {OK_COLOR}✓  All done. Goodbye!{RESET}\n\n")
+        sys.stdout.flush()
 
 
 if __name__ == "__main__":
