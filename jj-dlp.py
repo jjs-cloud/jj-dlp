@@ -767,15 +767,6 @@ def _streamer_mgmt_thread() -> None:
                         os.kill(os.getpid(), __import__("signal").SIGINT)
                     elif ch in ("\x1c",):
                         os.kill(os.getpid(), __import__("signal").SIGINT)
-                    elif ch == "o" or ch == "O":
-                        # Let 'o' pass through to cycle — restore tty first
-                        termios.tcsetattr(fd, termios.TCSADRAIN, old)
-                        cycle_output_mode()
-                        # Re-enter raw mode
-                        tty.setraw(fd)
-                        # Signal re-draw
-                        _streamer_mgmt_event.set()
-                        return "__REDRAW__"
                     else:
                         buf.append(ch)
                         sys.stdout.write(ch)
@@ -819,7 +810,7 @@ def _streamer_mgmt_thread() -> None:
             )
             footer = (
                 f"\n{TITLE_COLOR}{'─' * 52}{RESET}\n"
-                f"  \033[90mPress 'o' to jump back to Dashboard\033[0m\n" #unnecessary, will remove
+                f"  \033[90mPress Enter to jump back to Dashboard\033[0m\n"
             )
             if result_msg:
                 body = f"  {OK_COLOR}{result_msg}{RESET}\n"
@@ -842,8 +833,8 @@ def _streamer_mgmt_thread() -> None:
                 continue
 
             if not username.strip():
-                result_msg = "No username entered — try again."
-                continue
+                _set_output_mode(1)
+                break
 
             cfg_path = _config_path
             if not cfg_path:
