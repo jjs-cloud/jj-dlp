@@ -1489,7 +1489,12 @@ def _twitch_api(path: str, client_id: str, token: str, method: str = "GET",
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")
         dbg(f"[Twitch] API {method} {path} → HTTP {e.code}: {body}")
-        return {}
+        # Return the parsed error body so callers can inspect fields like
+        # "message" (e.g. the existing sub ID on a 409 Conflict).
+        try:
+            return json.loads(body)
+        except Exception:
+            return {"_http_status": e.code}
     except Exception as e:
         dbg(f"[Twitch] API {method} {path} → exception: {type(e).__name__}: {e}")
         return {}
@@ -1563,7 +1568,19 @@ def _twitch_subscribe(user_id: str, client_id: str, token: str,
         sub_status = sub.get("status", "?")
         dbg(f"[Twitch] subscribe: OK — sub_id={sub_id}  status={sub_status}")
         return sub_id
-    # Subscription failed — log whatever Twitch returned
+    # HTTP 409: subscription already exists — Twitch puts the existing ID in the
+    # message field: "subscription already exists; id=<uuid>"
+    if resp.get("status") == 409 or resp.get("error") == "Conflict":
+        msg = resp.get("message", "")
+        existing_id = ""
+        if "id=" in msg:
+            existing_id = msg.split("id=", 1)[1].strip()
+        if existing_id:
+            dbg(f"[Twitch] subscribe: 409 Conflict — reusing existing sub_id={existing_id}")
+            return existing_id
+        dbg(f"[Twitch] subscribe: 409 Conflict but could not parse existing id from message={msg!r}")
+        return ""
+    # Any other failure — log whatever Twitch returned
     error_msg = resp.get("message", "")
     error_code = resp.get("error", "")
     dbg(f"[Twitch] subscribe: FAILED for user_id={user_id} — "
