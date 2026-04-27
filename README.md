@@ -28,7 +28,7 @@ jj-dlp is a [yt-dlp](https://github.com/yt-dlp/yt-dlp) wrapper that allows you t
 - **Error detection** — restarts yt-dlp if ffmpeg recieves certain errors
 - **Small footprint** — only needs to run 1 yt-dlp process when checking for live streams
 - **Twitch API** — Optionally connect your Twitch API credentials for faster triggering
-- 
+  
 ---
 
 ## Requirements
