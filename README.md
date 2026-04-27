@@ -115,7 +115,7 @@ streamer3
 # Normal usage
 python jj-dlp.py
 
-# Specify a custom config file
+# Specify a config file
 python jj-dlp.py --config C:\path\to\my.conf
 ```
 
