@@ -125,6 +125,7 @@ Press **Ctrl+C** to stop. Active recordings are given up to 15 seconds to finish
 2. **Recording thread** — runs yt-dlp as a subprocess.
 3. **Config watcher thread** — polls the config file every `CONFIG_CHECK_INTERVAL` seconds and triggers an immediate live check when new streamers are added.
 4. **Block list** — checked on every config reload during an active recording; a blocked streamer's process is killed immediately.
+5. **Optional Twitch API** — Runs a small web server and waits for Twitch API to POST an EventSub notification.   Starts recording the streamer immediately.
 
 ---
 
