@@ -26,12 +26,9 @@ jj-dlp is a [yt-dlp](https://github.com/yt-dlp/yt-dlp) wrapper that allows you t
 - **Dashboard controls** — Add and remove streamers straight from the dashboard view.
 - **Multi-streamer monitoring** — watches/records any number of channels concurrently
 - **Small footprint** — only needs to run 1 yt-dlp process when checking for live streams
-- **Twitch EventSub** — connect your Twitch api credentials for faster triggering
+- **Twitch API** — connect your Twitch API credentials for faster triggering
 - **Stall detection** — restarts yt-dlp if the download stalls
 - **Error detection** — restarts yt-dlp if ffmpeg recieves certain errors
-- **Hot config file** — modify the config file while the script is still running
-- **Verbosity modes** — Easily hide yt-dlp and/or ffmpeg output, or show debug messages.
-- **Cross-platform** — works on Linux, Windows, and Mac (probably)
 
 ---
 
