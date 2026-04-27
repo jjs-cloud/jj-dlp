@@ -112,7 +112,7 @@ streamer3
 ## Usage
 
 ```bash
-# Use the default jj-dlp.conf in the current directory
+# Normal usage
 python jj-dlp.py
 
 # Specify a custom config file
