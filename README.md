@@ -6,11 +6,11 @@ Step 1:  Download jj-dlp by clicking the green "Code" button, then "Download ZIP
 
 Step 2:  Extract the zip, and double click on jj-dlp.py to run it.  
 
-Alternatively, you can run it with the following commands:
+Note: You might need to run it with one of the following commands:
 ```
-py jj-dlp.py --config twitch.conf
-python jj-dlp.py --config twitch.conf
-python3 jj-dlp.py --config twitch.conf
+py jj-dlp.py
+python jj-dlp.py
+python3 jj-dlp.py
 ```
 
 ---
