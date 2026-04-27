@@ -44,7 +44,8 @@ jj-dlp is a [yt-dlp](https://github.com/yt-dlp/yt-dlp) wrapper that allows you t
 
 ## Configuration
 
-The script is driven by a `.conf` file.  At startup, it will scan the folder for `.conf` files and prompt you to choose one.     You can also use the `--config` option to specify a `.conf` file.
+The script is driven by a `.conf` file.  At startup, it will scan the folder for `.conf` files and prompt you to choose one.
+You can also use the `--config` option to specify a `.conf` file.
 
 ### Example `twitch.conf`
 
