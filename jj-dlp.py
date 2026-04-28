@@ -1138,7 +1138,7 @@ def get_streamer_file_size(
         stalled_time = 0.0
         stall_detected = False
 
-        dbg(f"[STALL_CHECKER] file: {os.path.basename(filename) or '<none>'}")
+        #dbg(f"[STALL_CHECKER] file: {os.path.basename(filename) or '<none>'}")
 
         try:
             if last_growth_time is not None:
@@ -1232,16 +1232,16 @@ def record_stream(streamer: str, cfg: dict) -> None:
                 output_dir, streamer, cfg=cfg, proc_start_time=proc_start_time
             )
 
-            dbg(f"[STALL_CHECKER] Setting initial last_size for {streamer}: {last_size} bytes "
-                f"(file: {os.path.basename(current_filename) if current_filename else '<none>'})")
+            #dbg(f"[STALL_CHECKER] Setting initial last_size for {streamer}: {last_size} bytes "
+                #f"(file: {os.path.basename(current_filename) if current_filename else '<none>'})")
 
             last_growth_time = time.time()
-            dbg(f"[STALL_CHECKER] Setting initial last_growth_time for {streamer}: {last_growth_time}")
+            #dbg(f"[STALL_CHECKER] Setting initial last_growth_time for {streamer}: {last_growth_time}")
 
             stall_check_interval = cfg["stall_check_interval"]
             stall_timeout = cfg["stall_timeout"]
             seconds_since_check = 0
-            dbg(f"[STALL_CHECKER] The first stall check will be in {stall_check_interval} seconds.")
+            #dbg(f"[STALL_CHECKER] The first stall check will be in {stall_check_interval} seconds.")
 
             while proc.poll() is None:  # While process is still running
                 current_cfg = load_config(cfg["config_path"])
@@ -1304,10 +1304,10 @@ def record_stream(streamer: str, cfg: dict) -> None:
 
                     if current_size > last_size:
                         dbg(f"[STALL_CHECKER] {filename_display} grew by {current_size - last_size} bytes ({last_size} --> {current_size})")
-                        dbg(f"[STALL_CHECKER] Setting new last_size for {filename_display}: {current_size} bytes")
+                        #dbg(f"[STALL_CHECKER] Setting new last_size for {filename_display}: {current_size} bytes")
                         last_size = current_size
                         last_growth_time = time.time()
-                        dbg(f"[STALL_CHECKER] Setting new last_growth_time for {filename_display}: {last_growth_time}")
+                        #dbg(f"[STALL_CHECKER] Setting new last_growth_time for {filename_display}: {last_growth_time}")
                     elif current_size < last_size:
                         last_size = current_size
                         last_growth_time = time.time()
@@ -1344,7 +1344,7 @@ def record_stream(streamer: str, cfg: dict) -> None:
         time.sleep(cfg["cooldown"])
 
 
-def start_recording_if_needed(live_now: List[str], cfg: dict) -> None:
+def start_recording_if_needed(live_now: List[str], cfg: dict, show_popup: bool = True) -> None:
     global recording_threads
 
     with lock:
@@ -1362,9 +1362,11 @@ def start_recording_if_needed(live_now: List[str], cfg: dict) -> None:
                 if streamer not in dashboard_live_since:
                     dashboard_live_since[streamer] = time.time()
             # Show popup notification (poll path)
-            if cfg.get("popup_notifications", True):
+            if show_popup and cfg.get("popup_notifications", True):
                 dbg(f"[POPUP] [poll] triggering popup for {streamer!r}")
                 _show_live_popup(streamer, source="poll")
+            elif not show_popup:
+                dbg(f"[POPUP] [poll] popup suppressed (already shown by eventsub) for {streamer!r}")
             else:
                 dbg(f"[POPUP] [poll] popup disabled via config — skipping for {streamer!r}")
             t = threading.Thread(target=record_stream, args=(streamer, cfg), daemon=True)
@@ -1730,7 +1732,7 @@ def _eventsub_handle_request(method: str, path: str, headers: dict,
                     _show_live_popup(broadcaster_login, source="eventsub")
                 else:
                     dbg(f"[POPUP] [eventsub] popup disabled via config — skipping for {broadcaster_login!r}")
-                start_recording_if_needed([broadcaster_login], current_cfg)
+                start_recording_if_needed([broadcaster_login], current_cfg, show_popup=False)
                 dbg(f"[TWITCH] http_handler: start_recording_if_needed returned")
             else:
                 dbg(f"[TWITCH] http_handler: skipping {broadcaster_login} "
@@ -2246,6 +2248,8 @@ def main() -> None:
                 log(f"Checking live status for {', '.join(streamers)}\n")
                 live_now = get_live_streamers(streamers, cfg)
                 dbg(f"[MAIN] get_live_streamers returned: {live_now}")
+
+                cfg = load_config(config_path) # fixes a bug with restarting the record thread after blocking a streamer
 
                 # Update dashboard: mark offline streamers, keep live ones
                 with dashboard_lock:
