@@ -233,7 +233,7 @@ FFMPEG_ERROR_PATTERNS: List[str] = [
 
 # How many total pattern matches (across all patterns) must occur before
 # yt-dlp is restarted. Set to 0 to disable ffmpeg error monitoring.
-FFMPEG_ERROR_RESTART_THRESHOLD: int = 1000
+FFMPEG_ERROR_RESTART_THRESHOLD: int = 500
 # ──────────────────────────────────────────────────────────────────────
 
 # ── Keybind Configuration ──────────────────────────────────────────────
@@ -288,13 +288,13 @@ def _show_live_popup(streamer: str, source: str = "poll") -> None:
     Runs in its own daemon thread so it never blocks the main loop.
     tkinter is optional — if unavailable, the popup is silently skipped.
     """
-    dbg(f"popup: _show_live_popup called — streamer={streamer!r}  source={source!r}")
+    dbg(f"[POPUP] _show_live_popup called — streamer={streamer!r}  source={source!r}")
 
     def _run():
-        dbg(f"popup: thread started — streamer={streamer!r}  source={source!r}")
+        dbg(f"[POPUP] thread started — streamer={streamer!r}  source={source!r}")
         try:
             import tkinter as tk
-            dbg(f"popup: tkinter imported OK")
+            dbg(f"[POPUP] tkinter imported OK")
 
             root = tk.Tk()
             root.withdraw()  # hide the blank root window
@@ -314,21 +314,21 @@ def _show_live_popup(streamer: str, source: str = "poll") -> None:
             tk.Button(win, text="Dismiss", command=win.destroy,
                       padx=12, pady=4).pack(pady=(4, 12))
 
-            dbg(f"popup: window created — scheduling auto-close in 15s")
+            dbg(f"[POPUP] window created — scheduling auto-close in 15s")
             # Auto-close after 15 seconds
             win.after(15000, win.destroy)
 
-            dbg(f"popup: entering mainloop")
+            dbg(f"[POPUP] entering mainloop")
             root.mainloop()
-            dbg(f"popup: mainloop exited for streamer={streamer!r}")
+            dbg(f"[POPUP] mainloop exited for streamer={streamer!r}")
         except ImportError:
-            dbg("popup: tkinter not available — skipping popup notification")
+            dbg(f"[POPUP] tkinter not available — skipping popup notification")
         except Exception as e:
-            dbg(f"popup: exception in _run — {type(e).__name__}: {e}")
+            dbg(f"[POPUP] exception in _run — {type(e).__name__}: {e}")
 
     t = threading.Thread(target=_run, daemon=True, name=f"popup-{streamer}")
     t.start()
-    dbg(f"popup: daemon thread launched (name={t.name!r})")
+    dbg(f"[POPUP] daemon thread launched (name={t.name!r})")
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -577,7 +577,7 @@ def _dashboard_renderer_thread() -> None:
         if mode == 1:
             with dashboard_lock:
                 next_in = dashboard_next_check_in
-            dbg(f"dashboard: render tick — next_check_in={next_in:.1f}s (id={id(dashboard_next_check_in)})")
+            #dbg(f"[DASHBOARD] render tick — next_check_in={next_in:.1f}s (id={id(dashboard_next_check_in)})")
             render_dashboard()
         # Use event.wait instead of time.sleep so shutdown can interrupt immediately
         _dashboard_stop_event.wait(timeout=1)
@@ -675,12 +675,14 @@ def _modify_config_streamer(config_path: str, username: str, action: str) -> str
 
     messages = []
     if action == "add":
+        dbg(f"[CONFIG_EDIT] adding {username!r} to [Streamers], removing from [Block] if present")
         removed_from_block = _remove_from_section("Block", username)
         if removed_from_block:
             messages.append(f"Unblocked '{username}'.")
         _add_to_section("Streamers", username)
         messages.append(f"Added '{username}' to [Streamers].")
     elif action == "remove":
+        dbg(f"[CONFIG_EDIT] removing {username!r} from [Streamers], adding to [Block]")
         removed_from_streamers = _remove_from_section("Streamers", username)
         if removed_from_streamers:
             messages.append(f"Removed '{username}' from [Streamers].")
@@ -692,7 +694,9 @@ def _modify_config_streamer(config_path: str, username: str, action: str) -> str
     try:
         with open(config_path, "w", encoding="utf-8") as f:
             f.writelines(lines)
+        dbg(f"[CONFIG_EDIT] config written OK — result: {'  '.join(messages)}")
     except Exception as e:
+        dbg(f"[CONFIG_EDIT] ERROR writing config: {e}")
         return f"ERROR writing config: {e}"
 
     return "  ".join(messages)
@@ -1007,7 +1011,7 @@ def _drain_pipe(pipe, log_fp, show_modes: set,
                 for pattern in FFMPEG_ERROR_PATTERNS:
                     if pattern.lower() in line_lower:
                         ffmpeg_error_counter[0] += 1
-                        dbg(f"ffmpeg_monitor [{streamer}]: pattern '{pattern}' matched "
+                        dbg(f"[FFMPEG_MONITOR] [{streamer}]: pattern '{pattern}' matched "
                             f"(count={ffmpeg_error_counter[0]}/{FFMPEG_ERROR_RESTART_THRESHOLD})")
                         if ffmpeg_error_counter[0] >= FFMPEG_ERROR_RESTART_THRESHOLD:
                             log(f"ffmpeg_monitor [{streamer}]: error threshold reached "
@@ -1028,12 +1032,15 @@ def get_live_streamers(streamers: List[str], cfg: dict) -> List[str]:
 
     streamers = [s for s in streamers if s not in cfg["blocked"]]
     if not streamers:
+        dbg(f"[CHECKER] get_live_streamers: all streamers are blocked — skipping check")
         return []
 
     urls = [cfg["site_tmpl"].format(username=s) for s in streamers]
     cmd = build_yt_dlp_command(cfg["yt_dlp_path"], cfg["checker_cmd"], urls)
+    dbg(f"[CHECKER] running liveness check for {streamers} — cmd={cmd}")
 
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    dbg(f"[CHECKER] yt-dlp check returncode={result.returncode}")
 
     if cfg["logging_enabled"]:
         out_path, err_path = get_log_file_paths(cfg)
@@ -1068,6 +1075,7 @@ def get_live_streamers(streamers: List[str], cfg: dict) -> List[str]:
                     streamer = url.rstrip("/").split("/")[-1].lstrip("@").lower().strip()
 
                 if streamer:
+                    dbg(f"[CHECKER] detected live: {streamer!r} (url={url!r})")
                     live.append(streamer)
         except Exception:
             if cfg.get("logging_enabled"):
@@ -1077,7 +1085,9 @@ def get_live_streamers(streamers: List[str], cfg: dict) -> List[str]:
                         lf.write(f"JSON parse error for line: {line}")
                 except Exception:
                     pass
+            dbg(f"[CHECKER] JSON parse error for line: {line!r}")
             continue
+    dbg(f"[CHECKER] get_live_streamers result: {live}")
     return live
 
 
@@ -1128,7 +1138,7 @@ def get_streamer_file_size(
         stalled_time = 0.0
         stall_detected = False
 
-        dbg(f"stall_checker: file: {os.path.basename(filename) or '<none>'}")
+        dbg(f"[STALL_CHECKER] file: {os.path.basename(filename) or '<none>'}")
 
         try:
             if last_growth_time is not None:
@@ -1167,6 +1177,7 @@ def record_stream(streamer: str, cfg: dict) -> None:
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, cfg["output_tmpl"])
 
+    dbg(f"[RECORD] thread started for {streamer!r} — url={channel_url!r} output_dir={output_dir!r}")
     log(f"Recording started: {streamer}  (saving to: {output_dir})\n")
 
     proc = None
@@ -1175,11 +1186,13 @@ def record_stream(streamer: str, cfg: dict) -> None:
     try:
         while True:
             cmd = build_yt_dlp_command(cfg["yt_dlp_path"], cfg["downloader_cmd"], ["-o", output_path, channel_url])
+            dbg(f"[RECORD] launching yt-dlp for {streamer!r} — cmd={cmd}")
             out_target, err_target, close_logs, log_out_fp, log_err_fp = open_log_streams(cfg)
 
             try:
                 proc = subprocess.Popen(cmd, stdout=out_target, stderr=err_target)
                 proc_start_time = time.time()
+                dbg(f"[RECORD] yt-dlp process started for {streamer!r} — pid={proc.pid}")
 
                 # Shared ffmpeg error counter and signal event for this yt-dlp session.
                 # A single-element list is used so both drain threads can safely
@@ -1219,21 +1232,22 @@ def record_stream(streamer: str, cfg: dict) -> None:
                 output_dir, streamer, cfg=cfg, proc_start_time=proc_start_time
             )
 
-            dbg(f"stall_checker: Setting initial last_size for {streamer}: {last_size} bytes "
+            dbg(f"[STALL_CHECKER] Setting initial last_size for {streamer}: {last_size} bytes "
                 f"(file: {os.path.basename(current_filename) if current_filename else '<none>'})")
 
             last_growth_time = time.time()
-            dbg(f"stall_checker: Setting initial last_growth_time for {streamer}: {last_growth_time}")
+            dbg(f"[STALL_CHECKER] Setting initial last_growth_time for {streamer}: {last_growth_time}")
 
             stall_check_interval = cfg["stall_check_interval"]
             stall_timeout = cfg["stall_timeout"]
             seconds_since_check = 0
-            dbg(f"stall_checker: The first stall check will be in {stall_check_interval} seconds.")
+            dbg(f"[STALL_CHECKER] The first stall check will be in {stall_check_interval} seconds.")
 
             while proc.poll() is None:  # While process is still running
                 current_cfg = load_config(cfg["config_path"])
 
                 if streamer in current_cfg["blocked"]:
+                    dbg(f"[RECORD] {streamer!r} is now blocked — killing yt-dlp (pid={proc.pid})")
                     kill_proc(proc)
                     log(f"Recording STOPPED (blocked) -> {streamer}")
                     try:
@@ -1254,6 +1268,7 @@ def record_stream(streamer: str, cfg: dict) -> None:
                 if ffmpeg_error_event.is_set():
                     log(f"\n\nffmpeg_monitor [{streamer}]: restarting yt-dlp due to ffmpeg errors "
                         f"(threshold={FFMPEG_ERROR_RESTART_THRESHOLD}).\n\n")
+                    dbg(f"[RECORD] killing yt-dlp (pid={proc.pid}) for {streamer!r} — ffmpeg error threshold crossed")
                     kill_proc(proc)
                     try:
                         close_logs()
@@ -1288,11 +1303,11 @@ def record_stream(streamer: str, cfg: dict) -> None:
                     filename_display = os.path.basename(current_filename) if current_filename else f"{streamer} (no file yet)"
 
                     if current_size > last_size:
-                        dbg(f"stall_checker: {filename_display} grew by {current_size - last_size} bytes ({last_size} --> {current_size})")
-                        dbg(f"stall_checker: Setting new last_size for {filename_display}: {current_size} bytes")
+                        dbg(f"[STALL_CHECKER] {filename_display} grew by {current_size - last_size} bytes ({last_size} --> {current_size})")
+                        dbg(f"[STALL_CHECKER] Setting new last_size for {filename_display}: {current_size} bytes")
                         last_size = current_size
                         last_growth_time = time.time()
-                        dbg(f"stall_checker: Setting new last_growth_time for {filename_display}: {last_growth_time}")
+                        dbg(f"[STALL_CHECKER] Setting new last_growth_time for {filename_display}: {last_growth_time}")
                     elif current_size < last_size:
                         last_size = current_size
                         last_growth_time = time.time()
@@ -1307,10 +1322,12 @@ def record_stream(streamer: str, cfg: dict) -> None:
                     close_logs()
                 except Exception:
                     pass
+                dbg(f"[RECORD] yt-dlp process exited naturally for {streamer!r} — returncode={proc.returncode}")
                 log(f"Recording finished: {streamer}")
                 break
 
     except KeyboardInterrupt:
+        dbg(f"[RECORD] KeyboardInterrupt received for {streamer!r} — killing yt-dlp")
         if proc is not None:
             try:
                 kill_proc(proc)
@@ -1323,6 +1340,7 @@ def record_stream(streamer: str, cfg: dict) -> None:
     finally:
         with lock:
             currently_recording.discard(streamer)
+        dbg(f"[RECORD] thread finalizing for {streamer!r} — cooldown={cfg['cooldown']}s")
         time.sleep(cfg["cooldown"])
 
 
@@ -1332,21 +1350,23 @@ def start_recording_if_needed(live_now: List[str], cfg: dict) -> None:
     with lock:
         to_start = [s for s in live_now if s not in currently_recording and s not in cfg["blocked"]]
         if not to_start:
+            dbg(f"[RECORD] start_recording_if_needed: nothing new to start — live_now={live_now} currently_recording={currently_recording}")
             recording_threads[:] = [t for t in recording_threads if t.is_alive()]
             return
 
         for streamer in to_start:
             currently_recording.add(streamer)
+            dbg(f"[RECORD] start_recording_if_needed: launching recording thread for {streamer!r}")
             # Track when this streamer went live for the dashboard
             with dashboard_lock:
                 if streamer not in dashboard_live_since:
                     dashboard_live_since[streamer] = time.time()
             # Show popup notification (poll path)
             if cfg.get("popup_notifications", True):
-                dbg(f"popup: [poll] triggering popup for {streamer!r}")
+                dbg(f"[POPUP] [poll] triggering popup for {streamer!r}")
                 _show_live_popup(streamer, source="poll")
             else:
-                dbg(f"popup: [poll] popup disabled via config — skipping for {streamer!r}")
+                dbg(f"[POPUP] [poll] popup disabled via config — skipping for {streamer!r}")
             t = threading.Thread(target=record_stream, args=(streamer, cfg), daemon=True)
             t.start()
             recording_threads.append(t)
@@ -1355,7 +1375,7 @@ def start_recording_if_needed(live_now: List[str], cfg: dict) -> None:
 
 
 def config_watcher(config_path: str, poll_interval: int = 3) -> None:
-    dbg("config_watcher thread started")
+    dbg(f"[CONFIG_WATCHER] thread started")
     prev_streamers: Set[str] = set()
     first_run = True
 
@@ -1365,25 +1385,25 @@ def config_watcher(config_path: str, poll_interval: int = 3) -> None:
             curr_streamers = set(cfg.get("streamers", []))
             blocked = set(cfg.get("blocked", []))
 
-            dbg(f"config_watcher: curr_streamers={curr_streamers} prev_streamers={prev_streamers} first_run={first_run}")
+            #dbg(f"[CONFIG_WATCHER] curr_streamers={curr_streamers} prev_streamers={prev_streamers} first_run={first_run}")
 
             if first_run:
                 prev_streamers = curr_streamers
                 first_run = False
-                dbg("config_watcher: first run — baseline set, skipping trigger check")
+                dbg(f"[CONFIG_WATCHER] first run — baseline set, skipping trigger check")
             else:
                 added = [s for s in (curr_streamers - prev_streamers) if s not in blocked]
-                dbg(f"config_watcher: added={added}")
+                #dbg(f"[CONFIG_WATCHER] added={added}")
                 if added: 
                     log(f"config_watcher: new streamer(s) detected: {', '.join(added)} — triggering immediate full check")
                     with lock:
                         known_streamers.update(curr_streamers)
                     trigger_full_check_event.set()
-                    dbg("config_watcher: trigger_full_check_event SET")
+                    dbg(f"[CONFIG_WATCHER] trigger_full_check_event SET")
                 prev_streamers = curr_streamers
 
         except Exception as e:
-            dbg(f"config_watcher: exception during poll: {e}")
+            dbg(f"[CONFIG_WATCHER] exception during poll: {e}")
 
         time.sleep(poll_interval)
 
@@ -1440,7 +1460,7 @@ def _twitch_get_token(client_id: str, client_secret: str) -> str:
         f"client_id={client_id}&client_secret={client_secret}"
         "&grant_type=client_credentials"
     ).encode()
-    dbg(f"[Twitch] token: POST {url}")
+    dbg(f"[TWITCH] token: POST {url}")
     req = urllib.request.Request(url, data=data, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -1448,19 +1468,19 @@ def _twitch_get_token(client_id: str, client_secret: str) -> str:
             token = body.get("access_token", "")
             expires_in = body.get("expires_in", "?")
             if token:
-                dbg(f"[Twitch] token: obtained OK  (expires_in={expires_in}s, "
+                dbg(f"[TWITCH] token: obtained OK  (expires_in={expires_in}s, "
                     f"token prefix={token[:8]}...)")
             else:
-                dbg(f"[Twitch] token: response had no access_token — full body: {body}")
+                dbg(f"[TWITCH] token: response had no access_token — full body: {body}")
             return token
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")
-        log(f"[Twitch] token fetch failed: HTTP {e.code} — {body}")
-        dbg(f"[Twitch] token: HTTPError {e.code} detail: {body}")
+        log(f"[TWITCH] token fetch failed: HTTP {e.code} — {body}")
+        dbg(f"[TWITCH] token: HTTPError {e.code} detail: {body}")
         return ""
     except Exception as e:
-        log(f"[Twitch] token fetch failed: {e}")
-        dbg(f"[Twitch] token: exception: {type(e).__name__}: {e}")
+        log(f"[TWITCH] token fetch failed: {e}")
+        dbg(f"[TWITCH] token: exception: {type(e).__name__}: {e}")
         return ""
 
 
@@ -1473,7 +1493,7 @@ def _twitch_api(path: str, client_id: str, token: str, method: str = "GET",
         url = f"{base}{path}?{qs}"
     else:
         url = f"{base}{path}"
-    dbg(f"[Twitch] API {method} {url}  (body_len={len(data) if data else 0})")
+    dbg(f"[TWITCH] API {method} {url}  (body_len={len(data) if data else 0})")
     headers = {
         "Client-Id": client_id,
         "Authorization": f"Bearer {token}",
@@ -1484,11 +1504,11 @@ def _twitch_api(path: str, client_id: str, token: str, method: str = "GET",
         with urllib.request.urlopen(req, timeout=15) as resp:
             raw = resp.read()
             result = json.loads(raw)
-            dbg(f"[Twitch] API {method} {path} → HTTP 200  ({len(raw)} bytes)")
+            dbg(f"[TWITCH] API {method} {path} → HTTP 200  ({len(raw)} bytes)")
             return result
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")
-        dbg(f"[Twitch] API {method} {path} → HTTP {e.code}: {body}")
+        dbg(f"[TWITCH] API {method} {path} → HTTP {e.code}: {body}")
         # Return the parsed error body so callers can inspect fields like
         # "message" (e.g. the existing sub ID on a 409 Conflict).
         try:
@@ -1496,20 +1516,20 @@ def _twitch_api(path: str, client_id: str, token: str, method: str = "GET",
         except Exception:
             return {"_http_status": e.code}
     except Exception as e:
-        dbg(f"[Twitch] API {method} {path} → exception: {type(e).__name__}: {e}")
+        dbg(f"[TWITCH] API {method} {path} → exception: {type(e).__name__}: {e}")
         return {}
 
 
 def _twitch_resolve_user_ids(logins: list, client_id: str, token: str) -> dict:
     """Return {login_lower: user_id} for all resolved logins."""
     result = {}
-    dbg(f"[Twitch] resolve_user_ids: resolving {len(logins)} login(s): {logins}")
+    dbg(f"[TWITCH] resolve_user_ids: resolving {len(logins)} login(s): {logins}")
     # Helix allows up to 100 logins per request
     for i in range(0, len(logins), 100):
         chunk = logins[i:i + 100]
         params_str = "&".join(f"login={l}" for l in chunk)
         url = f"https://api.twitch.tv/helix/users?{params_str}"
-        dbg(f"[Twitch] resolve_user_ids: GET {url}")
+        dbg(f"[TWITCH] resolve_user_ids: GET {url}")
         req = urllib.request.Request(url, headers={
             "Client-Id": client_id,
             "Authorization": f"Bearer {token}",
@@ -1518,26 +1538,26 @@ def _twitch_resolve_user_ids(logins: list, client_id: str, token: str) -> dict:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read())
                 users_found = data.get("data", [])
-                dbg(f"[Twitch] resolve_user_ids: API returned {len(users_found)} user(s)")
+                dbg(f"[TWITCH] resolve_user_ids: API returned {len(users_found)} user(s)")
                 for u in users_found:
                     login_lower = u["login"].lower()
                     uid = u["id"]
                     result[login_lower] = uid
-                    dbg(f"[Twitch] resolve_user_ids:   {login_lower!r} → user_id={uid}")
+                    dbg(f"[TWITCH] resolve_user_ids:   {login_lower!r} → user_id={uid}")
                 # Report any logins that came back empty
                 found_logins = {u["login"].lower() for u in users_found}
                 for missing in chunk:
                     if missing.lower() not in found_logins:
-                        dbg(f"[Twitch] resolve_user_ids:   {missing!r} → NOT FOUND "
+                        dbg(f"[TWITCH] resolve_user_ids:   {missing!r} → NOT FOUND "
                             f"(check spelling / account exists?)")
         except urllib.error.HTTPError as e:
             body = e.read().decode(errors="replace")
-            log(f"[Twitch] user-id resolve failed: HTTP {e.code} — {body}")
-            dbg(f"[Twitch] resolve_user_ids: HTTPError {e.code}: {body}")
+            log(f"[TWITCH] user-id resolve failed: HTTP {e.code} — {body}")
+            dbg(f"[TWITCH] resolve_user_ids: HTTPError {e.code}: {body}")
         except Exception as e:
-            log(f"[Twitch] user-id resolve failed: {e}")
-            dbg(f"[Twitch] resolve_user_ids: exception: {type(e).__name__}: {e}")
-    dbg(f"[Twitch] resolve_user_ids: final result = {result}")
+            log(f"[TWITCH] user-id resolve failed: {e}")
+            dbg(f"[TWITCH] resolve_user_ids: exception: {type(e).__name__}: {e}")
+    dbg(f"[TWITCH] resolve_user_ids: final result = {result}")
     return result
 
 
@@ -1547,7 +1567,7 @@ def _twitch_subscribe(user_id: str, client_id: str, token: str,
     Subscribe to stream.online for user_id via EventSub.
     Returns the subscription id string, or '' on failure.
     """
-    dbg(f"[Twitch] subscribe: creating stream.online subscription "
+    dbg(f"[TWITCH] subscribe: creating stream.online subscription "
         f"for user_id={user_id}  callback={callback_url}")
     payload = json.dumps({
         "type": "stream.online",
@@ -1566,7 +1586,7 @@ def _twitch_subscribe(user_id: str, client_id: str, token: str,
         sub = subs[0]
         sub_id     = sub.get("id", "")
         sub_status = sub.get("status", "?")
-        dbg(f"[Twitch] subscribe: OK — sub_id={sub_id}  status={sub_status}")
+        dbg(f"[TWITCH] subscribe: OK — sub_id={sub_id}  status={sub_status}")
         return sub_id
     # HTTP 409: subscription already exists — Twitch puts the existing ID in the
     # message field: "subscription already exists; id=<uuid>"
@@ -1576,24 +1596,24 @@ def _twitch_subscribe(user_id: str, client_id: str, token: str,
         if "id=" in msg:
             existing_id = msg.split("id=", 1)[1].strip()
         if existing_id:
-            dbg(f"[Twitch] subscribe: 409 Conflict — reusing existing sub_id={existing_id}")
+            dbg(f"[TWITCH] subscribe: 409 Conflict — reusing existing sub_id={existing_id}")
             return existing_id
-        dbg(f"[Twitch] subscribe: 409 Conflict but could not parse existing id from message={msg!r}")
+        dbg(f"[TWITCH] subscribe: 409 Conflict but could not parse existing id from message={msg!r}")
         return ""
     # Any other failure — log whatever Twitch returned
     error_msg = resp.get("message", "")
     error_code = resp.get("error", "")
-    dbg(f"[Twitch] subscribe: FAILED for user_id={user_id} — "
+    dbg(f"[TWITCH] subscribe: FAILED for user_id={user_id} — "
         f"error={error_code!r}  message={error_msg!r}  full_resp={resp}")
     return ""
 
 
 def _twitch_unsubscribe(sub_id: str, client_id: str, token: str) -> None:
     """Delete an EventSub subscription by id."""
-    dbg(f"[Twitch] unsubscribe: deleting sub_id={sub_id}")
+    dbg(f"[TWITCH] unsubscribe: deleting sub_id={sub_id}")
     _twitch_api(f"/eventsub/subscriptions?id={sub_id}", client_id, token,
                 method="DELETE")
-    dbg(f"[Twitch] unsubscribe: done sub_id={sub_id}")
+    dbg(f"[TWITCH] unsubscribe: done sub_id={sub_id}")
 
 
 def _eventsub_verify_signature(secret: str, msg_id: str, msg_timestamp: str,
@@ -1605,7 +1625,7 @@ def _eventsub_verify_signature(secret: str, msg_id: str, msg_timestamp: str,
     ).hexdigest()
     match = hmac.compare_digest(expected, twitch_sig)
     if not match:
-        dbg(f"[Twitch] sig_verify: MISMATCH  "
+        dbg(f"[TWITCH] sig_verify: MISMATCH  "
             f"expected={expected[:32]}...  got={twitch_sig[:32]}...")
     return match
 
@@ -1624,30 +1644,30 @@ def _eventsub_handle_request(method: str, path: str, headers: dict,
     msg_ts    = headers.get("twitch-eventsub-message-timestamp", "")
     signature = headers.get("twitch-eventsub-message-signature", "")
 
-    dbg(f"[Twitch] http_handler: {method} {path}  "
+    dbg(f"[TWITCH] http_handler: {method} {path}  "
         f"msg-type={msg_type!r}  msg-id={msg_id!r}  "
         f"body_len={len(body)}  sig_present={bool(signature)}")
 
     if method != "POST":
-        dbg(f"[Twitch] http_handler: rejecting non-POST request ({method})")
+        dbg(f"[TWITCH] http_handler: rejecting non-POST request ({method})")
         return 405, b"Method Not Allowed"
 
     if not signature:
-        dbg("[Twitch] http_handler: no Twitch signature header present — "
+        dbg(f"[TWITCH] http_handler: no Twitch signature header present — "
             "this may not be a real Twitch request, or HMAC headers are missing")
 
     if not _eventsub_verify_signature(secret, msg_id, msg_ts, body, signature):
         log("[Twitch] EventSub: signature verification FAILED — "
             "ignoring request (wrong WEBHOOK_SECRET, or not from Twitch)")
-        dbg("[Twitch] http_handler: 403 — signature mismatch")
+        dbg(f"[TWITCH] http_handler: 403 — signature mismatch")
         return 403, b"Forbidden"
 
-    dbg("[Twitch] http_handler: signature OK")
+    dbg(f"[TWITCH] http_handler: signature OK")
 
     try:
         payload = json.loads(body)
     except Exception as e:
-        dbg(f"[Twitch] http_handler: JSON parse error: {e}  body={body[:200]!r}")
+        dbg(f"[TWITCH] http_handler: JSON parse error: {e}  body={body[:200]!r}")
         return 400, b"Bad Request"
 
     # ── Twitch challenge (sent once when we subscribe) ────────────────────────
@@ -1656,9 +1676,9 @@ def _eventsub_handle_request(method: str, path: str, headers: dict,
         sub_info  = payload.get("subscription", {})
         sub_type  = sub_info.get("type", "?")
         sub_cond  = sub_info.get("condition", {})
-        dbg(f"[Twitch] http_handler: challenge verification request "
+        dbg(f"[TWITCH] http_handler: challenge verification request "
             f"type={sub_type}  condition={sub_cond}  challenge={challenge!r}")
-        log(f"[Twitch] EventSub: challenge verified for {sub_type} "
+        log(f"[TWITCH] EventSub: challenge verified for {sub_type} "
             f"(condition={sub_cond}) — subscription is now active")
         with _eventsub_status_lock:
             _eventsub_last_notification = f"challenge OK for {sub_type}"
@@ -1672,7 +1692,7 @@ def _eventsub_handle_request(method: str, path: str, headers: dict,
         stream_type       = event.get("type", "?")   # "live" or "playlist"
         started_at        = event.get("started_at", "")
 
-        dbg(f"[Twitch] http_handler: NOTIFICATION  "
+        dbg(f"[TWITCH] http_handler: NOTIFICATION  "
             f"login={broadcaster_login!r}  id={broadcaster_id}  "
             f"stream_type={stream_type!r}  started_at={started_at!r}")
 
@@ -1685,40 +1705,40 @@ def _eventsub_handle_request(method: str, path: str, headers: dict,
                     f"(#{_eventsub_notifications_total})"
                 )
 
-            log(f"[Twitch] EventSub: *** {broadcaster_login} just went live "
+            log(f"[TWITCH] EventSub: *** {broadcaster_login} just went live "
                 f"(stream_type={stream_type}) — triggering recording immediately ***\n")
 
             # Update dashboard live_since immediately
             with dashboard_lock:
                 if broadcaster_login not in dashboard_live_since:
                     dashboard_live_since[broadcaster_login] = time.time()
-                    dbg(f"[Twitch] http_handler: updated dashboard_live_since for {broadcaster_login}")
+                    dbg(f"[TWITCH] http_handler: updated dashboard_live_since for {broadcaster_login}")
 
             # Load fresh config and start recording
-            dbg(f"[Twitch] http_handler: loading config to verify {broadcaster_login} is still in [Streamers]")
+            dbg(f"[TWITCH] http_handler: loading config to verify {broadcaster_login} is still in [Streamers]")
             current_cfg = load_config(cfg["config_path"])
             in_streamers = broadcaster_login in current_cfg.get("streamers", [])
             is_blocked   = broadcaster_login in current_cfg.get("blocked", [])
-            dbg(f"[Twitch] http_handler: {broadcaster_login} "
+            dbg(f"[TWITCH] http_handler: {broadcaster_login} "
                 f"in_streamers={in_streamers}  is_blocked={is_blocked}")
 
             if in_streamers and not is_blocked:
-                dbg(f"[Twitch] http_handler: calling start_recording_if_needed([{broadcaster_login!r}])")
+                dbg(f"[TWITCH] http_handler: calling start_recording_if_needed([{broadcaster_login!r}])")
                 # Show popup notification (EventSub path)
                 if current_cfg.get("popup_notifications", True):
-                    dbg(f"popup: [eventsub] triggering popup for {broadcaster_login!r}")
+                    dbg(f"[POPUP] [eventsub] triggering popup for {broadcaster_login!r}")
                     _show_live_popup(broadcaster_login, source="eventsub")
                 else:
-                    dbg(f"popup: [eventsub] popup disabled via config — skipping for {broadcaster_login!r}")
+                    dbg(f"[POPUP] [eventsub] popup disabled via config — skipping for {broadcaster_login!r}")
                 start_recording_if_needed([broadcaster_login], current_cfg)
-                dbg(f"[Twitch] http_handler: start_recording_if_needed returned")
+                dbg(f"[TWITCH] http_handler: start_recording_if_needed returned")
             else:
-                dbg(f"[Twitch] http_handler: skipping {broadcaster_login} "
+                dbg(f"[TWITCH] http_handler: skipping {broadcaster_login} "
                     f"(in_streamers={in_streamers}, is_blocked={is_blocked})")
-                log(f"[Twitch] EventSub: {broadcaster_login} notified as live but is not in "
+                log(f"[TWITCH] EventSub: {broadcaster_login} notified as live but is not in "
                     f"[Streamers] or is blocked — skipping")
         else:
-            dbg(f"[Twitch] http_handler: notification had no broadcaster_user_login — "
+            dbg(f"[TWITCH] http_handler: notification had no broadcaster_user_login — "
                 f"full event: {event}")
 
         return 200, b"OK"
@@ -1730,22 +1750,22 @@ def _eventsub_handle_request(method: str, path: str, headers: dict,
         sub_status = sub_info.get("status", "?")
         sub_cond   = sub_info.get("condition", {})
         sub_id     = sub_info.get("id", "?")
-        dbg(f"[Twitch] http_handler: REVOCATION  sub_id={sub_id}  "
+        dbg(f"[TWITCH] http_handler: REVOCATION  sub_id={sub_id}  "
             f"type={sub_type}  status={sub_status}  condition={sub_cond}")
-        log(f"[Twitch] EventSub: subscription REVOKED "
+        log(f"[TWITCH] EventSub: subscription REVOKED "
             f"(type={sub_type}  status={sub_status}  condition={sub_cond}) "
             f"— will resubscribe within 15 seconds")
         # Remove from our tracking so the manager resubscribes on next cycle
         with _eventsub_sub_lock:
             for login, sid in list(_eventsub_subscription_ids.items()):
                 if sid == sub_id:
-                    dbg(f"[Twitch] http_handler: removing revoked sub for login={login!r}")
+                    dbg(f"[TWITCH] http_handler: removing revoked sub for login={login!r}")
                     del _eventsub_subscription_ids[login]
                     break
         return 200, b"OK"
 
     # ── Unknown message type ──────────────────────────────────────────────────
-    dbg(f"[Twitch] http_handler: unhandled msg_type={msg_type!r} — returning 200 anyway")
+    dbg(f"[TWITCH] http_handler: unhandled msg_type={msg_type!r} — returning 200 anyway")
     return 200, b"OK"
 
 
@@ -1759,7 +1779,7 @@ def _eventsub_http_server(cfg: dict, stop_event: threading.Event) -> None:
 
     port = cfg.get("twitch_webhook_port", 8888)
     callback_url = cfg.get("twitch_callback_url", "?")
-    dbg(f"[Twitch] http_server: starting — binding to 0.0.0.0:{port}  "
+    dbg(f"[TWITCH] http_server: starting — binding to 0.0.0.0:{port}  "
         f"callback_url={callback_url!r}")
 
     try:
@@ -1771,14 +1791,14 @@ def _eventsub_http_server(cfg: dict, stop_event: threading.Event) -> None:
         with _eventsub_status_lock:
             _eventsub_server_status = f"listening on port {port}"
             _eventsub_server_port   = port
-        log(f"[Twitch] EventSub webhook server listening on 0.0.0.0:{port}")
-        dbg(f"[Twitch] http_server: bind+listen OK on port {port}")
+        log(f"[TWITCH] EventSub webhook server listening on 0.0.0.0:{port}")
+        dbg(f"[TWITCH] http_server: bind+listen OK on port {port}")
     except Exception as e:
         err = f"ERROR: could not bind port {port}: {e}"
         with _eventsub_status_lock:
             _eventsub_server_status = err
-        log(f"[Twitch] EventSub: {err}")
-        dbg(f"[Twitch] http_server: fatal bind error: {type(e).__name__}: {e}")
+        log(f"[TWITCH] EventSub: {err}")
+        dbg(f"[TWITCH] http_server: fatal bind error: {type(e).__name__}: {e}")
         return
 
     req_count = 0
@@ -1790,7 +1810,7 @@ def _eventsub_http_server(cfg: dict, stop_event: threading.Event) -> None:
             continue
 
         req_count += 1
-        dbg(f"[Twitch] http_server: accepted connection #{req_count} from {addr}")
+        dbg(f"[TWITCH] http_server: accepted connection #{req_count} from {addr}")
 
         try:
             data = b""
@@ -1811,13 +1831,13 @@ def _eventsub_http_server(cfg: dict, stop_event: threading.Event) -> None:
                             except Exception:
                                 pass
                     if len(body_so_far) >= cl:
-                        dbg(f"[Twitch] http_server: req #{req_count} "
+                        dbg(f"[TWITCH] http_server: req #{req_count} "
                             f"headers_len={len(header_part)} body_len={len(body_so_far)} "
                             f"content-length={cl}")
                         break
 
             if not data:
-                dbg(f"[Twitch] http_server: req #{req_count} from {addr} — empty data, closing")
+                dbg(f"[TWITCH] http_server: req #{req_count} from {addr} — empty data, closing")
                 conn.close()
                 continue
 
@@ -1835,7 +1855,7 @@ def _eventsub_http_server(cfg: dict, stop_event: threading.Event) -> None:
                     k, _, v = hl.partition(":")
                     headers[k.strip().lower()] = v.strip()
 
-            dbg(f"[Twitch] http_server: req #{req_count} parsed — "
+            dbg(f"[TWITCH] http_server: req #{req_count} parsed — "
                 f"{method} {path}  headers_count={len(headers)}")
 
             # Use the live cfg snapshot
@@ -1852,10 +1872,10 @@ def _eventsub_http_server(cfg: dict, stop_event: threading.Event) -> None:
                 "Connection: close\r\n\r\n"
             ).encode() + resp_body
             conn.sendall(response)
-            dbg(f"[Twitch] http_server: req #{req_count} → responded {status}")
+            dbg(f"[TWITCH] http_server: req #{req_count} → responded {status}")
 
         except Exception as e:
-            dbg(f"[Twitch] http_server: req #{req_count} handler exception: "
+            dbg(f"[TWITCH] http_server: req #{req_count} handler exception: "
                 f"{type(e).__name__}: {e}")
         finally:
             try:
@@ -1867,7 +1887,7 @@ def _eventsub_http_server(cfg: dict, stop_event: threading.Event) -> None:
     with _eventsub_status_lock:
         _eventsub_server_status = "stopped"
     log("[Twitch] EventSub webhook server stopped")
-    dbg("[Twitch] http_server: thread exiting")
+    dbg(f"[TWITCH] http_server: thread exiting")
 
 
 def _eventsub_sync_subscriptions(cfg: dict) -> None:
@@ -1883,32 +1903,32 @@ def _eventsub_sync_subscriptions(cfg: dict) -> None:
     callback_url   = cfg["twitch_callback_url"]
     streamers      = [s for s in cfg["streamers"] if s not in cfg["blocked"]]
 
-    dbg(f"[Twitch] sync_subscriptions: entry  streamers={streamers}  "
+    dbg(f"[TWITCH] sync_subscriptions: entry  streamers={streamers}  "
         f"callback_url={callback_url!r}")
 
     # ── Get / refresh access token ────────────────────────────────────────────
     with _twitch_token_lock:
         existing_token = _twitch_token
     if not existing_token:
-        dbg("[Twitch] sync_subscriptions: no token cached — fetching new one")
+        dbg(f"[TWITCH] sync_subscriptions: no token cached — fetching new one")
         new_token = _twitch_get_token(client_id, client_secret)
         with _twitch_token_lock:
             _twitch_token = new_token
         token = new_token
     else:
-        dbg(f"[Twitch] sync_subscriptions: using cached token (prefix={existing_token[:8]}...)")
+        dbg(f"[TWITCH] sync_subscriptions: using cached token (prefix={existing_token[:8]}...)")
         token = existing_token
 
     if not token:
         log("[Twitch] EventSub: could not obtain access token — "
             "skipping subscription sync this cycle (will retry in 15s)")
-        dbg("[Twitch] sync_subscriptions: aborting — no token")
+        dbg(f"[TWITCH] sync_subscriptions: aborting — no token")
         return
 
     # ── Update cfg snapshot for the HTTP server ───────────────────────────────
     with _twitch_token_lock:
         _eventsub_cfg.update(cfg)
-    dbg("[Twitch] sync_subscriptions: cfg snapshot updated")
+    dbg(f"[TWITCH] sync_subscriptions: cfg snapshot updated")
 
     # ── Diff: what needs to change? ───────────────────────────────────────────
     with _eventsub_sub_lock:
@@ -1917,7 +1937,7 @@ def _eventsub_sync_subscriptions(cfg: dict) -> None:
     to_subscribe   = [s for s in streamers if s not in already_subscribed]
     to_unsubscribe = [s for s in already_subscribed if s not in streamers]
 
-    dbg(f"[Twitch] sync_subscriptions: already_subscribed={sorted(already_subscribed)}  "
+    dbg(f"[TWITCH] sync_subscriptions: already_subscribed={sorted(already_subscribed)}  "
         f"to_subscribe={to_subscribe}  to_unsubscribe={to_unsubscribe}")
 
     # ── Remove stale subscriptions ────────────────────────────────────────────
@@ -1925,44 +1945,44 @@ def _eventsub_sync_subscriptions(cfg: dict) -> None:
         with _eventsub_sub_lock:
             sub_id = _eventsub_subscription_ids.pop(login, None)
         if sub_id:
-            dbg(f"[Twitch] sync_subscriptions: unsubscribing {login!r}  sub_id={sub_id}")
+            dbg(f"[TWITCH] sync_subscriptions: unsubscribing {login!r}  sub_id={sub_id}")
             _twitch_unsubscribe(sub_id, client_id, token)
-            log(f"[Twitch] EventSub: unsubscribed {login} (removed from [Streamers])")
+            log(f"[TWITCH] EventSub: unsubscribed {login} (removed from [Streamers])")
         else:
-            dbg(f"[Twitch] sync_subscriptions: {login!r} had no sub_id stored — nothing to delete")
+            dbg(f"[TWITCH] sync_subscriptions: {login!r} had no sub_id stored — nothing to delete")
 
     # ── Add new subscriptions ─────────────────────────────────────────────────
     if not to_subscribe:
-        dbg("[Twitch] sync_subscriptions: nothing new to subscribe — done")
+        dbg(f"[TWITCH] sync_subscriptions: nothing new to subscribe — done")
         return
 
-    dbg(f"[Twitch] sync_subscriptions: resolving user IDs for {to_subscribe}")
+    dbg(f"[TWITCH] sync_subscriptions: resolving user IDs for {to_subscribe}")
     login_to_id = _twitch_resolve_user_ids(to_subscribe, client_id, token)
 
     for login in to_subscribe:
         user_id = login_to_id.get(login)
         if not user_id:
-            log(f"[Twitch] EventSub: could not resolve user_id for '{login}' "
+            log(f"[TWITCH] EventSub: could not resolve user_id for '{login}' "
                 "— check spelling / the account exists on Twitch")
-            dbg(f"[Twitch] sync_subscriptions: skipping {login!r} — no user_id resolved")
+            dbg(f"[TWITCH] sync_subscriptions: skipping {login!r} — no user_id resolved")
             continue
 
-        dbg(f"[Twitch] sync_subscriptions: subscribing {login!r} (user_id={user_id})")
+        dbg(f"[TWITCH] sync_subscriptions: subscribing {login!r} (user_id={user_id})")
         sub_id = _twitch_subscribe(user_id, client_id, token, callback_url, webhook_secret)
         if sub_id:
             with _eventsub_sub_lock:
                 _eventsub_subscription_ids[login] = sub_id
-            log(f"[Twitch] EventSub: subscribed to stream.online for {login} "
+            log(f"[TWITCH] EventSub: subscribed to stream.online for {login} "
                 f"(sub_id={sub_id})")
-            dbg(f"[Twitch] sync_subscriptions: {login!r} subscribed OK  sub_id={sub_id}")
+            dbg(f"[TWITCH] sync_subscriptions: {login!r} subscribed OK  sub_id={sub_id}")
         else:
-            log(f"[Twitch] EventSub: subscription FAILED for {login} "
+            log(f"[TWITCH] EventSub: subscription FAILED for {login} "
                 f"(check CALLBACK_URL is reachable from the internet)")
-            dbg(f"[Twitch] sync_subscriptions: {login!r} subscription returned empty id")
+            dbg(f"[TWITCH] sync_subscriptions: {login!r} subscription returned empty id")
 
     with _eventsub_sub_lock:
         final_subs = dict(_eventsub_subscription_ids)
-    dbg(f"[Twitch] sync_subscriptions: done — active subscriptions: {final_subs}")
+    dbg(f"[TWITCH] sync_subscriptions: done — active subscriptions: {final_subs}")
 
 
 def _eventsub_manager_thread(config_path: str, stop_event: threading.Event) -> None:
@@ -1978,16 +1998,16 @@ def _eventsub_manager_thread(config_path: str, stop_event: threading.Event) -> N
     last_sync_time: float = 0.0
     loop_count = 0
 
-    dbg("[Twitch] manager_thread: started")
+    dbg(f"[TWITCH] manager_thread: started")
     log("[Twitch] EventSub manager started — will sync subscriptions now")
 
     while not stop_event.is_set():
         loop_count += 1
-        dbg(f"[Twitch] manager_thread: loop #{loop_count}")
+        dbg(f"[TWITCH] manager_thread: loop #{loop_count}")
         try:
             cfg = load_config(config_path)
             if not cfg.get("twitch_enabled"):
-                dbg("[Twitch] manager_thread: twitch_enabled=False in config — sleeping 30s")
+                dbg(f"[TWITCH] manager_thread: twitch_enabled=False in config — sleeping 30s")
                 stop_event.wait(timeout=30)
                 continue
 
@@ -1999,7 +2019,7 @@ def _eventsub_manager_thread(config_path: str, stop_event: threading.Event) -> N
             streamers_changed = current_streamers != last_streamers
             token_stale = time_since_sync >= RESYNC_INTERVAL
 
-            dbg(f"[Twitch] manager_thread: current_streamers={sorted(current_streamers)}  "
+            dbg(f"[TWITCH] manager_thread: current_streamers={sorted(current_streamers)}  "
                 f"last_streamers={sorted(last_streamers)}  "
                 f"streamers_changed={streamers_changed}  "
                 f"time_since_sync={time_since_sync:.0f}s  token_stale={token_stale}")
@@ -2015,29 +2035,29 @@ def _eventsub_manager_thread(config_path: str, stop_event: threading.Event) -> N
                     # Force token refresh on next _eventsub_sync_subscriptions call
                     with _twitch_token_lock:
                         _twitch_token = ""
-                    dbg("[Twitch] manager_thread: cleared cached token for refresh")
+                    dbg(f"[TWITCH] manager_thread: cleared cached token for refresh")
 
-                dbg(f"[Twitch] manager_thread: syncing — reason: {'; '.join(reason)}")
-                log(f"[Twitch] EventSub: syncing subscriptions ({', '.join(reason)})")
+                dbg(f"[TWITCH] manager_thread: syncing — reason: {'; '.join(reason)}")
+                log(f"[TWITCH] EventSub: syncing subscriptions ({', '.join(reason)})")
                 _eventsub_sync_subscriptions(cfg)
                 last_streamers = current_streamers
                 last_sync_time = now
-                dbg(f"[Twitch] manager_thread: sync complete")
+                dbg(f"[TWITCH] manager_thread: sync complete")
             else:
-                dbg(f"[Twitch] manager_thread: no sync needed — "
+                dbg(f"[TWITCH] manager_thread: no sync needed — "
                     f"next token refresh in {RESYNC_INTERVAL - time_since_sync:.0f}s")
 
         except Exception as e:
             import traceback
-            log(f"[Twitch] EventSub manager error: {e}")
-            dbg(f"[Twitch] manager_thread: exception in loop #{loop_count}: "
+            log(f"[TWITCH] EventSub manager error: {e}")
+            dbg(f"[TWITCH] manager_thread: exception in loop #{loop_count}: "
                 f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
 
-        dbg(f"[Twitch] manager_thread: sleeping 15s before next check")
+        dbg(f"[TWITCH] manager_thread: sleeping 15s before next check")
         stop_event.wait(timeout=15)
 
     # ── Shutdown: clean up all subscriptions ──────────────────────────────────
-    dbg("[Twitch] manager_thread: stop_event set — cleaning up subscriptions")
+    dbg(f"[TWITCH] manager_thread: stop_event set — cleaning up subscriptions")
     log("[Twitch] EventSub manager: cleaning up subscriptions...")
     try:
         cfg = load_config(config_path)
@@ -2046,17 +2066,17 @@ def _eventsub_manager_thread(config_path: str, stop_event: threading.Event) -> N
             token = _twitch_token
         with _eventsub_sub_lock:
             subs = dict(_eventsub_subscription_ids)
-        dbg(f"[Twitch] manager_thread: deleting {len(subs)} subscription(s): {list(subs.keys())}")
+        dbg(f"[TWITCH] manager_thread: deleting {len(subs)} subscription(s): {list(subs.keys())}")
         for login, sub_id in subs.items():
             try:
-                dbg(f"[Twitch] manager_thread: deleting sub for {login!r}  sub_id={sub_id}")
+                dbg(f"[TWITCH] manager_thread: deleting sub for {login!r}  sub_id={sub_id}")
                 _twitch_unsubscribe(sub_id, client_id, token)
             except Exception as e:
-                dbg(f"[Twitch] manager_thread: error deleting {login!r}: {e}")
+                dbg(f"[TWITCH] manager_thread: error deleting {login!r}: {e}")
     except Exception as e:
-        dbg(f"[Twitch] manager_thread: error during cleanup: {e}")
+        dbg(f"[TWITCH] manager_thread: error during cleanup: {e}")
     log("[Twitch] EventSub manager: done")
-    dbg("[Twitch] manager_thread: exiting")
+    dbg(f"[TWITCH] manager_thread: exiting")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2158,12 +2178,15 @@ def main() -> None:
 
     keyboard_thread = threading.Thread(target=_keyboard_listener, daemon=True)
     keyboard_thread.start()
+    dbg(f"[MAIN] keyboard_listener thread launched")
 
     dashboard_thread = threading.Thread(target=_dashboard_renderer_thread, daemon=True)
     dashboard_thread.start()
+    dbg(f"[MAIN] dashboard_renderer thread launched")
 
     streamer_mgmt_thread = threading.Thread(target=_streamer_mgmt_thread, daemon=True)
     streamer_mgmt_thread.start()
+    dbg(f"[MAIN] streamer_mgmt thread launched")
 
     watcher_interval = initial_cfg.get("config_check_interval", 3)
     watcher_thread = threading.Thread(
@@ -2172,7 +2195,7 @@ def main() -> None:
         daemon=True
     )
     watcher_thread.start()
-    dbg(f"main: config_watcher thread launched (poll every {watcher_interval}s)")
+    dbg(f"[MAIN] config_watcher thread launched (poll every {watcher_interval}s)")
 
     # ── Twitch EventSub (optional) ────────────────────────────────────────────
     if initial_cfg.get("twitch_enabled"):
@@ -2196,7 +2219,7 @@ def main() -> None:
         )
         eventsub_mgr_thread.start()
     else:
-        dbg("main: Twitch EventSub not configured — polling only")
+        dbg(f"[MAIN] Twitch EventSub not configured — polling only")
     # ─────────────────────────────────────────────────────────────────────────
 
     try:
@@ -2213,16 +2236,16 @@ def main() -> None:
             # zero it so the dashboard shows 0s (i.e. "checking now").
             with dashboard_lock:
                 dashboard_next_check_in = 0.0
-            dbg(f"dashboard: [WRITE] zeroed before liveness check (id={id(dashboard_next_check_in)})")
+            dbg(f"[DASHBOARD] [WRITE] zeroed before liveness check (id={id(dashboard_next_check_in)})")
 
-            dbg(f"main: top of loop — streamers={streamers} currently_recording={currently_recording} event_is_set={trigger_full_check_event.is_set()}")
+            dbg(f"[MAIN] top of loop — streamers={streamers} currently_recording={currently_recording} event_is_set={trigger_full_check_event.is_set()}")
 
             if not streamers:
                 log("ERROR: No streamers configured. Retrying next cycle.")
             else:
                 log(f"Checking live status for {', '.join(streamers)}\n")
                 live_now = get_live_streamers(streamers, cfg)
-                dbg(f"main: get_live_streamers returned: {live_now}")
+                dbg(f"[MAIN] get_live_streamers returned: {live_now}")
 
                 # Update dashboard: mark offline streamers, keep live ones
                 with dashboard_lock:
@@ -2235,7 +2258,7 @@ def main() -> None:
                         elif s not in dashboard_live_since:
                             dashboard_live_since[s] = time.time()
 
-                dbg(f"dashboard: state updated — live={list(live_set)} all={streamers}")
+                dbg(f"[DASHBOARD] state updated — live={list(live_set)} all={streamers}")
 
                 if live_now:
                     log(f"Live now: {', '.join(live_now)}\n")
@@ -2252,38 +2275,38 @@ def main() -> None:
             deadline = time.time() + wait_secs
             with dashboard_lock:
                 dashboard_next_check_in = float(wait_secs)
-            dbg(f"dashboard: [WRITE] seeded to {wait_secs}s (id={id(dashboard_next_check_in)}, deadline={deadline:.3f})")
+            dbg(f"[DASHBOARD] [WRITE] seeded to {wait_secs}s (id={id(dashboard_next_check_in)}, deadline={deadline:.3f})")
 
-            dbg(f"main: entering wait loop (timeout={wait_secs}s)")
+            dbg(f"[MAIN] entering wait loop (timeout={wait_secs}s)\n")
             try:
                 triggered = False
                 while True:
                     remaining = deadline - time.time()
                     with dashboard_lock:
                         dashboard_next_check_in = max(0.0, remaining)
-                    dbg(f"dashboard: countdown tick — remaining={remaining:.1f}s")
+                    #dbg(f"[DASHBOARD] countdown tick — remaining={remaining:.1f}s")
                     if remaining <= 0:
                         # Zero it out explicitly so the display shows 0 cleanly
                         # while the next liveness check runs.
                         with dashboard_lock:
                             dashboard_next_check_in = 0.0
-                        dbg("dashboard: countdown reached 0 — breaking wait loop")
+                        dbg(f"[DASHBOARD] countdown reached 0 — breaking wait loop")
                         break
                     fired = trigger_full_check_event.wait(timeout=min(1.0, remaining))
                     if fired:
                         triggered = True
                         with dashboard_lock:
                             dashboard_next_check_in = 0.0
-                        dbg("dashboard: early trigger received — countdown zeroed")
+                        dbg(f"[DASHBOARD] early trigger received — countdown zeroed")
                         break
-                dbg(f"main: wait returned — triggered={triggered} event_is_set={trigger_full_check_event.is_set()}")
+                dbg(f"[MAIN] wait returned — triggered={triggered} event_is_set={trigger_full_check_event.is_set()}")
                 if triggered:
                     trigger_full_check_event.clear()
-                    dbg("main: event cleared, looping immediately for full check")
+                    dbg(f"[MAIN] event cleared, looping immediately for full check")
                 else:
-                    dbg("main: normal timeout elapsed, proceeding to next cycle")
+                    dbg(f"[MAIN] normal timeout elapsed, proceeding to next cycle")
             except Exception as e:
-                dbg(f"main: wait raised exception: {e} — falling back to sleep")
+                dbg(f"[MAIN] wait raised exception: {e} — falling back to sleep")
                 time.sleep(wait_secs)
 
     except KeyboardInterrupt:
