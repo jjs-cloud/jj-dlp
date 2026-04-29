@@ -189,30 +189,39 @@ known_streamers: Set[str] = set()
 
 VERBOSITY = 1  # default; overridden after config is loaded
 verbosity_lock = threading.Lock()
+# Verbosity levels apply only when OUTPUT_MODE == 2 (terminal mode).
+# They control which streams of output are shown alongside log() messages.
+#   1 = clean      (log only)
+#   2 = stdout     (log + stdout)
+#   3 = debug      (log + stdout + debug)
+#   4 = stderr     (stderr only)
+#   5 = everything (log + stdout + debug + stderr)
 VERBOSITY_NAMES = {
-    1: "normal      (log only)",
-    2: "debug only  (dbg only)",
-    3: "verbose     (log + dbg)",
+    1: "clean",
+    2: "stdout",
+    3: "debug",
+    4: "stderr",
+    5: "everything",
+}
+VERBOSITY_DESC = {
+    1: "log only",
+    2: "log + stdout",
+    3: "log + stdout + debug",
+    4: "stderr only",
+    5: "log + stdout + debug + stderr",
 }
 
-# Output mode: controls what yt-dlp subprocess output is shown in the terminal.
-# Unrelated to VERBOSITY / log() / dbg().
-#   1 = dashboard   (live status overview)
-#   2 = clean       (stdout+stderr suppressed)
-#   3 = stdout only
-#   4 = stderr only
-#   5 = everything
-#   6 = add a streamer
-#   7 = remove a streamer
+# Output mode: controls the display style.
+#   1 = dashboard  (live status overview)
+#   2 = terminal   (text output; verbosity level controls detail)
+#   3 = add a streamer  (internal UI mode)
+#   4 = remove a streamer  (internal UI mode)
 OUTPUT_MODE = 1
 OUTPUT_MODE_NAMES = {
-    1: "dashboard   (live status overview)",
-    2: "clean       (stdout+stderr suppressed)",
-    3: "stdout only",
-    4: "stderr only",
-    5: "everything  (stdout+stderr shown)",
-    6: "add a streamer",
-    7: "remove a streamer",
+    1: "dashboard",
+    2: "terminal",
+    3: "add a streamer",
+    4: "remove a streamer",
 }
 output_mode_lock = threading.Lock()
 
@@ -262,7 +271,7 @@ DEBUG_LOGS_ENABLED: bool = False
 DEBUG_LOG_PATH: str = ""
 debug_log_lock = threading.Lock()
 
-# Event used to wake the streamer-management thread when mode 6/7 becomes active
+# Event used to wake the streamer-management thread when mode 3/4 becomes active
 _streamer_mgmt_event = threading.Event()
 
 # When set, the keyboard listener must not read from stdin (mgmt thread owns it)
@@ -335,28 +344,35 @@ def _show_live_popup(streamer: str, source: str = "poll") -> None:
 def cycle_verbosity() -> None:
     global VERBOSITY
     with verbosity_lock:
-        VERBOSITY = VERBOSITY % 3 + 1
+        VERBOSITY = VERBOSITY % 5 + 1
         mode = VERBOSITY
         name = VERBOSITY_NAMES[VERBOSITY]
+        desc = VERBOSITY_DESC[VERBOSITY]
+    kb_verb = KEYBIND_LABELS.get(KEYBIND_VERBOSITY, "Ctrl+B")
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] [verbosity {mode}] {name}", flush=True)
+    print(f"[{ts}] [verbosity {mode}] {name}       ({desc})", flush=True)
 
 
 def cycle_output_mode() -> None:
     global OUTPUT_MODE
     with output_mode_lock:
-        # Only cycle through modes 1–5
-        if OUTPUT_MODE >= 5 or OUTPUT_MODE < 1:
-            OUTPUT_MODE = 1
+        # Only cycle between modes 1 (dashboard) and 2 (terminal)
+        if OUTPUT_MODE == 1:
+            OUTPUT_MODE = 2
         else:
-            OUTPUT_MODE += 1
+            OUTPUT_MODE = 1
 
         mode = OUTPUT_MODE
         name = OUTPUT_MODE_NAMES[OUTPUT_MODE]
 
-    if mode != 1:
+    if mode == 2:
+        with verbosity_lock:
+            v = VERBOSITY
+        v_name = VERBOSITY_NAMES[v]
+        v_desc = VERBOSITY_DESC[v]
+        kb_verb = KEYBIND_LABELS.get(KEYBIND_VERBOSITY, "Ctrl+B")
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{ts}] [output mode {mode}] {name}", flush=True)
+        print(f"[{ts}] [output mode 2] {name}   [{v_name}] ({v_desc}) (press {kb_verb} to cycle verbosity levels)", flush=True)
 
 
 def _set_output_mode(mode: int) -> None:
@@ -364,15 +380,20 @@ def _set_output_mode(mode: int) -> None:
     global OUTPUT_MODE
     with output_mode_lock:
         OUTPUT_MODE = mode
-    if mode in (6, 7):
+    if mode in (3, 4):
         _stdin_owned_by_mgmt.set()
         _streamer_mgmt_event.set()
     else:
         _stdin_owned_by_mgmt.clear()
-        if mode != 1:
+        if mode == 2:
+            with verbosity_lock:
+                v = VERBOSITY
+            v_name = VERBOSITY_NAMES[v]
+            v_desc = VERBOSITY_DESC[v]
+            kb_verb = KEYBIND_LABELS.get(KEYBIND_VERBOSITY, "Ctrl+B")
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             name = OUTPUT_MODE_NAMES.get(mode, "")
-            print(f"[{ts}] [output mode {mode}] {name}", flush=True)
+            print(f"[{ts}] [output mode 2] {name}   [{v_name}] ({v_desc}) (press {kb_verb} to cycle verbosity levels)", flush=True)
 
 
 def _keyboard_listener() -> None:
@@ -392,9 +413,9 @@ def _keyboard_listener() -> None:
                 elif ch == KEYBIND_OUTPUT:
                     cycle_output_mode()
                 elif ch.lower() == KEYBIND_ADD.lower():
-                    _set_output_mode(6)
+                    _set_output_mode(3)
                 elif ch.lower() == KEYBIND_REMOVE.lower():
-                    _set_output_mode(7)
+                    _set_output_mode(4)
 
             time.sleep(0.05)
 
@@ -426,9 +447,9 @@ def _keyboard_listener() -> None:
                 elif ch == KEYBIND_OUTPUT:
                     cycle_output_mode()
                 elif ch.lower() == KEYBIND_ADD.lower():
-                    _set_output_mode(6)
+                    _set_output_mode(3)
                 elif ch.lower() == KEYBIND_REMOVE.lower():
-                    _set_output_mode(7)
+                    _set_output_mode(4)
                 elif ch in ("\x03", "\x1c"):
                     os.kill(os.getpid(), __import__("signal").SIGINT)
 
@@ -561,7 +582,7 @@ def render_dashboard() -> None:
     kb_add = KEYBIND_LABELS.get(KEYBIND_ADD, KEYBIND_ADD.upper())
     kb_rem = KEYBIND_LABELS.get(KEYBIND_REMOVE, KEYBIND_REMOVE.upper())
 
-    lines.append(f"  {OFF_COLOR}press {kb_out} to cycle through output modes{RESET}")
+    lines.append(f"  {OFF_COLOR}press {kb_out} to switch to terminal mode{RESET}")
     lines.append(f"  {OFF_COLOR}press {kb_add} to add a streamer{RESET}")
     lines.append(f"  {OFF_COLOR}press {kb_rem} to remove a streamer{RESET}")
     
@@ -704,7 +725,7 @@ def _modify_config_streamer(config_path: str, username: str, action: str) -> str
 
 def _streamer_mgmt_thread() -> None:
     """
-    Background thread that handles output modes 6 (add streamer) and 7 (remove streamer).
+    Background thread that handles output modes 3 (add streamer) and 4 (remove streamer).
     Uses raw terminal input on Unix; falls back to normal input() on Windows.
     """
     TITLE_COLOR = "\033[96m"
@@ -785,10 +806,10 @@ def _streamer_mgmt_thread() -> None:
         with output_mode_lock:
             mode = OUTPUT_MODE
 
-        if mode not in (6, 7):
+        if mode not in (3, 4):
             continue
 
-        if mode == 6:
+        if mode == 3:
             title = "Add a Streamer"
             prompt = "Enter streamer username to ADD"
             action = "add"
@@ -802,7 +823,7 @@ def _streamer_mgmt_thread() -> None:
         while True:
             with output_mode_lock:
                 current_mode = OUTPUT_MODE
-            if current_mode not in (6, 7):
+            if current_mode not in (3, 4):
                 break
 
             # Re-draw the page
@@ -829,7 +850,7 @@ def _streamer_mgmt_thread() -> None:
             # Check if mode changed while we were waiting for input
             with output_mode_lock:
                 current_mode = OUTPUT_MODE
-            if current_mode not in (6, 7):
+            if current_mode not in (3, 4):
                 break
 
             if username == "__REDRAW__":
@@ -873,12 +894,15 @@ def _streamer_mgmt_thread() -> None:
             break
 
 def log(msg: str) -> None:
-    with verbosity_lock:
-        v = VERBOSITY
     with output_mode_lock:
         mode = OUTPUT_MODE
-    if mode in (1, 6, 7):
+    if mode in (1, 3, 4):
         return  # dashboard / streamer mgmt pages own the screen
+    # mode 2 (terminal): suppress log() when verbosity is 4 (stderr only)
+    with verbosity_lock:
+        v = VERBOSITY
+    if v == 4:
+        return  # stderr-only verbosity — log() messages are suppressed
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
 
@@ -902,13 +926,14 @@ def dbg(msg: str) -> None:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     full = f"[{ts}] {msg}"
     _write_debug_log(full)
-    with verbosity_lock:
-        v = VERBOSITY
     with output_mode_lock:
         mode = OUTPUT_MODE
-    if mode in (1, 6, 7):
+    if mode in (1, 3, 4):
         return  # dashboard / streamer mgmt pages own the screen
-    if v in (2, 3):
+    with verbosity_lock:
+        v = VERBOSITY
+    # Show debug output in verbosity 3 (log+stdout+debug) and 5 (everything)
+    if v in (3, 5):
         print(full, flush=True)
 
 
@@ -969,21 +994,21 @@ def open_log_streams(cfg: dict):
     return subprocess.PIPE, subprocess.PIPE, _close, log_out_fp, log_err_fp
 
 
-def _drain_pipe(pipe, log_fp, show_modes: set,
+def _drain_pipe(pipe, log_fp, pipe_type: str,
                 ffmpeg_error_counter=None,
                 ffmpeg_error_event=None,
                 streamer: str = "") -> None:
     """
     Read lines from *pipe* until EOF.
     - Writes each line to *log_fp* if provided.
-    - Prints to terminal when OUTPUT_MODE is in *show_modes*.
+    - Prints to terminal when OUTPUT_MODE == 2 and VERBOSITY includes this stream.
     - If ffmpeg_error_counter and ffmpeg_error_event are provided, scans each
       line for FFMPEG_ERROR_PATTERNS and increments the shared counter.
       When the counter exceeds FFMPEG_ERROR_RESTART_THRESHOLD, sets the event
       to signal record_stream to kill and restart yt-dlp.
 
-    show_modes: set of OUTPUT_MODE values that should display this stream.
-                stdout -> {3, 5}   stderr -> {4, 5}
+    pipe_type: 'stdout' or 'stderr' — used to determine if this pipe should be
+               shown given the current verbosity level.
     ffmpeg_error_counter: a single-element list [int] so it can be mutated
                           across threads without a lock (GIL-safe for += 1).
     ffmpeg_error_event:   threading.Event set when the threshold is crossed.
@@ -999,8 +1024,17 @@ def _drain_pipe(pipe, log_fp, show_modes: set,
                     pass
             with output_mode_lock:
                 mode = OUTPUT_MODE
-            if mode in show_modes:
-                print(line, flush=True)
+            if mode == 2:
+                with verbosity_lock:
+                    v = VERBOSITY
+                # stdout shown in verbosity 2 (stdout), 3 (debug), 5 (everything)
+                # stderr shown in verbosity 4 (stderr), 5 (everything)
+                show = (
+                    (pipe_type == "stdout" and v in (2, 3, 5)) or
+                    (pipe_type == "stderr" and v in (4, 5))
+                )
+                if show:
+                    print(line, flush=True)
 
             # FFmpeg error pattern monitoring
             if (ffmpeg_error_counter is not None
@@ -1205,7 +1239,7 @@ def record_stream(streamer: str, cfg: dict) -> None:
                 # current OUTPUT_MODE to decide whether to print to terminal.
                 threading.Thread(
                     target=_drain_pipe,
-                    args=(proc.stdout, log_out_fp, {3, 5}),
+                    args=(proc.stdout, log_out_fp, "stdout"),
                     kwargs={"ffmpeg_error_counter": ffmpeg_error_counter,
                             "ffmpeg_error_event": ffmpeg_error_event,
                             "streamer": streamer},
@@ -1213,7 +1247,7 @@ def record_stream(streamer: str, cfg: dict) -> None:
                 ).start()
                 threading.Thread(
                     target=_drain_pipe,
-                    args=(proc.stderr, log_err_fp, {4, 5}),
+                    args=(proc.stderr, log_err_fp, "stderr"),
                     kwargs={"ffmpeg_error_counter": ffmpeg_error_counter,
                             "ffmpeg_error_event": ffmpeg_error_event,
                             "streamer": streamer},
@@ -2163,7 +2197,8 @@ def main() -> None:
         DEBUG_LOG_PATH     = get_debug_log_path(initial_cfg) if DEBUG_LOGS_ENABLED else ""
 
     kb_v = KEYBIND_LABELS.get(KEYBIND_VERBOSITY, KEYBIND_VERBOSITY)
-    log(f"Verbosity: {VERBOSITY} — {VERBOSITY_NAMES[VERBOSITY]}  (press {kb_v} to cycle)")
+    v = VERBOSITY
+    log(f"Verbosity: {v} — {VERBOSITY_NAMES.get(v, v)} ({VERBOSITY_DESC.get(v, '')})  (press {kb_v} to cycle)")
     log(f"Config file: {config_path}")
     log(f"Output directory: {initial_cfg['output_dir']}")
 
@@ -2176,7 +2211,8 @@ def main() -> None:
 
     log(f"Check interval: {initial_cfg['check_interval']}s")
     kb_o = KEYBIND_LABELS.get(KEYBIND_OUTPUT, KEYBIND_OUTPUT)
-    log(f"Output mode: {OUTPUT_MODE} — {OUTPUT_MODE_NAMES[OUTPUT_MODE]}  (press {kb_o} to cycle through modes 1–7)\n")
+    kb_b = KEYBIND_LABELS.get(KEYBIND_VERBOSITY, KEYBIND_VERBOSITY)
+    log(f"Output mode: {OUTPUT_MODE} — {OUTPUT_MODE_NAMES[OUTPUT_MODE]}  (press {kb_o} to toggle dashboard/terminal, {kb_b} to cycle verbosity)\n")
 
     keyboard_thread = threading.Thread(target=_keyboard_listener, daemon=True)
     keyboard_thread.start()
