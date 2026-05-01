@@ -111,6 +111,7 @@ def load_config(config_path: str):
     split_logs = general.get("SPLIT_LOGS", "false").strip().lower() == "true"
 
     popup_notifications = general.get("POPUP_NOTIFICATIONS", "true").strip().lower() == "true"
+    popup_timeout = safe_int(general.get("POPUP_TIMEOUT", 15), 15)
 
     debug_logs = general.get("DEBUG_LOGS", "false").strip().lower() == "true"
     debug_log_path_raw = general.get("DEBUG_LOG_PATH", "").strip().strip('\"\'')
@@ -165,6 +166,7 @@ def load_config(config_path: str):
         "log_path": log_path,
         "split_logs": split_logs,
         "popup_notifications": popup_notifications,
+        "popup_timeout": popup_timeout,
         "debug_logs": debug_logs,
         "debug_log_path": debug_log_path,
         "site_tmpl": site_tmpl,
@@ -290,14 +292,15 @@ _dashboard_stop_event = threading.Event()
 
 
 # ── Popup notification ────────────────────────────────────────────────────────
-def _show_live_popup(streamer: str, source: str = "poll") -> None:
+def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 15) -> None:
     """
     Show a non-blocking tkinter popup when a streamer goes live.
     source: 'poll' (normal yt-dlp loop) or 'eventsub' (Twitch EventSub push).
+    popup_timeout: seconds before the popup auto-closes (configurable via POPUP_TIMEOUT).
     Runs in its own daemon thread so it never blocks the main loop.
     tkinter is optional — if unavailable, the popup is silently skipped.
     """
-    dbg(f"[POPUP] _show_live_popup called — streamer={streamer!r}  source={source!r}")
+    dbg(f"[POPUP] _show_live_popup called — streamer={streamer!r}  source={source!r}  popup_timeout={popup_timeout}s")
 
     def _run():
         dbg(f"[POPUP] thread started — streamer={streamer!r}  source={source!r}")
@@ -323,9 +326,9 @@ def _show_live_popup(streamer: str, source: str = "poll") -> None:
             tk.Button(win, text="Dismiss", command=win.destroy,
                       padx=12, pady=4).pack(pady=(4, 12))
 
-            dbg(f"[POPUP] window created — scheduling auto-close in 15s")
-            # Auto-close after 15 seconds
-            win.after(15000, win.destroy)
+            dbg(f"[POPUP] window created — scheduling auto-close in {popup_timeout}s")
+            # Auto-close after popup_timeout seconds (configured via POPUP_TIMEOUT)
+            win.after(popup_timeout * 1000, win.destroy)
 
             dbg(f"[POPUP] entering mainloop")
             root.mainloop()
@@ -1398,7 +1401,7 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, show_popup: bool =
             # Show popup notification (poll path)
             if show_popup and cfg.get("popup_notifications", True):
                 dbg(f"[POPUP] [poll] triggering popup for {streamer!r}")
-                _show_live_popup(streamer, source="poll")
+                _show_live_popup(streamer, source="poll", popup_timeout=cfg.get("popup_timeout", 15))
             elif not show_popup:
                 dbg(f"[POPUP] [poll] popup suppressed (already shown by eventsub) for {streamer!r}")
             else:
@@ -1763,7 +1766,7 @@ def _eventsub_handle_request(method: str, path: str, headers: dict,
                 # Show popup notification (EventSub path)
                 if current_cfg.get("popup_notifications", True):
                     dbg(f"[POPUP] [eventsub] triggering popup for {broadcaster_login!r}")
-                    _show_live_popup(broadcaster_login, source="eventsub")
+                    _show_live_popup(broadcaster_login, source="eventsub", popup_timeout=current_cfg.get("popup_timeout", 15))
                 else:
                     dbg(f"[POPUP] [eventsub] popup disabled via config — skipping for {broadcaster_login!r}")
                 start_recording_if_needed([broadcaster_login], current_cfg, show_popup=False)
