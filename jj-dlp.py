@@ -218,12 +218,14 @@ VERBOSITY_DESC = {
 #   2 = terminal   (text output; verbosity level controls detail)
 #   3 = add a streamer  (internal UI mode)
 #   4 = remove a streamer  (internal UI mode)
+#   5 = disable a streamer  (internal UI mode)
 OUTPUT_MODE = 1
 OUTPUT_MODE_NAMES = {
     1: "dashboard",
     2: "terminal",
     3: "add a streamer",
     4: "remove a streamer",
+    5: "disable a streamer",
 }
 output_mode_lock = threading.Lock()
 
@@ -254,6 +256,7 @@ KEYBIND_VERBOSITY = "\x02"   # Ctrl+B
 KEYBIND_OUTPUT    = "\x0f"   # Ctrl+O
 KEYBIND_ADD       = "a"
 KEYBIND_REMOVE    = "r"
+KEYBIND_DISABLE   = "d"
 
 # Optional: human-readable labels for UI
 KEYBIND_LABELS = {
@@ -261,6 +264,7 @@ KEYBIND_LABELS = {
     KEYBIND_OUTPUT:    "Ctrl+O",
     KEYBIND_ADD:       "A",
     KEYBIND_REMOVE:    "R",
+    KEYBIND_DISABLE:   "D",
 }
 # ───────────────────────────────────────────────────────────────────────
 
@@ -287,6 +291,8 @@ dashboard_live_since: dict = {}
 dashboard_next_check_in: float = 0.0
 # All known streamers for display (updated by main loop)
 dashboard_all_streamers: list = []
+# Streamers currently in [Block] (updated by main loop); used for "disabled" display
+dashboard_blocked_streamers: set = set()
 # Set when shutting down so the renderer stops immediately without waiting for its sleep to expire
 _dashboard_stop_event = threading.Event()
 
@@ -383,7 +389,7 @@ def _set_output_mode(mode: int) -> None:
     global OUTPUT_MODE
     with output_mode_lock:
         OUTPUT_MODE = mode
-    if mode in (3, 4):
+    if mode in (3, 4, 5):
         _stdin_owned_by_mgmt.set()
         _streamer_mgmt_event.set()
     else:
@@ -419,6 +425,8 @@ def _keyboard_listener() -> None:
                     _set_output_mode(3)
                 elif ch.lower() == KEYBIND_REMOVE.lower():
                     _set_output_mode(4)
+                elif ch.lower() == KEYBIND_DISABLE.lower():
+                    _set_output_mode(5)
 
             time.sleep(0.05)
 
@@ -453,6 +461,8 @@ def _keyboard_listener() -> None:
                     _set_output_mode(3)
                 elif ch.lower() == KEYBIND_REMOVE.lower():
                     _set_output_mode(4)
+                elif ch.lower() == KEYBIND_DISABLE.lower():
+                    _set_output_mode(5)
                 elif ch in ("\x03", "\x1c"):
                     os.kill(os.getpid(), __import__("signal").SIGINT)
 
@@ -486,17 +496,19 @@ def _live_bar(seconds: float, width: int = 20) -> str:
 
 def render_dashboard() -> None:
     """Render a full-screen dashboard view (output mode 1)."""
-    LIVE_COLOR   = "\033[92m"   # bright green
-    OFF_COLOR    = "\033[90m"   # dark grey
-    TITLE_COLOR  = "\033[96m"   # cyan
-    WARN_COLOR   = "\033[93m"   # yellow
-    RESET        = "\033[0m"
-    CLEAR        = "\033[2J\033[H"  # clear screen + home
+    LIVE_COLOR     = "\033[92m"   # bright green
+    OFF_COLOR      = "\033[90m"   # dark grey
+    DISABLED_COLOR = "\033[93m"   # yellow
+    TITLE_COLOR    = "\033[96m"   # cyan
+    WARN_COLOR     = "\033[93m"   # yellow
+    RESET          = "\033[0m"
+    CLEAR          = "\033[2J\033[H"  # clear screen + home
 
     with dashboard_lock:
         streamers   = list(dashboard_all_streamers)
         live_since  = dict(dashboard_live_since)
         next_in     = dashboard_next_check_in
+        blocked_set = set(dashboard_blocked_streamers)
 
     now = time.time()
     lines = []
@@ -512,18 +524,25 @@ def render_dashboard() -> None:
     else:
         col_name = 18
         for s in streamers:
+            is_disabled = s in blocked_set
             since = live_since.get(s)
-            if since is not None:
+            if is_disabled:
+                status = f"{DISABLED_COLOR}⊘ disabled{RESET}"
+                bar    = f"{DISABLED_COLOR}[{'░' * 20}]{RESET}"
+                lines.append(
+                    f"  {DISABLED_COLOR}{s:<{col_name}}{RESET}  {status}  {bar}"
+                )
+            elif since is not None:
                 elapsed   = now - since
                 dur_str   = _format_duration(elapsed)
                 bar       = _live_bar(elapsed)
-                status    = f"{LIVE_COLOR}● LIVE   {RESET}"
+                status    = f"{LIVE_COLOR}● LIVE    {RESET}"
                 lines.append(
                     f"  {LIVE_COLOR}{s:<{col_name}}{RESET}  {status}  "
                     f"{LIVE_COLOR}{bar}{RESET}  {dur_str}"
                 )
             else:
-                status = f"{OFF_COLOR}○ offline{RESET}"
+                status = f"{OFF_COLOR}○ offline {RESET}"
                 bar    = f"{OFF_COLOR}[{'░' * 20}]{RESET}"
                 lines.append(
                     f"  {OFF_COLOR}{s:<{col_name}}{RESET}  {status}  {bar}"
@@ -584,10 +603,12 @@ def render_dashboard() -> None:
     kb_out = KEYBIND_LABELS.get(KEYBIND_OUTPUT, KEYBIND_OUTPUT)
     kb_add = KEYBIND_LABELS.get(KEYBIND_ADD, KEYBIND_ADD.upper())
     kb_rem = KEYBIND_LABELS.get(KEYBIND_REMOVE, KEYBIND_REMOVE.upper())
+    kb_dis = KEYBIND_LABELS.get(KEYBIND_DISABLE, KEYBIND_DISABLE.upper())
 
     lines.append(f"  {OFF_COLOR}press {kb_out} to switch to terminal mode{RESET}")
-    lines.append(f"  {OFF_COLOR}press {kb_add} to add a streamer{RESET}")
+    lines.append(f"  {OFF_COLOR}press {kb_add} to add or enable a streamer{RESET}")
     lines.append(f"  {OFF_COLOR}press {kb_rem} to remove a streamer{RESET}")
+    lines.append(f"  {OFF_COLOR}press {kb_dis} to disable a streamer{RESET}")
     
     sys.stdout.write(CLEAR + "\r\n".join(lines) + "\r\n")
     sys.stdout.flush()
@@ -714,6 +735,26 @@ def _modify_config_streamer(config_path: str, username: str, action: str) -> str
             messages.append(f"'{username}' was not found in [Streamers].")
         _add_to_section("Block", username)
         messages.append(f"Added '{username}' to [Block].")
+    elif action == "disable":
+        dbg(f"[CONFIG_EDIT] disabling {username!r} — keeping in [Streamers], adding to [Block]")
+        # Check if already in [Streamers]
+        in_streamers = False
+        if "Streamers" in section_starts:
+            sec_line = section_starts["Streamers"]
+            next_sec_line = len(lines)
+            for other_sec, other_line in section_starts.items():
+                if other_line > sec_line:
+                    next_sec_line = min(next_sec_line, other_line)
+            for i in range(sec_line + 1, next_sec_line):
+                key = lines[i].strip().split("=")[0].strip().lower()
+                if key == username:
+                    in_streamers = True
+                    break
+        if in_streamers:
+            _add_to_section("Block", username)
+            messages.append(f"Disabled '{username}' (added to [Block], kept in [Streamers]).")
+        else:
+            messages.append(f"'{username}' was not found in [Streamers].")
 
     try:
         with open(config_path, "w", encoding="utf-8") as f:
@@ -809,43 +850,68 @@ def _streamer_mgmt_thread() -> None:
         with output_mode_lock:
             mode = OUTPUT_MODE
 
-        if mode not in (3, 4):
+        if mode not in (3, 4, 5):
             continue
 
         if mode == 3:
             title = "Add a Streamer"
-            prompt = "Enter streamer username to ADD"
+            prompt = "Enter streamer username to ADD or ENABLE"
             action = "add"
-        else:
+        elif mode == 4:
             title = "Remove a Streamer"
             prompt = "Enter streamer username to REMOVE"
             action = "remove"
+        else:
+            title = "Disable a Streamer"
+            prompt = "Enter streamer username to DISABLE"
+            action = "disable"
 
         result_msg = ""
 
         while True:
             with output_mode_lock:
                 current_mode = OUTPUT_MODE
-            if current_mode not in (3, 4):
+            if current_mode not in (3, 4, 5):
                 break
+
+            # Build streamer list for ADD, REMOVE and DISABLE modes
+            streamer_list_block = ""
+            if action in ("add", "remove", "disable"):
+                with dashboard_lock:
+                    current_streamers = list(dashboard_all_streamers)
+                if current_streamers:
+                    streamer_lines = "\r\n".join(
+                        f"    \033[90m· {s}\033[0m" for s in current_streamers
+                    )
+                    streamer_list_block = (
+                        f"  \033[96mStreamers:\033[0m\r\n"
+                        f"{streamer_lines}\r\n"
+                        f"\r\n"
+                    )
+                else:
+                    streamer_list_block = f"  \033[90m(no streamers configured)\033[0m\r\n\r\n"
 
             # Re-draw the page
             header = (
                 f"{CLEAR}"
-                f"{TITLE_COLOR}{'─' * 52}{RESET}\n"
-                f"{TITLE_COLOR}  jj-dlp · {title}{RESET}\n"
-                f"{TITLE_COLOR}{'─' * 52}{RESET}\n"
+                f"{TITLE_COLOR}{'─' * 52}{RESET}\r\n"
+                f"{TITLE_COLOR}  jj-dlp · {title}{RESET}\r\n"
+                f"{TITLE_COLOR}{'─' * 52}{RESET}\r\n"
+                f"\r\n"
             )
             footer = (
-                f"\n{TITLE_COLOR}{'─' * 52}{RESET}\n"
-                f"  \033[90mPress Enter to jump back to Dashboard\033[0m\n"
+                f"\r\n{TITLE_COLOR}{'─' * 52}{RESET}\r\n"
+                f"  \033[90mPress Enter to jump back to Dashboard\033[0m\r\n"
             )
             if result_msg:
-                body = f"  {OK_COLOR}{result_msg}{RESET}\n"
+                body = f"  {OK_COLOR}{result_msg}{RESET}\r\n"
             else:
                 body = ""
 
-            sys.stdout.write(header + body + f"  {WARN_COLOR}{prompt}:{RESET}" + footer)
+            sys.stdout.write(
+                header + streamer_list_block + body +
+                f"  {WARN_COLOR}{prompt}:{RESET}" + footer
+            )
             sys.stdout.flush()
 
             username = _read_line_raw()
@@ -853,7 +919,7 @@ def _streamer_mgmt_thread() -> None:
             # Check if mode changed while we were waiting for input
             with output_mode_lock:
                 current_mode = OUTPUT_MODE
-            if current_mode not in (3, 4):
+            if current_mode not in (3, 4, 5):
                 break
 
             if username == "__REDRAW__":
@@ -877,14 +943,14 @@ def _streamer_mgmt_thread() -> None:
             # Re-draw once so the user sees the confirmation message
             header = (
                 f"{CLEAR}"
-                f"{TITLE_COLOR}{'─' * 52}{RESET}\n"
-                f"{TITLE_COLOR}  jj-dlp · {title}{RESET}\n"
-                f"{TITLE_COLOR}{'─' * 52}{RESET}\n"
+                f"{TITLE_COLOR}{'─' * 52}{RESET}\r\n"
+                f"{TITLE_COLOR}  jj-dlp · {title}{RESET}\r\n"
+                f"{TITLE_COLOR}{'─' * 52}{RESET}\r\n"
             )
             footer = (
-                f"\n{TITLE_COLOR}{'─' * 52}{RESET}\n"
+                f"\r\n{TITLE_COLOR}{'─' * 52}{RESET}\r\n"
             )
-            body = f"  {OK_COLOR}{result_msg}{RESET}\n"
+            body = f"  {OK_COLOR}{result_msg}{RESET}\r\n"
 
             sys.stdout.write(header + body + footer)
             sys.stdout.flush()
@@ -899,7 +965,7 @@ def _streamer_mgmt_thread() -> None:
 def log(msg: str) -> None:
     with output_mode_lock:
         mode = OUTPUT_MODE
-    if mode in (1, 3, 4):
+    if mode in (1, 3, 4, 5):
         return  # dashboard / streamer mgmt pages own the screen
     # mode 2 (terminal): suppress log() when verbosity is 4 (stderr only)
     with verbosity_lock:
@@ -931,7 +997,7 @@ def dbg(msg: str) -> None:
     _write_debug_log(full)
     with output_mode_lock:
         mode = OUTPUT_MODE
-    if mode in (1, 3, 4):
+    if mode in (1, 3, 4, 5):
         return  # dashboard / streamer mgmt pages own the screen
     with verbosity_lock:
         v = VERBOSITY
@@ -2294,6 +2360,8 @@ def main() -> None:
                 with dashboard_lock:
                     dashboard_all_streamers.clear()
                     dashboard_all_streamers.extend(streamers)
+                    dashboard_blocked_streamers.clear()
+                    dashboard_blocked_streamers.update(cfg["blocked"])
                     live_set = set(live_now)
                     for s in streamers:
                         if s not in live_set:
