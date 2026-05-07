@@ -589,7 +589,7 @@ def render_dashboard() -> None:
     lines.append(f"  {OFF_COLOR}press {kb_add} to add a streamer{RESET}")
     lines.append(f"  {OFF_COLOR}press {kb_rem} to remove a streamer{RESET}")
     
-    sys.stdout.write(CLEAR + "\n".join(lines) + "\n")
+    sys.stdout.write(CLEAR + "\r\n".join(lines) + "\r\n")
     sys.stdout.flush()
 
 
@@ -2366,13 +2366,13 @@ def main() -> None:
         active_recordings = [t for t in recording_threads if t.is_alive()]
 
         sys.stdout.write(CLEAR)
-        sys.stdout.write(f"{TITLE_COLOR}{'─' * 52}{RESET}\n")
-        sys.stdout.write(f"{TITLE_COLOR}  jj-dlp  ·  Shutting down...{RESET}\n")
-        sys.stdout.write(f"{TITLE_COLOR}{'─' * 52}{RESET}\n\n")
+        sys.stdout.write(f"{TITLE_COLOR}{'─' * 52}{RESET}\r\n")
+        sys.stdout.write(f"{TITLE_COLOR}  jj-dlp  ·  Shutting down...{RESET}\r\n")
+        sys.stdout.write(f"{TITLE_COLOR}{'─' * 52}{RESET}\r\n\r\n")
 
         if active_recordings:
             sys.stdout.write(
-                f"  {WARN_COLOR}Waiting for {len(active_recordings)} active recording(s) to finish...{RESET}\n\n"
+                f"  {WARN_COLOR}Waiting for {len(active_recordings)} active recording(s) to finish...{RESET}\r\n\r\n"
             )
         sys.stdout.flush()
 
@@ -2380,7 +2380,7 @@ def main() -> None:
             if t.is_alive():
                 t.join(timeout=15)  # Wait 15 seconds for each thread to finish gracefully
 
-        sys.stdout.write(f"  {OK_COLOR}✓  All done. Goodbye!{RESET}\n\n")
+        sys.stdout.write(f"  {OK_COLOR}✓  All done. Goodbye!{RESET}\r\n\r\n")
         sys.stdout.flush()
 
 
