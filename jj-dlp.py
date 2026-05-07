@@ -433,6 +433,7 @@ def _keyboard_listener() -> None:
     else:
         import tty
         import termios
+        import select
         fd = sys.stdin.fileno()
         try:
             old = termios.tcgetattr(fd)
@@ -443,12 +444,26 @@ def _keyboard_listener() -> None:
             tty.setraw(fd)
             while True:
                 # Yield stdin to the streamer-mgmt thread while it owns it.
-                # We must restore normal tty settings so _read_line_raw can
-                # take over, then re-enter raw mode when control returns to us.
+                # Restore normal tty settings so _read_line_raw gets a clean
+                # terminal, then wait (without touching stdin) until it's done.
                 if _stdin_owned_by_mgmt.is_set():
                     termios.tcsetattr(fd, termios.TCSADRAIN, old)
-                    _stdin_owned_by_mgmt.wait()  # block until mgmt releases stdin
+                    while _stdin_owned_by_mgmt.is_set():
+                        _stdin_owned_by_mgmt.wait(timeout=0.1)
                     tty.setraw(fd)
+                    continue
+
+                # Use select() with a short timeout instead of a bare blocking
+                # read(1).  This lets us re-check _stdin_owned_by_mgmt promptly
+                # after the user presses a hotkey that switches to the mgmt page,
+                # so we never race with _read_line_raw for subsequent characters.
+                ready, _, _ = select.select([sys.stdin], [], [], 0.05)
+                if not ready:
+                    continue
+
+                # Re-check immediately after select returns — the mgmt thread
+                # may have claimed stdin during the 50 ms window.
+                if _stdin_owned_by_mgmt.is_set():
                     continue
 
                 ch = sys.stdin.read(1)
