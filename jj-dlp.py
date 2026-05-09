@@ -1656,11 +1656,15 @@ def _ensure_ffmpeg(ffmpeg_path: str) -> str:
             return resolved
     else:
         # Plain command name (e.g. "ffmpeg") — check PATH via shutil.which.
+        # Return the full resolved path so yt-dlp receives --ffmpeg-location
+        # with an absolute path rather than a bare name it must re-resolve via
+        # its own (possibly stale) PATH.
         # Also probe known winget install locations in case PATH hasn't been
         # refreshed yet after a recent winget install (requires restart/logoff).
         import shutil
-        if shutil.which(resolved):
-            return resolved
+        which_result = shutil.which(resolved)
+        if which_result:
+            return which_result
         probed = _find_ffmpeg_without_path_refresh()
         if probed:
             return probed
