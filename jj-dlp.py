@@ -210,6 +210,41 @@ class SiteState:
 
         self._stop_event          = threading.Event()
 
+        # Active yt-dlp subprocesses: streamer -> proc
+        # Written by record_stream threads; read by stop() for clean kill.
+        self._procs_lock          = threading.Lock()
+        self._active_procs:       Dict[str, object] = {}
+
+    def register_proc(self, streamer: str, proc) -> None:
+        """Register an active yt-dlp subprocess so stop() can kill it."""
+        with self._procs_lock:
+            self._active_procs[streamer] = proc
+        dbg(f"[PROC] register_proc: streamer={streamer!r} pid={proc.pid} "
+            f"total_active={len(self._active_procs)}")
+
+    def unregister_proc(self, streamer: str) -> None:
+        """Remove a subprocess from the registry (after it exits)."""
+        with self._procs_lock:
+            removed = self._active_procs.pop(streamer, None)
+        dbg(f"[PROC] unregister_proc: streamer={streamer!r} "
+            f"pid={removed.pid if removed else 'N/A'} "
+            f"total_remaining={len(self._active_procs)}")
+
+    def kill_all_procs(self) -> None:
+        """Kill every registered yt-dlp process. Called on quit."""
+        with self._procs_lock:
+            procs = dict(self._active_procs)
+        dbg(f"[PROC] kill_all_procs: found {len(procs)} proc(s): "
+            f"{[(s, p.pid) for s, p in procs.items()]}")
+        for streamer, proc in procs.items():
+            dbg(f"[PROC] kill_all_procs: killing streamer={streamer!r} pid={proc.pid} "
+                f"poll()={proc.poll()}")
+            try:
+                kill_proc(proc)
+                dbg(f"[PROC] kill_all_procs: kill sent to pid={proc.pid}")
+            except Exception as e:
+                dbg(f"[PROC] kill_all_procs: ERROR killing pid={proc.pid}: {e}")
+
     def log_line(self, msg: str) -> None:
         """Append a timestamped line to the site's activity log (capped at 200 lines)."""
         ts = datetime.now().strftime("%H:%M:%S")
@@ -220,8 +255,10 @@ class SiteState:
                 self.dash_log_lines = self.dash_log_lines[-200:]
 
     def stop(self) -> None:
+        dbg(f"[PROC] SiteState.stop() called for config={self.config_path!r}")
         self._stop_event.set()
         self.trigger_event.set()
+        self.kill_all_procs()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -613,6 +650,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
             try:
                 proc = subprocess.Popen(cmd, stdout=out_target, stderr=err_target)
                 proc_start_time = time.time()
+                dbg(f"[PROC] record_stream: started yt-dlp for streamer={streamer!r} "
+                    f"pid={proc.pid} cmd={cmd}")
+                site.register_proc(streamer, proc)
                 ffmpeg_error_counter = [0]
                 ffmpeg_error_event   = threading.Event()
                 threading.Thread(target=_drain_pipe, args=(proc.stdout, log_out_fp, "stdout"),
@@ -625,6 +665,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                                          "streamer": streamer}, daemon=True).start()
             except Exception as e:
                 site.log_line(f"Failed to start yt-dlp for {streamer}: {e}")
+                dbg(f"[PROC] record_stream: Popen FAILED for streamer={streamer!r}: {e}")
                 try:
                     close_logs()
                 except Exception:
@@ -639,10 +680,28 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
             seconds_since_check  = 0
 
             while proc.poll() is None:
+                # Check if we've been asked to stop (e.g. user pressed Q)
+                if site._stop_event.is_set():
+                    dbg(f"[PROC] record_stream: stop_event set — killing pid={proc.pid} "
+                        f"streamer={streamer!r}")
+                    kill_proc(proc)
+                    dbg(f"[PROC] record_stream: kill sent, waiting for proc to exit")
+                    proc.wait()
+                    dbg(f"[PROC] record_stream: proc exited after stop_event kill "
+                        f"pid={proc.pid} poll()={proc.poll()}")
+                    site.unregister_proc(streamer)
+                    try:
+                        close_logs()
+                    except Exception:
+                        pass
+                    return
+
                 current_cfg = load_config(cfg["config_path"])
                 if streamer in current_cfg["blocked"]:
+                    dbg(f"[PROC] record_stream: streamer={streamer!r} blocked — killing pid={proc.pid}")
                     kill_proc(proc)
                     site.log_line(f"Recording STOPPED (blocked) -> {streamer}")
+                    site.unregister_proc(streamer)
                     try:
                         close_logs()
                     except Exception:
@@ -654,7 +713,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
                 if ffmpeg_error_event.is_set():
                     site.log_line(f"ffmpeg error threshold reached for {streamer} — restarting")
+                    dbg(f"[PROC] record_stream: ffmpeg error restart for streamer={streamer!r} pid={proc.pid}")
                     kill_proc(proc)
+                    site.unregister_proc(streamer)
                     try:
                         close_logs()
                     except Exception:
@@ -672,7 +733,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                         stall_check_interval=stall_check_interval)
                     if stall_detected:
                         site.log_line(f"Stall detected for {streamer} — restarting")
+                        dbg(f"[PROC] record_stream: stall restart for streamer={streamer!r} pid={proc.pid}")
                         kill_proc(proc)
+                        site.unregister_proc(streamer)
                         try:
                             close_logs()
                         except Exception:
@@ -683,6 +746,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                         last_size        = current_size
                         last_growth_time = time.time()
             else:
+                dbg(f"[PROC] record_stream: proc exited naturally "
+                    f"pid={proc.pid} poll()={proc.poll()} streamer={streamer!r}")
+                site.unregister_proc(streamer)
                 try:
                     close_logs()
                 except Exception:
@@ -693,16 +759,22 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                 break
 
     except KeyboardInterrupt:
+        dbg(f"[PROC] record_stream: KeyboardInterrupt for streamer={streamer!r} "
+            f"pid={proc.pid if proc else 'N/A'}")
         if proc is not None:
             try:
                 kill_proc(proc)
-            except Exception:
-                pass
+                dbg(f"[PROC] record_stream: killed pid={proc.pid} via KeyboardInterrupt path")
+            except Exception as e:
+                dbg(f"[PROC] record_stream: kill error in KBI path: {e}")
+        site.unregister_proc(streamer)
         try:
             close_logs()
         except Exception:
             pass
     finally:
+        dbg(f"[PROC] record_stream: finally block — streamer={streamer!r} "
+            f"pid={proc.pid if proc else 'N/A'}")
         with site.lock:
             site.currently_recording.discard(streamer)
         time.sleep(cfg["cooldown"])
@@ -872,7 +944,7 @@ def _fmt_duration(seconds: float) -> str:
 def _live_bar(seconds: float, width: int = 14) -> str:
     MAX_SECS = 6 * 3600
     filled = min(int(width * seconds / MAX_SECS), width)
-    return "#" * filled + "." * (width - filled)
+    return "█" * filled + "░" * (width - filled)
 
 def draw_box(stdscr, y1, x1, y2, x2, pair):
     h, w = stdscr.getmaxyx()
@@ -1128,16 +1200,32 @@ class JJDlpDashboard:
                             str(val)[:inner_w - label_w - 1],
                             curses.color_pair(cpair) | curses.A_BOLD)
 
-        # Disk space rows
+        # Disk space rows — aggregate drives from ALL site configs
         disk_row_y = y1 + 2 + len(rows) + 1
         try:
-            cfg0 = load_config(self.sites[0].config_path) if self.sites else {}
-            drives = cfg0.get("disk_drives", [])
-            if not drives:
-                # Fallback: show output_dir's drive/fs
-                drives = [cfg0.get("output_dir", "/")]
+            # Collect unique drives across every loaded config
+            seen_drives: list = []
+            seen_drives_set: set = set()
+            fallback_dir = None
+            for _site in self.sites:
+                try:
+                    _cfg = load_config(_site.config_path)
+                    drives_for_site = _cfg.get("disk_drives", [])
+                    if drives_for_site:
+                        for d in drives_for_site:
+                            key = os.path.normcase(d)
+                            if key not in seen_drives_set:
+                                seen_drives_set.add(key)
+                                seen_drives.append(d)
+                    elif fallback_dir is None:
+                        fallback_dir = _cfg.get("output_dir", "/")
+                except Exception:
+                    pass
+            drives = seen_drives if seen_drives else ([fallback_dir] if fallback_dir else ["/"])
+            dbg(f"[DISK] draw_system_panel: drives={drives} (seen_drives={seen_drives}, "
+                f"fallback={fallback_dir})")
             if disk_row_y < y2 - 1:
-                safe_addstr(self.stdscr, disk_row_y, x1 + 2, "-- Disk --",
+                safe_addstr(self.stdscr, disk_row_y, x1 + 2, "── Disk ──",
                             curses.color_pair(self.C_SYSTEM))
                 disk_row_y += 1
             for drive in drives:
@@ -1156,10 +1244,10 @@ class JJDlpDashboard:
                                 disk_str[:inner_w],
                                 curses.color_pair(color))
                     disk_row_y += 1
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception as _de:
+                    dbg(f"[DISK] draw_system_panel: disk_usage({drive!r}) failed: {_de}")
+        except Exception as _outer:
+            dbg(f"[DISK] draw_system_panel: outer exception: {_outer}")
 
         # Uptime at bottom
         safe_addstr(self.stdscr, y2 - 1, x1 + 2,
@@ -1253,11 +1341,11 @@ class JJDlpDashboard:
                 name_attr   = curses.color_pair(self.C_DISABLED)
                 # Flash between "[x] off" and "[REC]" style for disabled
                 if self.tick % 2 == 0:
-                    status_str  = "[x] off"
+                    status_str  = "[✕] off"
                 else:
                     status_str  = "[DIS]  "
                 status_attr = curses.color_pair(self.C_DISABLED)
-                bar_str     = "-" * bar_w
+                bar_str     = "─" * bar_w
                 bar_attr    = curses.color_pair(self.C_DISABLED)
                 dur_str     = ""
             elif since is not None:
@@ -1266,13 +1354,13 @@ class JJDlpDashboard:
                 # Flash between "Live" and "REC" for recording streamers
                 if is_rec:
                     if self.tick % 2 == 0:
-                        status_str  = "[Live] "
+                        status_str  = "[●Live]"
                         status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
                     else:
-                        status_str  = "[ REC]"
+                        status_str  = "[▶REC]"
                         status_attr = curses.color_pair(self.C_REC) | curses.A_BOLD
                 else:
-                    status_str  = "[Live] "
+                    status_str  = "[●Live]"
                     status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
                 bar_str     = _live_bar(elapsed, bar_w)
                 bar_attr    = curses.color_pair(self.C_LIVE)
@@ -1280,9 +1368,9 @@ class JJDlpDashboard:
                 last_live_str = ""  # currently live, no "last live"
             else:
                 name_attr   = curses.color_pair(self.C_DIM)
-                status_str  = "[ off] "
+                status_str  = "[○ off]"
                 status_attr = curses.color_pair(self.C_DIM)
-                bar_str     = "-" * bar_w
+                bar_str     = "─" * bar_w
                 bar_attr    = curses.color_pair(self.C_DIM)
                 dur_str     = ""
 
@@ -1561,10 +1649,9 @@ class JJDlpDashboard:
         # Logo (6 lines tall, starts at row 1)
         self.draw_logo(1, 2)
 
-        # Uptime top-right (replaces timestamp)
-        uptime_secs = int(time.time() - _SCRIPT_START_TIME)
-        uptime_str  = f"Up: {_fmt_duration(uptime_secs)}"
-        safe_addstr(self.stdscr, 1, w - len(uptime_str) - 3, uptime_str,
+        # System time top-right
+        sys_time_str = datetime.now().strftime("%Y-%m-%d  %H:%M:%S")
+        safe_addstr(self.stdscr, 1, w - len(sys_time_str) - 3, sys_time_str,
                     curses.color_pair(self.C_CHROME))
 
         # Blank line after logo (row 7), then tab bar at row 8
