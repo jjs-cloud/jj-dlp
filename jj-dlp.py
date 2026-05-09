@@ -120,6 +120,9 @@ def load_config(config_path: str):
     yt_dlp_path_raw = general.get("YT_DLP_PATH", "").strip().strip('"\'')
     yt_dlp_path = yt_dlp_path_raw if yt_dlp_path_raw else "yt-dlp"
 
+    ffmpeg_path_raw = general.get("FFMPEG_PATH", "").strip().strip('"\'')
+    ffmpeg_path = ffmpeg_path_raw if ffmpeg_path_raw else "bin/ffmpeg.exe"
+
     if not os.path.isabs(output_dir):
         output_dir = os.path.abspath(output_dir)
 
@@ -158,6 +161,7 @@ def load_config(config_path: str):
         "stall_check_interval": stall_check_interval,
         "stall_timeout": stall_timeout,
         "yt_dlp_path": yt_dlp_path,
+        "ffmpeg_path": ffmpeg_path,
         "checker_cmd": checker_cmd,
         "downloader_cmd": downloader_cmd,
         "config_check_interval": config_check_interval,
@@ -1140,8 +1144,9 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
         pass
 
 
-def build_yt_dlp_command(yt_dlp_path: str, base_cmd: List[str], extra: List[str]) -> List[str]:
-    return [yt_dlp_path, *base_cmd, *extra]
+def build_yt_dlp_command(yt_dlp_path: str, base_cmd: List[str], extra: List[str], ffmpeg_path: str = "") -> List[str]:
+    ffmpeg_args = ["--ffmpeg-location", ffmpeg_path] if ffmpeg_path else []
+    return [yt_dlp_path, *ffmpeg_args, *base_cmd, *extra]
 
 
 def get_live_streamers(streamers: List[str], cfg: dict) -> List[str]:
@@ -1154,7 +1159,7 @@ def get_live_streamers(streamers: List[str], cfg: dict) -> List[str]:
         return []
 
     urls = [cfg["site_tmpl"].format(username=s) for s in streamers]
-    cmd = build_yt_dlp_command(cfg["yt_dlp_path"], cfg["checker_cmd"], urls)
+    cmd = build_yt_dlp_command(cfg["yt_dlp_path"], cfg["checker_cmd"], urls, cfg.get("ffmpeg_path", ""))
     dbg(f"[CHECKER] running liveness check for {streamers} — cmd={cmd}")
 
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -1303,7 +1308,7 @@ def record_stream(streamer: str, cfg: dict) -> None:
 
     try:
         while True:
-            cmd = build_yt_dlp_command(cfg["yt_dlp_path"], cfg["downloader_cmd"], ["-o", output_path, channel_url])
+            cmd = build_yt_dlp_command(cfg["yt_dlp_path"], cfg["downloader_cmd"], ["-o", output_path, channel_url], cfg.get("ffmpeg_path", ""))
             dbg(f"[RECORD] launching yt-dlp for {streamer!r} — cmd={cmd}")
             out_target, err_target, close_logs, log_out_fp, log_err_fp = open_log_streams(cfg)
 
