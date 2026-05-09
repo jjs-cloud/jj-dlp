@@ -1628,6 +1628,7 @@ def _ensure_ffmpeg(ffmpeg_path: str) -> str:
                 print(f"\n{OK}ffmpeg installed successfully!{RESET}")
                 print(f"{WARN}NOTE: The PATH update won't take effect until you restart your terminal.")
                 print(f"      Please relaunch jj-dlp and it will find ffmpeg automatically.{RESET}\n")
+                input("Press Enter to exit...")
                 sys.exit(0)
         else:
             print()  # blank line before manual instructions
@@ -1639,6 +1640,7 @@ def _ensure_ffmpeg(ffmpeg_path: str) -> str:
     print(f"  • Set  FFMPEG_PATH = ffmpeg  in your config (uses the system PATH), or")
     print(f"  • Run  install-ffmpeg.bat  if included in the repo.\n")
     print(f"{ERR}Cannot continue without ffmpeg. Exiting.{RESET}\n")
+    input("Press Enter to exit...")
     sys.exit(1)
 
 
