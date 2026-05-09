@@ -1625,18 +1625,10 @@ def _ensure_ffmpeg(ffmpeg_path: str) -> str:
                 ret = None
 
             if ret is not None and ret.returncode == 0:
-                # winget puts ffmpeg on PATH; verify it's now callable
-                try:
-                    subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-                    print(f"\n{OK}ffmpeg installed successfully!{RESET}")
-                    print(f"{WARN}NOTE: Your config still points to '{ffmpeg_path}'.")
-                    print(f"      Update FFMPEG_PATH in your config to 'ffmpeg' (or leave it blank){RESET}")
-                    print(f"      to use the system-installed version going forward.\n")
-                    return "ffmpeg"  # fall back to PATH-based ffmpeg for this run
-                except Exception:
-                    pass  # installed but not on PATH yet — fall through to manual instructions
-
-            print(f"\n{ERR}Automatic installation did not complete successfully.{RESET}")
+                print(f"\n{OK}ffmpeg installed successfully!{RESET}")
+                print(f"{WARN}NOTE: The PATH update won't take effect until you restart your terminal.")
+                print(f"      Please relaunch jj-dlp and it will find ffmpeg automatically.{RESET}\n")
+                sys.exit(0)
         else:
             print()  # blank line before manual instructions
 
