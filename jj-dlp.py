@@ -909,6 +909,24 @@ class JJDlpDashboard:
     def __init__(self, stdscr, sites: List["SiteState"]):
         self.stdscr       = stdscr
         self.sites        = sites
+        
+        # --- Dynamic Tab Logic ---
+        # Start with the mandatory tabs
+        self.TABS = ["Dashboard", "Log"]
+
+        # Check if ANY site has Twitch EventSub enabled
+        any_eventsub = False
+        for site in self.sites:
+            cfg = load_config(site.config_path)
+            if cfg.get("twitch_enabled"):
+                any_eventsub = True
+                break
+        if any_eventsub:
+            self.TABS.append("EventSub")
+
+        self.TABS.append("Config")  # Config tab is always last
+        # --------------------------
+
         self.selected_tab = 0
         self.selected_site_idx = 0   # for log/config/eventsub tabs
         self.tick         = 0
@@ -964,13 +982,15 @@ class JJDlpDashboard:
             x += len(label) + 1
 
     # ── Site panel (one per config) ──────────────────────────────────────────
-    def draw_site_panel(self, site: "SiteState", y1, x1, y2, x2):
+    def draw_site_panel(self, site: "SiteState", y1, x1, y2, x2, is_selected:False):
         """
         Draws one site's streamer list inside the given bounding box.
         This is the main reusable panel — rearrange by changing caller geometry.
         """
         now = time.time()
-        draw_box(self.stdscr, y1, x1, y2, x2, self.C_CHROME)
+        #Pick border color based on selection
+        border_pair = self.C_HILIGHT if is_selected else self.C_CHROME
+        draw_box(self.stdscr, y1, x1, y2, x2, border_pair)
 
         # ── Panel header ──
         with site.dash_lock:
@@ -1108,7 +1128,10 @@ class JJDlpDashboard:
             px2 = min(px2, x2)
             py2 = min(py2, y2)
 
-            self.draw_site_panel(site, py1, px1, py2, px2)
+            # Check if this is the active site
+            is_selected = (idx == self.selected_site_idx)
+            
+            self.draw_site_panel(site, py1, px1, py2, px2, is_selected)
 
     # ── Log tab ──────────────────────────────────────────────────────────────
     def draw_log_tab(self, y1, x1, y2, x2):
@@ -1333,14 +1356,16 @@ class JJDlpDashboard:
         content_y1 = 9
         content_y2 = h - 2
 
-        # ── TAB CONTENT — change order/position here ──
-        if self.selected_tab == 0:
+        # Get the name of the currently selected tab
+        current_tab_name = self.TABS[self.selected_tab]
+
+        if current_tab_name == "Dashboard":
             self.draw_dashboard_tab(content_y1, 1, content_y2, w - 2)
-        elif self.selected_tab == 1:
+        elif current_tab_name == "Log":
             self.draw_log_tab(content_y1, 1, content_y2, w - 2)
-        elif self.selected_tab == 2:
+        elif current_tab_name == "EventSub":
             self.draw_eventsub_tab(content_y1, 1, content_y2, w - 2)
-        elif self.selected_tab == 3:
+        elif current_tab_name == "Config":
             self.draw_config_tab(content_y1, 1, content_y2, w - 2)
 
         self.draw_footer()
