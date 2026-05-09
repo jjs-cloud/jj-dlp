@@ -1565,81 +1565,6 @@ _eventsub: TwitchEventSub = None
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def _find_ffmpeg_without_path_refresh() -> str:
-    """
-    Try to locate ffmpeg in known winget/system install locations without
-    relying on the current process's PATH (which won't reflect a just-installed
-    winget package until the user restarts or logs out).
-
-    Returns the full path to ffmpeg.exe if found, or an empty string.
-    """
-    if sys.platform != "win32":
-        return ""
-
-    import shutil
-
-    # 1. Already on PATH in this process (covers cases where the user has
-    #    restarted or PATH was inherited correctly).
-    found = shutil.which("ffmpeg")
-    if found:
-        return found
-
-    # 2. Winget installs Gyan.FFmpeg under %LOCALAPPDATA%\Microsoft\WinGet\Packages
-    #    or %ProgramFiles%\ffmpeg-*\bin\ffmpeg.exe.  Walk both.
-    candidate_roots = []
-
-    local_appdata = os.environ.get("LOCALAPPDATA", "")
-    if local_appdata:
-        candidate_roots.append(os.path.join(local_appdata, "Microsoft", "WinGet", "Packages"))
-
-    for prog in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
-        pf = os.environ.get(prog, "")
-        if pf:
-            candidate_roots.append(pf)
-
-    for root in candidate_roots:
-        if not os.path.isdir(root):
-            continue
-        try:
-            for entry in os.scandir(root):
-                if not entry.is_dir():
-                    continue
-                # Gyan.FFmpeg package folder names start with "Gyan.FFmpeg"
-                if "ffmpeg" not in entry.name.lower() and "gyan" not in entry.name.lower():
-                    continue
-                # Walk up to two levels deep looking for ffmpeg.exe
-                for dirpath, _dirnames, filenames in os.walk(entry.path):
-                    if "ffmpeg.exe" in filenames:
-                        return os.path.join(dirpath, "ffmpeg.exe")
-        except PermissionError:
-            continue
-
-    # 3. Check the PATH stored in the *registry* (HKCU and HKLM) — this reflects
-    #    the updated PATH even before a reboot, unlike os.environ["PATH"].
-    try:
-        import winreg
-        for hive, subkey in (
-            (winreg.HKEY_CURRENT_USER,  r"Environment"),
-            (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
-        ):
-            try:
-                with winreg.OpenKey(hive, subkey) as key:
-                    reg_path, _ = winreg.QueryValueEx(key, "Path")
-            except FileNotFoundError:
-                continue
-            for directory in reg_path.split(";"):
-                directory = directory.strip().strip('"')
-                if not directory:
-                    continue
-                candidate = os.path.join(directory, "ffmpeg.exe")
-                if os.path.isfile(candidate):
-                    return candidate
-    except Exception:
-        pass
-
-    return ""
-
-
 def _ensure_ffmpeg(ffmpeg_path: str) -> str:
     """
     Verify that ffmpeg exists at ffmpeg_path.
@@ -1655,19 +1580,10 @@ def _ensure_ffmpeg(ffmpeg_path: str) -> str:
         if os.path.isfile(resolved):
             return resolved
     else:
-        # Plain command name (e.g. "ffmpeg") — check PATH via shutil.which.
-        # Return the full resolved path so yt-dlp receives --ffmpeg-location
-        # with an absolute path rather than a bare name it must re-resolve via
-        # its own (possibly stale) PATH.
-        # Also probe known winget install locations in case PATH hasn't been
-        # refreshed yet after a recent winget install (requires restart/logoff).
+        # Plain command name (e.g. "ffmpeg") — check PATH via shutil.which
         import shutil
-        which_result = shutil.which(resolved)
-        if which_result:
-            return which_result
-        probed = _find_ffmpeg_without_path_refresh()
-        if probed:
-            return probed
+        if shutil.which(resolved):
+            return resolved
 
     # ── ffmpeg not found ──────────────────────────────────────────────────────
     WARN  = "\033[93m"
@@ -1710,20 +1626,10 @@ def _ensure_ffmpeg(ffmpeg_path: str) -> str:
 
             if ret is not None and ret.returncode == 0:
                 print(f"\n{OK}ffmpeg installed successfully!{RESET}")
-                # Try to find ffmpeg right now without a PATH refresh.
-                # Winget installs to a known location so we may be able to
-                # locate the binary immediately and skip the restart entirely.
-                probed = _find_ffmpeg_without_path_refresh()
-                if probed:
-                    print(f"{OK}Located ffmpeg at: {probed}{RESET}")
-                    print(f"{INFO}No restart needed — jj-dlp will use the full path directly.{RESET}\n")
-                    input("Press Enter to continue...")
-                    return probed
-                else:
-                    print(f"{WARN}NOTE: The PATH update won't take effect until you restart your computer or log out and back in.")
-                    print(f"      Please restart your computer or log out and back in, then relaunch jj-dlp.{RESET}\n")
-                    input("Press Enter to exit...")
-                    sys.exit(0)
+                print(f"{WARN}NOTE: The PATH update won't take effect until you restart your terminal.")
+                print(f"      Please relaunch jj-dlp and it will find ffmpeg automatically.{RESET}\n")
+                input("Press Enter to exit...")
+                sys.exit(0)
         else:
             print()  # blank line before manual instructions
 
