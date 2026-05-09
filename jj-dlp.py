@@ -121,7 +121,7 @@ def load_config(config_path: str):
     yt_dlp_path = yt_dlp_path_raw if yt_dlp_path_raw else "yt-dlp"
 
     ffmpeg_path_raw = general.get("FFMPEG_PATH", "").strip().strip('"\'')
-    ffmpeg_path = ffmpeg_path_raw if ffmpeg_path_raw else "bin/ffmpeg.exe"
+    ffmpeg_path = ffmpeg_path_raw if ffmpeg_path_raw else "ffmpeg"
 
     if not os.path.isabs(output_dir):
         output_dir = os.path.abspath(output_dir)
@@ -1574,11 +1574,16 @@ def _ensure_ffmpeg(ffmpeg_path: str) -> str:
     # Resolve relative paths against the script directory so the check is
     # consistent regardless of where the script was launched from.
     resolved = ffmpeg_path
-    if not os.path.isabs(resolved):
+    if not os.path.isabs(resolved) and os.sep in resolved or (os.altsep and os.altsep in resolved):
+        # Looks like a relative file path (e.g. "bin/ffmpeg.exe") — resolve it
         resolved = os.path.join(os.path.dirname(os.path.abspath(__file__)), resolved)
-
-    if os.path.isfile(resolved):
-        return resolved  # all good — already present
+        if os.path.isfile(resolved):
+            return resolved
+    else:
+        # Plain command name (e.g. "ffmpeg") — check PATH via shutil.which
+        import shutil
+        if shutil.which(resolved):
+            return resolved
 
     # ── ffmpeg not found ──────────────────────────────────────────────────────
     WARN  = "\033[93m"
@@ -1587,7 +1592,7 @@ def _ensure_ffmpeg(ffmpeg_path: str) -> str:
     ERR   = "\033[91m"
     RESET = "\033[0m"
 
-    print(f"\n{WARN}WARNING: ffmpeg not found at '{ffmpeg_path}'{RESET}")
+    print(f"\n{WARN}WARNING: ffmpeg not found at '{ffmpeg_path}' (resolved: '{resolved}'){RESET}")
     print(f"{INFO}ffmpeg is required for recording streams.{RESET}\n")
 
     # Check whether winget is available on this machine
