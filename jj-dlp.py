@@ -15,12 +15,16 @@ from typing import List, Set, Tuple, Dict, Optional
 import configparser
 import argparse
 from urllib.parse import urlparse
+import shutil
 
 
 # ── Early startup debug log ──────────────────────────────────────────────────
 ENABLE_STARTUP_LOG: bool = False
 ENABLE_CRASH_LOG:   bool = True
 _STARTUP_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jj-dlp-startup-debug.log")
+
+# Script start time (for uptime display)
+_SCRIPT_START_TIME: float = time.time()
 
 def _startup_dbg(msg: str) -> None:
     if not ENABLE_STARTUP_LOG:
@@ -105,6 +109,13 @@ def load_config(config_path: str) -> dict:
     yt_dlp_path           = yt_dlp_path_raw if yt_dlp_path_raw else "yt-dlp"
     site_label            = general.get("SITE_LABEL", os.path.basename(config_path)).strip().strip('\"\'')
 
+    # Disk drives to monitor (comma-separated paths/letters, e.g. "C:\,D:\,/home")
+    disk_drives_raw = general.get("DISK_DRIVES", "").strip().strip('\"\'')
+    if disk_drives_raw:
+        disk_drives = [d.strip() for d in disk_drives_raw.split(",") if d.strip()]
+    else:
+        disk_drives = []
+
     if not os.path.isabs(output_dir):
         output_dir = os.path.abspath(output_dir)
 
@@ -155,6 +166,7 @@ def load_config(config_path: str) -> dict:
         "username_idx": username_idx,
         "config_path": config_path,
         "site_label": site_label,
+        "disk_drives": disk_drives,
         "twitch_enabled": twitch_enabled,
         "twitch_client_id": twitch_client_id,
         "twitch_client_secret": twitch_client_secret,
@@ -182,6 +194,7 @@ class SiteState:
         # Dashboard display state (written by monitor thread, read by renderer)
         self.dash_lock            = threading.Lock()
         self.dash_live_since:     Dict[str, float] = {}   # streamer -> epoch
+        self.dash_last_live:      Dict[str, float] = {}   # streamer -> epoch when recording stopped
         self.dash_next_check_in:  float = 0.0
         self.dash_all_streamers:  List[str] = []
         self.dash_blocked:        Set[str] = set()
@@ -674,6 +687,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                     close_logs()
                 except Exception:
                     pass
+                with site.dash_lock:
+                    site.dash_last_live[streamer] = time.time()
                 site.log_line(f"Recording finished: {streamer}")
                 break
 
@@ -857,7 +872,7 @@ def _fmt_duration(seconds: float) -> str:
 def _live_bar(seconds: float, width: int = 14) -> str:
     MAX_SECS = 6 * 3600
     filled = min(int(width * seconds / MAX_SECS), width)
-    return "█" * filled + "░" * (width - filled)
+    return "#" * filled + "." * (width - filled)
 
 def draw_box(stdscr, y1, x1, y2, x2, pair):
     h, w = stdscr.getmaxyx()
@@ -934,35 +949,94 @@ class JJDlpDashboard:
         self._mgmt_mode   = None
         self._mgmt_buf    = ""
         self._mgmt_result = ""
+        # Color scheme index for randomization
+        self._color_scheme_idx = 0
 
     # ── Color palette ────────────────────────────────────────────────────────
     # Pair numbers and their meanings — easy to change here
-    C_CHROME    = 1   # cyan on black       — borders, labels
-    C_HILIGHT   = 2   # white on blue       — selected tab
-    C_WARN      = 3   # yellow on black     — countdown, warnings
-    C_LIVE      = 4   # green on black      — live status
-    C_INVHEAD   = 5   # black on cyan       — inverse headers
-    C_LOGO      = 6   # magenta on black    — logo
-    C_REC       = 7   # red on black        — recording dot
-    C_DIM       = 8   # white on black      — dim / offline
-    C_LIVEBADGE = 9   # black on green      — live badge bg
-    C_NORMAL    = 10  # white on black      — normal text
-    C_DISABLED  = 11  # yellow on black     — disabled/blocked
+    C_CHROME    = 1   # borders, labels
+    C_HILIGHT   = 2   # selected tab
+    C_WARN      = 3   # countdown, warnings
+    C_LIVE      = 4   # live status
+    C_INVHEAD   = 5   # inverse headers
+    C_LOGO      = 6   # logo
+    C_REC       = 7   # recording dot
+    C_DIM       = 8   # dim / offline
+    C_LIVEBADGE = 9   # live badge bg
+    C_NORMAL    = 10  # normal text
+    C_DISABLED  = 11  # disabled/blocked
+    C_SYSTEM    = 12  # system panel header/border
+
+    # Color schemes: list of (chrome_fg, hilight_fg, hilight_bg, warn_fg, live_fg,
+    #                          invhead_fg, invhead_bg, logo_fg, rec_fg, dim_fg,
+    #                          livebadge_fg, livebadge_bg, normal_fg, disabled_fg, system_fg)
+    COLOR_SCHEMES = [
+        # 0: Default (cyan/blue/green/magenta)
+        (curses.COLOR_CYAN,    curses.COLOR_WHITE,   curses.COLOR_BLUE,
+         curses.COLOR_YELLOW,  curses.COLOR_GREEN,   curses.COLOR_BLACK,
+         curses.COLOR_CYAN,    curses.COLOR_MAGENTA, curses.COLOR_RED,
+         curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
+         curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_YELLOW),
+        # 1: Amber terminal
+        (curses.COLOR_YELLOW,  curses.COLOR_BLACK,   curses.COLOR_YELLOW,
+         curses.COLOR_WHITE,   curses.COLOR_GREEN,   curses.COLOR_BLACK,
+         curses.COLOR_YELLOW,  curses.COLOR_YELLOW,  curses.COLOR_RED,
+         curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
+         curses.COLOR_WHITE,   curses.COLOR_WHITE,   curses.COLOR_CYAN),
+        # 2: Green phosphor
+        (curses.COLOR_GREEN,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
+         curses.COLOR_CYAN,    curses.COLOR_WHITE,   curses.COLOR_BLACK,
+         curses.COLOR_GREEN,   curses.COLOR_GREEN,   curses.COLOR_RED,
+         curses.COLOR_GREEN,   curses.COLOR_BLACK,   curses.COLOR_WHITE,
+         curses.COLOR_WHITE,   curses.COLOR_CYAN,    curses.COLOR_YELLOW),
+        # 3: Red alert
+        (curses.COLOR_RED,     curses.COLOR_WHITE,   curses.COLOR_RED,
+         curses.COLOR_YELLOW,  curses.COLOR_GREEN,   curses.COLOR_WHITE,
+         curses.COLOR_RED,     curses.COLOR_RED,     curses.COLOR_MAGENTA,
+         curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
+         curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_CYAN),
+        # 4: Magenta/purple
+        (curses.COLOR_MAGENTA, curses.COLOR_WHITE,   curses.COLOR_MAGENTA,
+         curses.COLOR_CYAN,    curses.COLOR_GREEN,   curses.COLOR_BLACK,
+         curses.COLOR_MAGENTA, curses.COLOR_CYAN,    curses.COLOR_RED,
+         curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
+         curses.COLOR_WHITE,   curses.COLOR_CYAN,    curses.COLOR_YELLOW),
+        # 5: Ice blue
+        (curses.COLOR_CYAN,    curses.COLOR_BLACK,   curses.COLOR_CYAN,
+         curses.COLOR_WHITE,   curses.COLOR_GREEN,   curses.COLOR_BLACK,
+         curses.COLOR_WHITE,   curses.COLOR_BLUE,    curses.COLOR_RED,
+         curses.COLOR_CYAN,    curses.COLOR_BLACK,   curses.COLOR_GREEN,
+         curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_MAGENTA),
+    ]
+
+    def randomize_colors(self):
+        """Cycle to the next color scheme."""
+        self._color_scheme_idx = (self._color_scheme_idx + 1) % len(self.COLOR_SCHEMES)
+        self._apply_color_scheme()
+
+    def _apply_color_scheme(self):
+        s = self.COLOR_SCHEMES[self._color_scheme_idx]
+        (chrome_fg, hilight_fg, hilight_bg, warn_fg, live_fg,
+         invhead_fg, invhead_bg, logo_fg, rec_fg, dim_fg,
+         livebadge_fg, livebadge_bg, normal_fg, disabled_fg, system_fg) = s
+        curses.init_pair(self.C_CHROME,    chrome_fg,    curses.COLOR_BLACK)
+        curses.init_pair(self.C_HILIGHT,   hilight_fg,   hilight_bg)
+        curses.init_pair(self.C_WARN,      warn_fg,      curses.COLOR_BLACK)
+        curses.init_pair(self.C_LIVE,      live_fg,      curses.COLOR_BLACK)
+        curses.init_pair(self.C_INVHEAD,   invhead_fg,   invhead_bg)
+        curses.init_pair(self.C_LOGO,      logo_fg,      curses.COLOR_BLACK)
+        curses.init_pair(self.C_REC,       rec_fg,       curses.COLOR_BLACK)
+        curses.init_pair(self.C_DIM,       dim_fg,       curses.COLOR_BLACK)
+        curses.init_pair(self.C_LIVEBADGE, livebadge_fg, livebadge_bg)
+        curses.init_pair(self.C_NORMAL,    normal_fg,    curses.COLOR_BLACK)
+        curses.init_pair(self.C_DISABLED,  disabled_fg,  curses.COLOR_BLACK)
+        curses.init_pair(self.C_SYSTEM,    system_fg,    curses.COLOR_BLACK)
 
     def setup_colors(self):
         curses.start_color()
         curses.use_default_colors()
-        curses.init_pair(self.C_CHROME,    curses.COLOR_CYAN,    curses.COLOR_BLACK)
-        curses.init_pair(self.C_HILIGHT,   curses.COLOR_WHITE,   curses.COLOR_BLUE)
-        curses.init_pair(self.C_WARN,      curses.COLOR_YELLOW,  curses.COLOR_BLACK)
-        curses.init_pair(self.C_LIVE,      curses.COLOR_GREEN,   curses.COLOR_BLACK)
-        curses.init_pair(self.C_INVHEAD,   curses.COLOR_BLACK,   curses.COLOR_CYAN)
-        curses.init_pair(self.C_LOGO,      curses.COLOR_MAGENTA, curses.COLOR_BLACK)
-        curses.init_pair(self.C_REC,       curses.COLOR_RED,     curses.COLOR_BLACK)
-        curses.init_pair(self.C_DIM,       curses.COLOR_WHITE,   curses.COLOR_BLACK)
-        curses.init_pair(self.C_LIVEBADGE, curses.COLOR_BLACK,   curses.COLOR_GREEN)
-        curses.init_pair(self.C_NORMAL,    curses.COLOR_WHITE,   curses.COLOR_BLACK)
-        curses.init_pair(self.C_DISABLED,  curses.COLOR_YELLOW,  curses.COLOR_BLACK)
+        self._apply_color_scheme()
+
 
     # ── Logo ─────────────────────────────────────────────────────────────────
     def draw_logo(self, y, x):
@@ -981,6 +1055,117 @@ class JJDlpDashboard:
                 safe_addstr(self.stdscr, y, x, label, curses.color_pair(self.C_CHROME))
             x += len(label) + 1
 
+    # ── System status sidebar ────────────────────────────────────────────────
+    def draw_system_panel(self, y1, x1, y2, x2):
+        """Draws the SYSTEM info panel (from demo). Placed in the sidebar."""
+        draw_box(self.stdscr, y1, x1, y2, x2, self.C_SYSTEM)
+        safe_addstr(self.stdscr, y1, x1 + 2, " SYSTEM ",
+                    curses.color_pair(self.C_SYSTEM) | curses.A_BOLD)
+
+        # Aggregate counts across all sites
+        total_streamers = 0
+        live_cnt = 0
+        rec_cnt  = 0
+        off_cnt  = 0
+        dis_cnt  = 0
+        check_interval = 60
+
+        for site in self.sites:
+            with site.dash_lock:
+                all_s      = list(site.dash_all_streamers)
+                live_since = dict(site.dash_live_since)
+                blocked    = set(site.dash_blocked)
+                recording  = set(site.currently_recording)
+            try:
+                cfg = load_config(site.config_path)
+                check_interval = cfg.get("check_interval", 60)
+            except Exception:
+                pass
+            total_streamers += len(all_s)
+            live_cnt += sum(1 for s in all_s if s in live_since and s not in blocked)
+            rec_cnt  += sum(1 for s in recording)
+            off_cnt  += sum(1 for s in all_s if s not in live_since and s not in blocked)
+            dis_cnt  += sum(1 for s in all_s if s in blocked)
+
+        # Uptime
+        uptime_secs = int(time.time() - _SCRIPT_START_TIME)
+        uptime_str  = _fmt_duration(uptime_secs)
+
+        rows = [
+            ("Streamers", str(total_streamers), self.C_CHROME),
+            ("Live",      str(live_cnt),        self.C_LIVE),
+            ("Recording", str(rec_cnt),         self.C_REC),
+            ("Offline",   str(off_cnt),         self.C_DIM),
+            ("Disabled",  str(dis_cnt),         self.C_DISABLED),
+            ("",          "",                   0),
+            ("Interval",  f"{check_interval}s", self.C_CHROME),
+            ("Logging",   "", self.C_LIVE),   # filled below
+            ("Popups",    "", self.C_LIVE),   # filled below
+        ]
+
+        # Fill logging/popups from first site's config
+        try:
+            cfg0 = load_config(self.sites[0].config_path) if self.sites else {}
+            rows[7] = ("Logging", "ON" if cfg0.get("logging_enabled") else "OFF",
+                       self.C_LIVE if cfg0.get("logging_enabled") else self.C_DIM)
+            rows[8] = ("Popups",  "ON" if cfg0.get("popup_notifications") else "OFF",
+                       self.C_LIVE if cfg0.get("popup_notifications") else self.C_DIM)
+        except Exception:
+            pass
+
+        inner_w = x2 - x1 - 2
+        label_w = min(10, inner_w // 2)
+
+        for i, (label, val, cpair) in enumerate(rows):
+            row_y = y1 + 2 + i
+            if row_y >= y2 - 1:
+                break
+            if label:
+                safe_addstr(self.stdscr, row_y, x1 + 2,
+                            label[:label_w].ljust(label_w),
+                            curses.color_pair(self.C_DIM))
+                safe_addstr(self.stdscr, row_y, x1 + 2 + label_w + 1,
+                            str(val)[:inner_w - label_w - 1],
+                            curses.color_pair(cpair) | curses.A_BOLD)
+
+        # Disk space rows
+        disk_row_y = y1 + 2 + len(rows) + 1
+        try:
+            cfg0 = load_config(self.sites[0].config_path) if self.sites else {}
+            drives = cfg0.get("disk_drives", [])
+            if not drives:
+                # Fallback: show output_dir's drive/fs
+                drives = [cfg0.get("output_dir", "/")]
+            if disk_row_y < y2 - 1:
+                safe_addstr(self.stdscr, disk_row_y, x1 + 2, "-- Disk --",
+                            curses.color_pair(self.C_SYSTEM))
+                disk_row_y += 1
+            for drive in drives:
+                if disk_row_y >= y2 - 1:
+                    break
+                try:
+                    usage = shutil.disk_usage(drive)
+                    pct   = (usage.used / usage.total * 100) if usage.total else 0
+                    free_gb = usage.free / (1024**3)
+                    # Short label: last component or drive letter
+                    drv_label = os.path.basename(drive.rstrip("/\\")) or drive
+                    drv_label = drv_label[:6]
+                    disk_str  = f"{drv_label:<6} {free_gb:>4.1f}G {pct:>3.0f}%"
+                    color = self.C_LIVE if pct < 80 else (self.C_WARN if pct < 95 else self.C_REC)
+                    safe_addstr(self.stdscr, disk_row_y, x1 + 2,
+                                disk_str[:inner_w],
+                                curses.color_pair(color))
+                    disk_row_y += 1
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Uptime at bottom
+        safe_addstr(self.stdscr, y2 - 1, x1 + 2,
+                    f"Up: {uptime_str}"[:inner_w],
+                    curses.color_pair(self.C_CHROME))
+
     # ── Site panel (one per config) ──────────────────────────────────────────
     def draw_site_panel(self, site: "SiteState", y1, x1, y2, x2, is_selected:False):
         """
@@ -998,6 +1183,7 @@ class JJDlpDashboard:
                                        os.path.basename(site.config_path))
             all_s        = list(site.dash_all_streamers)
             live_since   = dict(site.dash_live_since)
+            last_live    = dict(site.dash_last_live)
             blocked      = set(site.dash_blocked)
             next_in      = site.dash_next_check_in
             recording    = set(site.currently_recording)
@@ -1036,9 +1222,9 @@ class JJDlpDashboard:
         max_rows     = y2 - row_start - 2   # leave 2 rows at bottom for countdown
 
         # Column widths — scale to panel width
-        name_w  = max(10, min(18, panel_width // 4))
-        bar_w   = max(8,  min(14, panel_width // 5))
-        # status col: fixed 10, dur col: remainder
+        name_w      = max(10, min(18, panel_width // 4))
+        bar_w       = max(8,  min(14, panel_width // 5))
+        last_live_w = 12   # "Last Live" column
 
         for i, s in enumerate(all_s):
             if i >= max_rows:
@@ -1048,30 +1234,55 @@ class JJDlpDashboard:
             since    = live_since.get(s)
             is_rec   = s in recording
 
+            # "Last Live" value for this streamer
+            ll_ts = last_live.get(s)
+            if ll_ts is not None:
+                ll_ago = int(now - ll_ts)
+                if ll_ago < 60:
+                    last_live_str = f"{ll_ago}s ago"
+                elif ll_ago < 3600:
+                    last_live_str = f"{ll_ago//60}m ago"
+                elif ll_ago < 86400:
+                    last_live_str = f"{ll_ago//3600}h ago"
+                else:
+                    last_live_str = f"{ll_ago//86400}d ago"
+            else:
+                last_live_str = ""
+
             if is_dis:
                 name_attr   = curses.color_pair(self.C_DISABLED)
-                status_str  = "⊘ off"
+                # Flash between "[x] off" and "[REC]" style for disabled
+                if self.tick % 2 == 0:
+                    status_str  = "[x] off"
+                else:
+                    status_str  = "[DIS]  "
                 status_attr = curses.color_pair(self.C_DISABLED)
-                bar_str     = "░" * bar_w
+                bar_str     = "-" * bar_w
                 bar_attr    = curses.color_pair(self.C_DISABLED)
                 dur_str     = ""
             elif since is not None:
                 elapsed     = now - since
                 name_attr   = curses.color_pair(self.C_LIVE) | curses.A_BOLD
+                # Flash between "Live" and "REC" for recording streamers
                 if is_rec:
-                    status_str  = "● REC"
-                    status_attr = curses.color_pair(self.C_REC) | curses.A_BOLD
+                    if self.tick % 2 == 0:
+                        status_str  = "[Live] "
+                        status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
+                    else:
+                        status_str  = "[ REC]"
+                        status_attr = curses.color_pair(self.C_REC) | curses.A_BOLD
                 else:
-                    status_str  = "● LIVE"
+                    status_str  = "[Live] "
                     status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
                 bar_str     = _live_bar(elapsed, bar_w)
                 bar_attr    = curses.color_pair(self.C_LIVE)
                 dur_str     = _fmt_duration(elapsed)
+                last_live_str = ""  # currently live, no "last live"
             else:
                 name_attr   = curses.color_pair(self.C_DIM)
-                status_str  = "○ off"
+                status_str  = "[ off] "
                 status_attr = curses.color_pair(self.C_DIM)
-                bar_str     = "░" * bar_w
+                bar_str     = "-" * bar_w
                 bar_attr    = curses.color_pair(self.C_DIM)
                 dur_str     = ""
 
@@ -1085,7 +1296,15 @@ class JJDlpDashboard:
             safe_addstr(self.stdscr, row_y, col, bar_str, bar_attr)
             col += bar_w + 1
             if dur_str:
-                safe_addstr(self.stdscr, row_y, col, dur_str, curses.color_pair(self.C_CHROME))
+                safe_addstr(self.stdscr, row_y, col,
+                            dur_str[:9].ljust(9), curses.color_pair(self.C_CHROME))
+            else:
+                safe_addstr(self.stdscr, row_y, col, " " * 9, 0)
+            col += 10
+            if last_live_str:
+                safe_addstr(self.stdscr, row_y, col,
+                            last_live_str[:last_live_w],
+                            curses.color_pair(self.C_DIM))
 
         # ── Countdown ──
         nxt = max(0.0, next_in)
@@ -1185,7 +1404,7 @@ class JJDlpDashboard:
                 break
             lbl = load_config(site.config_path).get("site_label",
                               os.path.basename(site.config_path))
-            safe_addstr(self.stdscr, row_y, x1 + 2, f"── {lbl} ──",
+            safe_addstr(self.stdscr, row_y, x1 + 2, f"-- {lbl} --",
                         curses.color_pair(self.C_WARN) | curses.A_BOLD)
             row_y += 1
 
@@ -1240,7 +1459,7 @@ class JJDlpDashboard:
             except Exception:
                 continue
             lbl = cfg.get("site_label", os.path.basename(site.config_path))
-            safe_addstr(self.stdscr, row_y, x1 + 2, f"── {lbl} ──",
+            safe_addstr(self.stdscr, row_y, x1 + 2, f"-- {lbl} --",
                         curses.color_pair(self.C_WARN) | curses.A_BOLD)
             row_y += 1
 
@@ -1272,10 +1491,10 @@ class JJDlpDashboard:
                      f"Type username then Enter  |  Esc to cancel  |  "
                      f"Input: {self._mgmt_buf}_")
         else:
-            hints = (f"  Tab/←/→: switch view"
-                     f"  [ ]/]/[: site panel"
+            hints = (f"  Tab/</->: switch view"
+                     f"  [/]: prev/next site"
                      f"  A: add  R: remove  D: disable"
-                     f"  Ctrl+O: terminal  Q: quit  ")
+                     f"  C: colors  Ctrl+O: terminal  Q: quit  ")
         safe_addstr(self.stdscr, h - 1, 0,
                     hints.ljust(w - 1)[:w - 1],
                     curses.color_pair(self.C_INVHEAD))
@@ -1318,7 +1537,7 @@ class JJDlpDashboard:
             for s in all_s:
                 if row >= by2 - 4:
                     break
-                safe_addstr(self.stdscr, row, bx1 + 4, f"· {s}",
+                safe_addstr(self.stdscr, row, bx1 + 4, f"- {s}",
                             curses.color_pair(self.C_DIM))
                 row += 1
 
@@ -1339,34 +1558,46 @@ class JJDlpDashboard:
         h, w = self.stdscr.getmaxyx()
         self.stdscr.bkgd(" ", curses.color_pair(self.C_NORMAL))
 
-        # Logo
+        # Logo (6 lines tall, starts at row 1)
         self.draw_logo(1, 2)
 
-        # Timestamp top-right
-        ts = time.strftime("%Y-%m-%d  %H:%M:%S")
-        safe_addstr(self.stdscr, 1, w - len(ts) - 3, ts, curses.color_pair(self.C_CHROME))
+        # Uptime top-right (replaces timestamp)
+        uptime_secs = int(time.time() - _SCRIPT_START_TIME)
+        uptime_str  = f"Up: {_fmt_duration(uptime_secs)}"
+        safe_addstr(self.stdscr, 1, w - len(uptime_str) - 3, uptime_str,
+                    curses.color_pair(self.C_CHROME))
 
-        # Tab bar
-        self.draw_tabs(7, 2)
+        # Blank line after logo (row 7), then tab bar at row 8
+        # (Logo occupies rows 1-6, row 7 is blank, tabs at row 8)
+        self.draw_tabs(8, 2)
 
         # Separator
-        safe_addstr(self.stdscr, 8, 1, "─" * (w - 2), curses.color_pair(self.C_CHROME))
+        safe_addstr(self.stdscr, 9, 1, "-" * (w - 2), curses.color_pair(self.C_CHROME))
 
-        # Content area
-        content_y1 = 9
+        # Content area starts at row 10
+        content_y1 = 10
         content_y2 = h - 2
+
+        # System panel sidebar (right column, always visible)
+        sidebar_w  = 22
+        sidebar_x1 = w - sidebar_w - 1
+        sidebar_x2 = w - 2
+        self.draw_system_panel(content_y1, sidebar_x1, content_y2, sidebar_x2)
+
+        # Content area is to the left of the sidebar
+        content_x2 = sidebar_x1 - 1
 
         # Get the name of the currently selected tab
         current_tab_name = self.TABS[self.selected_tab]
 
         if current_tab_name == "Dashboard":
-            self.draw_dashboard_tab(content_y1, 1, content_y2, w - 2)
+            self.draw_dashboard_tab(content_y1, 1, content_y2, content_x2)
         elif current_tab_name == "Log":
-            self.draw_log_tab(content_y1, 1, content_y2, w - 2)
+            self.draw_log_tab(content_y1, 1, content_y2, content_x2)
         elif current_tab_name == "EventSub":
-            self.draw_eventsub_tab(content_y1, 1, content_y2, w - 2)
+            self.draw_eventsub_tab(content_y1, 1, content_y2, content_x2)
         elif current_tab_name == "Config":
-            self.draw_config_tab(content_y1, 1, content_y2, w - 2)
+            self.draw_config_tab(content_y1, 1, content_y2, content_x2)
 
         self.draw_footer()
 
@@ -1397,6 +1628,8 @@ class JJDlpDashboard:
             self._start_mgmt("remove")
         elif key in (ord('d'), ord('D')):
             self._start_mgmt("disable")
+        elif key in (ord('c'), ord('C')):
+            self.randomize_colors()
         elif key == ord('\x0f'):  # Ctrl+O — switch to terminal mode
             with output_mode_lock:
                 global OUTPUT_MODE
@@ -1489,7 +1722,7 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
 
         ts = time.strftime("%Y-%m-%d  %H:%M:%S")
         safe_addstr(stdscr, 1, w - len(ts) - 3, ts, curses.color_pair(1))
-        safe_addstr(stdscr, 7, 2, "─" * (w - 4), curses.color_pair(1))
+        safe_addstr(stdscr, 7, 2, "-" * (w - 4), curses.color_pair(1))
 
         # Title
         title = "SELECT CONFIG FILE(S)"
@@ -1497,13 +1730,13 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
 
         # Instructions
         safe_addstr(stdscr, 10, 2,
-                    "Space = toggle ✓   Enter = confirm   Q = quit",
+                    "Space = toggle [x]   Enter = confirm   Q = quit",
                     curses.color_pair(3))
 
         # File list
         for i, name in enumerate(found):
             row     = 12 + i
-            checked = "●" if i in selected else "○"
+            checked = "[x]" if i in selected else "[ ]"
             is_cur  = i == cursor
             if is_cur:
                 attr = curses.color_pair(2) | curses.A_BOLD
