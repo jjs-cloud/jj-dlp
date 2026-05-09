@@ -647,7 +647,66 @@ def _dashboard_renderer_thread() -> None:
         _dashboard_stop_event.wait(timeout=1)
 
 
-def _modify_config_streamer(config_path: str, username: str, action: str) -> str:
+def _set_config_value(config_path: str, section: str, key: str, value: str) -> bool:
+    """
+    Set key = value in the given section of the config file, in-place.
+    Updates the line if the key already exists, or appends it if not.
+    Returns True on success, False on any file error.
+    """
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception:
+        return False
+
+    # Find section boundaries
+    section_start = None
+    section_end = len(lines)
+    in_target = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if in_target:
+                section_end = i
+                break
+            if stripped[1:-1].lower() == section.lower():
+                section_start = i
+                in_target = True
+
+    if section_start is None:
+        # Section doesn't exist — append it at the end
+        lines.append(f"\n[{section}]\n")
+        lines.append(f"{key} = {value}\n")
+    else:
+        # Look for an existing key within the section
+        key_lower = key.lower()
+        updated = False
+        for i in range(section_start + 1, section_end):
+            stripped = lines[i].strip()
+            if stripped.startswith("#") or stripped.startswith(";") or "=" not in stripped:
+                continue
+            k = stripped.split("=", 1)[0].strip().lower()
+            if k == key_lower:
+                lines[i] = f"{key} = {value}\n"
+                updated = True
+                break
+
+        if not updated:
+            # Append before the next section, after trimming trailing blanks
+            insert_at = section_end
+            while insert_at > section_start + 1 and lines[insert_at - 1].strip() == "":
+                insert_at -= 1
+            lines.insert(insert_at, f"{key} = {value}\n")
+
+    try:
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        return True
+    except Exception:
+        return False
+
+
+
     """
     Edit the config file in-place to add or remove a streamer.
 
@@ -1565,7 +1624,7 @@ _eventsub: TwitchEventSub = None
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def _ensure_ffmpeg(ffmpeg_path: str) -> str:
+def _ensure_ffmpeg(ffmpeg_path: str, config_path: str = "") -> str:
     """
     Verify that ffmpeg exists at ffmpeg_path.
     If not found, prompt the user to install it via winget.
@@ -1626,6 +1685,11 @@ def _ensure_ffmpeg(ffmpeg_path: str) -> str:
 
             if ret is not None and ret.returncode == 0:
                 print(f"\n{OK}ffmpeg installed successfully!{RESET}")
+                if config_path:
+                    if _set_config_value(config_path, "General", "FFMPEG_PATH", "ffmpeg"):
+                        print(f"{INFO}Updated FFMPEG_PATH = ffmpeg in your config file.{RESET}")
+                    else:
+                        print(f"{WARN}Could not update config file — you may want to set FFMPEG_PATH = ffmpeg manually.{RESET}")
                 print(f"{WARN}NOTE: The PATH update won't take effect until you restart your terminal.")
                 print(f"      Please relaunch jj-dlp and it will find ffmpeg automatically.{RESET}\n")
                 input("Press Enter to exit...")
@@ -1715,7 +1779,7 @@ def main() -> None:
 
     # Verify ffmpeg is present; prompt to install via winget if not.
     # _ensure_ffmpeg may return a corrected path (e.g. "ffmpeg" on PATH after install).
-    initial_cfg["ffmpeg_path"] = _ensure_ffmpeg(initial_cfg.get("ffmpeg_path", "bin/ffmpeg.exe"))
+    initial_cfg["ffmpeg_path"] = _ensure_ffmpeg(initial_cfg.get("ffmpeg_path", "ffmpeg"), config_path)
 
     global VERBOSITY, DEBUG_LOGS_ENABLED, DEBUG_LOG_PATH, dashboard_next_check_in, _config_path
     _config_path = config_path
