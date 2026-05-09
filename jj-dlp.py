@@ -1565,6 +1565,86 @@ _eventsub: TwitchEventSub = None
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+def _ensure_ffmpeg(ffmpeg_path: str) -> str:
+    """
+    Verify that ffmpeg exists at ffmpeg_path.
+    If not found, prompt the user to install it via winget.
+    Returns the resolved ffmpeg path on success, or exits on failure.
+    """
+    # Resolve relative paths against the script directory so the check is
+    # consistent regardless of where the script was launched from.
+    resolved = ffmpeg_path
+    if not os.path.isabs(resolved):
+        resolved = os.path.join(os.path.dirname(os.path.abspath(__file__)), resolved)
+
+    if os.path.isfile(resolved):
+        return resolved  # all good — already present
+
+    # ── ffmpeg not found ──────────────────────────────────────────────────────
+    WARN  = "\033[93m"
+    INFO  = "\033[96m"
+    OK    = "\033[92m"
+    ERR   = "\033[91m"
+    RESET = "\033[0m"
+
+    print(f"\n{WARN}WARNING: ffmpeg not found at '{ffmpeg_path}'{RESET}")
+    print(f"{INFO}ffmpeg is required for recording streams.{RESET}\n")
+
+    # Check whether winget is available on this machine
+    winget_available = False
+    try:
+        result = subprocess.run(
+            ["winget", "--version"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        winget_available = result.returncode == 0
+    except FileNotFoundError:
+        winget_available = False
+
+    if winget_available:
+        print("ffmpeg can be installed automatically using winget.\n")
+        try:
+            answer = input("  Install ffmpeg now? [Y/n]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = "n"
+
+        if answer in ("", "y", "yes"):
+            print(f"\n{INFO}Running: winget install Gyan.FFmpeg{RESET}\n")
+            try:
+                ret = subprocess.run(
+                    ["winget", "install", "--id", "Gyan.FFmpeg", "-e", "--accept-source-agreements", "--accept-package-agreements"],
+                    check=False
+                )
+            except Exception as e:
+                print(f"{ERR}winget failed to launch: {e}{RESET}")
+                ret = None
+
+            if ret is not None and ret.returncode == 0:
+                # winget puts ffmpeg on PATH; verify it's now callable
+                try:
+                    subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                    print(f"\n{OK}ffmpeg installed successfully!{RESET}")
+                    print(f"{WARN}NOTE: Your config still points to '{ffmpeg_path}'.")
+                    print(f"      Update FFMPEG_PATH in your config to 'ffmpeg' (or leave it blank){RESET}")
+                    print(f"      to use the system-installed version going forward.\n")
+                    return "ffmpeg"  # fall back to PATH-based ffmpeg for this run
+                except Exception:
+                    pass  # installed but not on PATH yet — fall through to manual instructions
+
+            print(f"\n{ERR}Automatic installation did not complete successfully.{RESET}")
+        else:
+            print()  # blank line before manual instructions
+
+    # ── Manual instructions ───────────────────────────────────────────────────
+    print(f"{INFO}To install ffmpeg manually, run the following in a terminal:{RESET}\n")
+    print(f"    winget install --id Gyan.FFmpeg -e\n")
+    print("After installing, either:")
+    print(f"  • Set  FFMPEG_PATH = ffmpeg  in your config (uses the system PATH), or")
+    print(f"  • Run  install-ffmpeg.bat  if included in the repo.\n")
+    print(f"{ERR}Cannot continue without ffmpeg. Exiting.{RESET}\n")
+    sys.exit(1)
+
+
 def main() -> None:
     # ── Double-click / drag-and-drop fix ─────────────────────────────────────
     # When launched by double-clicking on Windows, the CWD is whatever Explorer
@@ -1633,6 +1713,10 @@ def main() -> None:
                     print(f"  Please enter a number between 1 and {len(found)}.")
 
     initial_cfg = load_config(config_path)
+
+    # Verify ffmpeg is present; prompt to install via winget if not.
+    # _ensure_ffmpeg may return a corrected path (e.g. "ffmpeg" on PATH after install).
+    initial_cfg["ffmpeg_path"] = _ensure_ffmpeg(initial_cfg.get("ffmpeg_path", "bin/ffmpeg.exe"))
 
     global VERBOSITY, DEBUG_LOGS_ENABLED, DEBUG_LOG_PATH, dashboard_next_check_in, _config_path
     _config_path = config_path
