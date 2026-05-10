@@ -176,6 +176,7 @@ class SiteState:
 
     def __init__(self, config_path: str):
         self.config_path          = config_path
+        self.label                = os.path.basename(config_path)
         self.lock                 = threading.Lock()
         self.currently_recording: Set[str] = set()
         self.recording_threads:   List[threading.Thread] = []
@@ -210,14 +211,14 @@ class SiteState:
         """Register an active yt-dlp subprocess so stop() can kill it."""
         with self._procs_lock:
             self._active_procs[streamer] = proc
-        dbg(f"[PROC] register_proc: streamer={streamer!r} pid={proc.pid} "
+        dbg(f"[{self.label}] [PROC] register_proc: streamer={streamer!r} pid={proc.pid} "
             f"total_active={len(self._active_procs)}")
 
     def unregister_proc(self, streamer: str) -> None:
         """Remove a subprocess from the registry (after it exits)."""
         with self._procs_lock:
             removed = self._active_procs.pop(streamer, None)
-        dbg(f"[PROC] unregister_proc: streamer={streamer!r} "
+        dbg(f"[{self.label}] [PROC] unregister_proc: streamer={streamer!r} "
             f"pid={removed.pid if removed else 'N/A'} "
             f"total_remaining={len(self._active_procs)}")
 
@@ -225,16 +226,16 @@ class SiteState:
         """Kill every registered yt-dlp process. Called on quit."""
         with self._procs_lock:
             procs = dict(self._active_procs)
-        dbg(f"[PROC] kill_all_procs: found {len(procs)} proc(s): "
+        dbg(f"[{self.label}] [PROC] kill_all_procs: found {len(procs)} proc(s): "
             f"{[(s, p.pid) for s, p in procs.items()]}")
         for streamer, proc in procs.items():
-            dbg(f"[PROC] kill_all_procs: killing streamer={streamer!r} pid={proc.pid} "
+            dbg(f"[{self.label}] [PROC] kill_all_procs: killing streamer={streamer!r} pid={proc.pid} "
                 f"poll()={proc.poll()}")
             try:
                 kill_proc(proc)
-                dbg(f"[PROC] kill_all_procs: kill sent to pid={proc.pid}")
+                dbg(f"[{self.label}] [PROC] kill_all_procs: kill sent to pid={proc.pid}")
             except Exception as e:
-                dbg(f"[PROC] kill_all_procs: ERROR killing pid={proc.pid}: {e}")
+                dbg(f"[{self.label}] [PROC] kill_all_procs: ERROR killing pid={proc.pid}: {e}")
 
     def log_line(self, msg: str) -> None:
         """Append a timestamped line to the site's activity log (capped at 200 lines)."""
@@ -246,7 +247,7 @@ class SiteState:
                 self.dash_log_lines = self.dash_log_lines[-200:]
 
     def stop(self) -> None:
-        dbg(f"[PROC] SiteState.stop() called for config={self.config_path!r}")
+        dbg(f"[{self.label}] [PROC] SiteState.stop() called for config={self.config_path!r}")
         self._stop_event.set()
         self.trigger_event.set()
         self.kill_all_procs()
@@ -602,7 +603,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
             try:
                 proc = subprocess.Popen(cmd, stdout=out_target, stderr=err_target)
                 proc_start_time = time.time()
-                dbg(f"[PROC] record_stream: started yt-dlp for streamer={streamer!r} "
+                dbg(f"[{site.label}] [PROC] record_stream: started yt-dlp for streamer={streamer!r} "
                     f"pid={proc.pid} cmd={cmd}")
                 site.register_proc(streamer, proc)
                 ffmpeg_error_counter = [0]
@@ -617,7 +618,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                                          "streamer": streamer}, daemon=True).start()
             except Exception as e:
                 site.log_line(f"Failed to start yt-dlp for {streamer}: {e}")
-                dbg(f"[PROC] record_stream: Popen FAILED for streamer={streamer!r}: {e}")
+                dbg(f"[{site.label}] [PROC] record_stream: Popen FAILED for streamer={streamer!r}: {e}")
                 try:
                     close_logs()
                 except Exception:
@@ -634,12 +635,12 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
             while proc.poll() is None:
                 # Check if we've been asked to stop (e.g. user pressed Q)
                 if site._stop_event.is_set():
-                    dbg(f"[PROC] record_stream: stop_event set — killing pid={proc.pid} "
+                    dbg(f"[{site.label}] [PROC] record_stream: stop_event set — killing pid={proc.pid} "
                         f"streamer={streamer!r}")
                     kill_proc(proc)
-                    dbg(f"[PROC] record_stream: kill sent, waiting for proc to exit")
+                    dbg(f"[{site.label}] [PROC] record_stream: kill sent, waiting for proc to exit")
                     proc.wait()
-                    dbg(f"[PROC] record_stream: proc exited after stop_event kill "
+                    dbg(f"[{site.label}] [PROC] record_stream: proc exited after stop_event kill "
                         f"pid={proc.pid} poll()={proc.poll()}")
                     site.unregister_proc(streamer)
                     try:
@@ -650,7 +651,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
                 current_cfg = load_config(cfg["config_path"])
                 if streamer in current_cfg["blocked"]:
-                    dbg(f"[PROC] record_stream: streamer={streamer!r} blocked — killing pid={proc.pid}")
+                    dbg(f"[{site.label}] [PROC] record_stream: streamer={streamer!r} blocked — killing pid={proc.pid}")
                     kill_proc(proc)
                     site.log_line(f"Recording STOPPED (blocked) -> {streamer}")
                     site.unregister_proc(streamer)
@@ -665,7 +666,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
                 if ffmpeg_error_event.is_set():
                     site.log_line(f"ffmpeg error threshold reached for {streamer} — restarting")
-                    dbg(f"[PROC] record_stream: ffmpeg error restart for streamer={streamer!r} pid={proc.pid}")
+                    dbg(f"[{site.label}] [PROC] record_stream: ffmpeg error restart for streamer={streamer!r} pid={proc.pid}")
                     kill_proc(proc)
                     site.unregister_proc(streamer)
                     try:
@@ -685,7 +686,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                         stall_check_interval=stall_check_interval)
                     if stall_detected:
                         site.log_line(f"Stall detected for {streamer} — restarting")
-                        dbg(f"[PROC] record_stream: stall restart for streamer={streamer!r} pid={proc.pid}")
+                        dbg(f"[{site.label}] [PROC]] record_stream: stall restart for streamer={streamer!r} pid={proc.pid}")
                         kill_proc(proc)
                         site.unregister_proc(streamer)
                         try:
@@ -698,7 +699,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                         last_size        = current_size
                         last_growth_time = time.time()
             else:
-                dbg(f"[PROC] record_stream: proc exited naturally "
+                dbg(f"[{site.label}] [PROC]] record_stream: proc exited naturally "
                     f"pid={proc.pid} poll()={proc.poll()} streamer={streamer!r}")
                 site.unregister_proc(streamer)
                 try:
@@ -711,21 +712,21 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                 break
 
     except KeyboardInterrupt:
-        dbg(f"[PROC] record_stream: KeyboardInterrupt for streamer={streamer!r} "
+        dbg(f"[{site.label}] [PROC]] record_stream: KeyboardInterrupt for streamer={streamer!r} "
             f"pid={proc.pid if proc else 'N/A'}")
         if proc is not None:
             try:
                 kill_proc(proc)
-                dbg(f"[PROC] record_stream: killed pid={proc.pid} via KeyboardInterrupt path")
+                dbg(f"[{site.label}] [PROC]] record_stream: killed pid={proc.pid} via KeyboardInterrupt path")
             except Exception as e:
-                dbg(f"[PROC] record_stream: kill error in KBI path: {e}")
+                dbg(f"[{site.label}] [PROC]] record_stream: kill error in KBI path: {e}")
         site.unregister_proc(streamer)
         try:
             close_logs()
         except Exception:
             pass
     finally:
-        dbg(f"[PROC] record_stream: finally block — streamer={streamer!r} "
+        dbg(f"[{site.label}] [PROC]] record_stream: finally block — streamer={streamer!r} "
             f"pid={proc.pid if proc else 'N/A'}")
         with site.lock:
             site.currently_recording.discard(streamer)
@@ -773,7 +774,7 @@ def config_watcher(site: "SiteState", poll_interval: int = 3) -> None:
                     site.trigger_event.set()
                 prev_streamers = curr_streamers
         except Exception as e:
-            dbg(f"[CONFIG_WATCHER] {site.config_path}: {e}")
+            dbg(f"[{site.label}] [CONFIG_WATCHER] {site.config_path}: {e}")
         site._stop_event.wait(timeout=poll_interval)
 
 
@@ -838,15 +839,15 @@ def monitor_site(site: "SiteState") -> None:
                 site.dash_blocked.clear()
                 site.dash_blocked.update(cfg["blocked"])
                 live_set = set(live_now)
-                dbg(f"[FLASH] monitor_site: live_set={live_set} "
+                dbg(f"[{site.label}] [FLASH] monitor_site: live_set={live_set} "
                     f"blocked={site.dash_blocked} streamers={streamers}")
                 for s in streamers:
                     if s not in live_set:
                         site.dash_live_since.pop(s, None)
-                        dbg(f"[FLASH] monitor_site: {s!r} -> offline, removed from dash_live_since")
+                        dbg(f"[{site.label}] [FLASH] monitor_site: {s!r} -> offline, removed from dash_live_since")
                     elif s not in site.dash_live_since:
                         site.dash_live_since[s] = time.time()
-                        dbg(f"[FLASH] monitor_site: {s!r} -> live, added to dash_live_since "
+                        dbg(f"[{site.label}] [FLASH] monitor_site: {s!r} -> live, added to dash_live_since "
                             f"(blocked={s in site.dash_blocked})")
 
             if live_now:
@@ -1179,7 +1180,7 @@ class JJDlpDashboard:
                 except Exception:
                     pass
             drives = seen_drives if seen_drives else ([fallback_dir] if fallback_dir else ["/"])
-            dbg(f"[DISK] draw_system_panel: drives={drives} (seen_drives={seen_drives}, "
+            dbg(f"[{site.label}] [DISK] draw_system_panel: drives={drives} (seen_drives={seen_drives}, "
                 f"fallback={fallback_dir})")
             if disk_row_y < y2 - 1:
                 safe_addstr(self.stdscr, disk_row_y, x1 + 2, "── Disk ──",
@@ -1202,9 +1203,9 @@ class JJDlpDashboard:
                                 curses.color_pair(color))
                     disk_row_y += 1
                 except Exception as _de:
-                    dbg(f"[DISK] draw_system_panel: disk_usage({drive!r}) failed: {_de}")
+                    dbg(f"[{site.label}] [DISK] draw_system_panel: disk_usage({drive!r}) failed: {_de}")
         except Exception as _outer:
-            dbg(f"[DISK] draw_system_panel: outer exception: {_outer}")
+            dbg(f"[{site.label}] [DISK] draw_system_panel: outer exception: {_outer}")
 
         # Uptime at bottom
         safe_addstr(self.stdscr, y2 - 1, x1 + 2,
@@ -1301,7 +1302,7 @@ class JJDlpDashboard:
                 dur_str     = ""
                 if since is not None:
                     # Disabled but currently live — flash [●Live] ↔ [DIS]
-                    dbg(f"[FLASH] draw_site_panel: {s!r} is_dis=True since={since:.0f} "
+                    dbg(f"[{site.label}] [FLASH] draw_site_panel: {s!r} is_dis=True since={since:.0f} "
                         f"tick={self.tick} tick%2={self.tick % 2}")
                     if self.tick % 2 == 0:
                         status_str  = "[●Live]"
@@ -1311,7 +1312,7 @@ class JJDlpDashboard:
                         status_attr = curses.color_pair(self.C_DISABLED)
                 else:
                     # Disabled and offline — steady [DIS]
-                    dbg(f"[FLASH] draw_site_panel: {s!r} is_dis=True since=None "
+                    dbg(f"[{site.label}] [FLASH] draw_site_panel: {s!r} is_dis=True since=None "
                         f"(no live data — fix not working if streamer IS live)")
                     status_str  = "[DIS]  "
                     status_attr = curses.color_pair(self.C_DISABLED)

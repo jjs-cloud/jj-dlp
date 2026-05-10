@@ -93,14 +93,18 @@ def _write_debug_log(msg: str) -> None:
         pass
 
 
-def dbg(msg: str) -> None:
+def dbg(msg: str, site_name: str = "") -> None:
     """
-    Write msg (with timestamp) to the debug log.
+    Write msg (with timestamp and optional site name) to the debug log.
     Also prints to stdout when in terminal mode (OUTPUT_MODE == 2)
     at verbosity 3 or 5.
     """
     ts   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    full = f"[{ts}] {msg}"
+
+    # Prepend site name if provided
+    prefix = f"[{site_name}] " if site_name else ""
+    full = f"[{ts}] {prefix}{msg}"
+    
     _write_debug_log(full)
 
     if _output_mode_ref is None:
