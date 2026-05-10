@@ -1626,8 +1626,8 @@ def _ensure_ffmpeg(ffmpeg_path: str) -> str:
 
             if ret is not None and ret.returncode == 0:
                 print(f"\n{OK}ffmpeg installed successfully!{RESET}")
-                print(f"{WARN}NOTE: You MUST restart your computer or log out and back in to update the PATH.")
-                print(f"      jj-dlp will not work correctly until you do so.{RESET}\n")
+                print(f"{WARN}NOTE: The PATH update won't take effect until you restart your terminal.")
+                print(f"      Please relaunch jj-dlp and it will find ffmpeg automatically.{RESET}\n")
                 input("Press Enter to exit...")
                 sys.exit(0)
         else:
@@ -1713,11 +1713,16 @@ def main() -> None:
 
     initial_cfg = load_config(config_path)
 
-    # Verify ffmpeg is present only when FFMPEG_PATH is explicitly set in the config.
-    # If no path was given we leave ffmpeg_path as "" so --ffmpeg-location is omitted
-    # entirely and yt-dlp resolves ffmpeg on its own (e.g. via PATH).
-    if initial_cfg.get("ffmpeg_path", ""):
-        initial_cfg["ffmpeg_path"] = _ensure_ffmpeg(initial_cfg["ffmpeg_path"])
+    # Always verify ffmpeg is present so the winget prompt fires when it's missing.
+    # If FFMPEG_PATH is explicitly set, store the resolved path so --ffmpeg-location
+    # is passed to yt-dlp.  If it was left blank, we check using "ffmpeg" (PATH
+    # lookup) but keep ffmpeg_path as "" so --ffmpeg-location is still omitted and
+    # yt-dlp resolves ffmpeg on its own.
+    configured_ffmpeg = initial_cfg.get("ffmpeg_path", "")
+    if configured_ffmpeg:
+        initial_cfg["ffmpeg_path"] = _ensure_ffmpeg(configured_ffmpeg)
+    else:
+        _ensure_ffmpeg("ffmpeg")  # validate it's on PATH; result discarded
 
     global VERBOSITY, DEBUG_LOGS_ENABLED, DEBUG_LOG_PATH, dashboard_next_check_in, _config_path
     _config_path = config_path
