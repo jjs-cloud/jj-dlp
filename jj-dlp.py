@@ -1626,8 +1626,8 @@ def _ensure_ffmpeg(ffmpeg_path: str) -> str:
 
             if ret is not None and ret.returncode == 0:
                 print(f"\n{OK}ffmpeg installed successfully!{RESET}")
-                print(f"{WARN}NOTE: The PATH update won't take effect until you restart your terminal.")
-                print(f"      Please relaunch jj-dlp and it will find ffmpeg automatically.{RESET}\n")
+                print(f"\n\n\n\n\n{WARN}NOTE: ffmpeg has been installed, but you must restart your comptuer or log out and back in for the system PATH to update. {RESET}")
+                print(f"      jj-dlp will not work properly until you restart.{RESET}\n")
                 input("Press Enter to exit...")
                 sys.exit(0)
         else:
