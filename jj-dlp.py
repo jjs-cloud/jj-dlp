@@ -1820,15 +1820,21 @@ class JJDlpDashboard:
 
             if is_dis:
                 name_attr   = curses.color_pair(self.C_DISABLED)
-                # Flash between "[x] off" and "[REC]" style for disabled
-                if self.tick % 2 == 0:
-                    status_str  = "[✕] off"
-                else:
-                    status_str  = "[DIS]  "
-                status_attr = curses.color_pair(self.C_DISABLED)
                 bar_str     = "─" * bar_w
                 bar_attr    = curses.color_pair(self.C_DISABLED)
                 dur_str     = ""
+                if since is not None:
+                    # Disabled but currently live — flash [●Live] ↔ [DIS]
+                    if self.tick % 2 == 0:
+                        status_str  = "[●Live]"
+                        status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
+                    else:
+                        status_str  = "[DIS]  "
+                        status_attr = curses.color_pair(self.C_DISABLED)
+                else:
+                    # Disabled and offline — steady [DIS]
+                    status_str  = "[DIS]  "
+                    status_attr = curses.color_pair(self.C_DISABLED)
             elif since is not None:
                 elapsed     = now - since
                 name_attr   = curses.color_pair(self.C_LIVE) | curses.A_BOLD
@@ -1838,7 +1844,7 @@ class JJDlpDashboard:
                         status_str  = "[●Live]"
                         status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
                     else:
-                        status_str  = "[▶REC]"
+                        status_str  = "[▶REC] "
                         status_attr = curses.color_pair(self.C_REC) | curses.A_BOLD
                 else:
                     status_str  = "[●Live]"
