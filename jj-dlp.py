@@ -121,7 +121,7 @@ def load_config(config_path: str):
     yt_dlp_path = yt_dlp_path_raw if yt_dlp_path_raw else "yt-dlp"
 
     ffmpeg_path_raw = general.get("FFMPEG_PATH", "").strip().strip('"\'')
-    ffmpeg_path = ffmpeg_path_raw if ffmpeg_path_raw else "ffmpeg"
+    ffmpeg_path = ffmpeg_path_raw  # empty string means no path given; --ffmpeg-location will be omitted
 
     if not os.path.isabs(output_dir):
         output_dir = os.path.abspath(output_dir)
@@ -1565,6 +1565,85 @@ _eventsub: TwitchEventSub = None
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+def _ensure_ffmpeg(ffmpeg_path: str) -> str:
+    """
+    Verify that ffmpeg exists at ffmpeg_path.
+    If not found, prompt the user to install it via winget.
+    Returns the resolved ffmpeg path on success, or exits on failure.
+    """
+    # Resolve relative paths against the script directory so the check is
+    # consistent regardless of where the script was launched from.
+    resolved = ffmpeg_path
+    if not os.path.isabs(resolved) and os.sep in resolved or (os.altsep and os.altsep in resolved):
+        # Looks like a relative file path (e.g. "bin/ffmpeg.exe") — resolve it
+        resolved = os.path.join(os.path.dirname(os.path.abspath(__file__)), resolved)
+        if os.path.isfile(resolved):
+            return resolved
+    else:
+        # Plain command name (e.g. "ffmpeg") — check PATH via shutil.which
+        import shutil
+        if shutil.which(resolved):
+            return resolved
+
+    # ── ffmpeg not found ──────────────────────────────────────────────────────
+    WARN  = "\033[93m"
+    INFO  = "\033[96m"
+    OK    = "\033[92m"
+    ERR   = "\033[91m"
+    RESET = "\033[0m"
+
+    print(f"\n{WARN}WARNING: ffmpeg not found at '{ffmpeg_path}' (resolved: '{resolved}'){RESET}")
+    print(f"{INFO}ffmpeg is required for recording streams.{RESET}\n")
+
+    # Check whether winget is available on this machine
+    winget_available = False
+    try:
+        result = subprocess.run(
+            ["winget", "--version"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        winget_available = result.returncode == 0
+    except FileNotFoundError:
+        winget_available = False
+
+    if winget_available:
+        print("ffmpeg can be installed automatically using winget.\n")
+        try:
+            answer = input("  Install ffmpeg now? [Y/n]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = "n"
+
+        if answer in ("", "y", "yes"):
+            print(f"\n{INFO}Running: winget install Gyan.FFmpeg{RESET}\n")
+            try:
+                ret = subprocess.run(
+                    ["winget", "install", "--id", "Gyan.FFmpeg", "-e", "--accept-source-agreements", "--accept-package-agreements"],
+                    check=False
+                )
+            except Exception as e:
+                print(f"{ERR}winget failed to launch: {e}{RESET}")
+                ret = None
+
+            if ret is not None and ret.returncode == 0:
+                print(f"\n{OK}ffmpeg installed successfully!{RESET}")
+                print(f"{WARN}NOTE: The PATH update won't take effect until you restart your terminal.")
+                print(f"      Please relaunch jj-dlp and it will find ffmpeg automatically.{RESET}\n")
+                input("Press Enter to exit...")
+                sys.exit(0)
+        else:
+            print()  # blank line before manual instructions
+
+    # ── Manual instructions ───────────────────────────────────────────────────
+    print(f"{INFO}To install ffmpeg manually, run the following in a terminal:{RESET}\n")
+    print(f"    winget install --id Gyan.FFmpeg -e\n")
+    print("After installing, either:")
+    print(f"  • Set  FFMPEG_PATH = ffmpeg  in your config (uses the system PATH), or")
+    print(f"  • Run  install-ffmpeg.bat  if included in the repo.\n")
+    print(f"{ERR}Cannot continue without ffmpeg. Exiting.{RESET}\n")
+    input("Press Enter to exit...")
+    sys.exit(1)
+
+
 def main() -> None:
     # ── Double-click / drag-and-drop fix ─────────────────────────────────────
     # When launched by double-clicking on Windows, the CWD is whatever Explorer
@@ -1633,6 +1712,12 @@ def main() -> None:
                     print(f"  Please enter a number between 1 and {len(found)}.")
 
     initial_cfg = load_config(config_path)
+
+    # Verify ffmpeg is present only when FFMPEG_PATH is explicitly set in the config.
+    # If no path was given we leave ffmpeg_path as "" so --ffmpeg-location is omitted
+    # entirely and yt-dlp resolves ffmpeg on its own (e.g. via PATH).
+    if initial_cfg.get("ffmpeg_path", ""):
+        initial_cfg["ffmpeg_path"] = _ensure_ffmpeg(initial_cfg["ffmpeg_path"])
 
     global VERBOSITY, DEBUG_LOGS_ENABLED, DEBUG_LOG_PATH, dashboard_next_check_in, _config_path
     _config_path = config_path
