@@ -2272,7 +2272,7 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
     curses.init_pair(5, curses.COLOR_BLACK,   curses.COLOR_CYAN)
     curses.init_pair(6, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
 
-    selected  = {0}   # start with first item selected
+    selected  = set(range(len(found)))   # start with all config files selected
     cursor    = 0
     n         = len(found)
 
