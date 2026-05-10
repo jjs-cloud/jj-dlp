@@ -1837,7 +1837,7 @@ class JJDlpDashboard:
                         f"tick={self.tick} tick%2={self.tick % 2}")
                     if self.tick % 2 == 0:
                         status_str  = "[●Live]"
-                        status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
+                        status_attr = curses.color_pair(self.C_DISABLED) | curses.A_BOLD
                     else:
                         status_str  = "[DIS]  "
                         status_attr = curses.color_pair(self.C_DISABLED)
