@@ -167,10 +167,16 @@ def _plain_curses_missing_prompt() -> None:
         success, message = _install_curses_auto(progress_cb=lambda l: print(f"  {l}"))
         print()
         if success:
+            # Display the success message, then restart the script so the new module can be imported cleanly.
             print(f"{GRN}✓  {message}{RESET}")
-            print(f"{GRN}   Restarting script …{RESET}\n")
-            # Re-exec so the newly installed module is picked up cleanly
-            os.execv(sys.executable, [sys.executable] + sys.argv)
+            print(f"{GRN}Curses has been successfully installed.  Please restart the script.{RESET}\n")
+            
+            # Wait for user acknowledgment and exit
+            try:
+                input("Press Enter to exit...")
+            except (EOFError, KeyboardInterrupt):
+                pass
+            sys.exit(0)
         else:
             print(f"{RED}✗  Installation failed:{RESET}")
             print(f"   {message}")
