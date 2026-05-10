@@ -1049,7 +1049,10 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
 def get_live_streamers(streamers: List[str], cfg: dict) -> List[str]:
     if not streamers:
         return []
-    streamers = [s for s in streamers if s not in cfg["blocked"]]
+    # NOTE: Do NOT filter out blocked streamers here. We still need to know
+    # if a blocked/disabled streamer is live so the dashboard can flash
+    # [●Live] ↔ [DIS]. Recording is suppressed downstream in
+    # start_recording_if_needed(), not here.
     if not streamers:
         return []
     urls = [cfg["site_tmpl"].format(username=s) for s in streamers]
@@ -1367,11 +1370,16 @@ def monitor_site(site: "SiteState") -> None:
                 site.dash_blocked.clear()
                 site.dash_blocked.update(cfg["blocked"])
                 live_set = set(live_now)
+                dbg(f"[FLASH] monitor_site: live_set={live_set} "
+                    f"blocked={site.dash_blocked} streamers={streamers}")
                 for s in streamers:
                     if s not in live_set:
                         site.dash_live_since.pop(s, None)
+                        dbg(f"[FLASH] monitor_site: {s!r} -> offline, removed from dash_live_since")
                     elif s not in site.dash_live_since:
                         site.dash_live_since[s] = time.time()
+                        dbg(f"[FLASH] monitor_site: {s!r} -> live, added to dash_live_since "
+                            f"(blocked={s in site.dash_blocked})")
 
             if live_now:
                 site.log_line(f"Live now: {', '.join(live_now)}")
@@ -1825,6 +1833,8 @@ class JJDlpDashboard:
                 dur_str     = ""
                 if since is not None:
                     # Disabled but currently live — flash [●Live] ↔ [DIS]
+                    dbg(f"[FLASH] draw_site_panel: {s!r} is_dis=True since={since:.0f} "
+                        f"tick={self.tick} tick%2={self.tick % 2}")
                     if self.tick % 2 == 0:
                         status_str  = "[●Live]"
                         status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
@@ -1833,6 +1843,8 @@ class JJDlpDashboard:
                         status_attr = curses.color_pair(self.C_DISABLED)
                 else:
                     # Disabled and offline — steady [DIS]
+                    dbg(f"[FLASH] draw_site_panel: {s!r} is_dis=True since=None "
+                        f"(no live data — fix not working if streamer IS live)")
                     status_str  = "[DIS]  "
                     status_attr = curses.color_pair(self.C_DISABLED)
             elif since is not None:
