@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+"""
+jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
+"""
 
 import subprocess
 import time
@@ -7,7 +10,7 @@ import os
 import json
 import threading
 from datetime import datetime
-from typing import List, Set, Tuple
+from typing import List, Set, Tuple, Dict, Optional
 import configparser
 import argparse
 from urllib.parse import urlparse
@@ -33,29 +36,22 @@ import curses  # noqa: E402  (intentionally placed after the availability check)
 _SCRIPT_START_TIME: float = time.time()
 
 
-def kill_proc(proc):
-    if sys.platform == "win32":
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                       capture_output=True)
-    else:
-        proc.kill()
-
+# ══════════════════════════════════════════════════════════════════════════════
+# Config loading
+# ══════════════════════════════════════════════════════════════════════════════
 
 def load_config(config_path: str) -> dict:
     startup_dbg(f"load_config called with: {config_path!r}")
     if not os.path.isfile(config_path):
-        _startup_dbg(f"load_config: file NOT FOUND — {config_path!r}")
         print(f"ERROR: Config file not found at: {config_path}", file=sys.stderr)
         sys.exit(1)
 
-    _startup_dbg(f"load_config: file found, attempting configparser.read...")
     parser = configparser.ConfigParser(allow_no_value=True, interpolation=None)
     try:
         parser.read(config_path, encoding="utf-8")
     except Exception as _e:
         startup_dbg(f"load_config: configparser FAILED — {type(_e).__name__}: {_e}")
         raise
-    _startup_dbg(f"load_config: configparser read OK, sections={parser.sections()}")
 
     streamers = []
     if parser.has_section("Streamers"):
@@ -77,14 +73,14 @@ def load_config(config_path: str) -> dict:
         except Exception:
             return default
 
-    check_interval = safe_int(general.get("CHECK_INTERVAL", 60), 60)
-    output_dir = general.get("OUTPUT_DIR", "recordings").strip().strip('\"\'')
-    output_tmpl = general.get("OUTPUT_TMPL", "%(title)s [%(id)s].%(ext)s").strip().strip('\"\'')
-    cooldown = safe_int(general.get("COOLDOWN_AFTER_RECORDING", 5), 5)
-    stall_check_interval = safe_int(general.get("STALL_CHECK_INTERVAL", 30), 30)
-    stall_timeout = safe_int(general.get("STALL_TIMEOUT", 120), 120)
+    check_interval        = safe_int(general.get("CHECK_INTERVAL", 60), 60)
+    output_dir            = general.get("OUTPUT_DIR", "recordings").strip().strip('\"\'')
+    output_tmpl           = general.get("OUTPUT_TMPL", "%(title)s [%(id)s].%(ext)s").strip().strip('\"\'')
+    cooldown              = safe_int(general.get("COOLDOWN_AFTER_RECORDING", 5), 5)
+    stall_check_interval  = safe_int(general.get("STALL_CHECK_INTERVAL", 30), 30)
+    stall_timeout         = safe_int(general.get("STALL_TIMEOUT", 120), 120)
     config_check_interval = safe_int(general.get("CONFIG_CHECK_INTERVAL", 3), 3)
-    site_tmpl = general.get("SITE_TMPL", "").strip().strip('"\'')
+    site_tmpl             = general.get("SITE_TMPL", "").strip().strip('"\'')
     tmpl_parts = urlparse(site_tmpl).path.rstrip("/").split("/") if site_tmpl else []
     username_idx = None
     for i, p in enumerate(tmpl_parts):
@@ -113,15 +109,13 @@ def load_config(config_path: str) -> dict:
     if not os.path.isabs(output_dir):
         output_dir = os.path.abspath(output_dir)
 
-    # ── Twitch EventSub (optional) ────────────────────────────────────────────
     twitch_cfg = parser["Twitch"] if parser.has_section("Twitch") else {}
     twitch_client_id     = twitch_cfg.get("CLIENT_ID", "").strip().strip('"\'')
     twitch_client_secret = twitch_cfg.get("CLIENT_SECRET", "").strip().strip('"\'')
     twitch_webhook_secret= twitch_cfg.get("WEBHOOK_SECRET", "jj-dlp-secret").strip().strip('"\'')
     twitch_callback_url  = twitch_cfg.get("CALLBACK_URL", "").strip().strip('"\'')
     twitch_webhook_port  = safe_int(twitch_cfg.get("WEBHOOK_PORT", 8888), 8888)
-    twitch_enabled = bool(twitch_client_id and twitch_client_secret and twitch_callback_url)
-    # ─────────────────────────────────────────────────────────────────────────
+    twitch_enabled       = bool(twitch_client_id and twitch_client_secret and twitch_callback_url)
 
     checker_cmd = []
     if parser.has_section("Checker"):
@@ -135,8 +129,7 @@ def load_config(config_path: str) -> dict:
         for key, val in parser.items("Downloader"):
             item = (val or key).strip()
             if item:
-                parts = item.split()
-                downloader_cmd.extend(parts)
+                downloader_cmd.extend(item.split())
 
     return {
         "streamers": streamers,
@@ -148,7 +141,6 @@ def load_config(config_path: str) -> dict:
         "stall_check_interval": stall_check_interval,
         "stall_timeout": stall_timeout,
         "yt_dlp_path": yt_dlp_path,
-        "ffmpeg_path": ffmpeg_path,
         "checker_cmd": checker_cmd,
         "downloader_cmd": downloader_cmd,
         "config_check_interval": config_check_interval,
@@ -277,41 +269,15 @@ class SiteState:
 # Global singletons (output mode)
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Output mode: controls the display style.
-#   1 = dashboard  (live status overview)
-#   2 = terminal   (text output; verbosity level controls detail)
-#   3 = add a streamer  (internal UI mode)
-#   4 = remove a streamer  (internal UI mode)
-#   5 = disable a streamer  (internal UI mode)
+# Output mode: 1=curses dashboard  2=terminal
 OUTPUT_MODE = 1
-OUTPUT_MODE_NAMES = {
-    1: "dashboard",
-    2: "terminal",
-    3: "add a streamer",
-    4: "remove a streamer",
-    5: "disable a streamer",
-}
 output_mode_lock = threading.Lock()
 
-# ── FFmpeg Error Monitoring ────────────────────────────────────────────
-# Strings to watch for in ffmpeg's stderr output. If any of these appear
-# more than FFMPEG_ERROR_RESTART_THRESHOLD times during a single recording
-# session, yt-dlp will be killed and restarted automatically.
-#
-# Add new patterns here as new ffmpeg errors are identified.
-# Matching is case-insensitive and uses substring search (not regex).
 FFMPEG_ERROR_PATTERNS: List[str] = [
     "timestamp discontinuity",
     "Packet corrupt",
-    # Add more patterns below as needed, e.g.:
-    # "av_interleaved_write_frame",
-    # "application provided invalid",
 ]
-
-# How many total pattern matches (across all patterns) must occur before
-# yt-dlp is restarted. Set to 0 to disable ffmpeg error monitoring.
 FFMPEG_ERROR_RESTART_THRESHOLD: int = 500
-# ──────────────────────────────────────────────────────────────────────
 
 # Wire logger.dbg to this module's OUTPUT_MODE
 def _get_output_mode() -> int:
@@ -327,8 +293,6 @@ KEYBIND_OUTPUT    = "o"
 KEYBIND_ADD       = "a"
 KEYBIND_REMOVE    = "r"
 KEYBIND_DISABLE   = "d"
-
-# Optional: human-readable labels for UI
 KEYBIND_LABELS = {
     KEYBIND_OUTPUT:    "O",
     KEYBIND_ADD:       "A",
@@ -345,163 +309,46 @@ def kill_proc(proc) -> None:
     if sys.platform == "win32":
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
     else:
-        return f"{s}s"
+        proc.kill()
 
 
-def _live_bar(seconds: float, width: int = 20) -> str:
-    """
-    Return a compact bar that grows with time-live.
-    Scale: bar fills completely after 6 hours (21600 s).
-    """
-    MAX_SECS = 6 * 3600
-    filled = min(int(width * seconds / MAX_SECS), width)
-    bar = "█" * filled + "░" * (width - filled)
-    return f"[{bar}]"
+def build_yt_dlp_command(yt_dlp_path: str, base_cmd: List[str], extra: List[str]) -> List[str]:
+    return [yt_dlp_path, *base_cmd, *extra]
 
 
-def render_dashboard() -> None:
-    """Render a full-screen dashboard view (output mode 1)."""
-    LIVE_COLOR     = "\033[92m"   # bright green
-    OFF_COLOR      = "\033[90m"   # dark grey
-    DISABLED_COLOR = "\033[93m"   # yellow
-    TITLE_COLOR    = "\033[96m"   # cyan
-    WARN_COLOR     = "\033[93m"   # yellow
-    RESET          = "\033[0m"
-    CLEAR          = "\033[2J\033[H"  # clear screen + home
+# ══════════════════════════════════════════════════════════════════════════════
+# Popup notification
+# ══════════════════════════════════════════════════════════════════════════════
 
-    with dashboard_lock:
-        streamers   = list(dashboard_all_streamers)
-        live_since  = dict(dashboard_live_since)
-        next_in     = dashboard_next_check_in
-        blocked_set = set(dashboard_blocked_streamers)
-
-    now = time.time()
-    lines = []
-
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    lines.append(f"{TITLE_COLOR}{'─' * 52}{RESET}")
-    lines.append(f"{TITLE_COLOR}  jj-dlp dashboard  ·  {ts}{RESET}")
-    lines.append(f"{TITLE_COLOR}{'─' * 52}{RESET}")
-    lines.append("")
-
-    if not streamers:
-        lines.append(f"  {WARN_COLOR}Loading streamers...{RESET}")
-    else:
-        col_name = 18
-        for s in streamers:
-            is_disabled = s in blocked_set
-            since = live_since.get(s)
-            if is_disabled:
-                status = f"{DISABLED_COLOR}⊘ disabled{RESET}"
-                bar    = f"{DISABLED_COLOR}[{'░' * 20}]{RESET}"
-                lines.append(
-                    f"  {DISABLED_COLOR}{s:<{col_name}}{RESET}  {status}  {bar}"
-                )
-            elif since is not None:
-                elapsed   = now - since
-                dur_str   = _format_duration(elapsed)
-                bar       = _live_bar(elapsed)
-                status    = f"{LIVE_COLOR}● LIVE    {RESET}"
-                lines.append(
-                    f"  {LIVE_COLOR}{s:<{col_name}}{RESET}  {status}  "
-                    f"{LIVE_COLOR}{bar}{RESET}  {dur_str}"
-                )
-            else:
-                status = f"{OFF_COLOR}○ offline {RESET}"
-                bar    = f"{OFF_COLOR}[{'░' * 20}]{RESET}"
-                lines.append(
-                    f"  {OFF_COLOR}{s:<{col_name}}{RESET}  {status}  {bar}"
-                )
-
-    lines.append("")
-    next_in_display = max(0.0, next_in)
-    lines.append(f"  Next check in: {WARN_COLOR}{next_in_display:.0f}s{RESET}")
-
-    # ── Twitch EventSub status block ──────────────────────────────────────────
-    srv_status              = _eventsub_state.get_server_status()
-    last_notif, notif_total = _eventsub_state.get_notification_info()
-    sub_ids                 = _eventsub_state.get_subscription_ids()
-    eventsub_configured     = _eventsub is not None
-
-    if eventsub_configured or srv_status not in ("not started", "stopped"):
-        lines.append("")
-        lines.append(f"  {TITLE_COLOR}── Twitch EventSub ─────────────────────────────{RESET}")
-
-        # Server bind status
-        if "listening" in srv_status:
-            lines.append(f"  Webhook server:   {LIVE_COLOR}● {srv_status}{RESET}")
-        elif "ERROR" in srv_status:
-            lines.append(f"  Webhook server:   {WARN_COLOR}✗ {srv_status}{RESET}")
-        else:
-            lines.append(f"  Webhook server:   {OFF_COLOR}○ {srv_status}{RESET}")
-
-        # Subscription count status
-        if sub_ids:
-            sub_count = len(sub_ids)
-            lines.append(
-                f"  Subscriptions:    {LIVE_COLOR}● {sub_count} active{RESET}"
-            )
-        else:
-            lines.append(f"  Subscriptions:    {WARN_COLOR}○ none yet (subscribing...){RESET}")
-
-        # Notification counter
-        if notif_total > 0:
-            lines.append(
-                f"  Notifications:    {LIVE_COLOR}{notif_total} received{RESET}"
-            )
-            if last_notif:
-                lines.append(f"  Last event:       {LIVE_COLOR}{last_notif}{RESET}")
-        else:
-            lines.append(f"  Notifications:    {OFF_COLOR}0 received (waiting for a stream.online push){RESET}")
-
-        # Callback URL hint — stored in cfg, readable from the TwitchEventSub object's initial cfg
-        if _eventsub is not None:
-            cb_url = getattr(_eventsub, "_initial_cfg", {}).get("twitch_callback_url", "")
-        else:
-            cb_url = ""
-        if cb_url:
-            lines.append(f"  Callback URL:     {OFF_COLOR}{cb_url}{RESET}")
-    # ─────────────────────────────────────────────────────────────────────────
-
-    lines.append(f"{TITLE_COLOR}{'─' * 52}{RESET}")
-    
-    kb_out = KEYBIND_LABELS.get(KEYBIND_OUTPUT, KEYBIND_OUTPUT)
-    kb_add = KEYBIND_LABELS.get(KEYBIND_ADD, KEYBIND_ADD.upper())
-    kb_rem = KEYBIND_LABELS.get(KEYBIND_REMOVE, KEYBIND_REMOVE.upper())
-    kb_dis = KEYBIND_LABELS.get(KEYBIND_DISABLE, KEYBIND_DISABLE.upper())
-
-    lines.append(f"  {OFF_COLOR}press {kb_out} to switch to terminal mode{RESET}")
-    lines.append(f"  {OFF_COLOR}press {kb_add} to add or enable a streamer{RESET}")
-    lines.append(f"  {OFF_COLOR}press {kb_rem} to remove a streamer{RESET}")
-    lines.append(f"  {OFF_COLOR}press {kb_dis} to disable a streamer{RESET}")
-    
-    sys.stdout.write(CLEAR + "\r\n".join(lines) + "\r\n")
-    sys.stdout.flush()
+def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 15) -> None:
+    def _run():
+        try:
+            import tkinter as tk
+            root = tk.Tk()
+            root.withdraw()
+            win = tk.Toplevel(root)
+            win.title("jj-dlp — Stream Live")
+            win.resizable(False, False)
+            win.attributes("-topmost", True)
+            tk.Label(win, text=f"🔴  {streamer}  is now LIVE",
+                     font=("Segoe UI", 16, "bold"), padx=20, pady=10).pack()
+            tk.Label(win, text=f"via {'EventSub' if source == 'eventsub' else 'poll check'}",
+                     font=("Segoe UI", 10), fg="gray", padx=20).pack()
+            tk.Button(win, text="Dismiss", command=win.destroy, padx=12, pady=4).pack(pady=(4, 12))
+            win.after(popup_timeout * 1000, win.destroy)
+            root.mainloop()
+        except ImportError:
+            pass
+        except Exception:
+            pass
+    threading.Thread(target=_run, daemon=True, name=f"popup-{streamer}").start()
 
 
-def _dashboard_renderer_thread() -> None:
-    """Continuously re-renders the dashboard while output mode 1 is active."""
-    while not _dashboard_stop_event.is_set():
-        with output_mode_lock:
-            mode = OUTPUT_MODE
-        if mode == 1:
-            with dashboard_lock:
-                next_in = dashboard_next_check_in
-            #dbg(f"[DASHBOARD] render tick — next_check_in={next_in:.1f}s (id={id(dashboard_next_check_in)})")
-            render_dashboard()
-        # Use event.wait instead of time.sleep so shutdown can interrupt immediately
-        _dashboard_stop_event.wait(timeout=1)
-
+# ══════════════════════════════════════════════════════════════════════════════
+# Config file editor
+# ══════════════════════════════════════════════════════════════════════════════
 
 def _modify_config_streamer(config_path: str, username: str, action: str) -> str:
-    """
-    Edit the config file in-place to add or remove a streamer.
-
-    action='add'    → remove from [Block] (if present), add to [Streamers]
-    action='remove' → remove from [Streamers], add to [Block]
-
-    Returns a human-readable result message.
-    """
     username = username.strip().lower()
     if not username:
         return "No username provided."
@@ -512,97 +359,68 @@ def _modify_config_streamer(config_path: str, username: str, action: str) -> str
     except Exception as e:
         return f"ERROR reading config: {e}"
 
-    # Parse section positions so we can do targeted insertions
-    section_starts: dict = {}  # section_name -> line index of [Section] header
-    current_section = None
+    section_starts: dict = {}
     for i, line in enumerate(lines):
         stripped = line.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
-            current_section = stripped[1:-1]
-            section_starts[current_section] = i
+            section_starts[stripped[1:-1]] = i
 
     def _remove_from_section(sec: str, name: str) -> bool:
-        """Remove all lines that are exactly `name` (or `name =`) from section `sec`.
-        Returns True if at least one line was removed."""
         if sec not in section_starts:
             return False
         removed = False
-        # Determine the line range that belongs to this section
         sec_line = section_starts[sec]
         next_sec_line = len(lines)
         for other_sec, other_line in section_starts.items():
             if other_line > sec_line:
                 next_sec_line = min(next_sec_line, other_line)
-
         to_delete = []
         for i in range(sec_line + 1, next_sec_line):
             key = lines[i].strip().split("=")[0].strip().lower()
             if key == name:
                 to_delete.append(i)
                 removed = True
-
         for i in reversed(to_delete):
             del lines[i]
-            # Adjust section_starts for sections after the deleted line
             for sec_name in list(section_starts.keys()):
                 if section_starts[sec_name] > i:
                     section_starts[sec_name] -= 1
-
         return removed
 
     def _add_to_section(sec: str, name: str) -> None:
-        """Append `name` as a new key at the end of section `sec`.
-        Creates the section if it doesn't exist."""
         if sec not in section_starts:
-            # Append a new section at the end of the file
             lines.append(f"\n[{sec}]\n")
             section_starts[sec] = len(lines) - 1
-
-        # Find the end of this section
         sec_line = section_starts[sec]
         next_sec_line = len(lines)
         for other_sec, other_line in section_starts.items():
             if other_line > sec_line:
                 next_sec_line = min(next_sec_line, other_line)
-
-        # Check if it's already there (case-insensitive)
         for i in range(sec_line + 1, next_sec_line):
             key = lines[i].strip().split("=")[0].strip().lower()
             if key == name:
-                return  # already present
-
-        # Insert just before the next section (or EOF), after any trailing blank line
+                return
         insert_at = next_sec_line
-        # Walk back past blank lines at the section boundary
         while insert_at > sec_line + 1 and lines[insert_at - 1].strip() == "":
             insert_at -= 1
-
         lines.insert(insert_at, f"{name}\n")
-        # Update section_starts for sections after insertion
         for sec_name in list(section_starts.keys()):
             if section_starts[sec_name] >= insert_at:
                 section_starts[sec_name] += 1
 
     messages = []
     if action == "add":
-        dbg(f"[CONFIG_EDIT] adding {username!r} to [Streamers], removing from [Block] if present")
         removed_from_block = _remove_from_section("Block", username)
         if removed_from_block:
             messages.append(f"Unblocked '{username}'.")
         _add_to_section("Streamers", username)
         messages.append(f"Added '{username}' to [Streamers].")
     elif action == "remove":
-        dbg(f"[CONFIG_EDIT] removing {username!r} from [Streamers], adding to [Block]")
-        removed_from_streamers = _remove_from_section("Streamers", username)
-        if removed_from_streamers:
-            messages.append(f"Removed '{username}' from [Streamers].")
-        else:
-            messages.append(f"'{username}' was not found in [Streamers].")
+        removed = _remove_from_section("Streamers", username)
+        messages.append(f"Removed '{username}' from [Streamers]." if removed else f"'{username}' not found.")
         _add_to_section("Block", username)
         messages.append(f"Added '{username}' to [Block].")
     elif action == "disable":
-        dbg(f"[CONFIG_EDIT] disabling {username!r} — keeping in [Streamers], adding to [Block]")
-        # Check if already in [Streamers]
         in_streamers = False
         if "Streamers" in section_starts:
             sec_line = section_starts["Streamers"]
@@ -617,314 +435,44 @@ def _modify_config_streamer(config_path: str, username: str, action: str) -> str
                     break
         if in_streamers:
             _add_to_section("Block", username)
-            messages.append(f"Disabled '{username}' (added to [Block], kept in [Streamers]).")
+            messages.append(f"Disabled '{username}'.")
         else:
-            messages.append(f"'{username}' was not found in [Streamers].")
+            messages.append(f"'{username}' not found in [Streamers].")
 
     try:
         with open(config_path, "w", encoding="utf-8") as f:
             f.writelines(lines)
-        dbg(f"[CONFIG_EDIT] config written OK — result: {'  '.join(messages)}")
     except Exception as e:
-        dbg(f"[CONFIG_EDIT] ERROR writing config: {e}")
         return f"ERROR writing config: {e}"
 
     return "  ".join(messages)
 
 
-def _streamer_mgmt_thread() -> None:
-    """
-    Background thread that handles output modes 3 (add streamer) and 4 (remove streamer).
-    Uses raw terminal input on Unix; falls back to normal input() on Windows.
-    """
-    TITLE_COLOR = "\033[96m"
-    OK_COLOR    = "\033[92m"
-    WARN_COLOR  = "\033[93m"
-    RESET       = "\033[0m"
-    CLEAR       = "\033[2J\033[H"
-
-    def _read_line_raw() -> str:
-        """Read a line of text from stdin in raw mode (Unix), echoing characters."""
-        if sys.platform == "win32":
-            import msvcrt
-            buf = []
-            sys.stdout.write("\n> ")
-            sys.stdout.flush()
-            while True:
-                if msvcrt.kbhit():
-                    ch = msvcrt.getwch()
-                    if ch in ("\r", "\n"):
-                        sys.stdout.write("\n")
-                        sys.stdout.flush()
-                        return "".join(buf)
-                    elif ch in ("\x08", "\x7f"):  # backspace
-                        if buf:
-                            buf.pop()
-                            sys.stdout.write("\b \b")
-                            sys.stdout.flush()
-                    elif ch == "\x03":  # Ctrl-C
-                        os.kill(os.getpid(), __import__("signal").SIGINT)
-                    elif ch in ("\x1c",):
-                        os.kill(os.getpid(), __import__("signal").SIGINT)
-                    else:
-                        buf.append(ch)
-                        sys.stdout.write(ch)
-                        sys.stdout.flush()
-                time.sleep(0.02)
-        else:
-            import tty, termios
-            fd = sys.stdin.fileno()
-            try:
-                old = termios.tcgetattr(fd)
-            except termios.error:
-                # Not a tty — fall back
-                sys.stdout.write("\n> ")
-                sys.stdout.flush()
-                return sys.stdin.readline().rstrip("\n")
-            buf = []
-            sys.stdout.write("\n> ")
-            sys.stdout.flush()
-            try:
-                tty.setraw(fd)
-                while True:
-                    ch = sys.stdin.read(1)
-                    if ch in ("\r", "\n"):
-                        sys.stdout.write("\r\n")
-                        sys.stdout.flush()
-                        return "".join(buf)
-                    elif ch in ("\x08", "\x7f"):  # backspace
-                        if buf:
-                            buf.pop()
-                            sys.stdout.write("\b \b")
-                            sys.stdout.flush()
-                    elif ch == "\x03":
-                        os.kill(os.getpid(), __import__("signal").SIGINT)
-                    elif ch in ("\x1c",):
-                        os.kill(os.getpid(), __import__("signal").SIGINT)
-                    else:
-                        buf.append(ch)
-                        sys.stdout.write(ch)
-                        sys.stdout.flush()
-            finally:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old)
-
-    while True:
-        _streamer_mgmt_event.wait()
-        _streamer_mgmt_event.clear()
-
-        with output_mode_lock:
-            mode = OUTPUT_MODE
-
-        if mode not in (3, 4, 5):
-            continue
-
-        if mode == 3:
-            title = "Add a Streamer"
-            prompt = "Enter streamer username to ADD or ENABLE"
-            action = "add"
-        elif mode == 4:
-            title = "Remove a Streamer"
-            prompt = "Enter streamer username to REMOVE"
-            action = "remove"
-        else:
-            title = "Disable a Streamer"
-            prompt = "Enter streamer username to DISABLE"
-            action = "disable"
-
-        result_msg = ""
-
-        while True:
-            with output_mode_lock:
-                current_mode = OUTPUT_MODE
-            if current_mode not in (3, 4, 5):
-                break
-
-            # Build streamer list for ADD, REMOVE and DISABLE modes
-            streamer_list_block = ""
-            if action in ("add", "remove", "disable"):
-                with dashboard_lock:
-                    current_streamers = list(dashboard_all_streamers)
-                if current_streamers:
-                    streamer_lines = "\r\n".join(
-                        f"    \033[90m· {s}\033[0m" for s in current_streamers
-                    )
-                    streamer_list_block = (
-                        f"  \033[96mStreamers:\033[0m\r\n"
-                        f"{streamer_lines}\r\n"
-                        f"\r\n"
-                    )
-                else:
-                    streamer_list_block = f"  \033[90m(no streamers configured)\033[0m\r\n\r\n"
-
-            # Re-draw the page
-            header = (
-                f"{CLEAR}"
-                f"{TITLE_COLOR}{'─' * 52}{RESET}\r\n"
-                f"{TITLE_COLOR}  jj-dlp · {title}{RESET}\r\n"
-                f"{TITLE_COLOR}{'─' * 52}{RESET}\r\n"
-                f"\r\n"
-            )
-            footer = (
-                f"\r\n{TITLE_COLOR}{'─' * 52}{RESET}\r\n"
-                f"  \033[90mPress Enter to jump back to Dashboard\033[0m\r\n"
-            )
-            if result_msg:
-                body = f"  {OK_COLOR}{result_msg}{RESET}\r\n"
-            else:
-                body = ""
-
-            sys.stdout.write(
-                header + streamer_list_block + body +
-                f"  {WARN_COLOR}{prompt}:{RESET}" + footer
-            )
-            sys.stdout.flush()
-
-            username = _read_line_raw()
-
-            # Check if mode changed while we were waiting for input
-            with output_mode_lock:
-                current_mode = OUTPUT_MODE
-            if current_mode not in (3, 4, 5):
-                break
-
-            if username == "__REDRAW__":
-                result_msg = ""
-                continue
-
-            if not username.strip():
-                _set_output_mode(1)
-                break
-
-            cfg_path = _config_path
-            if not cfg_path:
-                result_msg = "ERROR: config path not available."
-                continue
-
-            result_msg = _modify_config_streamer(cfg_path, username, action)
-
-            # Trigger a config reload / immediate check
-            trigger_full_check_event.set()
-
-            # Re-draw once so the user sees the confirmation message
-            header = (
-                f"{CLEAR}"
-                f"{TITLE_COLOR}{'─' * 52}{RESET}\r\n"
-                f"{TITLE_COLOR}  jj-dlp · {title}{RESET}\r\n"
-                f"{TITLE_COLOR}{'─' * 52}{RESET}\r\n"
-            )
-            footer = (
-                f"\r\n{TITLE_COLOR}{'─' * 52}{RESET}\r\n"
-            )
-            body = f"  {OK_COLOR}{result_msg}{RESET}\r\n"
-
-            sys.stdout.write(header + body + footer)
-            sys.stdout.flush()
-
-            # Wait so user can read it
-            time.sleep(1.0)
-
-            # Return to dashboard
-            _set_output_mode(1)
-            break
-
-def log(msg: str) -> None:
-    with output_mode_lock:
-        mode = OUTPUT_MODE
-    if mode in (1, 3, 4, 5):
-        return  # dashboard / streamer mgmt pages own the screen
-    # mode 2 (terminal): suppress log() when verbosity is 4 (stderr only)
-    with verbosity_lock:
-        v = VERBOSITY
-    if v == 4:
-        return  # stderr-only verbosity — log() messages are suppressed
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
-
-
-def _write_debug_log(msg: str) -> None:
-    """Append a dbg() message to debug.log regardless of OUTPUT_MODE or VERBOSITY."""
-    with debug_log_lock:
-        enabled = DEBUG_LOGS_ENABLED
-        path    = DEBUG_LOG_PATH
-    if not enabled or not path:
-        return
-    try:
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(msg + "\n")
-            f.flush()
-    except Exception:
-        pass
-
-
-def dbg(msg: str) -> None:
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    full = f"[{ts}] {msg}"
-    _write_debug_log(full)
-    with output_mode_lock:
-        mode = OUTPUT_MODE
-    if mode in (1, 3, 4, 5):
-        return  # dashboard / streamer mgmt pages own the screen
-    with verbosity_lock:
-        v = VERBOSITY
-    # Show debug output in verbosity 3 (log+stdout+debug) and 5 (everything)
-    if v in (3, 5):
-        print(full, flush=True)
-
-
-def get_debug_log_path(cfg: dict) -> str:
-    p = cfg.get("debug_log_path") or ""
-    if p.strip():
-        return p
-    return os.path.join(cfg.get("output_dir", "."), "debug.log")
-
-
-def get_log_path(cfg: dict) -> str:
-    lp = cfg.get("log_path") or ""
-    if lp.strip():
-        return lp
-    return os.path.join(cfg.get("output_dir", "."), "jj-dlp.log")
-
-
-def get_log_file_paths(cfg: dict) -> Tuple[str, str]:
-    base = get_log_path(cfg)
-    if cfg.get("split_logs"):
-        return f"{base}.stdout.log", f"{base}.stderr.log"
-    else:
-        return base, base
-
+# ══════════════════════════════════════════════════════════════════════════════
+# yt-dlp subprocess helpers
+# ══════════════════════════════════════════════════════════════════════════════
 
 def open_log_streams(cfg: dict):
-    """
-    Always returns subprocess.PIPE so record_stream can drain and selectively
-    display output according to OUTPUT_MODE.  Log-file handles are opened here
-    and passed through to the drainer threads via the returned closer.
-    """
-    log_out_fp = None
-    log_err_fp = None
-
+    log_out_fp = log_err_fp = None
     if cfg.get("logging_enabled"):
         out_path, err_path = get_log_file_paths(cfg)
         try:
             log_out_fp = open(out_path, "a", encoding="utf-8")
         except Exception:
-            log_out_fp = None
+            pass
         try:
-            if err_path == out_path:
-                log_err_fp = log_out_fp
-            else:
-                log_err_fp = open(err_path, "a", encoding="utf-8")
+            log_err_fp = log_out_fp if err_path == out_path else open(err_path, "a", encoding="utf-8")
         except Exception:
-            log_err_fp = None
+            pass
 
     def _close():
         for fp in {log_out_fp, log_err_fp}:
             try:
-                if fp is not None and hasattr(fp, "close"):
+                if fp is not None:
                     fp.close()
             except Exception:
                 pass
 
-    # Always use PIPE; the drainer threads handle display + optional file write.
     return subprocess.PIPE, subprocess.PIPE, _close, log_out_fp, log_err_fp
 
 
@@ -956,20 +504,11 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
                 for pattern in FFMPEG_ERROR_PATTERNS:
                     if pattern.lower() in line_lower:
                         ffmpeg_error_counter[0] += 1
-                        dbg(f"[FFMPEG_MONITOR] [{streamer}]: pattern '{pattern}' matched "
-                            f"(count={ffmpeg_error_counter[0]}/{FFMPEG_ERROR_RESTART_THRESHOLD})")
                         if ffmpeg_error_counter[0] >= FFMPEG_ERROR_RESTART_THRESHOLD:
-                            log(f"ffmpeg_monitor [{streamer}]: error threshold reached "
-                                f"({ffmpeg_error_counter[0]} matches) — signalling restart.")
                             ffmpeg_error_event.set()
-                        break  # only count once per line even if multiple patterns match
+                        break
     except Exception:
         pass
-
-
-def build_yt_dlp_command(yt_dlp_path: str, base_cmd: List[str], extra: List[str], ffmpeg_path: str = "") -> List[str]:
-    ffmpeg_args = ["--ffmpeg-location", ffmpeg_path] if ffmpeg_path else []
-    return [yt_dlp_path, *ffmpeg_args, *base_cmd, *extra]
 
 
 def get_live_streamers(streamers: List[str], cfg: dict) -> List[str]:
@@ -980,31 +519,17 @@ def get_live_streamers(streamers: List[str], cfg: dict) -> List[str]:
     # [●Live] ↔ [DIS]. Recording is suppressed downstream in
     # start_recording_if_needed(), not here.
     if not streamers:
-        dbg(f"[CHECKER] get_live_streamers: all streamers are blocked — skipping check")
         return []
-
     urls = [cfg["site_tmpl"].format(username=s) for s in streamers]
-    cmd = build_yt_dlp_command(cfg["yt_dlp_path"], cfg["checker_cmd"], urls, cfg.get("ffmpeg_path", ""))
-    dbg(f"[CHECKER] running liveness check for {streamers} — cmd={cmd}")
-
+    cmd = build_yt_dlp_command(cfg["yt_dlp_path"], cfg["checker_cmd"], urls)
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    dbg(f"[CHECKER] yt-dlp check returncode={result.returncode}")
-
     if cfg["logging_enabled"]:
         out_path, err_path = get_log_file_paths(cfg)
         try:
             if result.stdout:
-                with open(out_path, "a", encoding="utf-8") as lf:
-                    lf.write(result.stdout)
+                open(out_path, "a", encoding="utf-8").write(result.stdout)
         except Exception:
             pass
-        try:
-            if result.stderr:
-                with open(err_path, "a", encoding="utf-8") as lf:
-                    lf.write(result.stderr)
-        except Exception:
-            pass
-
     live = []
     for line in result.stdout.splitlines():
         if not line.strip():
@@ -1015,128 +540,62 @@ def get_live_streamers(streamers: List[str], cfg: dict) -> List[str]:
                 url = info.get("webpage_url") or info.get("url") or ""
                 ui = cfg.get("username_idx")
                 try:
-                    if ui is not None:
-                        streamer = url.rstrip("/").split("/")[ui].lstrip("@").lower().strip()
-                    else:
-                        streamer = url.rstrip("/").split("/")[-1].lstrip("@").lower().strip()
+                    streamer = url.rstrip("/").split("/")[ui if ui is not None else -1].lstrip("@").lower().strip()
                 except Exception:
                     streamer = url.rstrip("/").split("/")[-1].lstrip("@").lower().strip()
-
                 if streamer:
-                    dbg(f"[CHECKER] detected live: {streamer!r} (url={url!r})")
                     live.append(streamer)
         except Exception:
-            if cfg.get("logging_enabled"):
-                try:
-                    out_path, _ = get_log_file_paths(cfg)
-                    with open(out_path, "a", encoding="utf-8") as lf:
-                        lf.write(f"JSON parse error for line: {line}")
-                except Exception:
-                    pass
-            dbg(f"[CHECKER] JSON parse error for line: {line!r}")
-            continue
-    dbg(f"[CHECKER] get_live_streamers result: {live}")
+            pass
     return live
 
 
-def wait_for_streamer_file(output_dir: str, streamer: str, proc_start_time: float, timeout: float = 15.0, interval: float = 0.5):
+def wait_for_streamer_file(output_dir, streamer, proc_start_time, timeout=15.0, interval=0.5):
     start = time.time()
-
     while time.time() - start < timeout:
         if os.path.isdir(output_dir):
             files = [
-                os.path.join(output_dir, f)
-                for f in os.listdir(output_dir)
+                os.path.join(output_dir, f) for f in os.listdir(output_dir)
                 if os.path.isfile(os.path.join(output_dir, f))
                 and streamer.lower() in f.lower()
+                and (proc_start_time is None or os.path.getmtime(os.path.join(output_dir, f)) >= proc_start_time)
             ]
-
-            if proc_start_time is not None:
-                files = [f for f in files if os.path.getmtime(f) >= proc_start_time]
-
             if files:
                 return max(files, key=os.path.getmtime)
-
         time.sleep(interval)
-
     return None
 
-def get_streamer_file_size(
-    output_dir: str,
-    streamer: str,
-    cfg: dict = None,
-    last_growth_time: float = None,
-    stall_timeout: int = None,
-    stall_check_interval: int = None,
-    proc_start_time: float = None,
-) -> tuple[int, bool, str]:   # <- Now returns size, stall_detected, filename
 
+def get_streamer_file_size(output_dir, streamer, cfg=None,
+                           last_growth_time=None, stall_timeout=None,
+                           stall_check_interval=None, proc_start_time=None):
     try:
-        if not os.path.isdir(output_dir):
-            filename = ""
-            size = 0
-        else:
-            filename = wait_for_streamer_file(output_dir, streamer, proc_start_time)
-            if filename:
-                size = os.path.getsize(filename)
-            else:
-                size = 0
-                filename = ""
-
-        stalled_time = 0.0
+        filename = wait_for_streamer_file(output_dir, streamer, proc_start_time) if os.path.isdir(output_dir) else None
+        size = os.path.getsize(filename) if filename else 0
         stall_detected = False
-
-        #dbg(f"[STALL_CHECKER] file: {os.path.basename(filename) or '<none>'}")
-
-        try:
-            if last_growth_time is not None:
-                stalled_time = max(0.0, time.time() - last_growth_time - stall_check_interval)
-
-                if stall_timeout is not None and stalled_time >= stall_timeout:
-                    stall_detected = True
-                    log(f"stall_checker: Stall detected for {streamer} ({os.path.basename(filename) or '<none>'})! "
-                        f"stalled_time: {stalled_time:.1f}s exceeds stall_timeout: {stall_timeout}s")
-        except Exception:
-            stalled_time = 0.0
-            log(f"stall_checker: Exception during stall check for {streamer}: {sys.exc_info()[0]}")
-
-        if cfg and cfg.get("logging_enabled"):
-            try:
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                out_path, _ = get_log_file_paths(cfg)
-                with open(out_path, "a", encoding="utf-8") as lf:
-                    lf.write(
-                        f"[{ts}] STALL_CHECK streamer={streamer} file={os.path.basename(filename) or '<none>'} "
-                        f"size={size} stalled_time={stalled_time:.1f}s stall_detected={stall_detected}"
-                    )
-            except Exception:
-                pass
-
-        return size, stall_detected, filename   # ← return filename too
-
+        if last_growth_time is not None and stall_timeout is not None:
+            stalled = max(0.0, time.time() - last_growth_time - stall_check_interval)
+            if stalled >= stall_timeout:
+                stall_detected = True
+        return size, stall_detected, filename or ""
     except Exception:
-        log(f"Exception in get_streamer_file_size for {streamer}: {sys.exc_info()[0]}")
         return 0, False, ""
 
 
-def record_stream(streamer: str, cfg: dict) -> None:
+def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
     channel_url = cfg["site_tmpl"].format(username=streamer)
-    output_dir = cfg["output_dir"]
+    output_dir  = cfg["output_dir"]
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, cfg["output_tmpl"])
-
-    dbg(f"[RECORD] thread started for {streamer!r} — url={channel_url!r} output_dir={output_dir!r}")
-    log(f"Recording started: {streamer}  (saving to: {output_dir})\n")
-
+    site.log_line(f"Recording started: {streamer}")
     proc = None
     close_logs = lambda: None
 
     try:
         while True:
-            cmd = build_yt_dlp_command(cfg["yt_dlp_path"], cfg["downloader_cmd"], ["-o", output_path, channel_url], cfg.get("ffmpeg_path", ""))
-            dbg(f"[RECORD] launching yt-dlp for {streamer!r} — cmd={cmd}")
+            cmd = build_yt_dlp_command(cfg["yt_dlp_path"], cfg["downloader_cmd"],
+                                       ["-o", output_path, channel_url])
             out_target, err_target, close_logs, log_out_fp, log_err_fp = open_log_streams(cfg)
-
             try:
                 proc = subprocess.Popen(cmd, stdout=out_target, stderr=err_target)
                 proc_start_time = time.time()
@@ -1164,21 +623,12 @@ def record_stream(streamer: str, cfg: dict) -> None:
                     pass
                 break
 
-            # === FIXED: Unpack all 3 return values ===
-            last_size, _, current_filename = get_streamer_file_size(
-                output_dir, streamer, cfg=cfg, proc_start_time=proc_start_time
-            )
-
-            #dbg(f"[STALL_CHECKER] Setting initial last_size for {streamer}: {last_size} bytes "
-                #f"(file: {os.path.basename(current_filename) if current_filename else '<none>'})")
-
-            last_growth_time = time.time()
-            #dbg(f"[STALL_CHECKER] Setting initial last_growth_time for {streamer}: {last_growth_time}")
-
+            last_size, _, _ = get_streamer_file_size(output_dir, streamer, cfg=cfg,
+                                                     proc_start_time=proc_start_time)
+            last_growth_time     = time.time()
             stall_check_interval = cfg["stall_check_interval"]
-            stall_timeout = cfg["stall_timeout"]
-            seconds_since_check = 0
-            #dbg(f"[STALL_CHECKER] The first stall check will be in {stall_check_interval} seconds.")
+            stall_timeout        = cfg["stall_timeout"]
+            seconds_since_check  = 0
 
             while proc.poll() is None:
                 # Check if we've been asked to stop (e.g. user pressed Q)
@@ -1198,7 +648,6 @@ def record_stream(streamer: str, cfg: dict) -> None:
                     return
 
                 current_cfg = load_config(cfg["config_path"])
-
                 if streamer in current_cfg["blocked"]:
                     dbg(f"[{site.label}] [PROC] record_stream: streamer={streamer!r} blocked — killing pid={proc.pid}")
                     kill_proc(proc)
@@ -1208,17 +657,11 @@ def record_stream(streamer: str, cfg: dict) -> None:
                         close_logs()
                     except Exception:
                         pass
-                    with lock:
-                        currently_recording.discard(streamer)
-                    log(f"Recording finished: {streamer}")
+                    with site.lock:
+                        site.currently_recording.discard(streamer)
                     time.sleep(cfg["cooldown"])
                     return
 
-                poll_interval = cfg.get("config_check_interval", 3)
-                time.sleep(poll_interval)
-                seconds_since_check += poll_interval
-
-                # Check if ffmpeg error threshold was crossed by a drain thread
                 if ffmpeg_error_event.is_set():
                     site.log_line(f"ffmpeg error threshold reached for {streamer} — restarting")
                     dbg(f"[{site.label}] [PROC] record_stream: ffmpeg error restart for streamer={streamer!r} pid={proc.pid}")
@@ -1231,18 +674,14 @@ def record_stream(streamer: str, cfg: dict) -> None:
                     time.sleep(5)
                     break
 
+                time.sleep(1)
+                seconds_since_check += 1
                 if seconds_since_check >= stall_check_interval:
                     seconds_since_check = 0
-
-                    # === FIXED: Unpack all 3 return values here too ===
-                    current_size, stall_detected, current_filename = get_streamer_file_size(
-                        output_dir, streamer, cfg=cfg,
-                        proc_start_time=proc_start_time,
-                        last_growth_time=last_growth_time,
-                        stall_timeout=stall_timeout,
-                        stall_check_interval=stall_check_interval
-                    )
-
+                    current_size, stall_detected, _ = get_streamer_file_size(
+                        output_dir, streamer, cfg=cfg, proc_start_time=proc_start_time,
+                        last_growth_time=last_growth_time, stall_timeout=stall_timeout,
+                        stall_check_interval=stall_check_interval)
                     if stall_detected:
                         site.log_line(f"Stall detected for {streamer} — restarting")
                         dbg(f"[{site.label}] [PROC]] record_stream: stall restart for streamer={streamer!r} pid={proc.pid}")
@@ -1254,13 +693,8 @@ def record_stream(streamer: str, cfg: dict) -> None:
                             pass
                         time.sleep(5)
                         break
-
-                    filename_display = os.path.basename(current_filename) if current_filename else f"{streamer} (no file yet)"
-
                     if current_size > last_size:
-                        dbg(f"[STALL_CHECKER] {filename_display} grew by {current_size - last_size} bytes ({last_size} --> {current_size})")
-                        #dbg(f"[STALL_CHECKER] Setting new last_size for {filename_display}: {current_size} bytes")
-                        last_size = current_size
+                        last_size        = current_size
                         last_growth_time = time.time()
             else:
                 dbg(f"[{site.label}] [PROC]] record_stream: proc exited naturally "
@@ -1297,64 +731,45 @@ def record_stream(streamer: str, cfg: dict) -> None:
         time.sleep(cfg["cooldown"])
 
 
-def start_recording_if_needed(live_now: List[str], cfg: dict, show_popup: bool = True) -> None:
-    global recording_threads
-
-    with lock:
-        to_start = [s for s in live_now if s not in currently_recording and s not in cfg["blocked"]]
+def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
+                               show_popup: bool = True) -> None:
+    with site.lock:
+        to_start = [s for s in live_now
+                    if s not in site.currently_recording and s not in cfg["blocked"]]
         if not to_start:
-            dbg(f"[RECORD] start_recording_if_needed: nothing new to start — live_now={live_now} currently_recording={currently_recording}")
-            recording_threads[:] = [t for t in recording_threads if t.is_alive()]
+            site.recording_threads[:] = [t for t in site.recording_threads if t.is_alive()]
             return
-
         for streamer in to_start:
-            currently_recording.add(streamer)
-            dbg(f"[RECORD] start_recording_if_needed: launching recording thread for {streamer!r}")
-            # Track when this streamer went live for the dashboard
-            with dashboard_lock:
-                if streamer not in dashboard_live_since:
-                    dashboard_live_since[streamer] = time.time()
-            # Show popup notification (poll path)
+            site.currently_recording.add(streamer)
+            with site.dash_lock:
+                if streamer not in site.dash_live_since:
+                    site.dash_live_since[streamer] = time.time()
             if show_popup and cfg.get("popup_notifications", True):
-                dbg(f"[POPUP] [poll] triggering popup for {streamer!r}")
                 _show_live_popup(streamer, source="poll", popup_timeout=cfg.get("popup_timeout", 15))
-            elif not show_popup:
-                dbg(f"[POPUP] [poll] popup suppressed (already shown by eventsub) for {streamer!r}")
-            else:
-                dbg(f"[POPUP] [poll] popup disabled via config — skipping for {streamer!r}")
-            t = threading.Thread(target=record_stream, args=(streamer, cfg), daemon=True)
+            t = threading.Thread(target=record_stream, args=(streamer, cfg, site), daemon=True)
             t.start()
-            recording_threads.append(t)
+            site.recording_threads.append(t)
+        site.recording_threads[:] = [t for t in site.recording_threads if t.is_alive()]
 
-        recording_threads[:] = [t for t in recording_threads if t.is_alive()]
 
-
-def config_watcher(config_path: str, poll_interval: int = 3) -> None:
-    dbg(f"[CONFIG_WATCHER] thread started")
+def config_watcher(site: "SiteState", poll_interval: int = 3) -> None:
     prev_streamers: Set[str] = set()
     first_run = True
-
-    while True:
+    while not site._stop_event.is_set():
         try:
-            cfg = load_config(config_path)
+            cfg = load_config(site.config_path)
             curr_streamers = set(cfg.get("streamers", []))
-            blocked = set(cfg.get("blocked", []))
-
-            #dbg(f"[CONFIG_WATCHER] curr_streamers={curr_streamers} prev_streamers={prev_streamers} first_run={first_run}")
-
+            blocked        = set(cfg.get("blocked", []))
             if first_run:
                 prev_streamers = curr_streamers
-                first_run = False
-                dbg(f"[CONFIG_WATCHER] first run — baseline set, skipping trigger check")
+                first_run      = False
             else:
                 added = [s for s in (curr_streamers - prev_streamers) if s not in blocked]
-                #dbg(f"[CONFIG_WATCHER] added={added}")
-                if added: 
-                    log(f"config_watcher: new streamer(s) detected: {', '.join(added)} — triggering immediate full check")
-                    with lock:
-                        known_streamers.update(curr_streamers)
-                    trigger_full_check_event.set()
-                    dbg(f"[CONFIG_WATCHER] trigger_full_check_event SET")
+                if added:
+                    site.log_line(f"New streamer(s): {', '.join(added)} — immediate check")
+                    with site.lock:
+                        site.known_streamers.update(curr_streamers)
+                    site.trigger_event.set()
                 prev_streamers = curr_streamers
         except Exception as e:
             dbg(f"[{site.label}] [CONFIG_WATCHER] {site.config_path}: {e}")
@@ -2586,36 +2001,23 @@ def main() -> None:
                 break
 
     except KeyboardInterrupt:
-        # Signal the dashboard renderer to stop immediately (no waiting for its sleep to expire)
-        _dashboard_stop_event.set()
-        if _eventsub is not None:
-            _eventsub.stop(timeout=5)  # signal EventSub threads to clean up
+        pass
+    finally:
+        for site in sites:
+            site.stop()
+            if site.eventsub is not None:
+                try:
+                    site.eventsub.stop(timeout=5)
+                except Exception:
+                    pass
 
-        TITLE_COLOR = "\033[96m"
-        WARN_COLOR  = "\033[93m"
-        OK_COLOR    = "\033[92m"
-        RESET       = "\033[0m"
-        CLEAR       = "\033[2J\033[H"
-
-        active_recordings = [t for t in recording_threads if t.is_alive()]
-
-        sys.stdout.write(CLEAR)
-        sys.stdout.write(f"{TITLE_COLOR}{'─' * 52}{RESET}\r\n")
-        sys.stdout.write(f"{TITLE_COLOR}  jj-dlp  ·  Shutting down...{RESET}\r\n")
-        sys.stdout.write(f"{TITLE_COLOR}{'─' * 52}{RESET}\r\n\r\n")
-
-        if active_recordings:
-            sys.stdout.write(
-                f"  {WARN_COLOR}Waiting for {len(active_recordings)} active recording(s) to finish...{RESET}\r\n\r\n"
-            )
-        sys.stdout.flush()
-
-        for t in recording_threads:
-            if t.is_alive():
-                t.join(timeout=15)  # Wait 15 seconds for each thread to finish gracefully
-
-        sys.stdout.write(f"  {OK_COLOR}✓  All done. Goodbye!{RESET}\r\n\r\n")
-        sys.stdout.flush()
+        print("\njj-dlp  ·  Shutting down...")
+        active = [t for site in sites for t in site.recording_threads if t.is_alive()]
+        if active:
+            print(f"Waiting for {len(active)} active recording(s) to finish...")
+            for t in active:
+                t.join(timeout=15)
+        print("✓  All done. Goodbye!\n")
 
 
 if __name__ == "__main__":
@@ -2629,9 +2031,8 @@ if __name__ == "__main__":
             _crash_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jj-dlp-crash.log")
             try:
                 with open(_crash_path, "a", encoding="utf-8") as _cf:
-                    _cf.write(f"\n{'='*60}\n")
-                    _cf.write(f"CRASH at {datetime.now()}\n")
+                    _cf.write(f"\n{'='*60}\nCRASH at {datetime.now()}\n")
                     _cf.write(traceback.format_exc())
             except Exception:
                 pass
-        raise  # re-raise so the normal Python error is still printed
+        raise
