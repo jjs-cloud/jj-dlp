@@ -1885,9 +1885,16 @@ def main() -> None:
         VERBOSITY = initial_cfg.get("verbosity", 1)
     import logger as _logger
     with _logger.debug_log_lock:
-        _logger.DEBUG_LOGS_ENABLED = initial_cfg.get("debug_logs", False)
-        _logger.DEBUG_LOG_PATH     = get_debug_log_path(initial_cfg) if _logger.DEBUG_LOGS_ENABLED else ""
-
+        any_debug = any(load_config(cp).get("debug_logs", False) for cp in config_paths)
+        _logger.DEBUG_LOGS_ENABLED = any_debug
+        if any_debug:
+            # Use the debug_log_path from whichever config has debug enabled
+            for cp in config_paths:
+                cfg_i = load_config(cp)
+                if cfg_i.get("debug_logs", False):
+                    _logger.DEBUG_LOG_PATH = get_debug_log_path(cfg_i)
+                    break
+        
     # ── Launch per-site state + threads ──────────────────────────────────────
     sites: List[SiteState] = []
     for cp in config_paths:
