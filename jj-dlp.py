@@ -16,514 +16,24 @@ import argparse
 from urllib.parse import urlparse
 import shutil
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# curses detection & installation  (must come before any other curses use)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _check_curses_available() -> bool:
-    """Return True if the curses module can be imported."""
-    try:
-        import curses as _c  # noqa: F401
-        return True
-    except ModuleNotFoundError:
-        return False
-
-
-def _install_curses_auto(progress_cb=None) -> tuple:
-    """
-    Attempt to install the platform-appropriate curses package.
-
-    On Windows: installs 'windows-curses' via pip.
-    On macOS/Linux: curses ships with Python; if missing, advise the user to
-    install the OS ncurses dev package and rebuild Python (or use their
-    distro's python3-curses package).
-
-    progress_cb(line: str) is called for each line of installer output.
-
-    Returns (success: bool, message: str).
-    """
-    def _emit(line):
-        if progress_cb:
-            progress_cb(line)
-
-    if sys.platform == "win32":
-        _emit("Attempting: pip install windows-curses ...")
-        try:
-            proc = subprocess.Popen(
-                [sys.executable, "-m", "pip", "install", "windows-curses"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-            for line in proc.stdout:
-                _emit(line.rstrip())
-            proc.wait()
-            if proc.returncode == 0:
-                # Verify it actually works now
-                if _check_curses_available():
-                    return True, "windows-curses installed successfully."
-                return False, ("pip reported success but curses still "
-                               "cannot be imported. Try restarting the script.")
-            return False, f"pip exited with code {proc.returncode}."
-        except Exception as exc:
-            return False, f"Installation error: {exc}"
-
-    elif sys.platform == "darwin":
-        msg = (
-            "curses is part of Python's standard library on macOS.\n"
-            "If it is missing, your Python installation may be incomplete.\n"
-            "Recommended fix:\n"
-            "  brew install python   # reinstall via Homebrew\n"
-            "or download the official installer from https://www.python.org/downloads/"
-        )
-        _emit(msg)
-        return False, msg
-
-    else:  # Linux / other POSIX
-        # Try the distro's python3-curses package first
-        candidates = [
-            ("apt-get",  ["apt-get", "install", "-y", "python3-curses"]),
-            ("apt",      ["apt",     "install", "-y", "python3-curses"]),
-            ("dnf",      ["dnf",     "install", "-y", "python3-curses"]),
-            ("yum",      ["yum",     "install", "-y", "python3-curses"]),
-            ("pacman",   ["pacman",  "-S",      "--noconfirm", "python-curses"]),
-            ("zypper",   ["zypper",  "install", "-y", "python3-curses"]),
-            ("apk",      ["apk",     "add",     "py3-curses"]),
-        ]
-        pm_name, cmd = "", []
-        for name, c in candidates:
-            if shutil.which(name):
-                pm_name, cmd = name, c
-                break
-
-        if not cmd:
-            msg = ("No supported package manager found.\n"
-                   "Install the python3-curses package for your distribution manually.")
-            _emit(msg)
-            return False, msg
-
-        if os.geteuid() != 0:
-            cmd = ["sudo"] + cmd
-
-        _emit(f"Attempting: {' '.join(cmd)} ...")
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-            for line in proc.stdout:
-                _emit(line.rstrip())
-            proc.wait()
-            if proc.returncode == 0:
-                if _check_curses_available():
-                    return True, "python3-curses installed successfully."
-                return False, ("Package installed but curses still cannot be imported. "
-                               "Try restarting the script.")
-            return False, f"Package manager exited with code {proc.returncode}."
-        except Exception as exc:
-            return False, f"Installation error: {exc}"
-
-
-def _plain_curses_missing_prompt() -> None:
-    """
-    Plain-terminal (no curses) prompt shown when curses is not available.
-    Offers to install it; exits or continues based on the user's choice.
-    Called once at startup, before any curses.wrapper() call.
-    """
-    BOLD  = "\033[1m"
-    RED   = "\033[91m"
-    YEL   = "\033[93m"
-    GRN   = "\033[92m"
-    RESET = "\033[0m"
-
-    print()
-    print(f"{BOLD}{RED}┌─ MISSING DEPENDENCY ───────────────────────────────┐{RESET}")
-    print(f"{BOLD}{RED}│  curses  is not available in this Python install.   │{RESET}")
-    print(f"{BOLD}{RED}└─────────────────────────────────────────────────────┘{RESET}")
-    print()
-
-    if sys.platform == "win32":
-        print(f"{YEL}On Windows, curses requires the 'windows-curses' package.{RESET}")
-        print(f"{YEL}It can be installed automatically via pip.{RESET}")
-    elif sys.platform == "darwin":
-        print(f"{YEL}On macOS, curses ships with Python.{RESET}")
-        print(f"{YEL}Your Python installation may be incomplete or broken.{RESET}")
-    else:
-        print(f"{YEL}On Linux, curses may require the 'python3-curses' OS package.{RESET}")
-
-    print()
-
-    try:
-        answer = input(f"{BOLD}Attempt automatic installation now? [Y/n]: {RESET}").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print("\nAborted.")
-        sys.exit(1)
-
-    if answer in ("", "y", "yes"):
-        print()
-        success, message = _install_curses_auto(progress_cb=lambda l: print(f"  {l}"))
-        print()
-        if success:
-            # Display the success message, then restart the script so the new module can be imported cleanly.
-            print(f"{GRN}✓  {message}{RESET}")
-            print(f"{GRN}Curses has been successfully installed.  Please restart the script.{RESET}\n")
-            
-            # Wait for user acknowledgment and exit
-            try:
-                input("Press Enter to exit...")
-            except (EOFError, KeyboardInterrupt):
-                pass
-            sys.exit(0)
-        else:
-            print(f"{RED}✗  Installation failed:{RESET}")
-            print(f"   {message}")
-            print()
-            try:
-                cont = input("Continue anyway (the UI will not work)? [y/N]: ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                cont = "n"
-            if cont not in ("y", "yes"):
-                sys.exit(1)
-    else:
-        print()
-        print(f"{RED}curses is required for the dashboard UI.{RESET}")
-        print("Install it manually and re-run, or press Enter to try continuing anyway.")
-        try:
-            input("Press Enter to continue, Ctrl+C to quit: ")
-        except (EOFError, KeyboardInterrupt):
-            sys.exit(1)
-
+from deps import ensure_curses, plain_ffmpeg_check
+from logger import (
+    startup_dbg, startup_dbg_flush,
+    dbg,
+    get_debug_log_path, get_log_path, get_log_file_paths,
+    DEBUG_LOGS_ENABLED, DEBUG_LOG_PATH, debug_log_lock,
+    ENABLE_CRASH_LOG,
+    configure as _configure_logger,
+)
 
 # ── Run the curses check before importing curses at module level ──────────────
-if not _check_curses_available():
-    _plain_curses_missing_prompt()
+ensure_curses()
 
 import curses  # noqa: E402  (intentionally placed after the availability check)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ffmpeg detection & installation
-# ══════════════════════════════════════════════════════════════════════════════
-
-def check_ffmpeg() -> tuple:
-    """
-    Returns (found: bool, path: str).
-    Checks PATH via shutil.which, then a few common hard-coded locations.
-    """
-    # Fast path: shutil.which covers everything on PATH
-    p = shutil.which("ffmpeg")
-    if p:
-        return True, p
-
-    # Fallback: common install locations not always on PATH
-    candidates = []
-    if sys.platform == "win32":
-        candidates = [
-            r"C:\ffmpeg\bin\ffmpeg.exe",
-            r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
-            r"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe",
-        ]
-    elif sys.platform == "darwin":
-        candidates = [
-            "/usr/local/bin/ffmpeg",
-            "/opt/homebrew/bin/ffmpeg",
-            "/opt/local/bin/ffmpeg",
-        ]
-    else:
-        candidates = [
-            "/usr/bin/ffmpeg",
-            "/usr/local/bin/ffmpeg",
-            "/snap/bin/ffmpeg",
-        ]
-
-    for c in candidates:
-        if os.path.isfile(c):
-            return True, c
-
-    return False, ""
-
-
-def _detect_linux_package_manager() -> tuple:
-    """
-    Returns (pm_name: str, install_cmd: list) for the first package manager found,
-    or ("", []) if none detected.
-    """
-    candidates = [
-        ("apt-get",  ["apt-get", "install", "-y", "ffmpeg"]),
-        ("apt",      ["apt",     "install", "-y", "ffmpeg"]),
-        ("dnf",      ["dnf",     "install", "-y", "ffmpeg"]),
-        ("yum",      ["yum",     "install", "-y", "ffmpeg"]),
-        ("pacman",   ["pacman",  "-S",      "--noconfirm", "ffmpeg"]),
-        ("zypper",   ["zypper",  "install", "-y", "ffmpeg"]),
-        ("apk",      ["apk",     "add",     "ffmpeg"]),
-    ]
-    for name, cmd in candidates:
-        if shutil.which(name):
-            return name, cmd
-    return "", []
-
-
-def install_ffmpeg_auto(progress_cb=None) -> tuple:
-    """
-    Attempt a platform-appropriate ffmpeg installation.
-
-    progress_cb(line: str) is called for each line of installer output.
-
-    Returns (success: bool, message: str).
-    """
-    if sys.platform == "win32":
-        # Check whether winget is available
-        winget_available = False
-        try:
-            result = subprocess.run(
-                ["winget", "--version"],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE
-            )
-            winget_available = result.returncode == 0
-        except FileNotFoundError:
-            winget_available = False
-
-        if not winget_available:
-            msg = ("winget not found. To install ffmpeg manually, run:\n"
-                   "    winget install --id Gyan.FFmpeg -e\n"
-                   "or download from https://www.gyan.dev/ffmpeg/builds/ "
-                   "and add it to your PATH.")
-            if progress_cb:
-                progress_cb(msg)
-            return False, msg
-
-        # winget is available — run it
-        cmd = ["winget", "install", "--id", "Gyan.FFmpeg", "-e",
-               "--accept-source-agreements", "--accept-package-agreements"]
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-            for line in proc.stdout:
-                if progress_cb:
-                    progress_cb(line.rstrip())
-            proc.wait()
-            if proc.returncode == 0:
-                return True, ("ffmpeg installed successfully via winget!\n"
-                              "NOTE: You must restart your computer or log out and back in "
-                              "for the system PATH to update. jj-dlp will not work properly until then.")
-            return False, f"winget exited with code {proc.returncode}."
-        except Exception as e:
-            return False, f"winget failed to launch: {e}"
-
-    if sys.platform == "darwin":
-        brew = shutil.which("brew")
-        if not brew:
-            msg = ("Homebrew not found. Install Homebrew first:\n"
-                   "  /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/"
-                   "Homebrew/install/HEAD/install.sh)\"\n"
-                   "Then run:  brew install ffmpeg")
-            if progress_cb:
-                progress_cb(msg)
-            return False, msg
-        cmd = [brew, "install", "ffmpeg"]
-    else:
-        pm_name, cmd = _detect_linux_package_manager()
-        if not cmd:
-            msg = "No supported package manager found (tried apt, dnf, yum, pacman, zypper, apk)."
-            if progress_cb:
-                progress_cb(msg)
-            return False, msg
-        # Prepend sudo if not already root
-        if os.geteuid() != 0:
-            cmd = ["sudo"] + cmd
-
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        for line in proc.stdout:
-            if progress_cb:
-                progress_cb(line.rstrip())
-        proc.wait()
-        if proc.returncode == 0:
-            found, path = check_ffmpeg()
-            if found:
-                return True, f"ffmpeg installed successfully at {path}"
-            return True, "Installer reported success (restart may be needed for PATH)."
-        return False, f"Installer exited with code {proc.returncode}."
-    except FileNotFoundError as e:
-        return False, f"Could not launch installer: {e}"
-    except Exception as e:
-        return False, f"Installation error: {e}"
-
-
-# ── Plain-text ffmpeg startup check ──────────────────────────────────────────
-
-def _plain_ffmpeg_check() -> bool:
-    """
-    Plain-terminal ffmpeg presence check run before the main curses dashboard.
-
-    • If ffmpeg is found  → brief confirmation, auto-continue after 1 s.
-    • If ffmpeg is missing → prompt Y/N to attempt auto-install.
-      - Y: run installer, stream output line-by-line to the terminal.
-      - N: warn and continue (yt-dlp may still work without ffmpeg for
-           some formats, but the user is informed).
-
-    Returns True to continue startup, False to abort.
-    """
-    BOLD  = "\033[1m"
-    RED   = "\033[91m"
-    YEL   = "\033[93m"
-    GRN   = "\033[92m"
-    CYN   = "\033[96m"
-    RESET = "\033[0m"
-
-    # ── Phase 1: Detection ────────────────────────────────────────────────────
-    found, ffmpeg_path = check_ffmpeg()
-
-    if found:
-        print()
-        print(f"{GRN}{BOLD}✔  ffmpeg found:{RESET}")
-        print(f"   {ffmpeg_path}")
-        print(f"{YEL}Continuing in 1 second…{RESET}")
-        deadline = time.time() + 1.0
-        while time.time() < deadline:
-            time.sleep(0.05)
-        return True
-
-    # ── Phase 2: Missing — prompt ─────────────────────────────────────────────
-    if sys.platform == "win32":
-        winget_available = False
-        try:
-            result = subprocess.run(
-                ["winget", "--version"],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE
-            )
-            winget_available = result.returncode == 0
-        except FileNotFoundError:
-            winget_available = False
-        install_hint = ("Will run: winget install Gyan.FFmpeg" if winget_available
-                        else "winget not found — manual install required.")
-    elif sys.platform == "darwin":
-        brew = shutil.which("brew")
-        install_hint = ("Will run: brew install ffmpeg" if brew
-                        else "Homebrew not found — manual install required.")
-    else:
-        pm_name, _ = _detect_linux_package_manager()
-        install_hint = (f"Will run: sudo {pm_name} install ffmpeg" if pm_name
-                        else "No supported package manager found.")
-
-    if sys.platform == "win32":
-        can_auto = winget_available
-    elif sys.platform == "darwin":
-        can_auto = bool(shutil.which("brew"))
-    else:
-        can_auto = bool(_detect_linux_package_manager()[0])
-
-    print()
-    print(f"{BOLD}{RED}┌─ DEPENDENCY CHECK — ffmpeg ─────────────────────────┐{RESET}")
-    print(f"{BOLD}{RED}│  ffmpeg not found in PATH or common locations.       │{RESET}")
-    print(f"{BOLD}{RED}└─────────────────────────────────────────────────────-┘{RESET}")
-    print()
-    print(f"{YEL}{install_hint}{RESET}")
-    print()
-
-    if can_auto:
-        prompt = f"{BOLD}Install ffmpeg now? [Y/n]: {RESET}"
-    else:
-        prompt = f"{BOLD}Continue without ffmpeg? [N/q]: {RESET}"
-
-    try:
-        answer = input(prompt).strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print("\nAborted.")
-        return False
-
-    if answer in ("q", "quit"):
-        return False
-
-    if answer in ("n", "no") or (not can_auto and answer not in ("y", "yes", "")):
-        print()
-        print(f"{YEL}⚠  Continuing without ffmpeg.{RESET}")
-        print(f"{YEL}   Some formats / remuxing may fail.{RESET}")
-        print()
-        return True
-
-    if not can_auto:
-        # can_auto is False and user didn't explicitly say n/q — treat as continue
-        print()
-        print(f"{YEL}⚠  Continuing without ffmpeg.{RESET}")
-        print(f"{YEL}   Some formats / remuxing may fail.{RESET}")
-        print()
-        return True
-
-    # ── Phase 3: Install ──────────────────────────────────────────────────────
-    print()
-    print(f"{CYN}Installing ffmpeg — please wait…{RESET}")
-    print()
-
-    success, msg = install_ffmpeg_auto(progress_cb=lambda line: print(f"  {line}"))
-
-    print()
-    if success:
-        print(f"{GRN}{BOLD}✔  Installation complete.{RESET}")
-        print(f"   {msg}")
-        if sys.platform == "win32":
-            print()
-            print(f"{YEL}{BOLD}NOTE: You must restart your computer (or log out and back in){RESET}")
-            print(f"{YEL}      for the system PATH to update before jj-dlp will work properly.{RESET}")
-            print()
-            input("Press Enter to exit...")
-            sys.exit(0)
-        print()
-        return True
-    else:
-        print(f"{RED}{BOLD}✘  Installation failed.{RESET}")
-        print(f"   {msg}")
-        print()
-        try:
-            cont = input(f"{BOLD}Continue without ffmpeg? [n/Q]: {RESET}").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            cont = "q"
-        if cont in ("y", "yes", "n", "no"):
-            print()
-            print(f"{YEL}⚠  Continuing without ffmpeg.{RESET}")
-            print(f"{YEL}   Some formats / remuxing may fail.{RESET}")
-            print()
-            return True
-        return False
-
-
-# ── Early startup debug log ──────────────────────────────────────────────────
-ENABLE_STARTUP_LOG: bool = False
-ENABLE_CRASH_LOG:   bool = True
-_STARTUP_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jj-dlp-startup-debug.log")
-
-# Script start time (for uptime display)
+# ── Script start time (for uptime display) ───────────────────────────────────
 _SCRIPT_START_TIME: float = time.time()
-
-def _startup_dbg(msg: str) -> None:
-    if not ENABLE_STARTUP_LOG:
-        return
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        with open(_STARTUP_LOG, "a", encoding="utf-8") as _f:
-            _f.write(f"[{ts}] {msg}\n")
-    except Exception:
-        pass
-
-def _startup_dbg_flush() -> None:
-    _startup_dbg("=" * 60)
-    _startup_dbg(f"NEW RUN  argv={sys.argv}")
-    _startup_dbg(f"cwd      = {os.getcwd()}")
-    _startup_dbg(f"__file__ = {os.path.abspath(__file__)}")
-    _startup_dbg(f"python   = {sys.executable}")
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -531,7 +41,7 @@ def _startup_dbg_flush() -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def load_config(config_path: str) -> dict:
-    _startup_dbg(f"load_config called with: {config_path!r}")
+    startup_dbg(f"load_config called with: {config_path!r}")
     if not os.path.isfile(config_path):
         print(f"ERROR: Config file not found at: {config_path}", file=sys.stderr)
         sys.exit(1)
@@ -540,7 +50,7 @@ def load_config(config_path: str) -> dict:
     try:
         parser.read(config_path, encoding="utf-8")
     except Exception as _e:
-        _startup_dbg(f"load_config: configparser FAILED — {type(_e).__name__}: {_e}")
+        startup_dbg(f"load_config: configparser FAILED — {type(_e).__name__}: {_e}")
         raise
 
     streamers = []
@@ -743,7 +253,7 @@ class SiteState:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Global singletons (verbosity, output mode, debug log)
+# Global singletons (verbosity, output mode)
 # ══════════════════════════════════════════════════════════════════════════════
 
 VERBOSITY = 1
@@ -765,9 +275,18 @@ FFMPEG_ERROR_PATTERNS: List[str] = [
 ]
 FFMPEG_ERROR_RESTART_THRESHOLD: int = 500
 
-DEBUG_LOGS_ENABLED: bool = False
-DEBUG_LOG_PATH:     str  = ""
-debug_log_lock = threading.Lock()
+# Wire logger.dbg to this module's OUTPUT_MODE and VERBOSITY
+def _get_output_mode() -> int:
+    with output_mode_lock:
+        return OUTPUT_MODE
+
+def _get_verbosity() -> int:
+    with verbosity_lock:
+        return VERBOSITY
+
+_configure_logger(_get_output_mode, _get_verbosity)
+
+# DEBUG_LOGS_ENABLED / DEBUG_LOG_PATH / debug_log_lock are imported from logger.
 
 # ── Keybinds ──
 KEYBIND_VERBOSITY = "\x02"   # Ctrl+B
@@ -782,57 +301,6 @@ KEYBIND_LABELS = {
     KEYBIND_REMOVE:    "R",
     KEYBIND_DISABLE:   "D",
 }
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Logging helpers
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _write_debug_log(msg: str) -> None:
-    with debug_log_lock:
-        enabled = DEBUG_LOGS_ENABLED
-        path    = DEBUG_LOG_PATH
-    if not enabled or not path:
-        return
-    try:
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(msg + "\n")
-    except Exception:
-        pass
-
-
-def dbg(msg: str) -> None:
-    ts   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    full = f"[{ts}] {msg}"
-    _write_debug_log(full)
-    with output_mode_lock:
-        mode = OUTPUT_MODE
-    if mode != 2:
-        return
-    with verbosity_lock:
-        v = VERBOSITY
-    if v in (3, 5):
-        print(full, flush=True)
-
-
-def get_debug_log_path(cfg: dict) -> str:
-    p = cfg.get("debug_log_path") or ""
-    if p.strip():
-        return p
-    return os.path.join(cfg.get("output_dir", "."), "debug.log")
-
-
-def get_log_path(cfg: dict) -> str:
-    lp = cfg.get("log_path") or ""
-    if lp.strip():
-        return lp
-    return os.path.join(cfg.get("output_dir", "."), "jj-dlp.log")
-
-
-def get_log_file_paths(cfg: dict) -> Tuple[str, str]:
-    base = get_log_path(cfg)
-    if cfg.get("split_logs"):
-        return f"{base}.stdout.log", f"{base}.stderr.log"
-    return base, base
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2370,9 +1838,9 @@ def main() -> None:
     _script_dir = os.path.dirname(os.path.abspath(__file__))
     if os.getcwd() != _script_dir:
         os.chdir(_script_dir)
-        _startup_dbg(f"CWD changed to: {_script_dir}")
+        startup_dbg(f"CWD changed to: {_script_dir}")
 
-    _startup_dbg_flush()
+    startup_dbg_flush()
 
     parser = argparse.ArgumentParser(description="jj-dlp multi-site stream recorder")
     parser.add_argument("--config", nargs="+", default=None,
@@ -2412,12 +1880,13 @@ def main() -> None:
     # ── Global config / debug setup ───────────────────────────────────────────
     initial_cfg = load_config(config_paths[0])
 
-    global VERBOSITY, DEBUG_LOGS_ENABLED, DEBUG_LOG_PATH
+    global VERBOSITY
     with verbosity_lock:
         VERBOSITY = initial_cfg.get("verbosity", 1)
-    with debug_log_lock:
-        DEBUG_LOGS_ENABLED = initial_cfg.get("debug_logs", False)
-        DEBUG_LOG_PATH     = get_debug_log_path(initial_cfg) if DEBUG_LOGS_ENABLED else ""
+    import logger as _logger
+    with _logger.debug_log_lock:
+        _logger.DEBUG_LOGS_ENABLED = initial_cfg.get("debug_logs", False)
+        _logger.DEBUG_LOG_PATH     = get_debug_log_path(initial_cfg) if _logger.DEBUG_LOGS_ENABLED else ""
 
     # ── Launch per-site state + threads ──────────────────────────────────────
     sites: List[SiteState] = []
@@ -2439,7 +1908,7 @@ def main() -> None:
         site.watcher_thread = wt
 
     # ── ffmpeg dependency check ───────────────────────────────────────────────
-    ffmpeg_ok = _plain_ffmpeg_check()
+    ffmpeg_ok = plain_ffmpeg_check()
     if not ffmpeg_ok:
         print("\njj-dlp  ·  Aborted during ffmpeg check.")
         return
@@ -2507,8 +1976,8 @@ if __name__ == "__main__":
         main()
     except Exception as _top_e:
         import traceback
-        _startup_dbg(f"UNCAUGHT EXCEPTION: {type(_top_e).__name__}: {_top_e}")
-        _startup_dbg(traceback.format_exc())
+        startup_dbg(f"UNCAUGHT EXCEPTION: {type(_top_e).__name__}: {_top_e}")
+        startup_dbg(traceback.format_exc())
         if ENABLE_CRASH_LOG:
             _crash_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jj-dlp-crash.log")
             try:
