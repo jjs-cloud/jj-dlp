@@ -434,7 +434,7 @@ def _plain_ffmpeg_check() -> bool:
     print()
 
     if can_auto:
-        prompt = f"{BOLD}Install ffmpeg now? [Y/n/q]: {RESET}"
+        prompt = f"{BOLD}Install ffmpeg now? [Y/n]: {RESET}"
     else:
         prompt = f"{BOLD}Continue without ffmpeg? [N/q]: {RESET}"
 
