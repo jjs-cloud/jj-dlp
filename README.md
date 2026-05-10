@@ -37,7 +37,7 @@ jj-dlp is a [yt-dlp](https://github.com/yt-dlp/yt-dlp) dashboard that allows you
 
 ## Advanced Configuration
 
-The script uses a `.conf` file for each website.  Some settings are modified from the dashboard (like adding and removing streamers), and some must be manually configured by editing the `.conf` file in a text editor.
+The script uses a `.conf` file for each streaming website.  Some settings are modified from the dashboard (like adding and removing streamers), and some must be manually configured by editing the `.conf` file in a text editor.
 
 At startup, the script will scan the current folder for `.conf` files and prompt you to choose the ones you want to use.
 
