@@ -269,12 +269,47 @@ def install_ffmpeg_auto(progress_cb=None) -> tuple:
     Returns (success: bool, message: str).
     """
     if sys.platform == "win32":
-        msg = ("Automatic install is not supported on Windows.\n"
-               "Download ffmpeg from https://www.gyan.dev/ffmpeg/builds/ "
-               "and add it to your PATH.")
-        if progress_cb:
-            progress_cb(msg)
-        return False, msg
+        # Check whether winget is available
+        winget_available = False
+        try:
+            result = subprocess.run(
+                ["winget", "--version"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            winget_available = result.returncode == 0
+        except FileNotFoundError:
+            winget_available = False
+
+        if not winget_available:
+            msg = ("winget not found. To install ffmpeg manually, run:\n"
+                   "    winget install --id Gyan.FFmpeg -e\n"
+                   "or download from https://www.gyan.dev/ffmpeg/builds/ "
+                   "and add it to your PATH.")
+            if progress_cb:
+                progress_cb(msg)
+            return False, msg
+
+        # winget is available — run it
+        cmd = ["winget", "install", "--id", "Gyan.FFmpeg", "-e",
+               "--accept-source-agreements", "--accept-package-agreements"]
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            for line in proc.stdout:
+                if progress_cb:
+                    progress_cb(line.rstrip())
+            proc.wait()
+            if proc.returncode == 0:
+                return True, ("ffmpeg installed successfully via winget!\n"
+                              "NOTE: You must restart your computer or log out and back in "
+                              "for the system PATH to update. jj-dlp will not work properly until then.")
+            return False, f"winget exited with code {proc.returncode}."
+        except Exception as e:
+            return False, f"winget failed to launch: {e}"
 
     if sys.platform == "darwin":
         brew = shutil.which("brew")
@@ -321,114 +356,53 @@ def install_ffmpeg_auto(progress_cb=None) -> tuple:
         return False, f"Installation error: {e}"
 
 
-# ── Curses ffmpeg startup check ───────────────────────────────────────────────
+# ── Plain-text ffmpeg startup check ──────────────────────────────────────────
 
-def _curses_ffmpeg_check(stdscr) -> bool:
+def _plain_ffmpeg_check() -> bool:
     """
-    Curses-native ffmpeg presence check run before the main dashboard.
+    Plain-terminal ffmpeg presence check run before the main curses dashboard.
 
     • If ffmpeg is found  → brief confirmation, auto-continue after 1 s.
     • If ffmpeg is missing → prompt Y/N to attempt auto-install.
-      - Y: run installer, stream output line-by-line into the panel.
+      - Y: run installer, stream output line-by-line to the terminal.
       - N: warn and continue (yt-dlp may still work without ffmpeg for
            some formats, but the user is informed).
 
     Returns True to continue startup, False to abort.
     """
-    curses.start_color()
-    curses.use_default_colors()
-    # Reuse the same colour indices as the main multiselect screen
-    curses.init_pair(1, curses.COLOR_CYAN,    curses.COLOR_BLACK)  # chrome
-    curses.init_pair(2, curses.COLOR_WHITE,   curses.COLOR_BLUE)   # highlight
-    curses.init_pair(3, curses.COLOR_YELLOW,  curses.COLOR_BLACK)  # warn
-    curses.init_pair(4, curses.COLOR_GREEN,   curses.COLOR_BLACK)  # ok / live
-    curses.init_pair(5, curses.COLOR_BLACK,   curses.COLOR_CYAN)   # inverse header
-    curses.init_pair(6, curses.COLOR_MAGENTA, curses.COLOR_BLACK)  # logo
-    curses.init_pair(7, curses.COLOR_RED,     curses.COLOR_BLACK)  # error / missing
-
-    curses.curs_set(0)
-    stdscr.keypad(True)
-    stdscr.nodelay(False)
-
-    h, w = stdscr.getmaxyx()
-
-    def _draw_base(status_lines=None, scroll_lines=None, scroll_offset=0):
-        """Redraw the full ffmpeg check screen."""
-        stdscr.erase()
-        stdscr.bkgd(" ", curses.color_pair(0))
-
-        # Logo
-        for i, line in enumerate(ASCII_LOGO):
-            safe_addstr(stdscr, 1 + i, 2, line,
-                        curses.color_pair(6) | curses.A_BOLD)
-
-        ts = time.strftime("%Y-%m-%d  %H:%M:%S")
-        safe_addstr(stdscr, 1, w - len(ts) - 3, ts, curses.color_pair(1))
-        safe_addstr(stdscr, 7, 2, "─" * (w - 4), curses.color_pair(1))
-
-        title = " DEPENDENCY CHECK — ffmpeg "
-        safe_addstr(stdscr, 9, 2, title,
-                    curses.color_pair(5) | curses.A_BOLD)
-
-        # Status lines (short summary rows)
-        row = 11
-        if status_lines:
-            for txt, pair, bold in status_lines:
-                attr = curses.color_pair(pair) | (curses.A_BOLD if bold else 0)
-                safe_addstr(stdscr, row, 4, txt, attr)
-                row += 1
-
-        # Scrollable installer output box
-        if scroll_lines is not None:
-            box_y1 = row + 1
-            box_y2 = h - 3
-            box_x1 = 2
-            box_x2 = w - 3
-            if box_y2 > box_y1 + 1:
-                # Draw a simple border
-                safe_addstr(stdscr, box_y1, box_x1,
-                            "┌" + "─" * (box_x2 - box_x1 - 1) + "┐",
-                            curses.color_pair(1))
-                safe_addstr(stdscr, box_y2, box_x1,
-                            "└" + "─" * (box_x2 - box_x1 - 1) + "┘",
-                            curses.color_pair(1))
-                for y in range(box_y1 + 1, box_y2):
-                    safe_addstr(stdscr, y, box_x1, "│", curses.color_pair(1))
-                    safe_addstr(stdscr, y, box_x2, "│", curses.color_pair(1))
-
-                inner_h = box_y2 - box_y1 - 1
-                inner_w = box_x2 - box_x1 - 1
-                visible = scroll_lines[scroll_offset: scroll_offset + inner_h]
-                for i, ln in enumerate(visible):
-                    safe_addstr(stdscr, box_y1 + 1 + i, box_x1 + 1,
-                                ln[:inner_w].ljust(inner_w),
-                                curses.color_pair(3))
-
-        stdscr.refresh()
+    BOLD  = "\033[1m"
+    RED   = "\033[91m"
+    YEL   = "\033[93m"
+    GRN   = "\033[92m"
+    CYN   = "\033[96m"
+    RESET = "\033[0m"
 
     # ── Phase 1: Detection ────────────────────────────────────────────────────
     found, ffmpeg_path = check_ffmpeg()
 
     if found:
-        _draw_base(status_lines=[
-            ("✔  ffmpeg found:", 4, True),
-            (f"   {ffmpeg_path}", 1, False),
-            ("", 0, False),
-            ("Continuing in 1 second…", 3, False),
-        ])
-        stdscr.nodelay(True)
+        print()
+        print(f"{GRN}{BOLD}✔  ffmpeg found:{RESET}")
+        print(f"   {ffmpeg_path}")
+        print(f"{YEL}Continuing in 1 second…{RESET}")
         deadline = time.time() + 1.0
         while time.time() < deadline:
-            k = stdscr.getch()
-            if k in (ord('\n'), ord('\r'), ord(' '), curses.KEY_ENTER):
-                break
-            curses.napms(50)
-        stdscr.nodelay(False)
+            time.sleep(0.05)
         return True
 
     # ── Phase 2: Missing — prompt ─────────────────────────────────────────────
     if sys.platform == "win32":
-        install_hint = "Automatic install not available on Windows."
+        winget_available = False
+        try:
+            result = subprocess.run(
+                ["winget", "--version"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            winget_available = result.returncode == 0
+        except FileNotFoundError:
+            winget_available = False
+        install_hint = ("Will run: winget install Gyan.FFmpeg" if winget_available
+                        else "winget not found — manual install required.")
     elif sys.platform == "darwin":
         brew = shutil.which("brew")
         install_hint = ("Will run: brew install ffmpeg" if brew
@@ -438,119 +412,85 @@ def _curses_ffmpeg_check(stdscr) -> bool:
         install_hint = (f"Will run: sudo {pm_name} install ffmpeg" if pm_name
                         else "No supported package manager found.")
 
-    can_auto = (sys.platform != "win32" and
-                (shutil.which("brew") if sys.platform == "darwin"
-                 else bool(_detect_linux_package_manager()[0])))
+    if sys.platform == "win32":
+        can_auto = winget_available
+    elif sys.platform == "darwin":
+        can_auto = bool(shutil.which("brew"))
+    else:
+        can_auto = bool(_detect_linux_package_manager()[0])
 
-    while True:
-        _draw_base(status_lines=[
-            ("✘  ffmpeg not found in PATH or common locations.", 7, True),
-            ("", 0, False),
-            (install_hint, 3, False),
-            ("", 0, False),
-            (("Press  Y  to install now,  N  to continue without ffmpeg,"
-              "  Q  to quit.")
-             if can_auto else
-             ("Press  N  to continue without ffmpeg   Q  to quit."),
-             1, False),
-        ])
-        key = stdscr.getch()
+    print()
+    print(f"{BOLD}{RED}┌─ DEPENDENCY CHECK — ffmpeg ─────────────────────────┐{RESET}")
+    print(f"{BOLD}{RED}│  ffmpeg not found in PATH or common locations.       │{RESET}")
+    print(f"{BOLD}{RED}└─────────────────────────────────────────────────────-┘{RESET}")
+    print()
+    print(f"{YEL}{install_hint}{RESET}")
+    print()
 
-        if key in (ord('q'), ord('Q'), 27):
-            return False
+    if can_auto:
+        prompt = f"{BOLD}Install ffmpeg now? [Y/n/q]: {RESET}"
+    else:
+        prompt = f"{BOLD}Continue without ffmpeg? [N/q]: {RESET}"
 
-        if key in (ord('n'), ord('N')):
-            # Warn and proceed
-            _draw_base(status_lines=[
-                ("⚠  Continuing without ffmpeg.", 3, True),
-                ("   Some formats / remuxing may fail.", 3, False),
-                ("", 0, False),
-                ("Press any key to start the dashboard…", 1, False),
-            ])
-            stdscr.getch()
-            return True
+    try:
+        answer = input(prompt).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\nAborted.")
+        return False
 
-        if can_auto and key in (ord('y'), ord('Y')):
-            break   # fall through to install phase
+    if answer in ("q", "quit"):
+        return False
+
+    if answer in ("n", "no") or (not can_auto and answer not in ("y", "yes", "")):
+        print()
+        print(f"{YEL}⚠  Continuing without ffmpeg.{RESET}")
+        print(f"{YEL}   Some formats / remuxing may fail.{RESET}")
+        print()
+        return True
+
+    if not can_auto:
+        # can_auto is False and user didn't explicitly say n/q — treat as continue
+        print()
+        print(f"{YEL}⚠  Continuing without ffmpeg.{RESET}")
+        print(f"{YEL}   Some formats / remuxing may fail.{RESET}")
+        print()
+        return True
 
     # ── Phase 3: Install ──────────────────────────────────────────────────────
-    output_lines: list = []
-    result_holder = [None]   # (success, message) written by worker thread
-    install_done  = threading.Event()
+    print()
+    print(f"{CYN}Installing ffmpeg — please wait…{RESET}")
+    print()
 
-    def _worker():
-        def _cb(line):
-            output_lines.append(line)
-        success, msg = install_ffmpeg_auto(progress_cb=_cb)
-        output_lines.append(f"{'✔' if success else '✘'}  {msg}")
-        result_holder[0] = (success, msg)
-        install_done.set()
+    success, msg = install_ffmpeg_auto(progress_cb=lambda line: print(f"  {line}"))
 
-    worker = threading.Thread(target=_worker, daemon=True)
-    worker.start()
-
-    scroll_offset = 0
-    stdscr.nodelay(True)
-
-    while not install_done.is_set():
-        h, w = stdscr.getmaxyx()
-        # Auto-scroll to bottom
-        inner_h = max(1, h - 3 - 14)   # approximate visible rows in the box
-        max_offset = max(0, len(output_lines) - inner_h)
-        scroll_offset = max_offset
-
-        _draw_base(
-            status_lines=[
-                ("Installing ffmpeg — please wait…", 3, True),
-                ("↑/↓  scroll output   (install runs in background)", 1, False),
-            ],
-            scroll_lines=output_lines,
-            scroll_offset=scroll_offset,
-        )
-
-        key = stdscr.getch()
-        if key == curses.KEY_UP:
-            scroll_offset = max(0, scroll_offset - 1)
-        elif key == curses.KEY_DOWN:
-            scroll_offset = min(max_offset, scroll_offset + 1)
-
-        curses.napms(100)
-
-    stdscr.nodelay(False)
-    success, msg = result_holder[0]
-
-    # Final result screen
-    h, w = stdscr.getmaxyx()
-    inner_h = max(1, h - 3 - 14)
-    max_offset = max(0, len(output_lines) - inner_h)
-
-    while True:
-        _draw_base(
-            status_lines=[
-                (("✔  Installation complete." if success
-                  else "✘  Installation failed."), 4 if success else 7, True),
-                (f"   {msg}", 1, False),
-                ("", 0, False),
-                ("Press any key to continue…" if success
-                 else "Press  N  to continue without ffmpeg,  Q  to quit.", 3, False),
-            ],
-            scroll_lines=output_lines,
-            scroll_offset=scroll_offset,
-        )
-        key = stdscr.getch()
-        if key == curses.KEY_UP:
-            scroll_offset = max(0, scroll_offset - 1)
-            continue
-        elif key == curses.KEY_DOWN:
-            scroll_offset = min(max_offset, scroll_offset + 1)
-            continue
-
-        if success:
+    print()
+    if success:
+        print(f"{GRN}{BOLD}✔  Installation complete.{RESET}")
+        print(f"   {msg}")
+        if sys.platform == "win32":
+            print()
+            print(f"{YEL}{BOLD}NOTE: You must restart your computer (or log out and back in){RESET}")
+            print(f"{YEL}      for the system PATH to update before jj-dlp will work properly.{RESET}")
+            print()
+            input("Press Enter to exit...")
+            sys.exit(0)
+        print()
+        return True
+    else:
+        print(f"{RED}{BOLD}✘  Installation failed.{RESET}")
+        print(f"   {msg}")
+        print()
+        try:
+            cont = input(f"{BOLD}Continue without ffmpeg? [n/Q]: {RESET}").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            cont = "q"
+        if cont in ("y", "yes", "n", "no"):
+            print()
+            print(f"{YEL}⚠  Continuing without ffmpeg.{RESET}")
+            print(f"{YEL}   Some formats / remuxing may fail.{RESET}")
+            print()
             return True
-        if key in (ord('q'), ord('Q'), 27):
-            return False
-        if key in (ord('n'), ord('N')):
-            return True
+        return False
 
 
 # ── Early startup debug log ──────────────────────────────────────────────────
@@ -2475,7 +2415,7 @@ def main() -> None:
         site.watcher_thread = wt
 
     # ── ffmpeg dependency check ───────────────────────────────────────────────
-    ffmpeg_ok = curses.wrapper(_curses_ffmpeg_check)
+    ffmpeg_ok = _plain_ffmpeg_check()
     if not ffmpeg_ok:
         print("\njj-dlp  ·  Aborted during ffmpeg check.")
         return
