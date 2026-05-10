@@ -96,6 +96,23 @@ def load_config(config_path: str) -> dict:
     debug_log_path_raw    = general.get("DEBUG_LOG_PATH", "").strip().strip('\"\'')
     debug_log_path        = debug_log_path_raw if debug_log_path_raw else ""
     yt_dlp_path_raw       = general.get("YT_DLP_PATH", "").strip().strip('"\'')
+    if sys.platform != "win32" and "exe" in yt_dlp_path_raw.lower():
+        # Rewrite the config file, blanking out YT_DLP_PATH so it won't
+        # try to run a Windows .exe on Linux.
+        try:
+            with open(config_path, "r", encoding="utf-8") as _f:
+                _cfg_text = _f.read()
+            import re as _re
+            _cfg_text = _re.sub(
+                r"(?im)^([ \t]*YT_DLP_PATH[ \t]*=[ \t]*).*$",
+                r"\g<1>",
+                _cfg_text,
+            )
+            with open(config_path, "w", encoding="utf-8") as _f:
+                _f.write(_cfg_text)
+        except Exception:
+            pass
+        yt_dlp_path_raw = ""
     yt_dlp_path           = yt_dlp_path_raw if yt_dlp_path_raw else "yt-dlp"
     site_label            = general.get("SITE_LABEL", os.path.basename(config_path)).strip().strip('\"\'')
 
