@@ -9,13 +9,548 @@ import sys
 import os
 import json
 import threading
-import curses
 from datetime import datetime
 from typing import List, Set, Tuple, Dict, Optional
 import configparser
 import argparse
 from urllib.parse import urlparse
 import shutil
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# curses detection & installation  (must come before any other curses use)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _check_curses_available() -> bool:
+    """Return True if the curses module can be imported."""
+    try:
+        import curses as _c  # noqa: F401
+        return True
+    except ModuleNotFoundError:
+        return False
+
+
+def _install_curses_auto(progress_cb=None) -> tuple:
+    """
+    Attempt to install the platform-appropriate curses package.
+
+    On Windows: installs 'windows-curses' via pip.
+    On macOS/Linux: curses ships with Python; if missing, advise the user to
+    install the OS ncurses dev package and rebuild Python (or use their
+    distro's python3-curses package).
+
+    progress_cb(line: str) is called for each line of installer output.
+
+    Returns (success: bool, message: str).
+    """
+    def _emit(line):
+        if progress_cb:
+            progress_cb(line)
+
+    if sys.platform == "win32":
+        _emit("Attempting: pip install windows-curses ...")
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "pip", "install", "windows-curses"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            for line in proc.stdout:
+                _emit(line.rstrip())
+            proc.wait()
+            if proc.returncode == 0:
+                # Verify it actually works now
+                if _check_curses_available():
+                    return True, "windows-curses installed successfully."
+                return False, ("pip reported success but curses still "
+                               "cannot be imported. Try restarting the script.")
+            return False, f"pip exited with code {proc.returncode}."
+        except Exception as exc:
+            return False, f"Installation error: {exc}"
+
+    elif sys.platform == "darwin":
+        msg = (
+            "curses is part of Python's standard library on macOS.\n"
+            "If it is missing, your Python installation may be incomplete.\n"
+            "Recommended fix:\n"
+            "  brew install python   # reinstall via Homebrew\n"
+            "or download the official installer from https://www.python.org/downloads/"
+        )
+        _emit(msg)
+        return False, msg
+
+    else:  # Linux / other POSIX
+        # Try the distro's python3-curses package first
+        candidates = [
+            ("apt-get",  ["apt-get", "install", "-y", "python3-curses"]),
+            ("apt",      ["apt",     "install", "-y", "python3-curses"]),
+            ("dnf",      ["dnf",     "install", "-y", "python3-curses"]),
+            ("yum",      ["yum",     "install", "-y", "python3-curses"]),
+            ("pacman",   ["pacman",  "-S",      "--noconfirm", "python-curses"]),
+            ("zypper",   ["zypper",  "install", "-y", "python3-curses"]),
+            ("apk",      ["apk",     "add",     "py3-curses"]),
+        ]
+        pm_name, cmd = "", []
+        for name, c in candidates:
+            if shutil.which(name):
+                pm_name, cmd = name, c
+                break
+
+        if not cmd:
+            msg = ("No supported package manager found.\n"
+                   "Install the python3-curses package for your distribution manually.")
+            _emit(msg)
+            return False, msg
+
+        if os.geteuid() != 0:
+            cmd = ["sudo"] + cmd
+
+        _emit(f"Attempting: {' '.join(cmd)} ...")
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            for line in proc.stdout:
+                _emit(line.rstrip())
+            proc.wait()
+            if proc.returncode == 0:
+                if _check_curses_available():
+                    return True, "python3-curses installed successfully."
+                return False, ("Package installed but curses still cannot be imported. "
+                               "Try restarting the script.")
+            return False, f"Package manager exited with code {proc.returncode}."
+        except Exception as exc:
+            return False, f"Installation error: {exc}"
+
+
+def _plain_curses_missing_prompt() -> None:
+    """
+    Plain-terminal (no curses) prompt shown when curses is not available.
+    Offers to install it; exits or continues based on the user's choice.
+    Called once at startup, before any curses.wrapper() call.
+    """
+    BOLD  = "\033[1m"
+    RED   = "\033[91m"
+    YEL   = "\033[93m"
+    GRN   = "\033[92m"
+    RESET = "\033[0m"
+
+    print()
+    print(f"{BOLD}{RED}┌─ MISSING DEPENDENCY ───────────────────────────────┐{RESET}")
+    print(f"{BOLD}{RED}│  curses  is not available in this Python install.   │{RESET}")
+    print(f"{BOLD}{RED}└─────────────────────────────────────────────────────┘{RESET}")
+    print()
+
+    if sys.platform == "win32":
+        print(f"{YEL}On Windows, curses requires the 'windows-curses' package.{RESET}")
+        print(f"{YEL}It can be installed automatically via pip.{RESET}")
+    elif sys.platform == "darwin":
+        print(f"{YEL}On macOS, curses ships with Python.{RESET}")
+        print(f"{YEL}Your Python installation may be incomplete or broken.{RESET}")
+    else:
+        print(f"{YEL}On Linux, curses may require the 'python3-curses' OS package.{RESET}")
+
+    print()
+
+    try:
+        answer = input(f"{BOLD}Attempt automatic installation now? [Y/n]: {RESET}").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\nAborted.")
+        sys.exit(1)
+
+    if answer in ("", "y", "yes"):
+        print()
+        success, message = _install_curses_auto(progress_cb=lambda l: print(f"  {l}"))
+        print()
+        if success:
+            print(f"{GRN}✓  {message}{RESET}")
+            print(f"{GRN}   Restarting script …{RESET}\n")
+            # Re-exec so the newly installed module is picked up cleanly
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        else:
+            print(f"{RED}✗  Installation failed:{RESET}")
+            print(f"   {message}")
+            print()
+            try:
+                cont = input("Continue anyway (the UI will not work)? [y/N]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                cont = "n"
+            if cont not in ("y", "yes"):
+                sys.exit(1)
+    else:
+        print()
+        print(f"{RED}curses is required for the dashboard UI.{RESET}")
+        print("Install it manually and re-run, or press Enter to try continuing anyway.")
+        try:
+            input("Press Enter to continue, Ctrl+C to quit: ")
+        except (EOFError, KeyboardInterrupt):
+            sys.exit(1)
+
+
+# ── Run the curses check before importing curses at module level ──────────────
+if not _check_curses_available():
+    _plain_curses_missing_prompt()
+
+import curses  # noqa: E402  (intentionally placed after the availability check)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ffmpeg detection & installation
+# ══════════════════════════════════════════════════════════════════════════════
+
+def check_ffmpeg() -> tuple:
+    """
+    Returns (found: bool, path: str).
+    Checks PATH via shutil.which, then a few common hard-coded locations.
+    """
+    # Fast path: shutil.which covers everything on PATH
+    p = shutil.which("ffmpeg")
+    if p:
+        return True, p
+
+    # Fallback: common install locations not always on PATH
+    candidates = []
+    if sys.platform == "win32":
+        candidates = [
+            r"C:\ffmpeg\bin\ffmpeg.exe",
+            r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+            r"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe",
+        ]
+    elif sys.platform == "darwin":
+        candidates = [
+            "/usr/local/bin/ffmpeg",
+            "/opt/homebrew/bin/ffmpeg",
+            "/opt/local/bin/ffmpeg",
+        ]
+    else:
+        candidates = [
+            "/usr/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+            "/snap/bin/ffmpeg",
+        ]
+
+    for c in candidates:
+        if os.path.isfile(c):
+            return True, c
+
+    return False, ""
+
+
+def _detect_linux_package_manager() -> tuple:
+    """
+    Returns (pm_name: str, install_cmd: list) for the first package manager found,
+    or ("", []) if none detected.
+    """
+    candidates = [
+        ("apt-get",  ["apt-get", "install", "-y", "ffmpeg"]),
+        ("apt",      ["apt",     "install", "-y", "ffmpeg"]),
+        ("dnf",      ["dnf",     "install", "-y", "ffmpeg"]),
+        ("yum",      ["yum",     "install", "-y", "ffmpeg"]),
+        ("pacman",   ["pacman",  "-S",      "--noconfirm", "ffmpeg"]),
+        ("zypper",   ["zypper",  "install", "-y", "ffmpeg"]),
+        ("apk",      ["apk",     "add",     "ffmpeg"]),
+    ]
+    for name, cmd in candidates:
+        if shutil.which(name):
+            return name, cmd
+    return "", []
+
+
+def install_ffmpeg_auto(progress_cb=None) -> tuple:
+    """
+    Attempt a platform-appropriate ffmpeg installation.
+
+    progress_cb(line: str) is called for each line of installer output.
+
+    Returns (success: bool, message: str).
+    """
+    if sys.platform == "win32":
+        msg = ("Automatic install is not supported on Windows.\n"
+               "Download ffmpeg from https://www.gyan.dev/ffmpeg/builds/ "
+               "and add it to your PATH.")
+        if progress_cb:
+            progress_cb(msg)
+        return False, msg
+
+    if sys.platform == "darwin":
+        brew = shutil.which("brew")
+        if not brew:
+            msg = ("Homebrew not found. Install Homebrew first:\n"
+                   "  /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/"
+                   "Homebrew/install/HEAD/install.sh)\"\n"
+                   "Then run:  brew install ffmpeg")
+            if progress_cb:
+                progress_cb(msg)
+            return False, msg
+        cmd = [brew, "install", "ffmpeg"]
+    else:
+        pm_name, cmd = _detect_linux_package_manager()
+        if not cmd:
+            msg = "No supported package manager found (tried apt, dnf, yum, pacman, zypper, apk)."
+            if progress_cb:
+                progress_cb(msg)
+            return False, msg
+        # Prepend sudo if not already root
+        if os.geteuid() != 0:
+            cmd = ["sudo"] + cmd
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        for line in proc.stdout:
+            if progress_cb:
+                progress_cb(line.rstrip())
+        proc.wait()
+        if proc.returncode == 0:
+            found, path = check_ffmpeg()
+            if found:
+                return True, f"ffmpeg installed successfully at {path}"
+            return True, "Installer reported success (restart may be needed for PATH)."
+        return False, f"Installer exited with code {proc.returncode}."
+    except FileNotFoundError as e:
+        return False, f"Could not launch installer: {e}"
+    except Exception as e:
+        return False, f"Installation error: {e}"
+
+
+# ── Curses ffmpeg startup check ───────────────────────────────────────────────
+
+def _curses_ffmpeg_check(stdscr) -> bool:
+    """
+    Curses-native ffmpeg presence check run before the main dashboard.
+
+    • If ffmpeg is found  → brief confirmation, auto-continue after 1 s.
+    • If ffmpeg is missing → prompt Y/N to attempt auto-install.
+      - Y: run installer, stream output line-by-line into the panel.
+      - N: warn and continue (yt-dlp may still work without ffmpeg for
+           some formats, but the user is informed).
+
+    Returns True to continue startup, False to abort.
+    """
+    curses.start_color()
+    curses.use_default_colors()
+    # Reuse the same colour indices as the main multiselect screen
+    curses.init_pair(1, curses.COLOR_CYAN,    curses.COLOR_BLACK)  # chrome
+    curses.init_pair(2, curses.COLOR_WHITE,   curses.COLOR_BLUE)   # highlight
+    curses.init_pair(3, curses.COLOR_YELLOW,  curses.COLOR_BLACK)  # warn
+    curses.init_pair(4, curses.COLOR_GREEN,   curses.COLOR_BLACK)  # ok / live
+    curses.init_pair(5, curses.COLOR_BLACK,   curses.COLOR_CYAN)   # inverse header
+    curses.init_pair(6, curses.COLOR_MAGENTA, curses.COLOR_BLACK)  # logo
+    curses.init_pair(7, curses.COLOR_RED,     curses.COLOR_BLACK)  # error / missing
+
+    curses.curs_set(0)
+    stdscr.keypad(True)
+    stdscr.nodelay(False)
+
+    h, w = stdscr.getmaxyx()
+
+    def _draw_base(status_lines=None, scroll_lines=None, scroll_offset=0):
+        """Redraw the full ffmpeg check screen."""
+        stdscr.erase()
+        stdscr.bkgd(" ", curses.color_pair(0))
+
+        # Logo
+        for i, line in enumerate(ASCII_LOGO):
+            safe_addstr(stdscr, 1 + i, 2, line,
+                        curses.color_pair(6) | curses.A_BOLD)
+
+        ts = time.strftime("%Y-%m-%d  %H:%M:%S")
+        safe_addstr(stdscr, 1, w - len(ts) - 3, ts, curses.color_pair(1))
+        safe_addstr(stdscr, 7, 2, "─" * (w - 4), curses.color_pair(1))
+
+        title = " DEPENDENCY CHECK — ffmpeg "
+        safe_addstr(stdscr, 9, 2, title,
+                    curses.color_pair(5) | curses.A_BOLD)
+
+        # Status lines (short summary rows)
+        row = 11
+        if status_lines:
+            for txt, pair, bold in status_lines:
+                attr = curses.color_pair(pair) | (curses.A_BOLD if bold else 0)
+                safe_addstr(stdscr, row, 4, txt, attr)
+                row += 1
+
+        # Scrollable installer output box
+        if scroll_lines is not None:
+            box_y1 = row + 1
+            box_y2 = h - 3
+            box_x1 = 2
+            box_x2 = w - 3
+            if box_y2 > box_y1 + 1:
+                # Draw a simple border
+                safe_addstr(stdscr, box_y1, box_x1,
+                            "┌" + "─" * (box_x2 - box_x1 - 1) + "┐",
+                            curses.color_pair(1))
+                safe_addstr(stdscr, box_y2, box_x1,
+                            "└" + "─" * (box_x2 - box_x1 - 1) + "┘",
+                            curses.color_pair(1))
+                for y in range(box_y1 + 1, box_y2):
+                    safe_addstr(stdscr, y, box_x1, "│", curses.color_pair(1))
+                    safe_addstr(stdscr, y, box_x2, "│", curses.color_pair(1))
+
+                inner_h = box_y2 - box_y1 - 1
+                inner_w = box_x2 - box_x1 - 1
+                visible = scroll_lines[scroll_offset: scroll_offset + inner_h]
+                for i, ln in enumerate(visible):
+                    safe_addstr(stdscr, box_y1 + 1 + i, box_x1 + 1,
+                                ln[:inner_w].ljust(inner_w),
+                                curses.color_pair(3))
+
+        stdscr.refresh()
+
+    # ── Phase 1: Detection ────────────────────────────────────────────────────
+    found, ffmpeg_path = check_ffmpeg()
+
+    if found:
+        _draw_base(status_lines=[
+            ("✔  ffmpeg found:", 4, True),
+            (f"   {ffmpeg_path}", 1, False),
+            ("", 0, False),
+            ("Continuing in 1 second…", 3, False),
+        ])
+        stdscr.nodelay(True)
+        deadline = time.time() + 1.0
+        while time.time() < deadline:
+            k = stdscr.getch()
+            if k in (ord('\n'), ord('\r'), ord(' '), curses.KEY_ENTER):
+                break
+            curses.napms(50)
+        stdscr.nodelay(False)
+        return True
+
+    # ── Phase 2: Missing — prompt ─────────────────────────────────────────────
+    if sys.platform == "win32":
+        install_hint = "Automatic install not available on Windows."
+    elif sys.platform == "darwin":
+        brew = shutil.which("brew")
+        install_hint = ("Will run: brew install ffmpeg" if brew
+                        else "Homebrew not found — manual install required.")
+    else:
+        pm_name, _ = _detect_linux_package_manager()
+        install_hint = (f"Will run: sudo {pm_name} install ffmpeg" if pm_name
+                        else "No supported package manager found.")
+
+    can_auto = (sys.platform != "win32" and
+                (shutil.which("brew") if sys.platform == "darwin"
+                 else bool(_detect_linux_package_manager()[0])))
+
+    while True:
+        _draw_base(status_lines=[
+            ("✘  ffmpeg not found in PATH or common locations.", 7, True),
+            ("", 0, False),
+            (install_hint, 3, False),
+            ("", 0, False),
+            (("Press  Y  to install now,  N  to continue without ffmpeg,"
+              "  Q  to quit.")
+             if can_auto else
+             ("Press  N  to continue without ffmpeg   Q  to quit."),
+             1, False),
+        ])
+        key = stdscr.getch()
+
+        if key in (ord('q'), ord('Q'), 27):
+            return False
+
+        if key in (ord('n'), ord('N')):
+            # Warn and proceed
+            _draw_base(status_lines=[
+                ("⚠  Continuing without ffmpeg.", 3, True),
+                ("   Some formats / remuxing may fail.", 3, False),
+                ("", 0, False),
+                ("Press any key to start the dashboard…", 1, False),
+            ])
+            stdscr.getch()
+            return True
+
+        if can_auto and key in (ord('y'), ord('Y')):
+            break   # fall through to install phase
+
+    # ── Phase 3: Install ──────────────────────────────────────────────────────
+    output_lines: list = []
+    result_holder = [None]   # (success, message) written by worker thread
+    install_done  = threading.Event()
+
+    def _worker():
+        def _cb(line):
+            output_lines.append(line)
+        success, msg = install_ffmpeg_auto(progress_cb=_cb)
+        output_lines.append(f"{'✔' if success else '✘'}  {msg}")
+        result_holder[0] = (success, msg)
+        install_done.set()
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+
+    scroll_offset = 0
+    stdscr.nodelay(True)
+
+    while not install_done.is_set():
+        h, w = stdscr.getmaxyx()
+        # Auto-scroll to bottom
+        inner_h = max(1, h - 3 - 14)   # approximate visible rows in the box
+        max_offset = max(0, len(output_lines) - inner_h)
+        scroll_offset = max_offset
+
+        _draw_base(
+            status_lines=[
+                ("Installing ffmpeg — please wait…", 3, True),
+                ("↑/↓  scroll output   (install runs in background)", 1, False),
+            ],
+            scroll_lines=output_lines,
+            scroll_offset=scroll_offset,
+        )
+
+        key = stdscr.getch()
+        if key == curses.KEY_UP:
+            scroll_offset = max(0, scroll_offset - 1)
+        elif key == curses.KEY_DOWN:
+            scroll_offset = min(max_offset, scroll_offset + 1)
+
+        curses.napms(100)
+
+    stdscr.nodelay(False)
+    success, msg = result_holder[0]
+
+    # Final result screen
+    h, w = stdscr.getmaxyx()
+    inner_h = max(1, h - 3 - 14)
+    max_offset = max(0, len(output_lines) - inner_h)
+
+    while True:
+        _draw_base(
+            status_lines=[
+                (("✔  Installation complete." if success
+                  else "✘  Installation failed."), 4 if success else 7, True),
+                (f"   {msg}", 1, False),
+                ("", 0, False),
+                ("Press any key to continue…" if success
+                 else "Press  N  to continue without ffmpeg,  Q  to quit.", 3, False),
+            ],
+            scroll_lines=output_lines,
+            scroll_offset=scroll_offset,
+        )
+        key = stdscr.getch()
+        if key == curses.KEY_UP:
+            scroll_offset = max(0, scroll_offset - 1)
+            continue
+        elif key == curses.KEY_DOWN:
+            scroll_offset = min(max_offset, scroll_offset + 1)
+            continue
+
+        if success:
+            return True
+        if key in (ord('q'), ord('Q'), 27):
+            return False
+        if key in (ord('n'), ord('N')):
+            return True
 
 
 # ── Early startup debug log ──────────────────────────────────────────────────
@@ -1938,6 +2473,12 @@ def main() -> None:
                               daemon=True)
         wt.start()
         site.watcher_thread = wt
+
+    # ── ffmpeg dependency check ───────────────────────────────────────────────
+    ffmpeg_ok = curses.wrapper(_curses_ffmpeg_check)
+    if not ffmpeg_ok:
+        print("\njj-dlp  ·  Aborted during ffmpeg check.")
+        return
 
     # ── Launch curses dashboard ───────────────────────────────────────────────
     try:
