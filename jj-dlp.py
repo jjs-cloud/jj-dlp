@@ -1611,10 +1611,10 @@ class JJDlpDashboard:
                      f"Type username then Enter  |  Esc to cancel  |  "
                      f"Input: {self._mgmt_buf}_")
         else:
-            hints = (f"  Tab/</->: switch view"
-                     f"  [/]: prev/next site"
-                     f"  A: add  R: remove  D: disable"
-                     f"  C: colors  Ctrl+O: terminal  Q: quit  ")
+            hints = (f"  Left/Right: switch tabs"
+                     f"  [: prev site  ]: next site"
+                     f"  A: add streamer R: remove streamer D: disable streamer"
+                     f"  C: colors  Q: quit  ")
         safe_addstr(self.stdscr, h - 1, 0,
                     hints.ljust(w - 1)[:w - 1],
                     curses.color_pair(self.C_INVHEAD))
