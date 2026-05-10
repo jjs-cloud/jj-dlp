@@ -1698,7 +1698,7 @@ class JJDlpDashboard:
         content_y2 = h - 2
 
         # System panel sidebar (right column, always visible)
-        sidebar_w  = 22
+        sidebar_w  = 28
         sidebar_x1 = w - sidebar_w - 1
         sidebar_x2 = w - 2
         self.draw_system_panel(content_y1, sidebar_x1, content_y2, sidebar_x2)
