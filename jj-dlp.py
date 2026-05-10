@@ -191,6 +191,8 @@ class SiteState:
         self.dash_all_streamers:  List[str] = []
         self.dash_blocked:        Set[str] = set()
         self.dash_log_lines:      List[str] = []          # recent activity log
+        self.dash_stdout_lines:   List[str] = []          # recent stdout lines
+        self.dash_stderr_lines:   List[str] = []          # recent stderr lines
 
         # Twitch EventSub
         self.eventsub             = None
@@ -245,6 +247,18 @@ class SiteState:
             self.dash_log_lines.append(line)
             if len(self.dash_log_lines) > 200:
                 self.dash_log_lines = self.dash_log_lines[-200:]
+
+    def add_stdout_line(self, line: str) -> None:
+        with self.dash_lock:
+            self.dash_stdout_lines.append(line)
+            if len(self.dash_stdout_lines) > 200:
+                self.dash_stdout_lines = self.dash_stdout_lines[-200:]
+
+    def add_stderr_line(self, line: str) -> None:
+        with self.dash_lock:
+            self.dash_stderr_lines.append(line)
+            if len(self.dash_stderr_lines) > 200:
+                self.dash_stderr_lines = self.dash_stderr_lines[-200:]
 
     def stop(self) -> None:
         dbg(f"[{self.label}] [PROC] SiteState.stop() called for config={self.config_path!r}")
@@ -481,7 +495,7 @@ def open_log_streams(cfg: dict):
 
 def _drain_pipe(pipe, log_fp, pipe_type: str,
                 ffmpeg_error_counter=None, ffmpeg_error_event=None,
-                streamer: str = "") -> None:
+                streamer: str = "", site: Optional[SiteState] = None) -> None:
     try:
         for raw in pipe:
             line = raw.decode(errors="replace").rstrip("\n")
@@ -491,6 +505,11 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
                     log_fp.flush()
                 except Exception:
                     pass
+            if site is not None:
+                if pipe_type == "stdout":
+                    site.add_stdout_line(line)
+                elif pipe_type == "stderr":
+                    site.add_stderr_line(line)
             with output_mode_lock:
                 mode = OUTPUT_MODE
             if mode == 2:
@@ -611,11 +630,13 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                 threading.Thread(target=_drain_pipe, args=(proc.stdout, log_out_fp, "stdout"),
                                  kwargs={"ffmpeg_error_counter": ffmpeg_error_counter,
                                          "ffmpeg_error_event": ffmpeg_error_event,
-                                         "streamer": streamer}, daemon=True).start()
+                                         "streamer": streamer,
+                                         "site": site}, daemon=True).start()
                 threading.Thread(target=_drain_pipe, args=(proc.stderr, log_err_fp, "stderr"),
                                  kwargs={"ffmpeg_error_counter": ffmpeg_error_counter,
                                          "ffmpeg_error_event": ffmpeg_error_event,
-                                         "streamer": streamer}, daemon=True).start()
+                                         "streamer": streamer,
+                                         "site": site}, daemon=True).start()
             except Exception as e:
                 site.log_line(f"Failed to start yt-dlp for {streamer}: {e}")
                 dbg(f"[{site.label}] [PROC] record_stream: Popen FAILED for streamer={streamer!r}: {e}")
@@ -957,7 +978,7 @@ class JJDlpDashboard:
         
         # --- Dynamic Tab Logic ---
         # Start with the mandatory tabs
-        self.TABS = ["Dashboard", "Log"]
+        self.TABS = ["Dashboard", "Log", "Stdout", "Stderr"]
 
         # Check if ANY site has Twitch EventSub enabled
         any_eventsub = False
@@ -1448,6 +1469,49 @@ class JJDlpDashboard:
                 attr = curses.color_pair(self.C_WARN)
             safe_addstr(self.stdscr, y1 + 2 + i, x1 + 2, line, attr)
 
+    def _draw_pipe_tab(self, y1, x1, y2, x2, title: str, lines: List[str]) -> None:
+        sel_site = self.sites[self.selected_site_idx] if self.sites else None
+        tab_x    = x1 + 1
+        safe_addstr(self.stdscr, y1, x1, "  Site: ",
+                    curses.color_pair(self.C_DIM))
+        tab_x += 8
+        for i, site in enumerate(self.sites):
+            lbl = load_config(site.config_path).get("site_label",
+                              os.path.basename(site.config_path))
+            label = f" {lbl} "
+            attr  = (curses.color_pair(self.C_HILIGHT) | curses.A_BOLD
+                     if i == self.selected_site_idx
+                     else curses.color_pair(self.C_CHROME))
+            safe_addstr(self.stdscr, y1, tab_x, label, attr)
+            tab_x += len(label) + 1
+
+        draw_box(self.stdscr, y1 + 1, x1, y2, x2, self.C_DIM)
+        safe_addstr(self.stdscr, y1 + 1, x1 + 2, f" {title} ",
+                    curses.color_pair(self.C_DIM) | curses.A_BOLD)
+
+        if sel_site is None:
+            return
+
+        visible_rows = (y2 - y1) - 3
+        for i, line in enumerate(lines[-visible_rows:]):
+            safe_addstr(self.stdscr, y1 + 2 + i, x1 + 2, line, curses.color_pair(self.C_DIM))
+
+    def draw_stdout_tab(self, y1, x1, y2, x2):
+        sel_site = self.sites[self.selected_site_idx] if self.sites else None
+        lines = []
+        if sel_site is not None:
+            with sel_site.dash_lock:
+                lines = list(sel_site.dash_stdout_lines)
+        self._draw_pipe_tab(y1, x1, y2, x2, " STDOUT ", lines)
+
+    def draw_stderr_tab(self, y1, x1, y2, x2):
+        sel_site = self.sites[self.selected_site_idx] if self.sites else None
+        lines = []
+        if sel_site is not None:
+            with sel_site.dash_lock:
+                lines = list(sel_site.dash_stderr_lines)
+        self._draw_pipe_tab(y1, x1, y2, x2, " STDERR ", lines)
+
     # ── EventSub tab ─────────────────────────────────────────────────────────
     def draw_eventsub_tab(self, y1, x1, y2, x2):
         draw_box(self.stdscr, y1, x1, y2, x2, self.C_CHROME)
@@ -1649,6 +1713,10 @@ class JJDlpDashboard:
             self.draw_dashboard_tab(content_y1, 1, content_y2, content_x2)
         elif current_tab_name == "Log":
             self.draw_log_tab(content_y1, 1, content_y2, content_x2)
+        elif current_tab_name == "Stdout":
+            self.draw_stdout_tab(content_y1, 1, content_y2, content_x2)
+        elif current_tab_name == "Stderr":
+            self.draw_stderr_tab(content_y1, 1, content_y2, content_x2)
         elif current_tab_name == "EventSub":
             self.draw_eventsub_tab(content_y1, 1, content_y2, content_x2)
         elif current_tab_name == "Config":
