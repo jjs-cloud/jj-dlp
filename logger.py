@@ -12,8 +12,7 @@ Public API
 ----------
 startup_dbg(msg)          Write a line to the startup log (if enabled).
 startup_dbg_flush()       Write the opening banner (argv, cwd, python path).
-dbg(msg)                  Write to debug log; also print when in terminal mode
-                          at verbosity 3 or 5.
+dbg(msg)                  Write to debug log.
 get_debug_log_path(cfg)   Resolve the debug log path from a config dict.
 get_log_path(cfg)         Resolve the activity log path from a config dict.
 get_log_file_paths(cfg)   Return (stdout_path, stderr_path) for yt-dlp logging.
@@ -41,17 +40,15 @@ debug_log_lock = threading.Lock()
 # ── References to output-mode state (injected by main module at startup) ──────
 # These are set by jj-dlp.py via configure() so logger doesn't import main.
 _output_mode_ref  = None   # callable() -> int  (1=curses, 2=terminal)
-_verbosity_ref    = None   # callable() -> int
 
 
-def configure(output_mode_fn, verbosity_fn) -> None:
+def configure(output_mode_fn) -> None:
     """
-    Inject accessors for OUTPUT_MODE and VERBOSITY.
+    Inject accessor for OUTPUT_MODE.
     Call once from jj-dlp.py after the globals are defined there.
     """
-    global _output_mode_ref, _verbosity_ref
+    global _output_mode_ref
     _output_mode_ref = output_mode_fn
-    _verbosity_ref   = verbosity_fn
 
 
 # ── Startup log ───────────────────────────────────────────────────────────────
@@ -96,8 +93,6 @@ def _write_debug_log(msg: str) -> None:
 def dbg(msg: str, site_name: str = "") -> None:
     """
     Write msg (with timestamp and optional site name) to the debug log.
-    Also prints to stdout when in terminal mode (OUTPUT_MODE == 2)
-    at verbosity 3 or 5.
     """
     ts   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -106,17 +101,6 @@ def dbg(msg: str, site_name: str = "") -> None:
     full = f"[{ts}] {prefix}{msg}"
     
     _write_debug_log(full)
-
-    if _output_mode_ref is None:
-        return
-    mode = _output_mode_ref()
-    if mode != 2:
-        return
-    if _verbosity_ref is None:
-        return
-    v = _verbosity_ref()
-    if v in (3, 5):
-        print(full, flush=True)
 
 
 # ── Log-path helpers ──────────────────────────────────────────────────────────

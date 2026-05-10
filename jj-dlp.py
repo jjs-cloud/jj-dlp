@@ -87,7 +87,6 @@ def load_config(config_path: str) -> dict:
         if "{username}" in p:
             username_idx = i - len(tmpl_parts)
             break
-    verbosity             = safe_int(general.get("VERBOSITY", 1), 1)
     logging_enabled       = general.get("LOGGING", "false").strip().lower() == "true"
     log_path              = general.get("LOG_PATH", "").strip().strip('\"\'')
     split_logs            = general.get("SPLIT_LOGS", "false").strip().lower() == "true"
@@ -145,7 +144,6 @@ def load_config(config_path: str) -> dict:
         "checker_cmd": checker_cmd,
         "downloader_cmd": downloader_cmd,
         "config_check_interval": config_check_interval,
-        "verbosity": verbosity,
         "logging_enabled": logging_enabled,
         "log_path": log_path,
         "split_logs": split_logs,
@@ -268,17 +266,8 @@ class SiteState:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Global singletons (verbosity, output mode)
+# Global singletons (output mode)
 # ══════════════════════════════════════════════════════════════════════════════
-
-VERBOSITY = 1
-verbosity_lock = threading.Lock()
-
-VERBOSITY_NAMES = {1:"clean", 2:"stdout", 3:"debug", 4:"stderr", 5:"everything"}
-VERBOSITY_DESC  = {
-    1:"log only", 2:"log + stdout", 3:"log + stdout + debug",
-    4:"stderr only", 5:"log + stdout + debug + stderr"
-}
 
 # Output mode: 1=curses dashboard  2=terminal
 OUTPUT_MODE = 1
@@ -290,28 +279,22 @@ FFMPEG_ERROR_PATTERNS: List[str] = [
 ]
 FFMPEG_ERROR_RESTART_THRESHOLD: int = 500
 
-# Wire logger.dbg to this module's OUTPUT_MODE and VERBOSITY
+# Wire logger.dbg to this module's OUTPUT_MODE
 def _get_output_mode() -> int:
     with output_mode_lock:
         return OUTPUT_MODE
 
-def _get_verbosity() -> int:
-    with verbosity_lock:
-        return VERBOSITY
-
-_configure_logger(_get_output_mode, _get_verbosity)
+_configure_logger(_get_output_mode)
 
 # DEBUG_LOGS_ENABLED / DEBUG_LOG_PATH / debug_log_lock are imported from logger.
 
 # ── Keybinds ──
-KEYBIND_VERBOSITY = "\x02"   # Ctrl+B
-KEYBIND_OUTPUT    = "\x0f"   # Ctrl+O
+KEYBIND_OUTPUT    = "o"
 KEYBIND_ADD       = "a"
 KEYBIND_REMOVE    = "r"
 KEYBIND_DISABLE   = "d"
 KEYBIND_LABELS = {
-    KEYBIND_VERBOSITY: "Ctrl+B",
-    KEYBIND_OUTPUT:    "Ctrl+O",
+    KEYBIND_OUTPUT:    "O",
     KEYBIND_ADD:       "A",
     KEYBIND_REMOVE:    "R",
     KEYBIND_DISABLE:   "D",
@@ -513,14 +496,8 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
             with output_mode_lock:
                 mode = OUTPUT_MODE
             if mode == 2:
-                with verbosity_lock:
-                    v = VERBOSITY
-                show = (
-                    (pipe_type == "stdout" and v in (2, 3, 5)) or
-                    (pipe_type == "stderr" and v in (4, 5))
-                )
-                if show:
-                    print(line, flush=True)
+                # In terminal mode, print stdout and stderr
+                print(line, flush=True)
             if (ffmpeg_error_counter is not None and ffmpeg_error_event is not None
                     and FFMPEG_ERROR_RESTART_THRESHOLD > 0 and not ffmpeg_error_event.is_set()):
                 line_lower = line.lower()
@@ -1588,7 +1565,6 @@ class JJDlpDashboard:
                 ("OUTPUT_DIR",    cfg["output_dir"]),
                 ("CHECK_INTERVAL",f"{cfg['check_interval']}s"),
                 ("YT_DLP_PATH",   cfg["yt_dlp_path"]),
-                ("VERBOSITY",     str(cfg["verbosity"])),
                 ("LOGGING",       "true" if cfg["logging_enabled"] else "false"),
                 ("POPUP_NOTIFY",  "true" if cfg["popup_notifications"] else "false"),
             ]
@@ -1949,9 +1925,6 @@ def main() -> None:
     # ── Global config / debug setup ───────────────────────────────────────────
     initial_cfg = load_config(config_paths[0])
 
-    global VERBOSITY
-    with verbosity_lock:
-        VERBOSITY = initial_cfg.get("verbosity", 1)
     import logger as _logger
     with _logger.debug_log_lock:
         any_debug = any(load_config(cp).get("debug_logs", False) for cp in config_paths)

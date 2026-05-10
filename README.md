@@ -71,9 +71,6 @@ STALL_TIMEOUT       = 120
 # How often (seconds) the config file is polled for changes
 CONFIG_CHECK_INTERVAL = 3
 
-# Verbosity: 1=normal, 2=debug, 3=both
-VERBOSITY           = 1
-
 # Enable logging to file (true/false)
 LOGGING             = false
 LOG_PATH            = recordings/jj-dlp.log
@@ -126,16 +123,6 @@ Press **Ctrl+C** to stop. Active recordings are given up to 15 seconds to finish
 3. **Config watcher thread** — polls the config file every `CONFIG_CHECK_INTERVAL` seconds and triggers an immediate live check when new streamers are added.
 4. **Block list** — checked on every config reload during an active recording; a blocked streamer's process is killed immediately.
 5. **Optional Twitch API** — Runs a small web server and waits for Twitch API to POST an EventSub notification.   Starts recording the streamer immediately.
-
----
-
-## Verbosity Levels
-
-| Value | Output |
-|-------|--------|
-| `1`   | Normal messages only |
-| `2`   | Debug messages only  |
-| `3`   | Normal + debug messages |
 
 ---
 
