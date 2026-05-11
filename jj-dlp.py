@@ -123,6 +123,8 @@ def load_config(config_path: str) -> dict:
         f"-> parsed progress_bar_width={progress_bar_width}"
     )
     popup_cooldown         = safe_int(general.get("POPUP_COOLDOWN", 30), 30)
+    set_cookie_flag        = general.get("SET_COOKIE_FLAG", "true").strip().lower() not in ("false", "0", "no")
+    ask_for_browser        = general.get("ASK_FOR_BROWSER", "true").strip().lower() not in ("false", "0", "no")
 
     # Disk drives to monitor (comma-separated paths/letters, e.g. "C:\,D:\,/home")
     disk_drives_raw = general.get("DISK_DRIVES", "").strip().strip('\"\'')
@@ -184,6 +186,8 @@ def load_config(config_path: str) -> dict:
         "progress_bar_width": progress_bar_width,
         "popup_cooldown": popup_cooldown,
         "disk_drives": disk_drives,
+        "set_cookie_flag": set_cookie_flag,
+        "ask_for_browser": ask_for_browser,
         "twitch_enabled": twitch_enabled,
         "twitch_client_id": twitch_client_id,
         "twitch_client_secret": twitch_client_secret,
@@ -1918,6 +1922,63 @@ def _write_browser_to_config(config_path: str, browser: str) -> None:
         pass
 
 
+def _write_ask_for_browser_to_config(config_path: str, value: bool) -> None:
+    """
+    Set ASK_FOR_BROWSER = True/False in the [General] section of *config_path*.
+    If the key already exists it is updated in-place; otherwise it is appended
+    to the end of the [General] section.  The rest of the file is preserved.
+    """
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception:
+        return
+
+    val_str = "True" if value else "False"
+    key_name = "ASK_FOR_BROWSER"
+    import re as _re
+
+    # Try to update an existing ASK_FOR_BROWSER line anywhere in the file
+    for i, line in enumerate(lines):
+        if _re.match(r"^\s*ASK_FOR_BROWSER\s*=", line, _re.IGNORECASE):
+            lines[i] = f"ASK_FOR_BROWSER = {val_str}\n"
+            try:
+                with open(config_path, "w", encoding="utf-8") as f:
+                    f.writelines(lines)
+            except Exception:
+                pass
+            return
+
+    # Key not found — insert after the [General] header
+    general_idx = None
+    next_sec_idx = len(lines)
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.lower() == "[general]":
+            general_idx = i
+            continue
+        if general_idx is not None and stripped.startswith("["):
+            next_sec_idx = i
+            break
+
+    if general_idx is None:
+        # No [General] section — append one
+        lines.append("\n[General]\n")
+        lines.append(f"{key_name} = {val_str}\n")
+    else:
+        # Insert before the next section (or end of file), skipping trailing blanks
+        insert_at = next_sec_idx
+        while insert_at > general_idx + 1 and lines[insert_at - 1].strip() == "":
+            insert_at -= 1
+        lines.insert(insert_at, f"{key_name} = {val_str}\n")
+
+    try:
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+    except Exception:
+        pass
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Multi-select startup chooser
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2011,17 +2072,31 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
             sys.exit(0)
 
     # ── Phase 2: browser / cookie selection ──────────────────────────────────
+    # Build a per-file config map for all selected files (used for flag checks).
+    file_cfgs = {
+        fname: load_config(os.path.join(os.getcwd(), fname))
+        for fname in chosen_files
+    }
+
+    # Show the page if ANY selected config has ASK_FOR_BROWSER = True (default).
+    # Only skip when every selected config has explicitly opted out.
+    if not any(file_cfgs[f].get("ask_for_browser", True) for f in chosen_files):
+        return chosen_files
+
+    first_fpath = os.path.join(os.getcwd(), chosen_files[0])
+
     # Read the current browser from the first selected config file so we can
     # pre-select it.  All selected configs will be updated with the same choice.
     browsers     = _SUPPORTED_BROWSERS          # e.g. ['brave', 'chrome', ..., 'other']
     nb           = len(browsers)
-    current_br   = _read_browser_from_config(
-        os.path.join(os.getcwd(), chosen_files[0])
-    )
+    current_br   = _read_browser_from_config(first_fpath)
     try:
         br_cursor = browsers.index(current_br)
     except ValueError:
         br_cursor = browsers.index("firefox")
+
+    # "Do not show again" toggle state (starts unchecked)
+    do_not_show = False
 
     while True:
         stdscr.erase()
@@ -2054,7 +2129,7 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
                     "BROWSER FOR --cookies-from-browser",
                     curses.color_pair(5) | curses.A_BOLD)
         safe_addstr(stdscr, br_title_row + 1, 2,
-                    "↑/↓ navigate  Enter = confirm   Q = quit",
+                    "↑/↓ navigate  Enter = confirm   D = do not show again   Q = quit",
                     curses.color_pair(3))
         safe_addstr(stdscr, br_title_row + 2, 2,
                     "(Twitch: cookies suppress ads — select your browser or \"other\" to disable)",
@@ -2073,8 +2148,16 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
             label = f"  {dot}  {br}" + ("  ← remove cookies flag" if br == "other" else "")
             safe_addstr(stdscr, row, 4, label, attr)
 
+        # "Do not show again" checkbox (below the browser list)
+        dna_row  = list_start_row + nb + 1
+        dna_box  = "[x]" if do_not_show else "[ ]"
+        dna_attr = curses.color_pair(3) | curses.A_BOLD if do_not_show else curses.color_pair(3)
+        safe_addstr(stdscr, dna_row, 4,
+                    f"  {dna_box}  Do not show again  (sets ASK_FOR_BROWSER = False in config)",
+                    dna_attr)
+
         # Footer
-        footer = "  ↑/↓ navigate  Enter = confirm  Q = quit  "
+        footer = "  ↑/↓ navigate  Enter = confirm  D = do not show again  Q = quit  "
         safe_addstr(stdscr, h - 1, 0,
                     footer.ljust(w - 1)[:w - 1],
                     curses.color_pair(5))
@@ -2086,12 +2169,19 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
             br_cursor = (br_cursor - 1) % nb
         elif key in (curses.KEY_DOWN, ord('j')):
             br_cursor = (br_cursor + 1) % nb
+        elif key in (ord('d'), ord('D')):
+            do_not_show = not do_not_show
         elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
             chosen_browser = browsers[br_cursor]
-            # Write back to every selected config file
             for fname in chosen_files:
                 fpath = os.path.join(os.getcwd(), fname)
-                _write_browser_to_config(fpath, chosen_browser)
+                # SET_COOKIE_FLAG is per-file — only write cookies back if that
+                # specific config has it enabled (True is the default).
+                if file_cfgs[fname].get("set_cookie_flag", True):
+                    _write_browser_to_config(fpath, chosen_browser)
+                # If "Do not show again" was checked, persist ASK_FOR_BROWSER = False
+                if do_not_show:
+                    _write_ask_for_browser_to_config(fpath, False)
             return chosen_files
         elif key in (ord('q'), ord('Q'), 27):
             sys.exit(0)
