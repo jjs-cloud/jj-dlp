@@ -256,6 +256,7 @@ class SiteState:
             try:
                 kill_proc(proc)
             except Exception as e:
+                dbg(f"[{self.label}] [PROC] kill_all_procs: ERROR killing pid={proc.pid}: {e}")
 
     def log_line(self, msg: str) -> None:
         """Append a timestamped line to the site's activity log (capped at 200 lines)."""
@@ -720,6 +721,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
             try:
                 kill_proc(proc)
             except Exception as e:
+                dbg(f"[{site.label}] [PROC]] record_stream: kill error in KBI path: {e}")
         site.unregister_proc(streamer)
         try:
             close_logs()
@@ -776,6 +778,7 @@ def config_watcher(site: "SiteState", poll_interval: int = 3) -> None:
                     site.trigger_event.set()
                 prev_streamers = curr_streamers
         except Exception as e:
+            dbg(f"[{site.label}] [CONFIG_WATCHER] {site.config_path}: {e}")
         site._stop_event.wait(timeout=poll_interval)
 
 
@@ -849,7 +852,6 @@ def monitor_site(site: "SiteState") -> None:
                         site.dash_live_since.pop(s, None)
                     elif s not in site.dash_live_since:
                         site.dash_live_since[s] = time.time()
-                            f"(blocked={s in site.dash_blocked})")
 
             if live_now:
                 site.log_line(f"Live now: {', '.join(live_now)}")
@@ -1201,7 +1203,9 @@ class JJDlpDashboard:
                                 curses.color_pair(color))
                     disk_row_y += 1
                 except Exception as _de:
+                    dbg(f"[{site.label}] [DISK] draw_system_panel: disk_usage({drive!r}) failed: {_de}")
         except Exception as _outer:
+            dbg(f"[{site.label}] [DISK] draw_system_panel: outer exception: {_outer}")
 
         # Uptime at bottom
         safe_addstr(self.stdscr, y2 - 1, x1 + 2,
