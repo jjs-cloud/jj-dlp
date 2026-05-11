@@ -116,6 +116,8 @@ def load_config(config_path: str) -> dict:
     yt_dlp_path           = yt_dlp_path_raw if yt_dlp_path_raw else "yt-dlp"
     site_label            = general.get("SITE_LABEL", os.path.basename(config_path)).strip().strip('\"\'')
     progress_bar_max_hours = safe_int(general.get("PROGRESS_BAR_MAX_HOURS", 6), 6)
+    progress_bar_width     = safe_int(general.get("PROGRESS_BAR_WIDTH", 14), 14)
+    popup_cooldown         = safe_int(general.get("POPUP_COOLDOWN", 30), 30)
 
     # Disk drives to monitor (comma-separated paths/letters, e.g. "C:\,D:\,/home")
     disk_drives_raw = general.get("DISK_DRIVES", "").strip().strip('\"\'')
@@ -174,6 +176,8 @@ def load_config(config_path: str) -> dict:
         "config_path": config_path,
         "site_label": site_label,
         "progress_bar_max_hours": progress_bar_max_hours,
+        "progress_bar_width": progress_bar_width,
+        "popup_cooldown": popup_cooldown,
         "disk_drives": disk_drives,
         "twitch_enabled": twitch_enabled,
         "twitch_client_id": twitch_client_id,
@@ -220,6 +224,9 @@ class SiteState:
         self.monitor_thread:      Optional[threading.Thread] = None
 
         self._stop_event          = threading.Event()
+
+        # Popup cooldown: streamer -> epoch of last popup shown
+        self.popup_last_shown:    Dict[str, float] = {}
 
         # Active yt-dlp subprocesses: streamer -> proc
         # Written by record_stream threads; read by stop() for clean kill.
@@ -764,7 +771,11 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                 if streamer not in site.dash_live_since:
                     site.dash_live_since[streamer] = time.time()
             if show_popup and cfg.get("popup_notifications", True):
-                _show_live_popup(streamer, source="poll", popup_timeout=cfg.get("popup_timeout", 15))
+                cooldown_secs = cfg.get("popup_cooldown", 30) * 60
+                last_shown    = site.popup_last_shown.get(streamer, 0)
+                if time.time() - last_shown >= cooldown_secs:
+                    _show_live_popup(streamer, source="poll", popup_timeout=cfg.get("popup_timeout", 15))
+                    site.popup_last_shown[streamer] = time.time()
             t = threading.Thread(target=record_stream, args=(streamer, cfg, site), daemon=True)
             t.start()
             site.recording_threads.append(t)
@@ -814,8 +825,12 @@ def monitor_site(site: "SiteState") -> None:
             if broadcaster_login in current_cfg.get("streamers", []) and \
                broadcaster_login not in current_cfg.get("blocked", []):
                 if current_cfg.get("popup_notifications", True):
-                    _show_live_popup(broadcaster_login, source="eventsub",
-                                     popup_timeout=current_cfg.get("popup_timeout", 15))
+                    cooldown_secs = current_cfg.get("popup_cooldown", 30) * 60
+                    last_shown    = site.popup_last_shown.get(broadcaster_login, 0)
+                    if time.time() - last_shown >= cooldown_secs:
+                        _show_live_popup(broadcaster_login, source="eventsub",
+                                         popup_timeout=current_cfg.get("popup_timeout", 15))
+                        site.popup_last_shown[broadcaster_login] = time.time()
                 start_recording_if_needed([broadcaster_login], current_cfg, site, show_popup=False)
 
         try:
@@ -1253,8 +1268,10 @@ class JJDlpDashboard:
         try:
             _panel_cfg = load_config(site.config_path)
             _bar_max_secs = _panel_cfg.get("progress_bar_max_hours", 6) * 3600
+            _bar_cfg_w    = max(4, _panel_cfg.get("progress_bar_width", 14))
         except Exception:
             _bar_max_secs = 6 * 3600
+            _bar_cfg_w    = 14
 
         # Counts for header badges
         live_cnt = sum(1 for s in all_s if s in live_since)
@@ -1289,9 +1306,9 @@ class JJDlpDashboard:
         row_start    = y1 + 3
         max_rows     = y2 - row_start - 2   # leave 2 rows at bottom for countdown
 
-        # Column widths — scale to panel width
+        # Column widths — bar_w honours PROGRESS_BAR_WIDTH but won't exceed panel space
         name_w      = max(10, min(18, panel_width // 4))
-        bar_w       = max(8,  min(14, panel_width // 5))
+        bar_w       = max(4,  min(_bar_cfg_w, panel_width // 5))
         last_live_w = 12   # "Last Live" column
 
         for i, s in enumerate(all_s):
