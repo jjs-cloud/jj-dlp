@@ -1805,14 +1805,130 @@ class JJDlpDashboard:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Browser cookie helper (for --cookies-from-browser in [Downloader])
+# ══════════════════════════════════════════════════════════════════════════════
+
+_SUPPORTED_BROWSERS = [
+    "brave", "chrome", "chromium", "edge",
+    "firefox", "opera", "safari", "vivaldi", "whale",
+    "other",
+]
+
+def _read_browser_from_config(config_path: str) -> str:
+    """
+    Return the browser name currently set after --cookies-from-browser in the
+    [Downloader] section, or 'firefox' if not found.
+    We use raw text scanning because configparser treats each line as a
+    separate no-value key when the value sits on its own continuation line.
+    """
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception:
+        return "firefox"
+
+    in_downloader = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.lower() == "[downloader]":
+            in_downloader = True
+            continue
+        if in_downloader:
+            if stripped.startswith("["):          # entered a new section
+                break
+            if stripped.lower() == "--cookies-from-browser":
+                # The browser name should be on the very next non-blank line
+                for j in range(i + 1, len(lines)):
+                    candidate = lines[j].strip()
+                    if candidate == "":
+                        continue
+                    if candidate.startswith("[") or candidate.startswith("-"):
+                        break
+                    return candidate.lower()
+    return "firefox"
+
+
+def _write_browser_to_config(config_path: str, browser: str) -> None:
+    """
+    Update the [Downloader] section so that --cookies-from-browser is followed
+    by *browser* on the next line.  If browser == 'other', both the
+    --cookies-from-browser line and the browser-name line are removed.
+    Uses raw text manipulation to preserve the rest of the file exactly.
+    """
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception:
+        return
+
+    in_downloader = False
+    cookies_idx   = None   # index of the --cookies-from-browser line
+    browser_idx   = None   # index of the browser-name line that follows it
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.lower() == "[downloader]":
+            in_downloader = True
+            continue
+        if in_downloader:
+            if stripped.startswith("["):
+                break
+            if stripped.lower() == "--cookies-from-browser":
+                cookies_idx = i
+                # Look for the browser name on the next non-blank line
+                for j in range(i + 1, len(lines)):
+                    candidate = lines[j].strip()
+                    if candidate == "":
+                        continue
+                    if candidate.startswith("[") or candidate.startswith("-"):
+                        break
+                    browser_idx = j
+                    break
+                break
+
+    if browser == "other":
+        # Remove both lines (reverse order so indices stay valid)
+        to_remove = sorted(
+            [x for x in [cookies_idx, browser_idx] if x is not None],
+            reverse=True,
+        )
+        for idx in to_remove:
+            lines.pop(idx)
+    else:
+        if cookies_idx is not None and browser_idx is not None:
+            # Replace the existing browser name in-place
+            indent = lines[browser_idx][: len(lines[browser_idx]) - len(lines[browser_idx].lstrip())]
+            lines[browser_idx] = f"{indent}{browser}\n"
+        elif cookies_idx is not None:
+            # No browser line existed — insert one right after --cookies-from-browser
+            lines.insert(cookies_idx + 1, f"{browser}\n")
+        else:
+            # --cookies-from-browser not present at all — find the [Downloader]
+            # section and insert both lines after it.
+            for i, line in enumerate(lines):
+                if line.strip().lower() == "[downloader]":
+                    lines.insert(i + 1, f"{browser}\n")
+                    lines.insert(i + 1, "--cookies-from-browser\n")
+                    break
+
+    try:
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+    except Exception:
+        pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Multi-select startup chooser
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
     """
-    MenuWorks-style config file chooser.
-    Space = toggle selection, Enter = confirm, Q/Esc = abort.
-    Returns list of selected paths (at least 1).
+    MenuWorks-style config file chooser, followed by a browser-cookie picker.
+    Phase 1 — config files:  Space = toggle [x],  Enter = confirm,  Q = quit.
+    Phase 2 — browser:       ↑/↓ navigate,        Enter = confirm,  Q = quit.
+    Returns list of selected config file paths (at least 1).
+    Writes the chosen browser back into each selected config file.
     """
     curses.start_color()
     curses.use_default_colors()
@@ -1823,12 +1939,13 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
     curses.init_pair(5, curses.COLOR_BLACK,   curses.COLOR_CYAN)
     curses.init_pair(6, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
 
+    curses.curs_set(0)
+    stdscr.keypad(True)
+
+    # ── Phase 1: config file selection ───────────────────────────────────────
     selected  = set(range(len(found)))   # start with all config files selected
     cursor    = 0
     n         = len(found)
-
-    curses.curs_set(0)
-    stdscr.keypad(True)
 
     while True:
         stdscr.erase()
@@ -1888,11 +2005,98 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
                 selected.add(cursor)
         elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
             if selected:
-                return [found[i] for i in sorted(selected)]
+                chosen_files = [found[i] for i in sorted(selected)]
+                break
         elif key in (ord('q'), ord('Q'), 27):
             sys.exit(0)
 
-    return [found[0]]
+    # ── Phase 2: browser / cookie selection ──────────────────────────────────
+    # Read the current browser from the first selected config file so we can
+    # pre-select it.  All selected configs will be updated with the same choice.
+    browsers     = _SUPPORTED_BROWSERS          # e.g. ['brave', 'chrome', ..., 'other']
+    nb           = len(browsers)
+    current_br   = _read_browser_from_config(
+        os.path.join(os.getcwd(), chosen_files[0])
+    )
+    try:
+        br_cursor = browsers.index(current_br)
+    except ValueError:
+        br_cursor = browsers.index("firefox")
+
+    while True:
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+        stdscr.bkgd(" ", curses.color_pair(0))
+
+        # Logo
+        for i, line in enumerate(ASCII_LOGO):
+            safe_addstr(stdscr, 1 + i, 2, line, curses.color_pair(6) | curses.A_BOLD)
+
+        ts = time.strftime("%Y-%m-%d  %H:%M:%S")
+        safe_addstr(stdscr, 1, w - len(ts) - 3, ts, curses.color_pair(1))
+        safe_addstr(stdscr, 7, 2, "-" * (w - 4), curses.color_pair(1))
+
+        # Title
+        safe_addstr(stdscr, 9, 2, "SELECT CONFIG FILE(S)", curses.color_pair(5) | curses.A_BOLD)
+
+        # Separator + browser sub-section header
+        files_row_end = 11 + len(chosen_files)
+        safe_addstr(stdscr, 11, 2, "-" * min(w - 4, 60), curses.color_pair(1))
+
+        # Selected config summary (read-only at this stage)
+        safe_addstr(stdscr, 10, 2,
+                    f"Config(s): {', '.join(chosen_files)}",
+                    curses.color_pair(4))
+
+        # Browser sub-title
+        br_title_row = files_row_end + 1
+        safe_addstr(stdscr, br_title_row, 2,
+                    "BROWSER FOR --cookies-from-browser",
+                    curses.color_pair(5) | curses.A_BOLD)
+        safe_addstr(stdscr, br_title_row + 1, 2,
+                    "↑/↓ navigate  Enter = confirm   Q = quit",
+                    curses.color_pair(3))
+        safe_addstr(stdscr, br_title_row + 2, 2,
+                    "(Twitch: cookies suppress ads — select your browser or \"other\" to disable)",
+                    curses.color_pair(3))
+
+        # Browser list (single-select radio buttons)
+        list_start_row = br_title_row + 4
+        for i, br in enumerate(browsers):
+            row    = list_start_row + i
+            dot    = "(*)" if i == br_cursor else "( )"
+            is_cur = i == br_cursor
+            if is_cur:
+                attr = curses.color_pair(2) | curses.A_BOLD
+            else:
+                attr = curses.color_pair(1)
+            label = f"  {dot}  {br}" + ("  ← remove cookies flag" if br == "other" else "")
+            safe_addstr(stdscr, row, 4, label, attr)
+
+        # Footer
+        footer = "  ↑/↓ navigate  Enter = confirm  Q = quit  "
+        safe_addstr(stdscr, h - 1, 0,
+                    footer.ljust(w - 1)[:w - 1],
+                    curses.color_pair(5))
+
+        stdscr.refresh()
+        key = stdscr.getch()
+
+        if key in (curses.KEY_UP, ord('k')):
+            br_cursor = (br_cursor - 1) % nb
+        elif key in (curses.KEY_DOWN, ord('j')):
+            br_cursor = (br_cursor + 1) % nb
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+            chosen_browser = browsers[br_cursor]
+            # Write back to every selected config file
+            for fname in chosen_files:
+                fpath = os.path.join(os.getcwd(), fname)
+                _write_browser_to_config(fpath, chosen_browser)
+            return chosen_files
+        elif key in (ord('q'), ord('Q'), 27):
+            sys.exit(0)
+
+    return chosen_files  # unreachable, satisfies type checker
 
 
 # ══════════════════════════════════════════════════════════════════════════════
