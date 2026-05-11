@@ -1280,16 +1280,18 @@ class JJDlpDashboard:
         row_start    = y1 + 3
         max_rows     = y2 - row_start - 2   # leave 2 rows at bottom for countdown
 
-        # Column widths — bar_w honours PROGRESS_BAR_WIDTH but won't exceed panel space
+        # Column widths — bar_w honours PROGRESS_BAR_WIDTH but won't overflow the row.
+        # Row layout: [name_w] 1 [status=7] 1 [bar_w] 1 [dur=9] 1 [last_live_w]
+        # So the actual space available for the bar is what's left after the fixed columns.
         name_w      = max(10, min(18, panel_width // 4))
-        bar_w       = max(4,  min(_bar_cfg_w, panel_width // 5))
         last_live_w = 12   # "Last Live" column
+        _fixed_cols = name_w + 1 + 7 + 1 + 1 + 9 + 1 + last_live_w  # everything except bar
+        bar_w       = max(4, min(_bar_cfg_w, panel_width - _fixed_cols))
         dbg(
             f"[BAR_WIDTH] draw_site_panel ({site.label}): "
-            f"panel_width={panel_width}  panel_width//5={panel_width // 5}  "
-            f"_bar_cfg_w={_bar_cfg_w}  "
-            f"FINAL bar_w={bar_w}  "
-            f"{'CLAMPED by panel_width//5 — this is the bug!' if _bar_cfg_w > panel_width // 5 else 'not clamped'}"
+            f"panel_width={panel_width}  _fixed_cols={_fixed_cols}  "
+            f"available_for_bar={panel_width - _fixed_cols}  "
+            f"_bar_cfg_w={_bar_cfg_w}  FINAL bar_w={bar_w}"
         )
 
         for i, s in enumerate(all_s):
