@@ -26,6 +26,11 @@ from logger import (
     configure as _configure_logger,
 )
 
+# ── ffmpeg dependency check (must happen before curses is initialised) ────────
+if not plain_ffmpeg_check():
+    print("\njj-dlp  ·  Aborted during ffmpeg check.")
+    sys.exit(1)
+
 # ── Run the curses check before importing curses at module level ──────────────
 ensure_curses()
 
@@ -2269,12 +2274,6 @@ def main() -> None:
                               daemon=True)
         wt.start()
         site.watcher_thread = wt
-
-    # ── ffmpeg dependency check ───────────────────────────────────────────────
-    ffmpeg_ok = plain_ffmpeg_check()
-    if not ffmpeg_ok:
-        print("\njj-dlp  ·  Aborted during ffmpeg check.")
-        return
 
     # ── Launch curses dashboard ───────────────────────────────────────────────
     try:
