@@ -96,8 +96,26 @@ def load_config(config_path: str) -> dict:
     debug_log_path_raw    = general.get("DEBUG_LOG_PATH", "").strip().strip('\"\'')
     debug_log_path        = debug_log_path_raw if debug_log_path_raw else ""
     yt_dlp_path_raw       = general.get("YT_DLP_PATH", "").strip().strip('"\'')
+    if sys.platform != "win32" and "exe" in yt_dlp_path_raw.lower():
+        # Rewrite the config file, blanking out YT_DLP_PATH so it won't
+        # try to run a Windows .exe on Linux.
+        try:
+            with open(config_path, "r", encoding="utf-8") as _f:
+                _cfg_text = _f.read()
+            import re as _re
+            _cfg_text = _re.sub(
+                r"(?im)^([ \t]*YT_DLP_PATH[ \t]*=[ \t]*).*$",
+                r"\g<1>",
+                _cfg_text,
+            )
+            with open(config_path, "w", encoding="utf-8") as _f:
+                _f.write(_cfg_text)
+        except Exception:
+            pass
+        yt_dlp_path_raw = ""
     yt_dlp_path           = yt_dlp_path_raw if yt_dlp_path_raw else "yt-dlp"
     site_label            = general.get("SITE_LABEL", os.path.basename(config_path)).strip().strip('\"\'')
+    progress_bar_max_hours = safe_int(general.get("PROGRESS_BAR_MAX_HOURS", 6), 6)
 
     # Disk drives to monitor (comma-separated paths/letters, e.g. "C:\,D:\,/home")
     disk_drives_raw = general.get("DISK_DRIVES", "").strip().strip('\"\'')
@@ -155,6 +173,7 @@ def load_config(config_path: str) -> dict:
         "username_idx": username_idx,
         "config_path": config_path,
         "site_label": site_label,
+        "progress_bar_max_hours": progress_bar_max_hours,
         "disk_drives": disk_drives,
         "twitch_enabled": twitch_enabled,
         "twitch_client_id": twitch_client_id,
@@ -897,9 +916,8 @@ def _fmt_duration(seconds: float) -> str:
         return f"{m}m {s:02d}s"
     return f"{s}s"
 
-def _live_bar(seconds: float, width: int = 14) -> str:
-    MAX_SECS = 6 * 3600
-    filled = min(int(width * seconds / MAX_SECS), width)
+def _live_bar(seconds: float, width: int = 14, max_secs: int = 6 * 3600) -> str:
+    filled = min(int(width * seconds / max(1, max_secs)), width)
     return "█" * filled + "░" * (width - filled)
 
 def draw_box(stdscr, y1, x1, y2, x2, pair):
@@ -1110,7 +1128,7 @@ class JJDlpDashboard:
             except Exception:
                 pass
             total_streamers += len(all_s)
-            live_cnt += sum(1 for s in all_s if s in live_since and s not in blocked)
+            live_cnt += sum(1 for s in all_s if s in live_since)
             rec_cnt  += sum(1 for s in recording)
             off_cnt  += sum(1 for s in all_s if s not in live_since and s not in blocked)
             dis_cnt  += sum(1 for s in all_s if s in blocked)
@@ -1232,8 +1250,14 @@ class JJDlpDashboard:
             next_in      = site.dash_next_check_in
             recording    = set(site.currently_recording)
 
+        try:
+            _panel_cfg = load_config(site.config_path)
+            _bar_max_secs = _panel_cfg.get("progress_bar_max_hours", 6) * 3600
+        except Exception:
+            _bar_max_secs = 6 * 3600
+
         # Counts for header badges
-        live_cnt = sum(1 for s in all_s if s in live_since and s not in blocked)
+        live_cnt = sum(1 for s in all_s if s in live_since)
         rec_cnt  = sum(1 for s in recording)
         off_cnt  = sum(1 for s in all_s if s not in live_since and s not in blocked)
         dis_cnt  = sum(1 for s in all_s if s in blocked)
@@ -1328,7 +1352,7 @@ class JJDlpDashboard:
                 else:
                     status_str  = "[●Live]"
                     status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
-                bar_str     = _live_bar(elapsed, bar_w)
+                bar_str     = _live_bar(elapsed, bar_w, _bar_max_secs)
                 bar_attr    = curses.color_pair(self.C_LIVE)
                 dur_str     = _fmt_duration(elapsed)
                 last_live_str = ""  # currently live, no "last live"
