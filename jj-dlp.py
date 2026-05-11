@@ -115,6 +115,16 @@ def load_config(config_path: str) -> dict:
         yt_dlp_path_raw = ""
     yt_dlp_path           = yt_dlp_path_raw if yt_dlp_path_raw else "yt-dlp"
     site_label            = general.get("SITE_LABEL", os.path.basename(config_path)).strip().strip('\"\'')
+    progress_bar_max_hours = safe_int(general.get("PROGRESS_BAR_MAX_HOURS", 6), 6)
+    _raw_pbw = general.get("PROGRESS_BAR_WIDTH", None)
+    progress_bar_width     = safe_int(general.get("PROGRESS_BAR_WIDTH", 14), 14)
+    startup_dbg(
+        f"[BAR_WIDTH] load_config: raw PROGRESS_BAR_WIDTH from file={_raw_pbw!r}  "
+        f"-> parsed progress_bar_width={progress_bar_width}"
+    )
+    popup_cooldown         = safe_int(general.get("POPUP_COOLDOWN", 30), 30)
+    set_cookie_flag        = general.get("SET_COOKIE_FLAG", "true").strip().lower() not in ("false", "0", "no")
+    ask_for_browser        = general.get("ASK_FOR_BROWSER", "true").strip().lower() not in ("false", "0", "no")
 
     # Disk drives to monitor (comma-separated paths/letters, e.g. "C:\,D:\,/home")
     disk_drives_raw = general.get("DISK_DRIVES", "").strip().strip('\"\'')
@@ -172,7 +182,12 @@ def load_config(config_path: str) -> dict:
         "username_idx": username_idx,
         "config_path": config_path,
         "site_label": site_label,
+        "progress_bar_max_hours": progress_bar_max_hours,
+        "progress_bar_width": progress_bar_width,
+        "popup_cooldown": popup_cooldown,
         "disk_drives": disk_drives,
+        "set_cookie_flag": set_cookie_flag,
+        "ask_for_browser": ask_for_browser,
         "twitch_enabled": twitch_enabled,
         "twitch_client_id": twitch_client_id,
         "twitch_client_secret": twitch_client_secret,
@@ -219,6 +234,9 @@ class SiteState:
 
         self._stop_event          = threading.Event()
 
+        # Popup cooldown: streamer -> epoch of last popup shown
+        self.popup_last_shown:    Dict[str, float] = {}
+
         # Active yt-dlp subprocesses: streamer -> proc
         # Written by record_stream threads; read by stop() for clean kill.
         self._procs_lock          = threading.Lock()
@@ -228,29 +246,19 @@ class SiteState:
         """Register an active yt-dlp subprocess so stop() can kill it."""
         with self._procs_lock:
             self._active_procs[streamer] = proc
-        dbg(f"[{self.label}] [PROC] register_proc: streamer={streamer!r} pid={proc.pid} "
-            f"total_active={len(self._active_procs)}")
 
     def unregister_proc(self, streamer: str) -> None:
         """Remove a subprocess from the registry (after it exits)."""
         with self._procs_lock:
             removed = self._active_procs.pop(streamer, None)
-        dbg(f"[{self.label}] [PROC] unregister_proc: streamer={streamer!r} "
-            f"pid={removed.pid if removed else 'N/A'} "
-            f"total_remaining={len(self._active_procs)}")
 
     def kill_all_procs(self) -> None:
         """Kill every registered yt-dlp process. Called on quit."""
         with self._procs_lock:
             procs = dict(self._active_procs)
-        dbg(f"[{self.label}] [PROC] kill_all_procs: found {len(procs)} proc(s): "
-            f"{[(s, p.pid) for s, p in procs.items()]}")
         for streamer, proc in procs.items():
-            dbg(f"[{self.label}] [PROC] kill_all_procs: killing streamer={streamer!r} pid={proc.pid} "
-                f"poll()={proc.poll()}")
             try:
                 kill_proc(proc)
-                dbg(f"[{self.label}] [PROC] kill_all_procs: kill sent to pid={proc.pid}")
             except Exception as e:
                 dbg(f"[{self.label}] [PROC] kill_all_procs: ERROR killing pid={proc.pid}: {e}")
 
@@ -276,7 +284,6 @@ class SiteState:
                 self.dash_stderr_lines = self.dash_stderr_lines[-200:]
 
     def stop(self) -> None:
-        dbg(f"[{self.label}] [PROC] SiteState.stop() called for config={self.config_path!r}")
         self._stop_event.set()
         self.trigger_event.set()
         self.kill_all_procs()
@@ -616,8 +623,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
             try:
                 proc = subprocess.Popen(cmd, stdout=out_target, stderr=err_target)
                 proc_start_time = time.time()
-                dbg(f"[{site.label}] [PROC] record_stream: started yt-dlp for streamer={streamer!r} "
-                    f"pid={proc.pid} cmd={cmd}")
                 site.register_proc(streamer, proc)
                 ffmpeg_error_counter = [0]
                 ffmpeg_error_event   = threading.Event()
@@ -633,7 +638,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                                          "site": site}, daemon=True).start()
             except Exception as e:
                 site.log_line(f"Failed to start yt-dlp for {streamer}: {e}")
-                dbg(f"[{site.label}] [PROC] record_stream: Popen FAILED for streamer={streamer!r}: {e}")
                 try:
                     close_logs()
                 except Exception:
@@ -650,13 +654,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
             while proc.poll() is None:
                 # Check if we've been asked to stop (e.g. user pressed Q)
                 if site._stop_event.is_set():
-                    dbg(f"[{site.label}] [PROC] record_stream: stop_event set — killing pid={proc.pid} "
-                        f"streamer={streamer!r}")
                     kill_proc(proc)
-                    dbg(f"[{site.label}] [PROC] record_stream: kill sent, waiting for proc to exit")
                     proc.wait()
-                    dbg(f"[{site.label}] [PROC] record_stream: proc exited after stop_event kill "
-                        f"pid={proc.pid} poll()={proc.poll()}")
                     site.unregister_proc(streamer)
                     try:
                         close_logs()
@@ -666,7 +665,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
                 current_cfg = load_config(cfg["config_path"])
                 if streamer in current_cfg["blocked"]:
-                    dbg(f"[{site.label}] [PROC] record_stream: streamer={streamer!r} blocked — killing pid={proc.pid}")
                     kill_proc(proc)
                     site.log_line(f"Recording STOPPED (blocked) -> {streamer}")
                     site.unregister_proc(streamer)
@@ -681,7 +679,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
                 if ffmpeg_error_event.is_set():
                     site.log_line(f"ffmpeg error threshold reached for {streamer} — restarting")
-                    dbg(f"[{site.label}] [PROC] record_stream: ffmpeg error restart for streamer={streamer!r} pid={proc.pid}")
                     kill_proc(proc)
                     site.unregister_proc(streamer)
                     try:
@@ -701,7 +698,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                         stall_check_interval=stall_check_interval)
                     if stall_detected:
                         site.log_line(f"Stall detected for {streamer} — restarting")
-                        dbg(f"[{site.label}] [PROC]] record_stream: stall restart for streamer={streamer!r} pid={proc.pid}")
                         kill_proc(proc)
                         site.unregister_proc(streamer)
                         try:
@@ -714,8 +710,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                         last_size        = current_size
                         last_growth_time = time.time()
             else:
-                dbg(f"[{site.label}] [PROC]] record_stream: proc exited naturally "
-                    f"pid={proc.pid} poll()={proc.poll()} streamer={streamer!r}")
                 site.unregister_proc(streamer)
                 try:
                     close_logs()
@@ -727,12 +721,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                 break
 
     except KeyboardInterrupt:
-        dbg(f"[{site.label}] [PROC]] record_stream: KeyboardInterrupt for streamer={streamer!r} "
-            f"pid={proc.pid if proc else 'N/A'}")
         if proc is not None:
             try:
                 kill_proc(proc)
-                dbg(f"[{site.label}] [PROC]] record_stream: killed pid={proc.pid} via KeyboardInterrupt path")
             except Exception as e:
                 dbg(f"[{site.label}] [PROC]] record_stream: kill error in KBI path: {e}")
         site.unregister_proc(streamer)
@@ -741,8 +732,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
         except Exception:
             pass
     finally:
-        dbg(f"[{site.label}] [PROC]] record_stream: finally block — streamer={streamer!r} "
-            f"pid={proc.pid if proc else 'N/A'}")
         with site.lock:
             site.currently_recording.discard(streamer)
         time.sleep(cfg["cooldown"])
@@ -762,7 +751,11 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                 if streamer not in site.dash_live_since:
                     site.dash_live_since[streamer] = time.time()
             if show_popup and cfg.get("popup_notifications", True):
-                _show_live_popup(streamer, source="poll", popup_timeout=cfg.get("popup_timeout", 15))
+                cooldown_secs = cfg.get("popup_cooldown", 30) * 60
+                last_shown    = site.popup_last_shown.get(streamer, 0)
+                if time.time() - last_shown >= cooldown_secs:
+                    _show_live_popup(streamer, source="poll", popup_timeout=cfg.get("popup_timeout", 15))
+                    site.popup_last_shown[streamer] = time.time()
             t = threading.Thread(target=record_stream, args=(streamer, cfg, site), daemon=True)
             t.start()
             site.recording_threads.append(t)
@@ -812,8 +805,12 @@ def monitor_site(site: "SiteState") -> None:
             if broadcaster_login in current_cfg.get("streamers", []) and \
                broadcaster_login not in current_cfg.get("blocked", []):
                 if current_cfg.get("popup_notifications", True):
-                    _show_live_popup(broadcaster_login, source="eventsub",
-                                     popup_timeout=current_cfg.get("popup_timeout", 15))
+                    cooldown_secs = current_cfg.get("popup_cooldown", 30) * 60
+                    last_shown    = site.popup_last_shown.get(broadcaster_login, 0)
+                    if time.time() - last_shown >= cooldown_secs:
+                        _show_live_popup(broadcaster_login, source="eventsub",
+                                         popup_timeout=current_cfg.get("popup_timeout", 15))
+                        site.popup_last_shown[broadcaster_login] = time.time()
                 start_recording_if_needed([broadcaster_login], current_cfg, site, show_popup=False)
 
         try:
@@ -854,16 +851,11 @@ def monitor_site(site: "SiteState") -> None:
                 site.dash_blocked.clear()
                 site.dash_blocked.update(cfg["blocked"])
                 live_set = set(live_now)
-                dbg(f"[{site.label}] [FLASH] monitor_site: live_set={live_set} "
-                    f"blocked={site.dash_blocked} streamers={streamers}")
                 for s in streamers:
                     if s not in live_set:
                         site.dash_live_since.pop(s, None)
-                        dbg(f"[{site.label}] [FLASH] monitor_site: {s!r} -> offline, removed from dash_live_since")
                     elif s not in site.dash_live_since:
                         site.dash_live_since[s] = time.time()
-                        dbg(f"[{site.label}] [FLASH] monitor_site: {s!r} -> live, added to dash_live_since "
-                            f"(blocked={s in site.dash_blocked})")
 
             if live_now:
                 site.log_line(f"Live now: {', '.join(live_now)}")
@@ -914,9 +906,8 @@ def _fmt_duration(seconds: float) -> str:
         return f"{m}m {s:02d}s"
     return f"{s}s"
 
-def _live_bar(seconds: float, width: int = 14) -> str:
-    MAX_SECS = 6 * 3600
-    filled = min(int(width * seconds / MAX_SECS), width)
+def _live_bar(seconds: float, width: int = 14, max_secs: int = 6 * 3600) -> str:
+    filled = min(int(width * seconds / max(1, max_secs)), width)
     return "█" * filled + "░" * (width - filled)
 
 def draw_box(stdscr, y1, x1, y2, x2, pair):
@@ -1127,7 +1118,7 @@ class JJDlpDashboard:
             except Exception:
                 pass
             total_streamers += len(all_s)
-            live_cnt += sum(1 for s in all_s if s in live_since and s not in blocked)
+            live_cnt += sum(1 for s in all_s if s in live_since)
             rec_cnt  += sum(1 for s in recording)
             off_cnt  += sum(1 for s in all_s if s not in live_since and s not in blocked)
             dis_cnt  += sum(1 for s in all_s if s in blocked)
@@ -1195,8 +1186,6 @@ class JJDlpDashboard:
                 except Exception:
                     pass
             drives = seen_drives if seen_drives else ([fallback_dir] if fallback_dir else ["/"])
-            dbg(f"[{site.label}] [DISK] draw_system_panel: drives={drives} (seen_drives={seen_drives}, "
-                f"fallback={fallback_dir})")
             if disk_row_y < y2 - 1:
                 safe_addstr(self.stdscr, disk_row_y, x1 + 2, "── Disk ──",
                             curses.color_pair(self.C_SYSTEM))
@@ -1249,8 +1238,21 @@ class JJDlpDashboard:
             next_in      = site.dash_next_check_in
             recording    = set(site.currently_recording)
 
+        try:
+            _panel_cfg = load_config(site.config_path)
+            _bar_max_secs = _panel_cfg.get("progress_bar_max_hours", 6) * 3600
+            _bar_cfg_w    = max(4, _panel_cfg.get("progress_bar_width", 14))
+            dbg(
+                f"[BAR_WIDTH] draw_site_panel ({site.label}): "
+                f"config progress_bar_width={_panel_cfg.get('progress_bar_width', 14)}  "
+                f"_bar_cfg_w (after max(4,...))={_bar_cfg_w}"
+            )
+        except Exception:
+            _bar_max_secs = 6 * 3600
+            _bar_cfg_w    = 14
+
         # Counts for header badges
-        live_cnt = sum(1 for s in all_s if s in live_since and s not in blocked)
+        live_cnt = sum(1 for s in all_s if s in live_since)
         rec_cnt  = sum(1 for s in recording)
         off_cnt  = sum(1 for s in all_s if s not in live_since and s not in blocked)
         dis_cnt  = sum(1 for s in all_s if s in blocked)
@@ -1282,10 +1284,19 @@ class JJDlpDashboard:
         row_start    = y1 + 3
         max_rows     = y2 - row_start - 2   # leave 2 rows at bottom for countdown
 
-        # Column widths — scale to panel width
+        # Column widths — bar_w honours PROGRESS_BAR_WIDTH but won't overflow the row.
+        # Row layout: [name_w] 1 [status=7] 1 [bar_w] 1 [dur=9] 1 [last_live_w]
+        # So the actual space available for the bar is what's left after the fixed columns.
         name_w      = max(10, min(18, panel_width // 4))
-        bar_w       = max(8,  min(14, panel_width // 5))
         last_live_w = 12   # "Last Live" column
+        _fixed_cols = name_w + 1 + 7 + 1 + 1 + 9 + 1 + last_live_w  # everything except bar
+        bar_w       = max(4, min(_bar_cfg_w, panel_width - _fixed_cols))
+        dbg(
+            f"[BAR_WIDTH] draw_site_panel ({site.label}): "
+            f"panel_width={panel_width}  _fixed_cols={_fixed_cols}  "
+            f"available_for_bar={panel_width - _fixed_cols}  "
+            f"_bar_cfg_w={_bar_cfg_w}  FINAL bar_w={bar_w}"
+        )
 
         for i, s in enumerate(all_s):
             if i >= max_rows:
@@ -1317,8 +1328,6 @@ class JJDlpDashboard:
                 dur_str     = ""
                 if since is not None:
                     # Disabled but currently live — flash [●Live] ↔ [DIS]
-                    dbg(f"[{site.label}] [FLASH] draw_site_panel: {s!r} is_dis=True since={since:.0f} "
-                        f"tick={self.tick} tick%2={self.tick % 2}")
                     if self.tick % 2 == 0:
                         status_str  = "[●Live]"
                         status_attr = curses.color_pair(self.C_DISABLED) | curses.A_BOLD
@@ -1327,8 +1336,6 @@ class JJDlpDashboard:
                         status_attr = curses.color_pair(self.C_DISABLED)
                 else:
                     # Disabled and offline — steady [DIS]
-                    dbg(f"[{site.label}] [FLASH] draw_site_panel: {s!r} is_dis=True since=None "
-                        f"(no live data — fix not working if streamer IS live)")
                     status_str  = "[DIS]  "
                     status_attr = curses.color_pair(self.C_DISABLED)
             elif since is not None:
@@ -1345,7 +1352,7 @@ class JJDlpDashboard:
                 else:
                     status_str  = "[●Live]"
                     status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
-                bar_str     = _live_bar(elapsed, bar_w)
+                bar_str     = _live_bar(elapsed, bar_w, _bar_max_secs)
                 bar_attr    = curses.color_pair(self.C_LIVE)
                 dur_str     = _fmt_duration(elapsed)
                 last_live_str = ""  # currently live, no "last live"
@@ -1802,14 +1809,187 @@ class JJDlpDashboard:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Browser cookie helper (for --cookies-from-browser in [Downloader])
+# ══════════════════════════════════════════════════════════════════════════════
+
+_SUPPORTED_BROWSERS = [
+    "brave", "chrome", "chromium", "edge",
+    "firefox", "opera", "safari", "vivaldi", "whale",
+    "other",
+]
+
+def _read_browser_from_config(config_path: str) -> str:
+    """
+    Return the browser name currently set after --cookies-from-browser in the
+    [Downloader] section, or 'firefox' if not found.
+    We use raw text scanning because configparser treats each line as a
+    separate no-value key when the value sits on its own continuation line.
+    """
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception:
+        return "firefox"
+
+    in_downloader = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.lower() == "[downloader]":
+            in_downloader = True
+            continue
+        if in_downloader:
+            if stripped.startswith("["):          # entered a new section
+                break
+            if stripped.lower() == "--cookies-from-browser":
+                # The browser name should be on the very next non-blank line
+                for j in range(i + 1, len(lines)):
+                    candidate = lines[j].strip()
+                    if candidate == "":
+                        continue
+                    if candidate.startswith("[") or candidate.startswith("-"):
+                        break
+                    return candidate.lower()
+    return "firefox"
+
+
+def _write_browser_to_config(config_path: str, browser: str) -> None:
+    """
+    Update the [Downloader] section so that --cookies-from-browser is followed
+    by *browser* on the next line.  If browser == 'other', both the
+    --cookies-from-browser line and the browser-name line are removed.
+    Uses raw text manipulation to preserve the rest of the file exactly.
+    """
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception:
+        return
+
+    in_downloader = False
+    cookies_idx   = None   # index of the --cookies-from-browser line
+    browser_idx   = None   # index of the browser-name line that follows it
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.lower() == "[downloader]":
+            in_downloader = True
+            continue
+        if in_downloader:
+            if stripped.startswith("["):
+                break
+            if stripped.lower() == "--cookies-from-browser":
+                cookies_idx = i
+                # Look for the browser name on the next non-blank line
+                for j in range(i + 1, len(lines)):
+                    candidate = lines[j].strip()
+                    if candidate == "":
+                        continue
+                    if candidate.startswith("[") or candidate.startswith("-"):
+                        break
+                    browser_idx = j
+                    break
+                break
+
+    if browser == "other":
+        # Remove both lines (reverse order so indices stay valid)
+        to_remove = sorted(
+            [x for x in [cookies_idx, browser_idx] if x is not None],
+            reverse=True,
+        )
+        for idx in to_remove:
+            lines.pop(idx)
+    else:
+        if cookies_idx is not None and browser_idx is not None:
+            # Replace the existing browser name in-place
+            indent = lines[browser_idx][: len(lines[browser_idx]) - len(lines[browser_idx].lstrip())]
+            lines[browser_idx] = f"{indent}{browser}\n"
+        elif cookies_idx is not None:
+            # No browser line existed — insert one right after --cookies-from-browser
+            lines.insert(cookies_idx + 1, f"{browser}\n")
+        else:
+            # --cookies-from-browser not present at all — find the [Downloader]
+            # section and insert both lines after it.
+            for i, line in enumerate(lines):
+                if line.strip().lower() == "[downloader]":
+                    lines.insert(i + 1, f"{browser}\n")
+                    lines.insert(i + 1, "--cookies-from-browser\n")
+                    break
+
+    try:
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+    except Exception:
+        pass
+
+
+def _write_ask_for_browser_to_config(config_path: str, value: bool) -> None:
+    """
+    Set ASK_FOR_BROWSER = True/False in the [General] section of *config_path*.
+    If the key already exists it is updated in-place; otherwise it is appended
+    to the end of the [General] section.  The rest of the file is preserved.
+    """
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception:
+        return
+
+    val_str = "True" if value else "False"
+    key_name = "ASK_FOR_BROWSER"
+    import re as _re
+
+    # Try to update an existing ASK_FOR_BROWSER line anywhere in the file
+    for i, line in enumerate(lines):
+        if _re.match(r"^\s*ASK_FOR_BROWSER\s*=", line, _re.IGNORECASE):
+            lines[i] = f"ASK_FOR_BROWSER = {val_str}\n"
+            try:
+                with open(config_path, "w", encoding="utf-8") as f:
+                    f.writelines(lines)
+            except Exception:
+                pass
+            return
+
+    # Key not found — insert after the [General] header
+    general_idx = None
+    next_sec_idx = len(lines)
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.lower() == "[general]":
+            general_idx = i
+            continue
+        if general_idx is not None and stripped.startswith("["):
+            next_sec_idx = i
+            break
+
+    if general_idx is None:
+        # No [General] section — append one
+        lines.append("\n[General]\n")
+        lines.append(f"{key_name} = {val_str}\n")
+    else:
+        # Insert before the next section (or end of file), skipping trailing blanks
+        insert_at = next_sec_idx
+        while insert_at > general_idx + 1 and lines[insert_at - 1].strip() == "":
+            insert_at -= 1
+        lines.insert(insert_at, f"{key_name} = {val_str}\n")
+
+    try:
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+    except Exception:
+        pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Multi-select startup chooser
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
     """
-    MenuWorks-style config file chooser.
-    Space = toggle selection, Enter = confirm, Q/Esc = abort.
-    Returns list of selected paths (at least 1).
+    MenuWorks-style config file chooser, followed by a browser-cookie picker.
+    Phase 1 — config files:  Space = toggle [x],  Enter = confirm,  Q = quit.
+    Phase 2 — browser:       ↑/↓ navigate,        Enter = confirm,  Q = quit.
+    Returns list of selected config file paths (at least 1).
+    Writes the chosen browser back into each selected config file.
     """
     curses.start_color()
     curses.use_default_colors()
@@ -1820,12 +2000,13 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
     curses.init_pair(5, curses.COLOR_BLACK,   curses.COLOR_CYAN)
     curses.init_pair(6, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
 
+    curses.curs_set(0)
+    stdscr.keypad(True)
+
+    # ── Phase 1: config file selection ───────────────────────────────────────
     selected  = set(range(len(found)))   # start with all config files selected
     cursor    = 0
     n         = len(found)
-
-    curses.curs_set(0)
-    stdscr.keypad(True)
 
     while True:
         stdscr.erase()
@@ -1885,11 +2066,127 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
                 selected.add(cursor)
         elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
             if selected:
-                return [found[i] for i in sorted(selected)]
+                chosen_files = [found[i] for i in sorted(selected)]
+                break
         elif key in (ord('q'), ord('Q'), 27):
             sys.exit(0)
 
-    return [found[0]]
+    # ── Phase 2: browser / cookie selection ──────────────────────────────────
+    # Build a per-file config map for all selected files (used for flag checks).
+    file_cfgs = {
+        fname: load_config(os.path.join(os.getcwd(), fname))
+        for fname in chosen_files
+    }
+
+    # Show the page if ANY selected config has ASK_FOR_BROWSER = True (default).
+    # Only skip when every selected config has explicitly opted out.
+    if not any(file_cfgs[f].get("ask_for_browser", True) for f in chosen_files):
+        return chosen_files
+
+    first_fpath = os.path.join(os.getcwd(), chosen_files[0])
+
+    # Read the current browser from the first selected config file so we can
+    # pre-select it.  All selected configs will be updated with the same choice.
+    browsers     = _SUPPORTED_BROWSERS          # e.g. ['brave', 'chrome', ..., 'other']
+    nb           = len(browsers)
+    current_br   = _read_browser_from_config(first_fpath)
+    try:
+        br_cursor = browsers.index(current_br)
+    except ValueError:
+        br_cursor = browsers.index("firefox")
+
+    # "Do not show again" toggle state (starts unchecked)
+    do_not_show = False
+
+    while True:
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+        stdscr.bkgd(" ", curses.color_pair(0))
+
+        # Logo
+        for i, line in enumerate(ASCII_LOGO):
+            safe_addstr(stdscr, 1 + i, 2, line, curses.color_pair(6) | curses.A_BOLD)
+
+        ts = time.strftime("%Y-%m-%d  %H:%M:%S")
+        safe_addstr(stdscr, 1, w - len(ts) - 3, ts, curses.color_pair(1))
+        safe_addstr(stdscr, 7, 2, "-" * (w - 4), curses.color_pair(1))
+
+        # Title
+        safe_addstr(stdscr, 9, 2, "SELECT CONFIG FILE(S)", curses.color_pair(5) | curses.A_BOLD)
+
+        # Separator + browser sub-section header
+        files_row_end = 11 + len(chosen_files)
+        safe_addstr(stdscr, 11, 2, "-" * min(w - 4, 60), curses.color_pair(1))
+
+        # Selected config summary (read-only at this stage)
+        safe_addstr(stdscr, 10, 2,
+                    f"Config(s): {', '.join(chosen_files)}",
+                    curses.color_pair(4))
+
+        # Browser sub-title
+        br_title_row = files_row_end + 1
+        safe_addstr(stdscr, br_title_row, 2,
+                    "BROWSER FOR --cookies-from-browser",
+                    curses.color_pair(5) | curses.A_BOLD)
+        safe_addstr(stdscr, br_title_row + 1, 2,
+                    "↑/↓ navigate  Enter = confirm   D = do not show again   Q = quit",
+                    curses.color_pair(3))
+        safe_addstr(stdscr, br_title_row + 2, 2,
+                    "(Twitch: cookies suppress ads — select your browser or \"other\" to disable)",
+                    curses.color_pair(3))
+
+        # Browser list (single-select radio buttons)
+        list_start_row = br_title_row + 4
+        for i, br in enumerate(browsers):
+            row    = list_start_row + i
+            dot    = "(*)" if i == br_cursor else "( )"
+            is_cur = i == br_cursor
+            if is_cur:
+                attr = curses.color_pair(2) | curses.A_BOLD
+            else:
+                attr = curses.color_pair(1)
+            label = f"  {dot}  {br}" + ("  ← remove cookies flag" if br == "other" else "")
+            safe_addstr(stdscr, row, 4, label, attr)
+
+        # "Do not show again" checkbox (below the browser list)
+        dna_row  = list_start_row + nb + 1
+        dna_box  = "[x]" if do_not_show else "[ ]"
+        dna_attr = curses.color_pair(3) | curses.A_BOLD if do_not_show else curses.color_pair(3)
+        safe_addstr(stdscr, dna_row, 4,
+                    f"  {dna_box}  Do not show again  (sets ASK_FOR_BROWSER = False in config)",
+                    dna_attr)
+
+        # Footer
+        footer = "  ↑/↓ navigate  Enter = confirm  D = do not show again  Q = quit  "
+        safe_addstr(stdscr, h - 1, 0,
+                    footer.ljust(w - 1)[:w - 1],
+                    curses.color_pair(5))
+
+        stdscr.refresh()
+        key = stdscr.getch()
+
+        if key in (curses.KEY_UP, ord('k')):
+            br_cursor = (br_cursor - 1) % nb
+        elif key in (curses.KEY_DOWN, ord('j')):
+            br_cursor = (br_cursor + 1) % nb
+        elif key in (ord('d'), ord('D')):
+            do_not_show = not do_not_show
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+            chosen_browser = browsers[br_cursor]
+            for fname in chosen_files:
+                fpath = os.path.join(os.getcwd(), fname)
+                # SET_COOKIE_FLAG is per-file — only write cookies back if that
+                # specific config has it enabled (True is the default).
+                if file_cfgs[fname].get("set_cookie_flag", True):
+                    _write_browser_to_config(fpath, chosen_browser)
+                # If "Do not show again" was checked, persist ASK_FOR_BROWSER = False
+                if do_not_show:
+                    _write_ask_for_browser_to_config(fpath, False)
+            return chosen_files
+        elif key in (ord('q'), ord('Q'), 27):
+            sys.exit(0)
+
+    return chosen_files  # unreachable, satisfies type checker
 
 
 # ══════════════════════════════════════════════════════════════════════════════
