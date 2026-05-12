@@ -29,7 +29,7 @@ ENABLE_STARTUP_LOG: bool = False
 ENABLE_CRASH_LOG:   bool = True
 
 _STARTUP_LOG: str = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "jj-dlp-startup-debug.log"
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "jj-dlp-startup-debug.log"
 )
 
 # ── Runtime debug log (path resolved from config after startup) ───────────────
