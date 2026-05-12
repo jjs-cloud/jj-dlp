@@ -137,6 +137,7 @@ def load_config(config_path: str) -> dict:
     popup_cooldown         = safe_int(general.get("POPUP_COOLDOWN", 30), 30)
     set_cookie_flag        = general.get("SET_COOKIE_FLAG", "true").strip().lower() not in ("false", "0", "no")
     ask_for_browser        = general.get("ASK_FOR_BROWSER", "true").strip().lower() not in ("false", "0", "no")
+    site_order             = safe_int(general.get("SITE_ORDER", 999), 999)
 
     # Disk drives to monitor (comma-separated paths/letters, e.g. "C:\,D:\,/home")
     disk_drives_raw = general.get("DISK_DRIVES", "").strip().strip('\"\'')
@@ -200,6 +201,7 @@ def load_config(config_path: str) -> dict:
         "disk_drives": disk_drives,
         "set_cookie_flag": set_cookie_flag,
         "ask_for_browser": ask_for_browser,
+        "site_order": site_order,
         "twitch_enabled": twitch_enabled,
         "twitch_client_id": twitch_client_id,
         "twitch_client_secret": twitch_client_secret,
@@ -219,6 +221,11 @@ class SiteState:
     def __init__(self, config_path: str):
         self.config_path          = config_path
         self.label                = os.path.basename(config_path)
+        
+        # Load the configuration once during init to retrieve things like site_order
+        cfg = load_config(config_path)
+        self.site_order           = cfg.get("site_order", 999)
+        
         self.lock                 = threading.Lock()
         self.currently_recording: Set[str] = set()
         self.recording_threads:   List[threading.Thread] = []
@@ -2083,13 +2090,17 @@ def main() -> None:
         site = SiteState(cp)
         sites.append(site)
 
+    # Sort sites by site_order so they appear in the desired positions in the dashboard
+    sites.sort(key=lambda s: s.site_order)
+
+    for site in sites:
         # Monitor thread (liveness check loop)
         mt = threading.Thread(target=monitor_site, args=(site,), daemon=True)
         mt.start()
         site.monitor_thread = mt
 
         # Config watcher thread
-        cfg_i = load_config(cp)
+        cfg_i = load_config(site.config_path)
         wt = threading.Thread(target=config_watcher,
                               args=(site, cfg_i.get("config_check_interval", 3)),
                               daemon=True)
