@@ -992,6 +992,9 @@ class JJDlpDashboard:
         self._mgmt_result = ""
         # Color scheme index for randomization
         self._color_scheme_idx = 0
+        
+        from config_editor import ConfigEditor
+        self.config_editor = ConfigEditor(self)
 
     # ── Color palette ────────────────────────────────────────────────────────
     # Pair numbers and their meanings — easy to change here
@@ -1572,39 +1575,7 @@ class JJDlpDashboard:
 
     # ── Config tab ───────────────────────────────────────────────────────────
     def draw_config_tab(self, y1, x1, y2, x2):
-        draw_box(self.stdscr, y1, x1, y2, x2, self.C_CHROME)
-        safe_addstr(self.stdscr, y1, x1 + 2, " CONFIGURATION ",
-                    curses.color_pair(self.C_INVHEAD) | curses.A_BOLD)
-
-        row_y = y1 + 2
-        for site in self.sites:
-            if row_y >= y2 - 1:
-                break
-            try:
-                cfg = load_config(site.config_path)
-            except Exception:
-                continue
-            lbl = cfg.get("site_label", os.path.basename(site.config_path))
-            safe_addstr(self.stdscr, row_y, x1 + 2, f"-- {lbl} --",
-                        curses.color_pair(self.C_WARN) | curses.A_BOLD)
-            row_y += 1
-
-            fields = [
-                ("CONFIG_FILE",   site.config_path),
-                ("OUTPUT_DIR",    cfg["output_dir"]),
-                ("CHECK_INTERVAL",f"{cfg['check_interval']}s"),
-                ("YT_DLP_PATH",   cfg["yt_dlp_path"]),
-                ("LOGGING",       "true" if cfg["logging_enabled"] else "false"),
-                ("POPUP_NOTIFY",  "true" if cfg["popup_notifications"] else "false"),
-            ]
-            for key, val in fields:
-                if row_y >= y2 - 1:
-                    break
-                safe_addstr(self.stdscr, row_y, x1 + 4,
-                            f"{key:<20}", curses.color_pair(self.C_WARN) | curses.A_BOLD)
-                safe_addstr(self.stdscr, row_y, x1 + 25, val, curses.color_pair(self.C_LIVE))
-                row_y += 1
-            row_y += 1
+        self.config_editor.draw_tab(self.stdscr, y1, x1, y2, x2)
 
     # ── Footer ────────────────────────────────────────────────────────────────
     def draw_footer(self):
@@ -1739,6 +1710,13 @@ class JJDlpDashboard:
         """Returns False to quit."""
         if self._mgmt_mode:
             return self._handle_mgmt_key(key)
+            
+        current_tab_name = self.TABS[self.selected_tab]
+        if current_tab_name == "Config":
+            # Pass keys to ConfigEditor first. But still handle global site switching:
+            if key not in (ord(']'), curses.KEY_NPAGE, ord('['), curses.KEY_PPAGE):
+                if self.config_editor.handle_key(key):
+                    return True
 
         if key in (ord('q'), ord('Q'), 27):
             return False
@@ -1810,7 +1788,7 @@ class JJDlpDashboard:
                 if not self.handle_key(key):
                     break
             self.tick += 1
-            curses.napms(250)
+            curses.napms(150)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
