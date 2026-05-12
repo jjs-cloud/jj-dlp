@@ -67,18 +67,22 @@ class ConfigEditor:
             self.lines = []
 
         self.items = []
+        current_section = None
         for i, line in enumerate(self.lines):
             s = line.strip()
             if not s or s.startswith("#") or s.startswith(";"):
                 continue
             if s.startswith("[") and s.endswith("]"):
-                self.items.append(ConfigItem(i, True, s[1:-1], "", False, line))
+                current_section = s[1:-1]
+                if current_section == "General":
+                    self.items.append(ConfigItem(i, True, current_section, "", False, line))
             else:
-                if "=" in s:
-                    k, v = s.split("=", 1)
-                    self.items.append(ConfigItem(i, False, k.strip(), v.strip(), True, line))
-                else:
-                    self.items.append(ConfigItem(i, False, s, "", False, line))
+                if current_section == "General":
+                    if "=" in s:
+                        k, v = s.split("=", 1)
+                        self.items.append(ConfigItem(i, False, k.strip(), v.strip(), True, line))
+                    else:
+                        self.items.append(ConfigItem(i, False, s, "", False, line))
         
         if self.items:
             self.selected_idx = min(self.selected_idx, len(self.items) - 1)
