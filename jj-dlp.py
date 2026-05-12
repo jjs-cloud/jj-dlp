@@ -1466,7 +1466,7 @@ class JJDlpDashboard:
                     curses.color_pair(self.C_CHROME))
 
     # ── Site panel (one per config) ──────────────────────────────────────────
-    def draw_site_panel(self, site: "SiteState", y1, x1, y2, x2, is_selected:False):
+    def draw_site_panel(self, site: "SiteState", y1, x1, y2, x2, is_selected: bool = False):
         """
         Draws one site's streamer list inside the given bounding box.
         This is the main reusable panel — rearrange by changing caller geometry.
