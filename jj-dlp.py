@@ -1797,7 +1797,7 @@ class JJDlpDashboard:
                 if not self.handle_key(key):
                     break
             self.tick += 1
-            curses.napms(150)
+            curses.napms(50)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
