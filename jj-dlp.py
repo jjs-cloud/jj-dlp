@@ -26,6 +26,18 @@ from logger import (
     configure as _configure_logger,
 )
 
+from browser_config import (
+    _SUPPORTED_BROWSERS,
+    _read_browser_from_config,
+    _write_browser_to_config,
+    _write_ask_for_browser_to_config,
+)
+
+# ── ffmpeg dependency check (must happen before curses is initialised) ────────
+if not plain_ffmpeg_check():
+    print("\njj-dlp  ·  Aborted during ffmpeg check.")
+    sys.exit(1)
+
 # ── Run the curses check before importing curses at module level ──────────────
 ensure_curses()
 
@@ -954,6 +966,8 @@ class JJDlpDashboard:
     Panel grid: sites[0]=top-left, sites[1]=top-right, sites[2]=bot-left, etc.
     """
 
+    FLASH_CYCLE = 8
+
     # ── Tab definitions — add/remove tabs here ──────────────────────────────
     TABS = ["Dashboard", "Log", "EventSub", "Config"]
 
@@ -987,6 +1001,9 @@ class JJDlpDashboard:
         self._mgmt_result = ""
         # Color scheme index for randomization
         self._color_scheme_idx = 0
+        
+        from config_editor import ConfigEditor
+        self.config_editor = ConfigEditor(self)
 
     # ── Color palette ────────────────────────────────────────────────────────
     # Pair numbers and their meanings — easy to change here
@@ -1327,27 +1344,27 @@ class JJDlpDashboard:
                 bar_attr    = curses.color_pair(self.C_DISABLED)
                 dur_str     = ""
                 if since is not None:
-                    # Disabled but currently live — flash [●Live] ↔ [DIS]
-                    if self.tick % 2 == 0:
+                    # Disabled but currently live — flash [●Live] ↔ [x DIS]
+                    if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
                         status_str  = "[●Live]"
                         status_attr = curses.color_pair(self.C_DISABLED) | curses.A_BOLD
                     else:
-                        status_str  = "[DIS]  "
+                        status_str  = "[x DIS]"
                         status_attr = curses.color_pair(self.C_DISABLED)
                 else:
-                    # Disabled and offline — steady [DIS]
-                    status_str  = "[DIS]  "
+                    # Disabled and offline — steady [x DIS]
+                    status_str  = "[x DIS]"
                     status_attr = curses.color_pair(self.C_DISABLED)
             elif since is not None:
                 elapsed     = now - since
                 name_attr   = curses.color_pair(self.C_LIVE) | curses.A_BOLD
                 # Flash between "Live" and "REC" for recording streamers
                 if is_rec:
-                    if self.tick % 2 == 0:
+                    if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
                         status_str  = "[●Live]"
                         status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
                     else:
-                        status_str  = "[▶REC] "
+                        status_str  = "[▶ REC] "
                         status_attr = curses.color_pair(self.C_REC) | curses.A_BOLD
                 else:
                     status_str  = "[●Live]"
@@ -1567,39 +1584,7 @@ class JJDlpDashboard:
 
     # ── Config tab ───────────────────────────────────────────────────────────
     def draw_config_tab(self, y1, x1, y2, x2):
-        draw_box(self.stdscr, y1, x1, y2, x2, self.C_CHROME)
-        safe_addstr(self.stdscr, y1, x1 + 2, " CONFIGURATION ",
-                    curses.color_pair(self.C_INVHEAD) | curses.A_BOLD)
-
-        row_y = y1 + 2
-        for site in self.sites:
-            if row_y >= y2 - 1:
-                break
-            try:
-                cfg = load_config(site.config_path)
-            except Exception:
-                continue
-            lbl = cfg.get("site_label", os.path.basename(site.config_path))
-            safe_addstr(self.stdscr, row_y, x1 + 2, f"-- {lbl} --",
-                        curses.color_pair(self.C_WARN) | curses.A_BOLD)
-            row_y += 1
-
-            fields = [
-                ("CONFIG_FILE",   site.config_path),
-                ("OUTPUT_DIR",    cfg["output_dir"]),
-                ("CHECK_INTERVAL",f"{cfg['check_interval']}s"),
-                ("YT_DLP_PATH",   cfg["yt_dlp_path"]),
-                ("LOGGING",       "true" if cfg["logging_enabled"] else "false"),
-                ("POPUP_NOTIFY",  "true" if cfg["popup_notifications"] else "false"),
-            ]
-            for key, val in fields:
-                if row_y >= y2 - 1:
-                    break
-                safe_addstr(self.stdscr, row_y, x1 + 4,
-                            f"{key:<20}", curses.color_pair(self.C_WARN) | curses.A_BOLD)
-                safe_addstr(self.stdscr, row_y, x1 + 25, val, curses.color_pair(self.C_LIVE))
-                row_y += 1
-            row_y += 1
+        self.config_editor.draw_tab(self.stdscr, y1, x1, y2, x2)
 
     # ── Footer ────────────────────────────────────────────────────────────────
     def draw_footer(self):
@@ -1734,6 +1719,13 @@ class JJDlpDashboard:
         """Returns False to quit."""
         if self._mgmt_mode:
             return self._handle_mgmt_key(key)
+            
+        current_tab_name = self.TABS[self.selected_tab]
+        if current_tab_name == "Config":
+            # Pass keys to ConfigEditor first. But still handle global site switching:
+            if key not in (ord(']'), curses.KEY_NPAGE, ord('['), curses.KEY_PPAGE):
+                if self.config_editor.handle_key(key):
+                    return True
 
         if key in (ord('q'), ord('Q'), 27):
             return False
@@ -1805,178 +1797,12 @@ class JJDlpDashboard:
                 if not self.handle_key(key):
                     break
             self.tick += 1
-            curses.napms(250)
+            curses.napms(150)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Browser cookie helper (for --cookies-from-browser in [Downloader])
 # ══════════════════════════════════════════════════════════════════════════════
-
-_SUPPORTED_BROWSERS = [
-    "brave", "chrome", "chromium", "edge",
-    "firefox", "opera", "safari", "vivaldi", "whale",
-    "other",
-]
-
-def _read_browser_from_config(config_path: str) -> str:
-    """
-    Return the browser name currently set after --cookies-from-browser in the
-    [Downloader] section, or 'firefox' if not found.
-    We use raw text scanning because configparser treats each line as a
-    separate no-value key when the value sits on its own continuation line.
-    """
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-    except Exception:
-        return "firefox"
-
-    in_downloader = False
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.lower() == "[downloader]":
-            in_downloader = True
-            continue
-        if in_downloader:
-            if stripped.startswith("["):          # entered a new section
-                break
-            if stripped.lower() == "--cookies-from-browser":
-                # The browser name should be on the very next non-blank line
-                for j in range(i + 1, len(lines)):
-                    candidate = lines[j].strip()
-                    if candidate == "":
-                        continue
-                    if candidate.startswith("[") or candidate.startswith("-"):
-                        break
-                    return candidate.lower()
-    return "firefox"
-
-
-def _write_browser_to_config(config_path: str, browser: str) -> None:
-    """
-    Update the [Downloader] section so that --cookies-from-browser is followed
-    by *browser* on the next line.  If browser == 'other', both the
-    --cookies-from-browser line and the browser-name line are removed.
-    Uses raw text manipulation to preserve the rest of the file exactly.
-    """
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-    except Exception:
-        return
-
-    in_downloader = False
-    cookies_idx   = None   # index of the --cookies-from-browser line
-    browser_idx   = None   # index of the browser-name line that follows it
-
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.lower() == "[downloader]":
-            in_downloader = True
-            continue
-        if in_downloader:
-            if stripped.startswith("["):
-                break
-            if stripped.lower() == "--cookies-from-browser":
-                cookies_idx = i
-                # Look for the browser name on the next non-blank line
-                for j in range(i + 1, len(lines)):
-                    candidate = lines[j].strip()
-                    if candidate == "":
-                        continue
-                    if candidate.startswith("[") or candidate.startswith("-"):
-                        break
-                    browser_idx = j
-                    break
-                break
-
-    if browser == "other":
-        # Remove both lines (reverse order so indices stay valid)
-        to_remove = sorted(
-            [x for x in [cookies_idx, browser_idx] if x is not None],
-            reverse=True,
-        )
-        for idx in to_remove:
-            lines.pop(idx)
-    else:
-        if cookies_idx is not None and browser_idx is not None:
-            # Replace the existing browser name in-place
-            indent = lines[browser_idx][: len(lines[browser_idx]) - len(lines[browser_idx].lstrip())]
-            lines[browser_idx] = f"{indent}{browser}\n"
-        elif cookies_idx is not None:
-            # No browser line existed — insert one right after --cookies-from-browser
-            lines.insert(cookies_idx + 1, f"{browser}\n")
-        else:
-            # --cookies-from-browser not present at all — find the [Downloader]
-            # section and insert both lines after it.
-            for i, line in enumerate(lines):
-                if line.strip().lower() == "[downloader]":
-                    lines.insert(i + 1, f"{browser}\n")
-                    lines.insert(i + 1, "--cookies-from-browser\n")
-                    break
-
-    try:
-        with open(config_path, "w", encoding="utf-8") as f:
-            f.writelines(lines)
-    except Exception:
-        pass
-
-
-def _write_ask_for_browser_to_config(config_path: str, value: bool) -> None:
-    """
-    Set ASK_FOR_BROWSER = True/False in the [General] section of *config_path*.
-    If the key already exists it is updated in-place; otherwise it is appended
-    to the end of the [General] section.  The rest of the file is preserved.
-    """
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-    except Exception:
-        return
-
-    val_str = "True" if value else "False"
-    key_name = "ASK_FOR_BROWSER"
-    import re as _re
-
-    # Try to update an existing ASK_FOR_BROWSER line anywhere in the file
-    for i, line in enumerate(lines):
-        if _re.match(r"^\s*ASK_FOR_BROWSER\s*=", line, _re.IGNORECASE):
-            lines[i] = f"ASK_FOR_BROWSER = {val_str}\n"
-            try:
-                with open(config_path, "w", encoding="utf-8") as f:
-                    f.writelines(lines)
-            except Exception:
-                pass
-            return
-
-    # Key not found — insert after the [General] header
-    general_idx = None
-    next_sec_idx = len(lines)
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.lower() == "[general]":
-            general_idx = i
-            continue
-        if general_idx is not None and stripped.startswith("["):
-            next_sec_idx = i
-            break
-
-    if general_idx is None:
-        # No [General] section — append one
-        lines.append("\n[General]\n")
-        lines.append(f"{key_name} = {val_str}\n")
-    else:
-        # Insert before the next section (or end of file), skipping trailing blanks
-        insert_at = next_sec_idx
-        while insert_at > general_idx + 1 and lines[insert_at - 1].strip() == "":
-            insert_at -= 1
-        lines.insert(insert_at, f"{key_name} = {val_str}\n")
-
-    try:
-        with open(config_path, "w", encoding="utf-8") as f:
-            f.writelines(lines)
-    except Exception:
-        pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2269,12 +2095,6 @@ def main() -> None:
                               daemon=True)
         wt.start()
         site.watcher_thread = wt
-
-    # ── ffmpeg dependency check ───────────────────────────────────────────────
-    ffmpeg_ok = plain_ffmpeg_check()
-    if not ffmpeg_ok:
-        print("\njj-dlp  ·  Aborted during ffmpeg check.")
-        return
 
     # ── Launch curses dashboard ───────────────────────────────────────────────
     try:
