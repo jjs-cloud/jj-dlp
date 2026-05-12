@@ -89,6 +89,7 @@ def load_config(config_path: str) -> dict:
     output_dir            = general.get("OUTPUT_DIR", "recordings").strip().strip('\"\'')
     output_tmpl           = general.get("OUTPUT_TMPL", "%(title)s [%(id)s].%(ext)s").strip().strip('\"\'')
     cooldown              = safe_int(general.get("COOLDOWN_AFTER_RECORDING", 5), 5)
+    split_after          = safe_int(general.get("SPLIT_AFTER", 0), 0)
     stall_check_interval  = safe_int(general.get("STALL_CHECK_INTERVAL", 30), 30)
     stall_timeout         = safe_int(general.get("STALL_TIMEOUT", 120), 120)
     config_check_interval = safe_int(general.get("CONFIG_CHECK_INTERVAL", 3), 3)
@@ -137,6 +138,7 @@ def load_config(config_path: str) -> dict:
     popup_cooldown         = safe_int(general.get("POPUP_COOLDOWN", 30), 30)
     set_cookie_flag        = general.get("SET_COOKIE_FLAG", "true").strip().lower() not in ("false", "0", "no")
     ask_for_browser        = general.get("ASK_FOR_BROWSER", "true").strip().lower() not in ("false", "0", "no")
+    site_order             = safe_int(general.get("SITE_ORDER", 999), 999)
 
     # Disk drives to monitor (comma-separated paths/letters, e.g. "C:\,D:\,/home")
     disk_drives_raw = general.get("DISK_DRIVES", "").strip().strip('\"\'')
@@ -177,6 +179,7 @@ def load_config(config_path: str) -> dict:
         "output_dir": output_dir,
         "output_tmpl": output_tmpl,
         "cooldown": cooldown,
+        "split_after": split_after,
         "stall_check_interval": stall_check_interval,
         "stall_timeout": stall_timeout,
         "yt_dlp_path": yt_dlp_path,
@@ -200,6 +203,7 @@ def load_config(config_path: str) -> dict:
         "disk_drives": disk_drives,
         "set_cookie_flag": set_cookie_flag,
         "ask_for_browser": ask_for_browser,
+        "site_order": site_order,
         "twitch_enabled": twitch_enabled,
         "twitch_client_id": twitch_client_id,
         "twitch_client_secret": twitch_client_secret,
@@ -219,6 +223,11 @@ class SiteState:
     def __init__(self, config_path: str):
         self.config_path          = config_path
         self.label                = os.path.basename(config_path)
+        
+        # Load the configuration once during init to retrieve things like site_order
+        cfg = load_config(config_path)
+        self.site_order           = cfg.get("site_order", 999)
+        
         self.lock                 = threading.Lock()
         self.currently_recording: Set[str] = set()
         self.recording_threads:   List[threading.Thread] = []
@@ -617,37 +626,113 @@ def get_streamer_file_size(output_dir, streamer, cfg=None,
     except Exception:
         return 0, False, ""
 
+def add_segment_suffix_to_tmpl(output_tmpl: str, segment_num: int) -> str:
+    """
+    Convert:
+        "%(title)s [%(id)s].%(ext)s"
+    into:
+        "%(title)s [%(id)s]_part1.%(ext)s"
+    """
+    root, ext = os.path.splitext(output_tmpl)
+    return f"{root}_part{segment_num:01d}{ext}"
+
+
+def wait_for_new_file_growth(filepath: str, timeout: float = 15.0,
+                             stable_checks: int = 2,
+                             interval: float = 1.0) -> bool:
+    """
+    Confirm a newly-started recording is actually writing data.
+    Returns True once the file size grows across multiple checks.
+    """
+    start = time.time()
+    last_size = -1
+    growth_hits = 0
+
+    while time.time() - start < timeout:
+        try:
+            if os.path.isfile(filepath):
+                size = os.path.getsize(filepath)
+                if size > 0 and size > last_size:
+                    growth_hits += 1
+                    if growth_hits >= stable_checks:
+                        return True
+                last_size = size
+        except Exception:
+            pass
+
+        time.sleep(interval)
+
+    return False
+
+
+
 
 def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
     channel_url = cfg["site_tmpl"].format(username=streamer)
     output_dir  = cfg["output_dir"]
     os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, cfg["output_tmpl"])
+
+    split_after_minutes = max(0, cfg.get("split_after", 0))
+    split_after_seconds = split_after_minutes * 60
+
     site.log_line(f"Recording started: {streamer}")
+
     proc = None
     close_logs = lambda: None
+    segment_num = 1
 
     try:
         while True:
-            cmd = build_yt_dlp_command(cfg["yt_dlp_path"], cfg["downloader_cmd"],
-                                       ["-o", output_path, channel_url])
+            current_output_tmpl = cfg["output_tmpl"]
+            if split_after_seconds > 0:
+                current_output_tmpl = add_segment_suffix_to_tmpl(
+                    current_output_tmpl,
+                    segment_num
+                )
+
+            output_path = os.path.join(output_dir, current_output_tmpl)
+
+            cmd = build_yt_dlp_command(
+                cfg["yt_dlp_path"],
+                cfg["downloader_cmd"],
+                ["-o", output_path, channel_url]
+            )
+
             out_target, err_target, close_logs, log_out_fp, log_err_fp = open_log_streams(cfg)
+
             try:
                 proc = subprocess.Popen(cmd, stdout=out_target, stderr=err_target)
                 proc_start_time = time.time()
+
                 site.register_proc(streamer, proc)
+
                 ffmpeg_error_counter = [0]
                 ffmpeg_error_event   = threading.Event()
-                threading.Thread(target=_drain_pipe, args=(proc.stdout, log_out_fp, "stdout"),
-                                 kwargs={"ffmpeg_error_counter": ffmpeg_error_counter,
-                                         "ffmpeg_error_event": ffmpeg_error_event,
-                                         "streamer": streamer,
-                                         "site": site}, daemon=True).start()
-                threading.Thread(target=_drain_pipe, args=(proc.stderr, log_err_fp, "stderr"),
-                                 kwargs={"ffmpeg_error_counter": ffmpeg_error_counter,
-                                         "ffmpeg_error_event": ffmpeg_error_event,
-                                         "streamer": streamer,
-                                         "site": site}, daemon=True).start()
+
+                threading.Thread(
+                    target=_drain_pipe,
+                    args=(proc.stdout, log_out_fp, "stdout"),
+                    kwargs={
+                        "ffmpeg_error_counter": ffmpeg_error_counter,
+                        "ffmpeg_error_event": ffmpeg_error_event,
+                        "streamer": streamer,
+                        "site": site
+                    },
+                    daemon=True
+                ).start()
+
+                threading.Thread(
+                    target=_drain_pipe,
+                    args=(proc.stderr, log_err_fp, "stderr"),
+                    kwargs={
+                        "ffmpeg_error_counter": ffmpeg_error_counter,
+                        "ffmpeg_error_event": ffmpeg_error_event,
+                        "streamer": streamer,
+                        "site": site
+                    },
+                    daemon=True
+                ).start()
+
             except Exception as e:
                 site.log_line(f"Failed to start yt-dlp for {streamer}: {e}")
                 try:
@@ -656,15 +741,27 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                     pass
                 break
 
-            last_size, _, _ = get_streamer_file_size(output_dir, streamer, cfg=cfg,
-                                                     proc_start_time=proc_start_time)
+            active_file = wait_for_streamer_file(
+                output_dir,
+                streamer,
+                proc_start_time
+            )
+
+            last_size, _, _ = get_streamer_file_size(
+                output_dir,
+                streamer,
+                cfg=cfg,
+                proc_start_time=proc_start_time
+            )
+
             last_growth_time     = time.time()
+            recording_start_time = time.time()
             stall_check_interval = cfg["stall_check_interval"]
             stall_timeout        = cfg["stall_timeout"]
             seconds_since_check  = 0
 
             while proc.poll() is None:
-                # Check if we've been asked to stop (e.g. user pressed Q)
+
                 if site._stop_event.is_set():
                     kill_proc(proc)
                     proc.wait()
@@ -676,16 +773,20 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                     return
 
                 current_cfg = load_config(cfg["config_path"])
+
                 if streamer in current_cfg["blocked"]:
                     kill_proc(proc)
                     site.log_line(f"Recording STOPPED (blocked) -> {streamer}")
                     site.unregister_proc(streamer)
+
                     try:
                         close_logs()
                     except Exception:
                         pass
+
                     with site.lock:
                         site.currently_recording.discard(streamer)
+
                     time.sleep(cfg["cooldown"])
                     return
 
@@ -693,42 +794,169 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                     site.log_line(f"ffmpeg error threshold reached for {streamer} — restarting")
                     kill_proc(proc)
                     site.unregister_proc(streamer)
+
                     try:
                         close_logs()
                     except Exception:
                         pass
+
                     time.sleep(5)
                     break
 
+                if split_after_seconds > 0:
+                    elapsed = time.time() - recording_start_time
+
+                    if elapsed >= split_after_seconds:
+                        next_segment_num = segment_num + 1
+
+                        next_output_tmpl = add_segment_suffix_to_tmpl(
+                            cfg["output_tmpl"],
+                            next_segment_num
+                        )
+
+                        next_output_path = os.path.join(output_dir, next_output_tmpl)
+
+                        site.log_line(
+                            f"SPLIT_AFTER reached for {streamer} — starting part {next_segment_num}"
+                        )
+
+                        next_cmd = build_yt_dlp_command(
+                            cfg["yt_dlp_path"],
+                            cfg["downloader_cmd"],
+                            ["-o", next_output_path, channel_url]
+                        )
+
+                        next_out_target, next_err_target, next_close_logs, next_log_out_fp, next_log_err_fp = open_log_streams(cfg)
+
+                        try:
+                            next_proc = subprocess.Popen(
+                                next_cmd,
+                                stdout=next_out_target,
+                                stderr=next_err_target
+                            )
+
+                            next_proc_start_time = time.time()
+
+                            threading.Thread(
+                                target=_drain_pipe,
+                                args=(next_proc.stdout, next_log_out_fp, "stdout"),
+                                kwargs={"streamer": streamer, "site": site},
+                                daemon=True
+                            ).start()
+
+                            threading.Thread(
+                                target=_drain_pipe,
+                                args=(next_proc.stderr, next_log_err_fp, "stderr"),
+                                kwargs={"streamer": streamer, "site": site},
+                                daemon=True
+                            ).start()
+
+                            time.sleep(3)
+
+                            next_file = wait_for_streamer_file(
+                                output_dir,
+                                streamer,
+                                next_proc_start_time,
+                                timeout=10.0
+                            )
+
+                            split_success = (
+                                next_file is not None and
+                                wait_for_new_file_growth(next_file, timeout=15.0)
+                            )
+
+                            if split_success:
+                                site.log_line(
+                                    f"Split confirmed for {streamer} — switching to part {next_segment_num}"
+                                )
+
+                                kill_proc(proc)
+                                proc.wait(timeout=15)
+
+                                site.unregister_proc(streamer)
+                                try:
+                                    close_logs()
+                                except Exception:
+                                    pass
+
+                                proc = next_proc
+                                close_logs = next_close_logs
+                                proc_start_time = next_proc_start_time
+                                active_file = next_file
+                                recording_start_time = time.time()
+                                segment_num = next_segment_num
+
+                                site.register_proc(streamer, proc)
+
+                                ffmpeg_error_counter = [0]
+                                ffmpeg_error_event   = threading.Event()
+
+                                last_size = 0
+                                last_growth_time = time.time()
+
+                                continue
+
+                            site.log_line(
+                                f"Split verification FAILED for {streamer} — keeping current recording"
+                            )
+
+                            kill_proc(next_proc)
+
+                            try:
+                                next_close_logs()
+                            except Exception:
+                                pass
+
+                        except Exception as e:
+                            site.log_line(
+                                f"Failed to start split recording for {streamer}: {e}"
+                            )
+
                 time.sleep(1)
                 seconds_since_check += 1
+
                 if seconds_since_check >= stall_check_interval:
                     seconds_since_check = 0
+
                     current_size, stall_detected, _ = get_streamer_file_size(
-                        output_dir, streamer, cfg=cfg, proc_start_time=proc_start_time,
-                        last_growth_time=last_growth_time, stall_timeout=stall_timeout,
-                        stall_check_interval=stall_check_interval)
+                        output_dir,
+                        streamer,
+                        cfg=cfg,
+                        proc_start_time=proc_start_time,
+                        last_growth_time=last_growth_time,
+                        stall_timeout=stall_timeout,
+                        stall_check_interval=stall_check_interval
+                    )
+
                     if stall_detected:
                         site.log_line(f"Stall detected for {streamer} — restarting")
+
                         kill_proc(proc)
                         site.unregister_proc(streamer)
+
                         try:
                             close_logs()
                         except Exception:
                             pass
+
                         time.sleep(5)
                         break
+
                     if current_size > last_size:
-                        last_size        = current_size
+                        last_size = current_size
                         last_growth_time = time.time()
+
             else:
                 site.unregister_proc(streamer)
+
                 try:
                     close_logs()
                 except Exception:
                     pass
+
                 with site.dash_lock:
                     site.dash_last_live[streamer] = time.time()
+
                 site.log_line(f"Recording finished: {streamer}")
                 break
 
@@ -738,14 +966,18 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                 kill_proc(proc)
             except Exception as e:
                 dbg(f"[{site.label}] [PROC]] record_stream: kill error in KBI path: {e}")
+
         site.unregister_proc(streamer)
+
         try:
             close_logs()
         except Exception:
             pass
+
     finally:
         with site.lock:
             site.currently_recording.discard(streamer)
+
         time.sleep(cfg["cooldown"])
 
 
@@ -1234,7 +1466,7 @@ class JJDlpDashboard:
                     curses.color_pair(self.C_CHROME))
 
     # ── Site panel (one per config) ──────────────────────────────────────────
-    def draw_site_panel(self, site: "SiteState", y1, x1, y2, x2, is_selected:False):
+    def draw_site_panel(self, site: "SiteState", y1, x1, y2, x2, is_selected: bool = False):
         """
         Draws one site's streamer list inside the given bounding box.
         This is the main reusable panel — rearrange by changing caller geometry.
@@ -1797,7 +2029,7 @@ class JJDlpDashboard:
                 if not self.handle_key(key):
                     break
             self.tick += 1
-            curses.napms(150)
+            curses.napms(50)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2083,13 +2315,17 @@ def main() -> None:
         site = SiteState(cp)
         sites.append(site)
 
+    # Sort sites by site_order so they appear in the desired positions in the dashboard
+    sites.sort(key=lambda s: s.site_order)
+
+    for site in sites:
         # Monitor thread (liveness check loop)
         mt = threading.Thread(target=monitor_site, args=(site,), daemon=True)
         mt.start()
         site.monitor_thread = mt
 
         # Config watcher thread
-        cfg_i = load_config(cp)
+        cfg_i = load_config(site.config_path)
         wt = threading.Thread(target=config_watcher,
                               args=(site, cfg_i.get("config_check_interval", 3)),
                               daemon=True)
