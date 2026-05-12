@@ -631,10 +631,10 @@ def add_segment_suffix_to_tmpl(output_tmpl: str, segment_num: int) -> str:
     Convert:
         "%(title)s [%(id)s].%(ext)s"
     into:
-        "%(title)s [%(id)s] - part0001.%(ext)s"
+        "%(title)s [%(id)s]_part1.%(ext)s"
     """
     root, ext = os.path.splitext(output_tmpl)
-    return f"{root} - part{segment_num:04d}{ext}"
+    return f"{root}_part{segment_num:01d}{ext}"
 
 
 def wait_for_new_file_growth(filepath: str, timeout: float = 15.0,
