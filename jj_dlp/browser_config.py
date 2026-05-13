@@ -3,7 +3,7 @@ import re
 _SUPPORTED_BROWSERS = [
     "brave", "chrome", "chromium", "edge",
     "firefox", "opera", "safari", "vivaldi", "whale",
-    "other",
+    "disabled",
 ]
 
 def _read_browser_from_config(config_path: str) -> str:
@@ -43,7 +43,7 @@ def _read_browser_from_config(config_path: str) -> str:
 def _write_browser_to_config(config_path: str, browser: str) -> None:
     """
     Update the [Downloader] section so that --cookies-from-browser is followed
-    by *browser* on the next line.  If browser == 'other', both the
+    by *browser* on the next line.  If browser == 'disabled', both the
     --cookies-from-browser line and the browser-name line are removed.
     Uses raw text manipulation to preserve the rest of the file exactly.
     """
@@ -78,7 +78,7 @@ def _write_browser_to_config(config_path: str, browser: str) -> None:
                     break
                 break
 
-    if browser == "other":
+    if browser == "disabled":
         # Remove both lines (reverse order so indices stay valid)
         to_remove = sorted(
             [x for x in [cookies_idx, browser_idx] if x is not None],
