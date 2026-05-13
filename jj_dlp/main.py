@@ -2312,7 +2312,7 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
         footer = "  ↑/↓ navigate  Enter = confirm  D = do not show again  Q = quit  "
         safe_addstr(stdscr, h - 1, 0,
                     footer.ljust(w - 1)[:w - 1],
-                    curses.color_pair(5))
+                    curses.color_pair(5) | curses.A_BOLD)
 
         stdscr.refresh()
         key = stdscr.getch()
