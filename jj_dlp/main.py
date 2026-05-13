@@ -1610,7 +1610,7 @@ class JJDlpDashboard:
         # Site label on top border
         label_text = f"  {cfg_label}  "
         safe_addstr(self.stdscr, header_y, x1 + 2, label_text,
-                    curses.color_pair(self.C_INVHEAD) | curses.A_BOLD)
+                    curses.color_pair(self.C_CHROME) | curses.A_BOLD)
 
         # Status badge row
         badge_y = y1 + 1
