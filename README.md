@@ -22,7 +22,7 @@ jj-dlp is a app that allows you to automatically record live streams, powered by
 
 - **Dashboard** — Manage your streamer monitoring and recording from a nice dashboard.
 - **Stall detection** — restarts yt-dlp if the download stalls (common issue with yt-dlp)
-- **Error detection** — restarts yt-dlp if ffmpeg recieves certain errors (common issue with yt-dlp)
+- **Error detection** — restarts yt-dlp if ffmpeg recieves certain errors (common issue with ffmpeg)
 - **Small footprint** — only needs to run 1 yt-dlp process when checking for live streams
 - **Twitch API** — Optionally connect your Twitch API credentials for faster triggering. 
 - **Dependency Resolution** — You will be prompted to install ffmpeg and windows-curses if needed.
