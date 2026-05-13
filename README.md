@@ -14,7 +14,7 @@ That's it!  Your streamers will be recorded automatically.
 
 # jj-dlp
 
-jj-dlp is a [yt-dlp](https://github.com/yt-dlp/yt-dlp) dashboard that allows you to automatically record live streams. 
+jj-dlp is a dashboard that allows you to automatically record live streams, powered by [yt-dlp](https://github.com/yt-dlp/yt-dlp). 
 
 ---
 
