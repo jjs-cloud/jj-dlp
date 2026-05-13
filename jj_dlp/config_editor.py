@@ -36,13 +36,14 @@ def safe_addstr(stdscr, y, x, text, attr=0):
 
 
 class ConfigItem:
-    def __init__(self, line_idx: int, is_section: bool, key: str, value: str, has_equals: bool, raw_line: str):
+    def __init__(self, line_idx: int, is_section: bool, key: str, value: str, has_equals: bool, raw_line: str, comment: str = ""):
         self.line_idx = line_idx
         self.is_section = is_section
         self.key = key
         self.value = value
         self.has_equals = has_equals
         self.raw_line = raw_line
+        self.comment = comment  # Help text parsed from the # line(s) above this key
 
 class ConfigEditor:
     def __init__(self, parent_dashboard):
@@ -68,21 +69,31 @@ class ConfigEditor:
 
         self.items = []
         current_section = None
+        pending_comment = ""
         for i, line in enumerate(self.lines):
             s = line.strip()
-            if not s or s.startswith("#") or s.startswith(";"):
+            if not s:
+                # A blank line resets any pending comment so it doesn't drift
+                pending_comment = ""
+                continue
+            if s.startswith("#") or s.startswith(";"):
+                # Accumulate comment text, stripping the marker and surrounding whitespace
+                fragment = s.lstrip("#;").strip()
+                pending_comment = (pending_comment + " " + fragment).strip() if pending_comment else fragment
                 continue
             if s.startswith("[") and s.endswith("]"):
                 current_section = s[1:-1]
+                pending_comment = ""
                 if current_section == "General":
-                    self.items.append(ConfigItem(i, True, current_section, "", False, line))
+                    self.items.append(ConfigItem(i, True, current_section, "", False, line, ""))
             else:
                 if current_section == "General":
                     if "=" in s:
                         k, v = s.split("=", 1)
-                        self.items.append(ConfigItem(i, False, k.strip(), v.strip(), True, line))
+                        self.items.append(ConfigItem(i, False, k.strip(), v.strip(), True, line, pending_comment))
                     else:
-                        self.items.append(ConfigItem(i, False, s, "", False, line))
+                        self.items.append(ConfigItem(i, False, s, "", False, line, pending_comment))
+                    pending_comment = ""
         
         if self.items:
             self.selected_idx = min(self.selected_idx, len(self.items) - 1)
@@ -194,9 +205,49 @@ class ConfigEditor:
         if self.popup_mode and self.editing_item:
             self.draw_popup(stdscr)
 
+    def _wrap_text(self, text: str, width: int) -> list:
+        """Word-wrap text to fit within `width` columns, returning a list of lines."""
+        if not text or width <= 0:
+            return []
+        words = text.split()
+        lines, current = [], ""
+        for word in words:
+            if current:
+                if len(current) + 1 + len(word) <= width:
+                    current += " " + word
+                else:
+                    lines.append(current)
+                    current = word
+            else:
+                current = word
+        if current:
+            lines.append(current)
+        return lines
+
     def draw_popup(self, stdscr):
         h, w = stdscr.getmaxyx()
-        box_h, box_w = 8, min(60, w - 4)
+        box_w = min(60, w - 4)
+        inner_w = box_w - 4  # usable text width inside the left/right padding
+
+        # Word-wrap the comment to fit the popup
+        comment_lines = []
+        if self.editing_item and self.editing_item.comment:
+            comment_lines = self._wrap_text(self.editing_item.comment, inner_w)
+
+        # Layout (rows inside the box, excluding top/bottom border):
+        #   row +1 : (blank)
+        #   row +2 : Key: <key>
+        #   row +3 : comment line 1  \  only when a comment exists
+        #   row +… : comment line N  /
+        #   row +? : (blank separator after comment, or blank gap without comment)
+        #   row +? : New Value: <input>
+        #   row +? : (blank)
+        # Total inner rows = 1 + 1 + len(comment_lines) + (1 if comment) + 1 + 1
+        inner_rows = 4 + len(comment_lines) + (1 if comment_lines else 0)
+        box_h = inner_rows + 1  # +1 for the bottom border row that also holds the hint
+        box_h = max(box_h, 7)   # minimum safe height
+        box_h = min(box_h, h - 4)
+
         by1 = (h - box_h) // 2
         bx1 = (w - box_w) // 2
         by2 = by1 + box_h
@@ -210,10 +261,20 @@ class ConfigEditor:
         title = " EDIT CONFIG VALUE "
         safe_addstr(stdscr, by1, bx1 + 2, title, curses.color_pair(self.dashboard.C_WARN) | curses.A_BOLD)
 
-        safe_addstr(stdscr, by1 + 2, bx1 + 2, f"Key: {self.editing_item.key}", curses.color_pair(self.dashboard.C_CHROME))
-        
-        safe_addstr(stdscr, by1 + 4, bx1 + 2, "New Value:", curses.color_pair(self.dashboard.C_WARN) | curses.A_BOLD)
-        safe_addstr(stdscr, by1 + 4, bx1 + 13, (self.popup_buf + "_")[:box_w - 15], curses.color_pair(self.dashboard.C_NORMAL) | curses.A_BOLD)
+        row = by1 + 2
+        safe_addstr(stdscr, row, bx1 + 2, f"Key: {self.editing_item.key}", curses.color_pair(self.dashboard.C_CHROME))
+        row += 1
+
+        if comment_lines:
+            for cl in comment_lines:
+                safe_addstr(stdscr, row, bx1 + 2, cl, curses.color_pair(self.dashboard.C_DIM))
+                row += 1
+            row += 1  # blank separator between comment and input
+        else:
+            row += 1  # blank gap when there is no comment
+
+        safe_addstr(stdscr, row, bx1 + 2, "New Value:", curses.color_pair(self.dashboard.C_WARN) | curses.A_BOLD)
+        safe_addstr(stdscr, row, bx1 + 13, (self.popup_buf + "_")[:box_w - 15], curses.color_pair(self.dashboard.C_NORMAL) | curses.A_BOLD)
 
         safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel ", curses.color_pair(self.dashboard.C_INVHEAD))
 

@@ -1,5 +1,5 @@
 """
-integrations/twitch_eventsub.py
+jj_dlp/twitch_eventsub.py
 ────────────────────────────────────────────────────────────────────────────────
 Twitch EventSub integration — instant "stream.online" notifications.
 
@@ -20,7 +20,7 @@ Optional:      If CALLBACK_URL uses https, you'll need a reverse proxy
 
 Usage from jj-dlp.py
 ─────────────────────
-    from integrations.twitch_eventsub import TwitchEventSub, EventSubState
+    from jj_dlp.twitch_eventsub import TwitchEventSub, EventSubState
 
     state = EventSubState()          # dashboard-visible status container
     es = TwitchEventSub(
