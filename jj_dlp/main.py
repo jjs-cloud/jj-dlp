@@ -2145,7 +2145,7 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
     """
     curses.start_color()
     curses.use_default_colors()
-    curses.init_pair(1, curses.COLOR_CYAN,    curses.COLOR_WHITE)
+    curses.init_pair(1, curses.COLOR_CYAN,    curses.COLOR_BLACK)
     curses.init_pair(2, curses.COLOR_WHITE,   curses.COLOR_BLUE)
     curses.init_pair(3, curses.COLOR_YELLOW,  curses.COLOR_BLACK)
     curses.init_pair(4, curses.COLOR_GREEN,   curses.COLOR_BLACK)
@@ -2201,7 +2201,7 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
                   f"↑/↓ navigate  Space toggle  Enter confirm  ")
         safe_addstr(stdscr, h - 1, 0,
                     footer.ljust(w - 1)[:w - 1],
-                    curses.color_pair(5))
+                    curses.color_pair(5) | curses.A_BOLD)
 
         stdscr.refresh()
         key = stdscr.getch()
