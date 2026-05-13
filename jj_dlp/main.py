@@ -908,19 +908,41 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                                 daemon=True
                             ).start()
 
-                            dbg(f"[SPLIT][record_stream] sleeping 3s before file check "
-                                f"(next_proc pid={next_proc.pid})")
-                            time.sleep(3)
+                            # Wait for the exact new segment file.
+                            # Do NOT use wait_for_streamer_file here — it does a
+                            # fuzzy mtime search and can return the *previous*
+                            # segment's file if the old proc is still writing to it
+                            # and bumps its mtime past next_proc_start_time.
+                            # Instead, search by the exact _partN suffix so we only
+                            # accept the file that belongs to this new segment.
+                            part_suffix = f"_part{next_segment_num}"
+                            next_file = None
+                            _nf_deadline = time.time() + 30.0
+                            dbg(f"[SPLIT][record_stream] waiting for exact segment file "
+                                f"part_suffix={part_suffix!r} pid={next_proc.pid} "
+                                f"next_proc_start_time={next_proc_start_time:.3f} timeout=30s")
+                            while time.time() < _nf_deadline:
+                                if os.path.isdir(output_dir):
+                                    for _f in os.listdir(output_dir):
+                                        _fp = os.path.join(output_dir, _f)
+                                        if (os.path.isfile(_fp)
+                                                and streamer.lower() in _f.lower()
+                                                and part_suffix.lower() in _f.lower()
+                                                and os.path.getmtime(_fp) >= next_proc_start_time):
+                                            next_file = _fp
+                                            break
+                                if next_file:
+                                    dbg(f"[SPLIT][record_stream] exact segment file found: "
+                                        f"{next_file!r} elapsed={30.0-(_nf_deadline-time.time()):.1f}s")
+                                    break
+                                dbg(f"[SPLIT][record_stream] still waiting for {part_suffix!r} file "
+                                    f"remaining={_nf_deadline-time.time():.1f}s")
+                                time.sleep(0.5)
 
-                            dbg(f"[SPLIT][record_stream] calling wait_for_streamer_file "
-                                f"next_proc_start_time={next_proc_start_time:.3f} timeout=10s")
-                            next_file = wait_for_streamer_file(
-                                output_dir,
-                                streamer,
-                                next_proc_start_time,
-                                timeout=10.0
-                            )
-                            dbg(f"[SPLIT][record_stream] wait_for_streamer_file returned: {next_file!r}")
+                            if next_file is None:
+                                dbg(f"[SPLIT][record_stream] TIMEOUT — exact segment file not found "
+                                    f"part_suffix={part_suffix!r} pid={next_proc.pid}")
+                            dbg(f"[SPLIT][record_stream] segment file search result: {next_file!r}")
 
                             split_success = (
                                 next_file is not None and
@@ -953,7 +975,11 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                                 close_logs = next_close_logs
                                 proc_start_time = next_proc_start_time
                                 active_file = next_file
-                                recording_start_time = time.time()
+                                # Use next_proc_start_time (not time.time()) so the
+                                # split timer accounts for time already spent verifying
+                                # the new file. time.time() here would let each segment
+                                # silently overrun SPLIT_AFTER by the verification delay.
+                                recording_start_time = next_proc_start_time
                                 segment_num = next_segment_num
 
                                 site.register_proc(streamer, proc)
