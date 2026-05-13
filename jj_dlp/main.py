@@ -1368,13 +1368,13 @@ class JJDlpDashboard:
          curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
          curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_YELLOW),
         # 1: Amber terminal
-        (curses.COLOR_YELLOW,  curses.COLOR_BLACK,   curses.COLOR_YELLOW,
+        (curses.COLOR_YELLOW,  curses.COLOR_WHITE,   curses.COLOR_YELLOW,
          curses.COLOR_WHITE,   curses.COLOR_GREEN,   curses.COLOR_BLACK,
          curses.COLOR_YELLOW,  curses.COLOR_YELLOW,  curses.COLOR_RED,
          curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
          curses.COLOR_WHITE,   curses.COLOR_WHITE,   curses.COLOR_CYAN),
         # 2: Green phosphor
-        (curses.COLOR_GREEN,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
+        (curses.COLOR_GREEN,   curses.COLOR_WHITE,   curses.COLOR_GREEN,
          curses.COLOR_CYAN,    curses.COLOR_WHITE,   curses.COLOR_BLACK,
          curses.COLOR_GREEN,   curses.COLOR_GREEN,   curses.COLOR_RED,
          curses.COLOR_GREEN,   curses.COLOR_BLACK,   curses.COLOR_WHITE,
@@ -1392,7 +1392,7 @@ class JJDlpDashboard:
          curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
          curses.COLOR_WHITE,   curses.COLOR_CYAN,    curses.COLOR_YELLOW),
         # 5: Ice blue
-        (curses.COLOR_CYAN,    curses.COLOR_BLACK,   curses.COLOR_CYAN,
+        (curses.COLOR_CYAN,    curses.COLOR_WHITE,   curses.COLOR_CYAN,
          curses.COLOR_WHITE,   curses.COLOR_GREEN,   curses.COLOR_BLACK,
          curses.COLOR_WHITE,   curses.COLOR_BLUE,    curses.COLOR_RED,
          curses.COLOR_CYAN,    curses.COLOR_BLACK,   curses.COLOR_GREEN,
@@ -1610,7 +1610,7 @@ class JJDlpDashboard:
         # Site label on top border
         label_text = f"  {cfg_label}  "
         safe_addstr(self.stdscr, header_y, x1 + 2, label_text,
-                    curses.color_pair(self.C_INVHEAD) | curses.A_BOLD)
+                    curses.color_pair(self.C_CHROME) | curses.A_BOLD)
 
         # Status badge row
         badge_y = y1 + 1
@@ -2149,7 +2149,7 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
     curses.init_pair(2, curses.COLOR_WHITE,   curses.COLOR_BLUE)
     curses.init_pair(3, curses.COLOR_YELLOW,  curses.COLOR_BLACK)
     curses.init_pair(4, curses.COLOR_GREEN,   curses.COLOR_BLACK)
-    curses.init_pair(5, curses.COLOR_BLACK,   curses.COLOR_CYAN)
+    curses.init_pair(5, curses.COLOR_WHITE,   curses.COLOR_CYAN)
     curses.init_pair(6, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
 
     curses.curs_set(0)
@@ -2201,7 +2201,7 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
                   f"↑/↓ navigate  Space toggle  Enter confirm  ")
         safe_addstr(stdscr, h - 1, 0,
                     footer.ljust(w - 1)[:w - 1],
-                    curses.color_pair(5))
+                    curses.color_pair(5) | curses.A_BOLD)
 
         stdscr.refresh()
         key = stdscr.getch()
@@ -2278,13 +2278,13 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
         # Browser sub-title
         br_title_row = files_row_end + 1
         safe_addstr(stdscr, br_title_row, 2,
-                    "BROWSER FOR --cookies-from-browser",
+                    "SELECT BROWSER",
                     curses.color_pair(5) | curses.A_BOLD)
         safe_addstr(stdscr, br_title_row + 1, 2,
-                    "↑/↓ navigate  Enter = confirm   D = do not show again   Q = quit",
+                    "",
                     curses.color_pair(3))
         safe_addstr(stdscr, br_title_row + 2, 2,
-                    "(Twitch: cookies suppress ads — select your browser or \"other\" to disable)",
+                    "Select your browser for the yt-dlp cookies option.  You can select \"disabled\" if you do not want to use cookies",
                     curses.color_pair(3))
 
         # Browser list (single-select radio buttons)
@@ -2297,7 +2297,7 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
                 attr = curses.color_pair(2) | curses.A_BOLD
             else:
                 attr = curses.color_pair(1)
-            label = f"  {dot}  {br}" + ("  ← remove cookies flag" if br == "other" else "")
+            label = f"  {dot}  {br}" + ("  ← remove cookies option" if br == "disabled" else "")
             safe_addstr(stdscr, row, 4, label, attr)
 
         # "Do not show again" checkbox (below the browser list)
@@ -2305,14 +2305,14 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
         dna_box  = "[x]" if do_not_show else "[ ]"
         dna_attr = curses.color_pair(3) | curses.A_BOLD if do_not_show else curses.color_pair(3)
         safe_addstr(stdscr, dna_row, 4,
-                    f"  {dna_box}  Do not show again  (sets ASK_FOR_BROWSER = False in config)",
+                    f"  {dna_box}  Do not show again (press D to toggle)",
                     dna_attr)
 
         # Footer
         footer = "  ↑/↓ navigate  Enter = confirm  D = do not show again  Q = quit  "
         safe_addstr(stdscr, h - 1, 0,
                     footer.ljust(w - 1)[:w - 1],
-                    curses.color_pair(5))
+                    curses.color_pair(5) | curses.A_BOLD)
 
         stdscr.refresh()
         key = stdscr.getch()
