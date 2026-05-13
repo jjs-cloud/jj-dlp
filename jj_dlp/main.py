@@ -1033,7 +1033,7 @@ def config_watcher(site: "SiteState", poll_interval: int = 3) -> None:
 def monitor_site(site: "SiteState") -> None:
     """Main polling loop for a single site — runs in its own thread."""
     try:
-        from .integrations.twitch_eventsub import TwitchEventSub, EventSubState
+        from .twitch_eventsub import TwitchEventSub, EventSubState
         site.eventsub_state = EventSubState()
     except ImportError:
         site.eventsub_state = None
@@ -1058,7 +1058,7 @@ def monitor_site(site: "SiteState") -> None:
                 start_recording_if_needed([broadcaster_login], current_cfg, site, show_popup=False)
 
         try:
-            from .integrations.twitch_eventsub import TwitchEventSub
+            from .twitch_eventsub import TwitchEventSub
             site.eventsub = TwitchEventSub(
                 cfg=initial_cfg,
                 state=site.eventsub_state,
