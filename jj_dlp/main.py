@@ -280,8 +280,8 @@ class SiteState:
         for streamer, proc in procs.items():
             try:
                 kill_proc(proc)
-            except Exception as e:
-                dbg(f"[{self.label}] [PROC] kill_all_procs: ERROR killing pid={proc.pid}: {e}")
+            except Exception:
+                pass
 
     def log_line(self, msg: str) -> None:
         """Append a timestamped line to the site's activity log (capped at 200 lines)."""
@@ -597,17 +597,37 @@ def get_live_streamers(streamers: List[str], cfg: dict) -> List[str]:
 
 def wait_for_streamer_file(output_dir, streamer, proc_start_time, timeout=15.0, interval=0.5):
     start = time.time()
+    dbg(f"[SPLIT][wait_for_streamer_file] START streamer={streamer!r} output_dir={output_dir!r} "
+        f"proc_start_time={proc_start_time:.3f} timeout={timeout}")
     while time.time() - start < timeout:
         if os.path.isdir(output_dir):
-            files = [
-                os.path.join(output_dir, f) for f in os.listdir(output_dir)
-                if os.path.isfile(os.path.join(output_dir, f))
-                and streamer.lower() in f.lower()
-                and (proc_start_time is None or os.path.getmtime(os.path.join(output_dir, f)) >= proc_start_time)
-            ]
-            if files:
-                return max(files, key=os.path.getmtime)
+            all_files = os.listdir(output_dir)
+            candidate_files = []
+            for f in all_files:
+                fpath = os.path.join(output_dir, f)
+                if not os.path.isfile(fpath):
+                    continue
+                name_match = streamer.lower() in f.lower()
+                mtime = os.path.getmtime(fpath)
+                time_match = proc_start_time is None or mtime >= proc_start_time
+                if name_match and time_match:
+                    candidate_files.append(fpath)
+                elif name_match and not time_match:
+                    dbg(f"[SPLIT][wait_for_streamer_file] SKIPPED (too old) file={f!r} "
+                        f"mtime={mtime:.3f} proc_start_time={proc_start_time:.3f} "
+                        f"age_delta={proc_start_time - mtime:.3f}s")
+            if candidate_files:
+                chosen = max(candidate_files, key=os.path.getmtime)
+                dbg(f"[SPLIT][wait_for_streamer_file] FOUND file={chosen!r} "
+                    f"elapsed={time.time()-start:.2f}s candidates={len(candidate_files)}")
+                return chosen
+            else:
+                dbg(f"[SPLIT][wait_for_streamer_file] no match yet "
+                    f"elapsed={time.time()-start:.2f}s total_files={len(all_files)}")
+        else:
+            dbg(f"[SPLIT][wait_for_streamer_file] output_dir does not exist: {output_dir!r}")
         time.sleep(interval)
+    dbg(f"[SPLIT][wait_for_streamer_file] TIMEOUT after {timeout}s — returning None for streamer={streamer!r}")
     return None
 
 
@@ -648,20 +668,34 @@ def wait_for_new_file_growth(filepath: str, timeout: float = 15.0,
     last_size = -1
     growth_hits = 0
 
+    dbg(f"[SPLIT][wait_for_new_file_growth] START filepath={filepath!r} "
+        f"timeout={timeout} stable_checks={stable_checks} interval={interval}")
+
     while time.time() - start < timeout:
         try:
             if os.path.isfile(filepath):
                 size = os.path.getsize(filepath)
+                dbg(f"[SPLIT][wait_for_new_file_growth] poll size={size} last_size={last_size} "
+                    f"growth_hits={growth_hits} elapsed={time.time()-start:.2f}s")
                 if size > 0 and size > last_size:
                     growth_hits += 1
+                    dbg(f"[SPLIT][wait_for_new_file_growth] growth detected "
+                        f"({growth_hits}/{stable_checks}) size={size} last_size={last_size}")
                     if growth_hits >= stable_checks:
+                        dbg(f"[SPLIT][wait_for_new_file_growth] CONFIRMED growth "
+                            f"after {time.time()-start:.2f}s filepath={filepath!r}")
                         return True
                 last_size = size
-        except Exception:
-            pass
+            else:
+                dbg(f"[SPLIT][wait_for_new_file_growth] file not found yet: {filepath!r} "
+                    f"elapsed={time.time()-start:.2f}s")
+        except Exception as e:
+            dbg(f"[SPLIT][wait_for_new_file_growth] exception: {e}")
 
         time.sleep(interval)
 
+    dbg(f"[SPLIT][wait_for_new_file_growth] TIMEOUT after {timeout}s — "
+        f"last_size={last_size} growth_hits={growth_hits} filepath={filepath!r}")
     return False
 
 
@@ -674,6 +708,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
     split_after_minutes = max(0, cfg.get("split_after", 0))
     split_after_seconds = split_after_minutes * 60
+
+    dbg(f"[SPLIT][record_stream] ENTER streamer={streamer!r} "
+        f"split_after_minutes={split_after_minutes} split_after_seconds={split_after_seconds} "
+        f"output_dir={output_dir!r}")
 
     site.log_line(f"Recording started: {streamer}")
 
@@ -759,6 +797,12 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
             stall_check_interval = cfg["stall_check_interval"]
             stall_timeout        = cfg["stall_timeout"]
             seconds_since_check  = 0
+            _split_log_counter   = 0  # throttle periodic split-timer dbg lines
+
+            dbg(f"[SPLIT][record_stream] inner loop starting: streamer={streamer!r} "
+                f"segment_num={segment_num} pid={proc.pid} "
+                f"split_after_seconds={split_after_seconds} "
+                f"stall_check_interval={stall_check_interval} stall_timeout={stall_timeout}")
 
             while proc.poll() is None:
 
@@ -805,6 +849,12 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
                 if split_after_seconds > 0:
                     elapsed = time.time() - recording_start_time
+                    _split_log_counter += 1
+                    if _split_log_counter % 30 == 0:  # log roughly every 30s
+                        dbg(f"[SPLIT][record_stream] split timer: streamer={streamer!r} "
+                            f"segment={segment_num} elapsed={elapsed:.1f}s / "
+                            f"split_after_seconds={split_after_seconds}s "
+                            f"remaining={max(0, split_after_seconds - elapsed):.1f}s")
 
                     if elapsed >= split_after_seconds:
                         next_segment_num = segment_num + 1
@@ -815,6 +865,11 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                         )
 
                         next_output_path = os.path.join(output_dir, next_output_tmpl)
+
+                        dbg(f"[SPLIT][record_stream] SPLIT_AFTER={split_after_seconds}s triggered for "
+                            f"streamer={streamer!r} elapsed={elapsed:.1f}s "
+                            f"segment_num={segment_num} -> next_segment_num={next_segment_num} "
+                            f"next_output_path={next_output_path!r}")
 
                         site.log_line(
                             f"SPLIT_AFTER reached for {streamer} — starting part {next_segment_num}"
@@ -836,6 +891,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                             )
 
                             next_proc_start_time = time.time()
+                            dbg(f"[SPLIT][record_stream] next_proc started pid={next_proc.pid} "
+                                f"next_proc_start_time={next_proc_start_time:.3f}")
 
                             threading.Thread(
                                 target=_drain_pipe,
@@ -851,27 +908,40 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                                 daemon=True
                             ).start()
 
+                            dbg(f"[SPLIT][record_stream] sleeping 3s before file check "
+                                f"(next_proc pid={next_proc.pid})")
                             time.sleep(3)
 
+                            dbg(f"[SPLIT][record_stream] calling wait_for_streamer_file "
+                                f"next_proc_start_time={next_proc_start_time:.3f} timeout=10s")
                             next_file = wait_for_streamer_file(
                                 output_dir,
                                 streamer,
                                 next_proc_start_time,
                                 timeout=10.0
                             )
+                            dbg(f"[SPLIT][record_stream] wait_for_streamer_file returned: {next_file!r}")
 
                             split_success = (
                                 next_file is not None and
                                 wait_for_new_file_growth(next_file, timeout=15.0)
                             )
+                            dbg(f"[SPLIT][record_stream] split_success={split_success} "
+                                f"next_file={next_file!r}")
 
                             if split_success:
                                 site.log_line(
                                     f"Split confirmed for {streamer} — switching to part {next_segment_num}"
                                 )
 
+                                dbg(f"[SPLIT][record_stream] killing old proc pid={proc.pid} "
+                                    f"(was part {segment_num})")
                                 kill_proc(proc)
-                                proc.wait(timeout=15)
+                                try:
+                                    proc.wait(timeout=15)
+                                    dbg(f"[SPLIT][record_stream] old proc pid={proc.pid} exited cleanly")
+                                except Exception as wait_err:
+                                    dbg(f"[SPLIT][record_stream] old proc pid={proc.pid} wait() error: {wait_err}")
 
                                 site.unregister_proc(streamer)
                                 try:
@@ -894,8 +964,15 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                                 last_size = 0
                                 last_growth_time = time.time()
 
+                                dbg(f"[SPLIT][record_stream] switched to part {segment_num} "
+                                    f"pid={proc.pid} active_file={active_file!r} "
+                                    f"recording_start_time reset")
+
                                 continue
 
+                            dbg(f"[SPLIT][record_stream] SPLIT FAILED — "
+                                f"next_file={next_file!r} split_success={split_success} — "
+                                f"killing next_proc pid={next_proc.pid} and continuing current segment")
                             site.log_line(
                                 f"Split verification FAILED for {streamer} — keeping current recording"
                             )
@@ -908,6 +985,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                                 pass
 
                         except Exception as e:
+                            dbg(f"[SPLIT][record_stream] EXCEPTION launching next proc: "
+                                f"{type(e).__name__}: {e}")
                             site.log_line(
                                 f"Failed to start split recording for {streamer}: {e}"
                             )
@@ -964,8 +1043,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
         if proc is not None:
             try:
                 kill_proc(proc)
-            except Exception as e:
-                dbg(f"[{site.label}] [PROC]] record_stream: kill error in KBI path: {e}")
+            except Exception:
+                pass
 
         site.unregister_proc(streamer)
 
@@ -1025,8 +1104,8 @@ def config_watcher(site: "SiteState", poll_interval: int = 3) -> None:
                         site.known_streamers.update(curr_streamers)
                     site.trigger_event.set()
                 prev_streamers = curr_streamers
-        except Exception as e:
-            dbg(f"[{site.label}] [CONFIG_WATCHER] {site.config_path}: {e}")
+        except Exception:
+            pass
         site._stop_event.wait(timeout=poll_interval)
 
 
@@ -1455,10 +1534,10 @@ class JJDlpDashboard:
                                 disk_str[:inner_w],
                                 curses.color_pair(color))
                     disk_row_y += 1
-                except Exception as _de:
-                    dbg(f"[{site.label}] [DISK] draw_system_panel: disk_usage({drive!r}) failed: {_de}")
-        except Exception as _outer:
-            dbg(f"[{site.label}] [DISK] draw_system_panel: outer exception: {_outer}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         # Uptime at bottom
         safe_addstr(self.stdscr, y2 - 1, x1 + 2,
@@ -1491,11 +1570,6 @@ class JJDlpDashboard:
             _panel_cfg = load_config(site.config_path)
             _bar_max_secs = _panel_cfg.get("progress_bar_max_hours", 6) * 3600
             _bar_cfg_w    = max(4, _panel_cfg.get("progress_bar_width", 14))
-            dbg(
-                f"[BAR_WIDTH] draw_site_panel ({site.label}): "
-                f"config progress_bar_width={_panel_cfg.get('progress_bar_width', 14)}  "
-                f"_bar_cfg_w (after max(4,...))={_bar_cfg_w}"
-            )
         except Exception:
             _bar_max_secs = 6 * 3600
             _bar_cfg_w    = 14
@@ -1540,12 +1614,6 @@ class JJDlpDashboard:
         last_live_w = 12   # "Last Live" column
         _fixed_cols = name_w + 1 + 7 + 1 + 1 + 9 + 1 + last_live_w  # everything except bar
         bar_w       = max(4, min(_bar_cfg_w, panel_width - _fixed_cols))
-        dbg(
-            f"[BAR_WIDTH] draw_site_panel ({site.label}): "
-            f"panel_width={panel_width}  _fixed_cols={_fixed_cols}  "
-            f"available_for_bar={panel_width - _fixed_cols}  "
-            f"_bar_cfg_w={_bar_cfg_w}  FINAL bar_w={bar_w}"
-        )
 
         for i, s in enumerate(all_s):
             if i >= max_rows:
