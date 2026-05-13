@@ -1368,13 +1368,13 @@ class JJDlpDashboard:
          curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
          curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_YELLOW),
         # 1: Amber terminal
-        (curses.COLOR_YELLOW,  curses.COLOR_BLACK,   curses.COLOR_YELLOW,
+        (curses.COLOR_YELLOW,  curses.COLOR_WHITE,   curses.COLOR_YELLOW,
          curses.COLOR_WHITE,   curses.COLOR_GREEN,   curses.COLOR_BLACK,
          curses.COLOR_YELLOW,  curses.COLOR_YELLOW,  curses.COLOR_RED,
          curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
          curses.COLOR_WHITE,   curses.COLOR_WHITE,   curses.COLOR_CYAN),
         # 2: Green phosphor
-        (curses.COLOR_GREEN,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
+        (curses.COLOR_GREEN,   curses.COLOR_WHITE,   curses.COLOR_GREEN,
          curses.COLOR_CYAN,    curses.COLOR_WHITE,   curses.COLOR_BLACK,
          curses.COLOR_GREEN,   curses.COLOR_GREEN,   curses.COLOR_RED,
          curses.COLOR_GREEN,   curses.COLOR_BLACK,   curses.COLOR_WHITE,
@@ -1392,7 +1392,7 @@ class JJDlpDashboard:
          curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
          curses.COLOR_WHITE,   curses.COLOR_CYAN,    curses.COLOR_YELLOW),
         # 5: Ice blue
-        (curses.COLOR_CYAN,    curses.COLOR_BLACK,   curses.COLOR_CYAN,
+        (curses.COLOR_CYAN,    curses.COLOR_WHITE,   curses.COLOR_CYAN,
          curses.COLOR_WHITE,   curses.COLOR_GREEN,   curses.COLOR_BLACK,
          curses.COLOR_WHITE,   curses.COLOR_BLUE,    curses.COLOR_RED,
          curses.COLOR_CYAN,    curses.COLOR_BLACK,   curses.COLOR_GREEN,
