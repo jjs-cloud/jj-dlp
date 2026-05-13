@@ -2281,7 +2281,7 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
                     "SELECT BROWSER",
                     curses.color_pair(5) | curses.A_BOLD)
         safe_addstr(stdscr, br_title_row + 1, 2,
-                    "↑/↓ navigate  Enter = confirm   D = do not show again   Q = quit",
+                    "",
                     curses.color_pair(3))
         safe_addstr(stdscr, br_title_row + 2, 2,
                     "Select your browser for the yt-dlp cookies option.  You can select \"disabled\" if you do not want to use cookies",
@@ -2305,7 +2305,7 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
         dna_box  = "[x]" if do_not_show else "[ ]"
         dna_attr = curses.color_pair(3) | curses.A_BOLD if do_not_show else curses.color_pair(3)
         safe_addstr(stdscr, dna_row, 4,
-                    f"  {dna_box}  Do not show again  (sets ASK_FOR_BROWSER = False in config)",
+                    f"  {dna_box}  Do not show again (press D to toggle)",
                     dna_attr)
 
         # Footer
