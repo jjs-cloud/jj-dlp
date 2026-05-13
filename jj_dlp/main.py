@@ -2278,13 +2278,13 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
         # Browser sub-title
         br_title_row = files_row_end + 1
         safe_addstr(stdscr, br_title_row, 2,
-                    "BROWSER FOR --cookies-from-browser",
+                    "SELECT BROWSER",
                     curses.color_pair(5) | curses.A_BOLD)
         safe_addstr(stdscr, br_title_row + 1, 2,
                     "↑/↓ navigate  Enter = confirm   D = do not show again   Q = quit",
                     curses.color_pair(3))
         safe_addstr(stdscr, br_title_row + 2, 2,
-                    "(Twitch: cookies suppress ads — select your browser or \"other\" to disable)",
+                    "Select your browser for the yt-dlp cookies option.  You can select \"disabled\" if you do not want to use cookies",
                     curses.color_pair(3))
 
         # Browser list (single-select radio buttons)
@@ -2297,7 +2297,7 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
                 attr = curses.color_pair(2) | curses.A_BOLD
             else:
                 attr = curses.color_pair(1)
-            label = f"  {dot}  {br}" + ("  ← remove cookies flag" if br == "other" else "")
+            label = f"  {dot}  {br}" + ("  ← remove cookies option" if br == "disabled" else "")
             safe_addstr(stdscr, row, 4, label, attr)
 
         # "Do not show again" checkbox (below the browser list)
