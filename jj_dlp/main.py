@@ -20,6 +20,7 @@ from .deps import ensure_curses, plain_ffmpeg_check
 from .logger import (
     startup_dbg, startup_dbg_flush,
     dbg,
+    log_crash,
     get_debug_log_path, get_log_path, get_log_file_paths,
     DEBUG_LOGS_ENABLED, DEBUG_LOG_PATH, debug_log_lock,
     ENABLE_CRASH_LOG,
@@ -2500,15 +2501,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as _top_e:
-        import traceback
-        startup_dbg(f"UNCAUGHT EXCEPTION: {type(_top_e).__name__}: {_top_e}")
-        startup_dbg(traceback.format_exc())
-        if ENABLE_CRASH_LOG:
-            _crash_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jj-dlp-crash.log")
-            try:
-                with open(_crash_path, "a", encoding="utf-8") as _cf:
-                    _cf.write(f"\n{'='*60}\nCRASH at {datetime.now()}\n")
-                    _cf.write(traceback.format_exc())
-            except Exception:
-                pass
+        log_crash(_top_e)
         raise
