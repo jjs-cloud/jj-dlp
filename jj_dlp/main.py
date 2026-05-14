@@ -749,7 +749,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
             out_target, err_target, close_logs, log_out_fp, log_err_fp = open_log_streams(cfg)
 
-            site.log_line(f"yt-dlp cmd: {cmd_display_str(cmd)}")
+            site.log_line(f"cmd: {cmd_display_str(cmd)}")
 
             try:
                 proc = subprocess.Popen(cmd, stdout=out_target, stderr=err_target)
@@ -1353,6 +1353,10 @@ class JJDlpDashboard:
         self._mgmt_result = ""
         # Color scheme index for randomization
         self._color_scheme_idx = 0
+        # Scroll offsets for log/stdout/stderr tabs (lines from bottom; 0 = newest at bottom)
+        self._log_scroll    = 0
+        self._stdout_scroll = 0
+        self._stderr_scroll = 0
         
         from .config_editor import ConfigEditor
         self.config_editor = ConfigEditor(self)
@@ -1788,6 +1792,23 @@ class JJDlpDashboard:
             
             self.draw_site_panel(site, py1, px1, py2, px2, is_selected)
 
+    # ── Line-wrap helper ─────────────────────────────────────────────────────
+    @staticmethod
+    def _wrap_lines(lines: List[str], max_width: int) -> List[str]:
+        """Wrap each line to max_width characters, preserving order."""
+        if max_width <= 0:
+            return lines
+        wrapped = []
+        for line in lines:
+            if not line:
+                wrapped.append("")
+                continue
+            while len(line) > max_width:
+                wrapped.append(line[:max_width])
+                line = line[max_width:]
+            wrapped.append(line)
+        return wrapped
+
     # ── Log tab ──────────────────────────────────────────────────────────────
     def draw_log_tab(self, y1, x1, y2, x2):
         # Site selector across the top
@@ -1815,10 +1836,22 @@ class JJDlpDashboard:
             return
 
         visible_rows = (y2 - y1) - 3
-        with sel_site.dash_lock:
-            lines = list(sel_site.dash_log_lines[-visible_rows:])
+        line_width   = max(1, (x2 - x1) - 4)   # 2 chars padding each side
 
-        for i, line in enumerate(lines):
+        with sel_site.dash_lock:
+            raw_lines = list(sel_site.dash_log_lines)
+
+        wrapped = self._wrap_lines(raw_lines, line_width)
+
+        # Clamp scroll so it never exceeds available history
+        max_scroll = max(0, len(wrapped) - visible_rows)
+        self._log_scroll = min(self._log_scroll, max_scroll)
+
+        # 0 = tail (newest); positive = scrolled up
+        start = max(0, len(wrapped) - visible_rows - self._log_scroll)
+        view  = wrapped[start : start + visible_rows]
+
+        for i, line in enumerate(view):
             attr = curses.color_pair(self.C_DIM)
             if "Live now" in line or "Recording started" in line:
                 attr = curses.color_pair(self.C_LIVE)
@@ -1828,7 +1861,15 @@ class JJDlpDashboard:
                 attr = curses.color_pair(self.C_WARN)
             safe_addstr(self.stdscr, y1 + 2 + i, x1 + 2, line, attr)
 
-    def _draw_pipe_tab(self, y1, x1, y2, x2, title: str, lines: List[str]) -> None:
+        # Scroll indicator
+        if max_scroll > 0:
+            scroll_info = f" ↑{self._log_scroll}/{max_scroll} " if self._log_scroll else " (end) "
+            safe_addstr(self.stdscr, y1 + 1, x2 - len(scroll_info) - 1,
+                        scroll_info, curses.color_pair(self.C_WARN))
+
+    def _draw_pipe_tab(self, y1, x1, y2, x2, title: str, lines: List[str],
+                       scroll: int = 0) -> int:
+        """Draw a pipe-output tab. Returns the clamped scroll value."""
         sel_site = self.sites[self.selected_site_idx] if self.sites else None
         tab_x    = x1 + 1
         safe_addstr(self.stdscr, y1, x1, "  Site: ",
@@ -1849,11 +1890,29 @@ class JJDlpDashboard:
                     curses.color_pair(self.C_DIM) | curses.A_BOLD)
 
         if sel_site is None:
-            return
+            return 0
 
         visible_rows = (y2 - y1) - 3
-        for i, line in enumerate(lines[-visible_rows:]):
-            safe_addstr(self.stdscr, y1 + 2 + i, x1 + 2, line, curses.color_pair(self.C_DIM))
+        line_width   = max(1, (x2 - x1) - 4)
+
+        wrapped   = self._wrap_lines(lines, line_width)
+        max_scroll = max(0, len(wrapped) - visible_rows)
+        scroll    = min(scroll, max_scroll)
+
+        start = max(0, len(wrapped) - visible_rows - scroll)
+        view  = wrapped[start : start + visible_rows]
+
+        for i, line in enumerate(view):
+            safe_addstr(self.stdscr, y1 + 2 + i, x1 + 2, line,
+                        curses.color_pair(self.C_DIM))
+
+        # Scroll indicator
+        if max_scroll > 0:
+            scroll_info = f" ↑{scroll}/{max_scroll} " if scroll else " (end) "
+            safe_addstr(self.stdscr, y1 + 1, x2 - len(scroll_info) - 1,
+                        scroll_info, curses.color_pair(self.C_WARN))
+
+        return scroll
 
     def draw_stdout_tab(self, y1, x1, y2, x2):
         sel_site = self.sites[self.selected_site_idx] if self.sites else None
@@ -1861,7 +1920,8 @@ class JJDlpDashboard:
         if sel_site is not None:
             with sel_site.dash_lock:
                 lines = list(sel_site.dash_stdout_lines)
-        self._draw_pipe_tab(y1, x1, y2, x2, " STDOUT ", lines)
+        self._stdout_scroll = self._draw_pipe_tab(
+            y1, x1, y2, x2, " STDOUT ", lines, self._stdout_scroll)
 
     def draw_stderr_tab(self, y1, x1, y2, x2):
         sel_site = self.sites[self.selected_site_idx] if self.sites else None
@@ -1869,7 +1929,8 @@ class JJDlpDashboard:
         if sel_site is not None:
             with sel_site.dash_lock:
                 lines = list(sel_site.dash_stderr_lines)
-        self._draw_pipe_tab(y1, x1, y2, x2, " STDERR ", lines)
+        self._stderr_scroll = self._draw_pipe_tab(
+            y1, x1, y2, x2, " STDERR ", lines, self._stderr_scroll)
 
     # ── EventSub tab ─────────────────────────────────────────────────────────
     def draw_eventsub_tab(self, y1, x1, y2, x2):
@@ -1937,10 +1998,17 @@ class JJDlpDashboard:
                      f"Type username then Enter  |  Esc to cancel  |  "
                      f"Input: {self._mgmt_buf}_")
         else:
-            hints = (f"  Left/Right: switch tabs"
-                     f"  [: prev site  ]: next site"
-                     f"  A: add streamer R: remove streamer D: disable streamer"
-                     f"  C: colors  Q: quit  ")
+            current_tab = self.TABS[self.selected_tab]
+            if current_tab in ("Log", "Stdout", "Stderr"):
+                hints = (f"  LEFT/RIGHT: switch tabs"
+                         f"  [: prev site  ]: next site"
+                         f"  UP: scroll up  DOWN: scroll down"
+                         f"  C: colors  Q: quit  ")
+            else:
+                hints = (f"  LEFT/RIGHT: switch tabs"
+                         f"  [: prev site  ]: next site"
+                         f"  A: add streamer R: remove streamer D: disable streamer"
+                         f"  C: colors  Q: quit  ")
         safe_addstr(self.stdscr, h - 1, 0,
                     hints.ljust(w - 1)[:w - 1],
                     curses.color_pair(self.C_INVHEAD))
@@ -2076,8 +2144,28 @@ class JJDlpDashboard:
             self.selected_tab = (self.selected_tab - 1) % len(self.TABS)
         elif key in (ord(']'), curses.KEY_NPAGE):   # next site (log/config tabs)
             self.selected_site_idx = (self.selected_site_idx + 1) % max(1, len(self.sites))
+            # Reset scroll when switching sites
+            self._log_scroll = self._stdout_scroll = self._stderr_scroll = 0
         elif key in (ord('['), curses.KEY_PPAGE):   # prev site
             self.selected_site_idx = (self.selected_site_idx - 1) % max(1, len(self.sites))
+            # Reset scroll when switching sites
+            self._log_scroll = self._stdout_scroll = self._stderr_scroll = 0
+        elif key in (curses.KEY_UP, ord('k')):
+            tab = self.TABS[self.selected_tab]
+            if tab == "Log":
+                self._log_scroll += 1
+            elif tab == "Stdout":
+                self._stdout_scroll += 1
+            elif tab == "Stderr":
+                self._stderr_scroll += 1
+        elif key in (curses.KEY_DOWN, ord('j')):
+            tab = self.TABS[self.selected_tab]
+            if tab == "Log":
+                self._log_scroll = max(0, self._log_scroll - 1)
+            elif tab == "Stdout":
+                self._stdout_scroll = max(0, self._stdout_scroll - 1)
+            elif tab == "Stderr":
+                self._stderr_scroll = max(0, self._stderr_scroll - 1)
         elif key in (ord('a'), ord('A')):
             self._start_mgmt("add")
         elif key in (ord('r'), ord('R')):
