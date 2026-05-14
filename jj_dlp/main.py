@@ -1457,7 +1457,7 @@ class JJDlpDashboard:
                 safe_addstr(self.stdscr, y, x, label,
                             curses.color_pair(self.C_HILIGHT) | curses.A_BOLD)
             else:
-                safe_addstr(self.stdscr, y, x, label, curses.color_pair(self.C_CHROME))
+                safe_addstr(self.stdscr, y, x, label, curses.color_pair(self.C_INVHEAD))
             x += len(label) + 1
 
     # ── System status sidebar ────────────────────────────────────────────────
