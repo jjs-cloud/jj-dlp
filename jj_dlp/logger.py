@@ -13,6 +13,7 @@ Public API
 startup_dbg(msg)          Write a line to the startup log (if enabled).
 startup_dbg_flush()       Write the opening banner (argv, cwd, python path).
 dbg(msg)                  Write to debug log.
+log_crash(e)              Write an unhandled exception to jj-dlp-crash.log.
 get_debug_log_path(cfg)   Resolve the debug log path from a config dict.
 get_log_path(cfg)         Resolve the activity log path from a config dict.
 get_log_file_paths(cfg)   Return (stdout_path, stderr_path) for yt-dlp logging.
@@ -28,9 +29,10 @@ from datetime import datetime
 ENABLE_STARTUP_LOG: bool = False
 ENABLE_CRASH_LOG:   bool = True
 
-_STARTUP_LOG: str = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "jj-dlp-startup-debug.log"
-)
+_ROOT_DIR: str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+_STARTUP_LOG: str = os.path.join(_ROOT_DIR, "jj-dlp-startup-debug.log")
+_CRASH_LOG:   str = os.path.join(_ROOT_DIR, "jj-dlp-crash.log")
 
 # ── Runtime debug log (path resolved from config after startup) ───────────────
 DEBUG_LOGS_ENABLED: bool = False
@@ -101,6 +103,31 @@ def dbg(msg: str, site_name: str = "") -> None:
     full = f"[{ts}] {prefix}{msg}"
     
     _write_debug_log(full)
+
+
+# ── Crash log ─────────────────────────────────────────────────────────────────
+
+def log_crash(e: Exception) -> None:
+    """
+    Log an unhandled exception to both the startup log and the crash log.
+    """
+    import traceback
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 1. Log to startup log (always good for context)
+    startup_dbg(f"UNCAUGHT EXCEPTION: {type(e).__name__}: {e}")
+    startup_dbg(traceback.format_exc())
+
+    # 2. Log to crash log (the user-visible artifact)
+    if not ENABLE_CRASH_LOG:
+        return
+
+    try:
+        with open(_CRASH_LOG, "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*60}\nCRASH at {ts}\n")
+            f.write(traceback.format_exc())
+    except Exception:
+        pass
 
 
 # ── Log-path helpers ──────────────────────────────────────────────────────────
