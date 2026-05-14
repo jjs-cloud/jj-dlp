@@ -739,6 +739,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
             out_target, err_target, close_logs, log_out_fp, log_err_fp = open_log_streams(cfg)
 
+            site.log_line(f"yt-dlp cmd: {' '.join(cmd)}")
+
             try:
                 proc = subprocess.Popen(cmd, stdout=out_target, stderr=err_target)
                 proc_start_time = time.time()
@@ -883,6 +885,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                         )
 
                         next_out_target, next_err_target, next_close_logs, next_log_out_fp, next_log_err_fp = open_log_streams(cfg)
+
+                        site.log_line(f"yt-dlp cmd: {' '.join(next_cmd)}")
 
                         try:
                             next_proc = subprocess.Popen(
