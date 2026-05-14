@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import List, Set, Tuple, Dict, Optional
 import configparser
 import argparse
+import shlex
 from urllib.parse import urlparse
 import shutil
 
@@ -171,7 +172,7 @@ def load_config(config_path: str) -> dict:
         for key, val in parser.items("Downloader"):
             item = (val or key).strip()
             if item:
-                downloader_cmd.extend(item.split())
+                downloader_cmd.extend(shlex.split(item))
 
     return {
         "streamers": streamers,
@@ -360,6 +361,15 @@ def kill_proc(proc) -> None:
 
 def build_yt_dlp_command(yt_dlp_path: str, base_cmd: List[str], extra: List[str]) -> List[str]:
     return [yt_dlp_path, *base_cmd, *extra]
+
+
+def cmd_display_str(cmd: List[str]) -> str:
+    """Return a shell-pasteable string for the given command list.
+    Uses subprocess.list2cmdline on Windows (cmd.exe quoting, backslashes intact)
+    and shlex.join on POSIX systems."""
+    if sys.platform == "win32":
+        return subprocess.list2cmdline(cmd)
+    return shlex.join(cmd)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -739,7 +749,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
             out_target, err_target, close_logs, log_out_fp, log_err_fp = open_log_streams(cfg)
 
-            site.log_line(f"yt-dlp cmd: {' '.join(cmd)}")
+            site.log_line(f"yt-dlp cmd: {cmd_display_str(cmd)}")
 
             try:
                 proc = subprocess.Popen(cmd, stdout=out_target, stderr=err_target)
@@ -886,7 +896,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
                         next_out_target, next_err_target, next_close_logs, next_log_out_fp, next_log_err_fp = open_log_streams(cfg)
 
-                        site.log_line(f"yt-dlp cmd: {' '.join(next_cmd)}")
+                        site.log_line(f"yt-dlp cmd: {cmd_display_str(next_cmd)}")
 
                         try:
                             next_proc = subprocess.Popen(
