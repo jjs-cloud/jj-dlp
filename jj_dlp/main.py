@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import List, Set, Tuple, Dict, Optional
 import configparser
 import argparse
+import shlex
 from urllib.parse import urlparse
 import shutil
 
@@ -171,7 +172,7 @@ def load_config(config_path: str) -> dict:
         for key, val in parser.items("Downloader"):
             item = (val or key).strip()
             if item:
-                downloader_cmd.extend(item.split())
+                downloader_cmd.extend(shlex.split(item))
 
     return {
         "streamers": streamers,
@@ -739,7 +740,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
             out_target, err_target, close_logs, log_out_fp, log_err_fp = open_log_streams(cfg)
 
-            site.log_line(f"yt-dlp cmd: {' '.join(cmd)}")
+            site.log_line(f"yt-dlp cmd: {shlex.join(cmd)}")
 
             try:
                 proc = subprocess.Popen(cmd, stdout=out_target, stderr=err_target)
@@ -886,7 +887,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
                         next_out_target, next_err_target, next_close_logs, next_log_out_fp, next_log_err_fp = open_log_streams(cfg)
 
-                        site.log_line(f"yt-dlp cmd: {' '.join(next_cmd)}")
+                        site.log_line(f"yt-dlp cmd: {shlex.join(next_cmd)}")
 
                         try:
                             next_proc = subprocess.Popen(
