@@ -265,6 +265,12 @@ class SiteState:
         self._procs_lock          = threading.Lock()
         self._active_procs:       Dict[str, object] = {}
 
+        # Cached config for the dashboard renderer — refreshed at most every 2s
+        # so we avoid 7+ file reads per frame in draw_system_panel.
+        self._cfg_cache:          Optional[dict] = None
+        self._cfg_cache_time:     float = 0.0
+        self._cfg_cache_lock:     threading.Lock = threading.Lock()
+
     def register_proc(self, streamer: str, proc) -> None:
         """Register an active yt-dlp subprocess so stop() can kill it."""
         with self._procs_lock:
@@ -284,6 +290,25 @@ class SiteState:
                 kill_proc(proc)
             except Exception:
                 pass
+
+    _CFG_CACHE_TTL: float = 2.0  # seconds between re-reads for the dashboard
+
+    def get_cached_config(self) -> dict:
+        """Return a recently-loaded config dict, re-reading the file at most every
+        _CFG_CACHE_TTL seconds.  Use this in all rendering paths; use load_config()
+        directly only where you need guaranteed-fresh data (monitor/watcher threads)."""
+        now = time.time()
+        with self._cfg_cache_lock:
+            if self._cfg_cache is None or (now - self._cfg_cache_time) >= self._CFG_CACHE_TTL:
+                self._cfg_cache      = load_config(self.config_path)
+                self._cfg_cache_time = now
+            return self._cfg_cache
+
+    def invalidate_config_cache(self) -> None:
+        """Force the next get_cached_config() call to re-read the file.
+        Call this after writing changes to the config (e.g. from ConfigEditor)."""
+        with self._cfg_cache_lock:
+            self._cfg_cache_time = 0.0
 
     def log_line(self, msg: str) -> None:
         """Append a timestamped line to the site's activity log (capped at 200 lines)."""
@@ -829,7 +854,11 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                         pass
                     return
 
+                _t0 = time.time()
                 current_cfg = load_config(cfg["config_path"])
+                _load_cfg_ms = (time.time() - _t0) * 1000
+                if _split_log_counter % 30 == 0:
+                    dbg(f"[PERF][record_stream/inner] load_config took {_load_cfg_ms:.2f}ms streamer={streamer!r}")
 
                 if streamer in current_cfg["blocked"]:
                     kill_proc(proc)
@@ -1334,7 +1363,7 @@ class JJDlpDashboard:
         # Check if ANY site has Twitch EventSub enabled
         any_eventsub = False
         for site in self.sites:
-            cfg = load_config(site.config_path)
+            cfg = site.get_cached_config()
             if cfg.get("twitch_enabled"):
                 any_eventsub = True
                 break
@@ -1486,7 +1515,7 @@ class JJDlpDashboard:
                 blocked    = set(site.dash_blocked)
                 recording  = set(site.currently_recording)
             try:
-                cfg = load_config(site.config_path)
+                cfg = site.get_cached_config()
                 check_interval = cfg.get("check_interval", 60)
             except Exception:
                 pass
@@ -1514,7 +1543,7 @@ class JJDlpDashboard:
 
         # Fill logging/popups from first site's config
         try:
-            cfg0 = load_config(self.sites[0].config_path) if self.sites else {}
+            cfg0 = self.sites[0].get_cached_config() if self.sites else {}
             rows[7] = ("Logging", "ON" if cfg0.get("logging_enabled") else "OFF",
                        self.C_LIVE if cfg0.get("logging_enabled") else self.C_DIM)
             rows[8] = ("Popups",  "ON" if cfg0.get("popup_notifications") else "OFF",
@@ -1546,7 +1575,7 @@ class JJDlpDashboard:
             fallback_dir = None
             for _site in self.sites:
                 try:
-                    _cfg = load_config(_site.config_path)
+                    _cfg = _site.get_cached_config()
                     drives_for_site = _cfg.get("disk_drives", [])
                     if drives_for_site:
                         for d in drives_for_site:
@@ -1601,8 +1630,9 @@ class JJDlpDashboard:
         draw_box(self.stdscr, y1, x1, y2, x2, border_pair)
 
         # ── Panel header ──
+        _panel_cfg = site.get_cached_config()
         with site.dash_lock:
-            cfg_label    = load_config(site.config_path).get("site_label",
+            cfg_label    = _panel_cfg.get("site_label",
                                        os.path.basename(site.config_path))
             all_s        = list(site.dash_all_streamers)
             live_since   = dict(site.dash_live_since)
@@ -1612,7 +1642,6 @@ class JJDlpDashboard:
             recording    = set(site.currently_recording)
 
         try:
-            _panel_cfg = load_config(site.config_path)
             _bar_max_secs = _panel_cfg.get("progress_bar_max_hours", 6) * 3600
             _bar_cfg_w    = max(4, _panel_cfg.get("progress_bar_width", 14))
         except Exception:
@@ -1818,7 +1847,7 @@ class JJDlpDashboard:
                     curses.color_pair(self.C_DIM))
         tab_x += 8
         for i, site in enumerate(self.sites):
-            lbl = load_config(site.config_path).get("site_label",
+            lbl = site.get_cached_config().get("site_label",
                               os.path.basename(site.config_path))
             label = f" {lbl} "
             attr  = (curses.color_pair(self.C_HILIGHT) | curses.A_BOLD
@@ -1826,9 +1855,6 @@ class JJDlpDashboard:
                      else curses.color_pair(self.C_CHROME))
             safe_addstr(self.stdscr, y1, tab_x, label, attr)
             tab_x += len(label) + 1
-
-        # Log lines
-        draw_box(self.stdscr, y1 + 1, x1, y2, x2, self.C_DIM)
         safe_addstr(self.stdscr, y1 + 1, x1 + 2, " ACTIVITY LOG ",
                     curses.color_pair(self.C_DIM) | curses.A_BOLD)
 
@@ -1876,7 +1902,7 @@ class JJDlpDashboard:
                     curses.color_pair(self.C_DIM))
         tab_x += 8
         for i, site in enumerate(self.sites):
-            lbl = load_config(site.config_path).get("site_label",
+            lbl = site.get_cached_config().get("site_label",
                               os.path.basename(site.config_path))
             label = f" {lbl} "
             attr  = (curses.color_pair(self.C_HILIGHT) | curses.A_BOLD
@@ -1942,7 +1968,7 @@ class JJDlpDashboard:
         for site in self.sites:
             if row_y >= y2 - 1:
                 break
-            lbl = load_config(site.config_path).get("site_label",
+            lbl = site.get_cached_config().get("site_label",
                               os.path.basename(site.config_path))
             safe_addstr(self.stdscr, row_y, x1 + 2, f"-- {lbl} --",
                         curses.color_pair(self.C_WARN) | curses.A_BOLD)
@@ -2036,7 +2062,7 @@ class JJDlpDashboard:
 
         draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_WARN)
         title = f" {action.upper()} STREAMER "
-        site_lbl = load_config(site.config_path).get("site_label",
+        site_lbl = site.get_cached_config().get("site_label",
                                os.path.basename(site.config_path))
         safe_addstr(self.stdscr, by1, bx1 + 2, title,
                     curses.color_pair(self.C_WARN) | curses.A_BOLD)
@@ -2095,7 +2121,9 @@ class JJDlpDashboard:
         sidebar_w  = 28
         sidebar_x1 = w - sidebar_w - 1
         sidebar_x2 = w - 2
+        _t0 = time.time()
         self.draw_system_panel(content_y1, sidebar_x1, content_y2, sidebar_x2)
+        _t_system_panel = time.time() - _t0
 
         # Content area is to the left of the sidebar
         content_x2 = sidebar_x1 - 1
@@ -2103,6 +2131,7 @@ class JJDlpDashboard:
         # Get the name of the currently selected tab
         current_tab_name = self.TABS[self.selected_tab]
 
+        _t0 = time.time()
         if current_tab_name == "Dashboard":
             self.draw_dashboard_tab(content_y1, 1, content_y2, content_x2)
         elif current_tab_name == "Log":
@@ -2115,6 +2144,7 @@ class JJDlpDashboard:
             self.draw_eventsub_tab(content_y1, 1, content_y2, content_x2)
         elif current_tab_name == "Config":
             self.draw_config_tab(content_y1, 1, content_y2, content_x2)
+        _t_main_tab = time.time() - _t0
 
         self.draw_footer()
 
@@ -2122,6 +2152,14 @@ class JJDlpDashboard:
             self.draw_mgmt_overlay()
 
         self.stdscr.refresh()
+
+        # Log timing every 100 frames (~5 seconds at 20fps)
+        if self.tick % 100 == 0:
+            dbg(
+                f"[PERF][refresh_screen] tick={self.tick} tab={current_tab_name!r} "
+                f"system_panel_ms={_t_system_panel*1000:.2f} "
+                f"main_tab_ms={_t_main_tab*1000:.2f}"
+            )
 
     # ── Input handling ────────────────────────────────────────────────────────
     def handle_key(self, key) -> bool:
@@ -2219,14 +2257,36 @@ class JJDlpDashboard:
         self.stdscr.keypad(True)
         self.setup_colors()
 
+        _perf_frame_count = 0
+        _perf_next_report = time.time() + 10.0  # report every 10 seconds
+
         while True:
+            _t_frame_start = time.time()
             self.refresh_screen()
+            _t_after_refresh = time.time()
+
             key = self.stdscr.getch()
             if key != -1:
                 if not self.handle_key(key):
                     break
             self.tick += 1
             curses.napms(50)
+
+            _t_frame_end = time.time()
+            _perf_frame_count += 1
+
+            if _t_frame_end >= _perf_next_report:
+                _frame_ms   = (_t_after_refresh - _t_frame_start) * 1000
+                _total_ms   = (_t_frame_end - _t_frame_start) * 1000
+                _fps        = _perf_frame_count / 10.0
+                dbg(
+                    f"[PERF][run] 10s summary: frames={_perf_frame_count} "
+                    f"effective_fps={_fps:.1f} "
+                    f"last_refresh_ms={_frame_ms:.1f} "
+                    f"last_total_frame_ms={_total_ms:.1f}"
+                )
+                _perf_frame_count = 0
+                _perf_next_report = _t_frame_end + 10.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
