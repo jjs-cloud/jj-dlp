@@ -141,6 +141,7 @@ def load_config(config_path: str) -> dict:
     set_cookie_flag        = general.get("SET_COOKIE_FLAG", "true").strip().lower() not in ("false", "0", "no")
     ask_for_browser        = general.get("ASK_FOR_BROWSER", "true").strip().lower() not in ("false", "0", "no")
     site_order             = safe_int(general.get("SITE_ORDER", 999), 999)
+    last_live_highlight    = safe_int(general.get("LAST_LIVE_HIGHLIGHT", 0), 0)
 
     # Disk drives to monitor (comma-separated paths/letters, e.g. "C:\,D:\,/home")
     disk_drives_raw = general.get("DISK_DRIVES", "").strip().strip('\"\'')
@@ -206,6 +207,7 @@ def load_config(config_path: str) -> dict:
         "set_cookie_flag": set_cookie_flag,
         "ask_for_browser": ask_for_browser,
         "site_order": site_order,
+        "last_live_highlight": last_live_highlight,
         "twitch_enabled": twitch_enabled,
         "twitch_client_id": twitch_client_id,
         "twitch_client_secret": twitch_client_secret,
@@ -1706,9 +1708,11 @@ class JJDlpDashboard:
         try:
             _bar_max_secs = _panel_cfg.get("progress_bar_max_hours", 6) * 3600
             _bar_cfg_w    = max(4, _panel_cfg.get("progress_bar_width", 14))
+            _last_live_highlight_days = _panel_cfg.get("last_live_highlight", 0)
         except Exception:
             _bar_max_secs = 6 * 3600
             _bar_cfg_w    = 14
+            _last_live_highlight_days = 0
 
         # Counts for header badges
         live_cnt = sum(1 for s in all_s if s in live_since)
@@ -1833,9 +1837,16 @@ class JJDlpDashboard:
                 safe_addstr(self.stdscr, row_y, col, " " * 9, 0)
             col += 10
             if last_live_str:
+                # Highlight in C_LIVE if streamer was live within LAST_LIVE_HIGHLIGHT days
+                if (ll_ts is not None
+                        and _last_live_highlight_days > 0
+                        and (now - ll_ts) <= _last_live_highlight_days * 86400):
+                    ll_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
+                else:
+                    ll_attr = curses.color_pair(self.C_DIM)
                 safe_addstr(self.stdscr, row_y, col,
                             last_live_str[:last_live_w],
-                            curses.color_pair(self.C_DIM))
+                            ll_attr)
 
         # ── Countdown ──
         nxt = max(0.0, next_in)
