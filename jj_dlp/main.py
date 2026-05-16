@@ -219,6 +219,67 @@ def load_config(config_path: str) -> dict:
 # Per-site state
 # ══════════════════════════════════════════════════════════════════════════════
 
+_GLOBAL_JSON_PATH: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "global.json")
+_global_json_lock: threading.Lock = threading.Lock()
+
+
+def _load_global_json() -> dict:
+    """Load the global.json file from the script's directory.  Returns an empty
+    dict if the file does not exist or cannot be parsed."""
+    try:
+        with open(_GLOBAL_JSON_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_global_json(data: dict) -> None:
+    """Write *data* to global.json atomically.  Silently ignores errors."""
+    try:
+        with open(_GLOBAL_JSON_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+
+def _load_last_live_cache(config_path: str) -> Dict[str, float]:
+    """Return the last-live timestamps for the given site from global.json.
+
+    The site is identified by its config filename (without path).  Each entry
+    in the returned dict maps a streamer name to the Unix epoch at which their
+    most recent recording ended.
+    """
+    site_key = os.path.basename(config_path)
+    with _global_json_lock:
+        global_data = _load_global_json()
+    site_data = global_data.get("sites", {}).get(site_key, {})
+    raw = site_data.get("last_live", {})
+    if isinstance(raw, dict):
+        return {k: float(v) for k, v in raw.items()}
+    return {}
+
+
+def _save_last_live_cache(config_path: str, last_live: Dict[str, float]) -> None:
+    """Persist last-live timestamps for the given site into global.json.
+
+    Merges with any existing data so other sites' entries are preserved.
+    """
+    site_key = os.path.basename(config_path)
+    with _global_json_lock:
+        global_data = _load_global_json()
+        if "sites" not in global_data or not isinstance(global_data["sites"], dict):
+            global_data["sites"] = {}
+        if site_key not in global_data["sites"] or not isinstance(global_data["sites"][site_key], dict):
+            global_data["sites"][site_key] = {}
+        global_data["sites"][site_key]["last_live"] = {
+            streamer: timestamp for streamer, timestamp in last_live.items()
+        }
+        _save_global_json(global_data)
+
+
 class SiteState:
     """All mutable runtime state for a single monitored site/config."""
 
@@ -239,7 +300,7 @@ class SiteState:
         # Dashboard display state (written by monitor thread, read by renderer)
         self.dash_lock            = threading.Lock()
         self.dash_live_since:     Dict[str, float] = {}   # streamer -> epoch
-        self.dash_last_live:      Dict[str, float] = {}   # streamer -> epoch when recording stopped
+        self.dash_last_live:      Dict[str, float] = _load_last_live_cache(config_path)   # streamer -> epoch when recording stopped
         self.dash_next_check_in:  float = 0.0
         self.dash_all_streamers:  List[str] = []
         self.dash_blocked:        Set[str] = set()
@@ -1105,6 +1166,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
                 with site.dash_lock:
                     site.dash_last_live[streamer] = time.time()
+                    _save_last_live_cache(site.config_path, site.dash_last_live)
 
                 site.log_line(f"Recording finished: {streamer}")
                 break
