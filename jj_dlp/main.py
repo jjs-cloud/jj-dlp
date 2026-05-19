@@ -1493,7 +1493,7 @@ class JJDlpDashboard:
          curses.COLOR_WHITE,   curses.COLOR_CYAN,    curses.COLOR_YELLOW),
         # 3: Red alert
         (curses.COLOR_RED,     curses.COLOR_WHITE,   curses.COLOR_RED,
-         curses.COLOR_YELLOW,  curses.COLOR_GREEN,   curses.COLOR_WHITE,
+         curses.COLOR_YELLOW,  curses.COLOR_GREEN,   curses.COLOR_BLACK,
          curses.COLOR_RED,     curses.COLOR_RED,     curses.COLOR_MAGENTA,
          curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
          curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_CYAN),
