@@ -128,7 +128,42 @@ def load_config(config_path: str) -> dict:
         except Exception:
             pass
         yt_dlp_path_raw = ""
-    yt_dlp_path           = yt_dlp_path_raw if yt_dlp_path_raw else "yt-dlp"
+    # Auto-detect bundled yt-dlp module in the project root
+    bundled_yt_dlp_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "yt-dlp")
+    bundled_yt_dlp_module = os.path.join(bundled_yt_dlp_dir, "yt_dlp")
+
+    startup_dbg(f"[YT_DLP] bundled_yt_dlp_dir={bundled_yt_dlp_dir!r}")
+    startup_dbg(f"[YT_DLP] bundled_yt_dlp_module={bundled_yt_dlp_module!r} exists={os.path.isdir(bundled_yt_dlp_module)}")
+    startup_dbg(f"[YT_DLP] sys.executable={sys.executable!r} platform={sys.platform!r}")
+    startup_dbg(f"[YT_DLP] yt_dlp_path_raw={yt_dlp_path_raw!r}")
+
+    if os.path.isdir(bundled_yt_dlp_module):
+        # Inject the bundled directory into PYTHONPATH so subprocesses can find it
+        current_pp = os.environ.get("PYTHONPATH", "")
+        if bundled_yt_dlp_dir not in current_pp:
+            os.environ["PYTHONPATH"] = f"{bundled_yt_dlp_dir}{os.pathsep}{current_pp}" if current_pp else bundled_yt_dlp_dir
+
+        # On Windows, sys.executable may be pythonw.exe (the windowless variant).
+        # Subprocesses spawned from pythonw.exe inherit broken pipe handles and
+        # produce no output at all — yt-dlp goes completely silent.
+        # Always force python.exe so the child process has a proper stdio environment.
+        _py_exe = sys.executable
+        if sys.platform == "win32":
+            _py_exe_lower = _py_exe.lower()
+            if _py_exe_lower.endswith("pythonw.exe"):
+                _py_exe = _py_exe[:-len("pythonw.exe")] + "python.exe"
+                startup_dbg(f"[YT_DLP] pythonw.exe detected — rewriting to python.exe: {_py_exe!r}")
+            else:
+                startup_dbg(f"[YT_DLP] python executable OK (not pythonw): {_py_exe!r}")
+
+        startup_dbg(f"[YT_DLP] PYTHONPATH set to: {os.environ['PYTHONPATH']!r}")
+        default_yt_dlp = f"{_py_exe} -m yt_dlp"
+        startup_dbg(f"[YT_DLP] bundled module found → default_yt_dlp={default_yt_dlp!r}")
+    else:
+        default_yt_dlp = "yt-dlp"
+        startup_dbg(f"[YT_DLP] bundled module NOT found → falling back to system yt-dlp")
+
+    yt_dlp_path           = yt_dlp_path_raw if yt_dlp_path_raw else default_yt_dlp
     site_label            = general.get("SITE_LABEL", os.path.basename(config_path)).strip().strip('\"\'')
     progress_bar_max_hours = safe_int(general.get("PROGRESS_BAR_MAX_HOURS", 6), 6)
     _raw_pbw = general.get("PROGRESS_BAR_WIDTH", None)
@@ -173,7 +208,7 @@ def load_config(config_path: str) -> dict:
         for key, val in parser.items("Downloader"):
             item = (val or key).strip()
             if item:
-                downloader_cmd.extend(shlex.split(item))
+                downloader_cmd.extend(shlex.split(item, posix=(sys.platform != "win32")))
 
     return {
         "streamers": streamers,
@@ -320,6 +355,10 @@ class SiteState:
 
         self._stop_event          = threading.Event()
 
+        # Stdout/Stderr tabs: whether to show checker command output (off by default — can flood with JSON)
+        self.show_checker_stdout: bool = False
+        self.show_checker_stderr: bool = False
+
         # Popup cooldown: streamer -> epoch of last popup shown
         self.popup_last_shown:    Dict[str, float] = {}
 
@@ -412,6 +451,11 @@ FFMPEG_ERROR_PATTERNS: List[str] = [
     "timestamp discontinuity",
     "Packet corrupt",
 ]
+
+# Lines from the checker command are stored with these prefixes so draw_stdout_tab
+# and draw_stderr_tab can filter them in/out without separate buffers.
+_CHECKER_STDOUT_PREFIX: str = "\x00checker\x00"
+_CHECKER_STDERR_PREFIX: str = "\x00checker_err\x00"
 FFMPEG_ERROR_RESTART_THRESHOLD: int = 500
 
 # Wire logger.dbg to this module's OUTPUT_MODE
@@ -448,7 +492,12 @@ def kill_proc(proc) -> None:
 
 
 def build_yt_dlp_command(yt_dlp_path: str, base_cmd: List[str], extra: List[str]) -> List[str]:
-    return [yt_dlp_path, *base_cmd, *extra]
+    # Support "python -m yt_dlp" or other commands with arguments
+    if " " in yt_dlp_path and not os.path.isfile(yt_dlp_path):
+        exec_parts = shlex.split(yt_dlp_path, posix=(sys.platform != "win32"))
+    else:
+        exec_parts = [yt_dlp_path]
+    return [*exec_parts, *base_cmd, *extra]
 
 
 def cmd_display_str(cmd: List[str]) -> str:
@@ -623,9 +672,14 @@ def open_log_streams(cfg: dict):
 def _drain_pipe(pipe, log_fp, pipe_type: str,
                 ffmpeg_error_counter=None, ffmpeg_error_event=None,
                 streamer: str = "", site: Optional[SiteState] = None) -> None:
+    dbg(f"[DRAIN] thread started pipe_type={pipe_type!r} streamer={streamer!r} pipe={pipe!r}")
+    line_count = 0
     try:
         for raw in pipe:
             line = raw.decode(errors="replace").rstrip("\n")
+            line_count += 1
+            if line_count <= 3:
+                dbg(f"[DRAIN] pipe_type={pipe_type!r} streamer={streamer!r} line#{line_count}: {line[:200]!r}")
             if log_fp is not None:
                 try:
                     log_fp.write(line + "\n")
@@ -651,11 +705,13 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
                         if ffmpeg_error_counter[0] >= FFMPEG_ERROR_RESTART_THRESHOLD:
                             ffmpeg_error_event.set()
                         break
-    except Exception:
-        pass
+    except Exception as _drain_exc:
+        dbg(f"[DRAIN] pipe_type={pipe_type!r} streamer={streamer!r} EXCEPTION: {_drain_exc!r}")
+    dbg(f"[DRAIN] thread exiting pipe_type={pipe_type!r} streamer={streamer!r} total_lines={line_count}")
 
 
-def get_live_streamers(streamers: List[str], cfg: dict) -> List[str]:
+def get_live_streamers(streamers: List[str], cfg: dict,
+                       site: Optional["SiteState"] = None) -> List[str]:
     if not streamers:
         return []
     # NOTE: Do NOT filter out blocked streamers here. We still need to know
@@ -666,7 +722,17 @@ def get_live_streamers(streamers: List[str], cfg: dict) -> List[str]:
         return []
     urls = [cfg["site_tmpl"].format(username=s) for s in streamers]
     cmd = build_yt_dlp_command(cfg["yt_dlp_path"], cfg["checker_cmd"], urls)
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    dbg(f"[CHECKER] yt_dlp_path={cfg['yt_dlp_path']!r}")
+    dbg(f"[CHECKER] cmd={cmd!r}")
+    dbg(f"[CHECKER] PYTHONPATH={os.environ.get('PYTHONPATH', '<not set>')!r}")
+    _run_kwargs: dict = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if sys.platform == "win32":
+        _run_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        dbg("[CHECKER] Windows: added CREATE_NO_WINDOW to subprocess.run")
+    result = subprocess.run(cmd, **_run_kwargs)
+    dbg(f"[CHECKER] returncode={result.returncode} stdout_len={len(result.stdout)} stderr_len={len(result.stderr)}")
+    if result.stderr:
+        dbg(f"[CHECKER] stderr (first 500 chars): {result.stderr[:500]!r}")
     if cfg["logging_enabled"]:
         out_path, err_path = get_log_file_paths(cfg)
         try:
@@ -674,6 +740,13 @@ def get_live_streamers(streamers: List[str], cfg: dict) -> List[str]:
                 open(out_path, "a", encoding="utf-8").write(result.stdout)
         except Exception:
             pass
+    # Feed checker stdout/stderr into the site's pipe buffers (tagged so the
+    # tabs can filter them based on the "Show All" toggle).
+    if site is not None:
+        for _chk_line in result.stdout.splitlines():
+            site.add_stdout_line(_CHECKER_STDOUT_PREFIX + _chk_line)
+        for _chk_line in result.stderr.splitlines():
+            site.add_stderr_line(_CHECKER_STDERR_PREFIX + _chk_line)
     live = []
     for line in result.stdout.splitlines():
         if not line.strip():
@@ -840,8 +913,15 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
             site.log_line(f"cmd: {cmd_display_str(cmd)}")
 
             try:
-                proc = subprocess.Popen(cmd, stdout=out_target, stderr=err_target)
+                _popen_kwargs: dict = dict(stdout=out_target, stderr=err_target)
+                if sys.platform == "win32":
+                    _popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+                dbg(f"[POPEN] streamer={streamer!r} cmd={cmd!r}")
+                dbg(f"[POPEN] Windows CREATE_NO_WINDOW={'yes' if sys.platform == 'win32' else 'n/a'}")
+                dbg(f"[POPEN] PYTHONPATH={os.environ.get('PYTHONPATH', '<not set>')!r}")
+                proc = subprocess.Popen(cmd, **_popen_kwargs)
                 proc_start_time = time.time()
+                dbg(f"[POPEN] launched pid={proc.pid}")
 
                 site.register_proc(streamer, proc)
 
@@ -1299,7 +1379,7 @@ def monitor_site(site: "SiteState") -> None:
             site.log_line("ERROR: No streamers configured.")
         else:
             site.log_line(f"Checking {len(streamers)} streamer(s)...")
-            live_now = get_live_streamers(streamers, cfg)
+            live_now = get_live_streamers(streamers, cfg, site=site)
             cfg = load_config(site.config_path)
 
             with site.dash_lock:
@@ -2016,20 +2096,42 @@ class JJDlpDashboard:
     def draw_stdout_tab(self, y1, x1, y2, x2):
         sel_site = self.sites[self.selected_site_idx] if self.sites else None
         lines = []
+        show_all = False
         if sel_site is not None:
+            show_all = sel_site.show_checker_stdout
             with sel_site.dash_lock:
-                lines = list(sel_site.dash_stdout_lines)
+                raw = list(sel_site.dash_stdout_lines)
+            if show_all:
+                # Strip the internal prefix tag before displaying
+                lines = [
+                    (ln[len(_CHECKER_STDOUT_PREFIX):] if ln.startswith(_CHECKER_STDOUT_PREFIX) else ln)
+                    for ln in raw
+                ]
+            else:
+                # Only downloader output (no checker prefix)
+                lines = [ln for ln in raw if not ln.startswith(_CHECKER_STDOUT_PREFIX)]
+        title = " STDOUT — Show All: ON  (A toggles) " if show_all else " STDOUT — Show All: OFF (A toggles) "
         self._stdout_scroll = self._draw_pipe_tab(
-            y1, x1, y2, x2, " STDOUT ", lines, self._stdout_scroll)
+            y1, x1, y2, x2, title, lines, self._stdout_scroll)
 
     def draw_stderr_tab(self, y1, x1, y2, x2):
         sel_site = self.sites[self.selected_site_idx] if self.sites else None
         lines = []
+        show_all = False
         if sel_site is not None:
+            show_all = sel_site.show_checker_stderr
             with sel_site.dash_lock:
-                lines = list(sel_site.dash_stderr_lines)
+                raw = list(sel_site.dash_stderr_lines)
+            if show_all:
+                lines = [
+                    (ln[len(_CHECKER_STDERR_PREFIX):] if ln.startswith(_CHECKER_STDERR_PREFIX) else ln)
+                    for ln in raw
+                ]
+            else:
+                lines = [ln for ln in raw if not ln.startswith(_CHECKER_STDERR_PREFIX)]
+        title = " STDERR — Show All: ON  (A toggles) " if show_all else " STDERR — Show All: OFF (A toggles) "
         self._stderr_scroll = self._draw_pipe_tab(
-            y1, x1, y2, x2, " STDERR ", lines, self._stderr_scroll)
+            y1, x1, y2, x2, title, lines, self._stderr_scroll)
 
     # ── EventSub tab ─────────────────────────────────────────────────────────
     def draw_eventsub_tab(self, y1, x1, y2, x2):
@@ -2098,10 +2200,28 @@ class JJDlpDashboard:
                      f"Input: {self._mgmt_buf}_")
         else:
             current_tab = self.TABS[self.selected_tab]
-            if current_tab in ("Log", "Stdout", "Stderr"):
+            if current_tab in ("Log",):
                 hints = (f"  LEFT/RIGHT: switch tabs"
                          f"  [: prev site  ]: next site"
                          f"  UP: scroll up  DOWN: scroll down"
+                         f"  C: colors  Q: quit  ")
+            elif current_tab == "Stdout":
+                sel_site = self.sites[self.selected_site_idx] if self.sites else None
+                show_all = sel_site.show_checker_stdout if sel_site else False
+                show_label = "ON " if show_all else "OFF"
+                hints = (f"  LEFT/RIGHT: switch tabs"
+                         f"  [: prev site  ]: next site"
+                         f"  UP: scroll up  DOWN: scroll down"
+                         f"  A: Show All [{show_label}]"
+                         f"  C: colors  Q: quit  ")
+            elif current_tab == "Stderr":
+                sel_site = self.sites[self.selected_site_idx] if self.sites else None
+                show_all = sel_site.show_checker_stderr if sel_site else False
+                show_label = "ON " if show_all else "OFF"
+                hints = (f"  LEFT/RIGHT: switch tabs"
+                         f"  [: prev site  ]: next site"
+                         f"  UP: scroll up  DOWN: scroll down"
+                         f"  A: Show All [{show_label}]"
                          f"  C: colors  Q: quit  ")
             else:
                 hints = (f"  LEFT/RIGHT: switch tabs"
@@ -2278,7 +2398,16 @@ class JJDlpDashboard:
             elif tab == "Stderr":
                 self._stderr_scroll = max(0, self._stderr_scroll - 1)
         elif key in (ord('a'), ord('A')):
-            self._start_mgmt("add")
+            if current_tab_name == "Stdout" and self.sites:
+                sel = self.sites[self.selected_site_idx]
+                sel.show_checker_stdout = not sel.show_checker_stdout
+                self._stdout_scroll = 0
+            elif current_tab_name == "Stderr" and self.sites:
+                sel = self.sites[self.selected_site_idx]
+                sel.show_checker_stderr = not sel.show_checker_stderr
+                self._stderr_scroll = 0
+            else:
+                self._start_mgmt("add")
         elif key in (ord('r'), ord('R')):
             self._start_mgmt("remove")
         elif key in (ord('d'), ord('D')):
