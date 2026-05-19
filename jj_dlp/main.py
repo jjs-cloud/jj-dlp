@@ -334,8 +334,9 @@ class SiteState:
 
         self._stop_event          = threading.Event()
 
-        # Stdout tab: whether to show checker command output (off by default — can flood with JSON)
+        # Stdout/Stderr tabs: whether to show checker command output (off by default — can flood with JSON)
         self.show_checker_stdout: bool = False
+        self.show_checker_stderr: bool = False
 
         # Popup cooldown: streamer -> epoch of last popup shown
         self.popup_last_shown:    Dict[str, float] = {}
@@ -430,9 +431,10 @@ FFMPEG_ERROR_PATTERNS: List[str] = [
     "Packet corrupt",
 ]
 
-# Lines from the checker command are stored with this prefix so draw_stdout_tab
-# can filter them in/out without a separate buffer.
+# Lines from the checker command are stored with these prefixes so draw_stdout_tab
+# and draw_stderr_tab can filter them in/out without separate buffers.
 _CHECKER_STDOUT_PREFIX: str = "\x00checker\x00"
+_CHECKER_STDERR_PREFIX: str = "\x00checker_err\x00"
 FFMPEG_ERROR_RESTART_THRESHOLD: int = 500
 
 # Wire logger.dbg to this module's OUTPUT_MODE
@@ -701,11 +703,13 @@ def get_live_streamers(streamers: List[str], cfg: dict,
                 open(out_path, "a", encoding="utf-8").write(result.stdout)
         except Exception:
             pass
-    # Feed checker stdout into the site's stdout buffer (tagged so the Stdout
-    # tab can filter them based on the "Show All" toggle).
+    # Feed checker stdout/stderr into the site's pipe buffers (tagged so the
+    # tabs can filter them based on the "Show All" toggle).
     if site is not None:
         for _chk_line in result.stdout.splitlines():
             site.add_stdout_line(_CHECKER_STDOUT_PREFIX + _chk_line)
+        for _chk_line in result.stderr.splitlines():
+            site.add_stderr_line(_CHECKER_STDERR_PREFIX + _chk_line)
     live = []
     for line in result.stdout.splitlines():
         if not line.strip():
@@ -2069,11 +2073,21 @@ class JJDlpDashboard:
     def draw_stderr_tab(self, y1, x1, y2, x2):
         sel_site = self.sites[self.selected_site_idx] if self.sites else None
         lines = []
+        show_all = False
         if sel_site is not None:
+            show_all = sel_site.show_checker_stderr
             with sel_site.dash_lock:
-                lines = list(sel_site.dash_stderr_lines)
+                raw = list(sel_site.dash_stderr_lines)
+            if show_all:
+                lines = [
+                    (ln[len(_CHECKER_STDERR_PREFIX):] if ln.startswith(_CHECKER_STDERR_PREFIX) else ln)
+                    for ln in raw
+                ]
+            else:
+                lines = [ln for ln in raw if not ln.startswith(_CHECKER_STDERR_PREFIX)]
+        title = " STDERR — Show All: ON  (A toggles) " if show_all else " STDERR — Show All: OFF (A toggles) "
         self._stderr_scroll = self._draw_pipe_tab(
-            y1, x1, y2, x2, " STDERR ", lines, self._stderr_scroll)
+            y1, x1, y2, x2, title, lines, self._stderr_scroll)
 
     # ── EventSub tab ─────────────────────────────────────────────────────────
     def draw_eventsub_tab(self, y1, x1, y2, x2):
@@ -2142,7 +2156,7 @@ class JJDlpDashboard:
                      f"Input: {self._mgmt_buf}_")
         else:
             current_tab = self.TABS[self.selected_tab]
-            if current_tab in ("Log", "Stderr"):
+            if current_tab in ("Log",):
                 hints = (f"  LEFT/RIGHT: switch tabs"
                          f"  [: prev site  ]: next site"
                          f"  UP: scroll up  DOWN: scroll down"
@@ -2150,6 +2164,15 @@ class JJDlpDashboard:
             elif current_tab == "Stdout":
                 sel_site = self.sites[self.selected_site_idx] if self.sites else None
                 show_all = sel_site.show_checker_stdout if sel_site else False
+                show_label = "ON " if show_all else "OFF"
+                hints = (f"  LEFT/RIGHT: switch tabs"
+                         f"  [: prev site  ]: next site"
+                         f"  UP: scroll up  DOWN: scroll down"
+                         f"  A: Show All [{show_label}]"
+                         f"  C: colors  Q: quit  ")
+            elif current_tab == "Stderr":
+                sel_site = self.sites[self.selected_site_idx] if self.sites else None
+                show_all = sel_site.show_checker_stderr if sel_site else False
                 show_label = "ON " if show_all else "OFF"
                 hints = (f"  LEFT/RIGHT: switch tabs"
                          f"  [: prev site  ]: next site"
@@ -2334,7 +2357,11 @@ class JJDlpDashboard:
             if current_tab_name == "Stdout" and self.sites:
                 sel = self.sites[self.selected_site_idx]
                 sel.show_checker_stdout = not sel.show_checker_stdout
-                self._stdout_scroll = 0   # reset scroll when toggling
+                self._stdout_scroll = 0
+            elif current_tab_name == "Stderr" and self.sites:
+                sel = self.sites[self.selected_site_idx]
+                sel.show_checker_stderr = not sel.show_checker_stderr
+                self._stderr_scroll = 0
             else:
                 self._start_mgmt("add")
         elif key in (ord('r'), ord('R')):
