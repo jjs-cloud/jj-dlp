@@ -334,6 +334,9 @@ class SiteState:
 
         self._stop_event          = threading.Event()
 
+        # Stdout tab: whether to show checker command output (off by default — can flood with JSON)
+        self.show_checker_stdout: bool = False
+
         # Popup cooldown: streamer -> epoch of last popup shown
         self.popup_last_shown:    Dict[str, float] = {}
 
@@ -426,6 +429,10 @@ FFMPEG_ERROR_PATTERNS: List[str] = [
     "timestamp discontinuity",
     "Packet corrupt",
 ]
+
+# Lines from the checker command are stored with this prefix so draw_stdout_tab
+# can filter them in/out without a separate buffer.
+_CHECKER_STDOUT_PREFIX: str = "\x00checker\x00"
 FFMPEG_ERROR_RESTART_THRESHOLD: int = 500
 
 # Wire logger.dbg to this module's OUTPUT_MODE
@@ -674,7 +681,8 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
         pass
 
 
-def get_live_streamers(streamers: List[str], cfg: dict) -> List[str]:
+def get_live_streamers(streamers: List[str], cfg: dict,
+                       site: Optional["SiteState"] = None) -> List[str]:
     if not streamers:
         return []
     # NOTE: Do NOT filter out blocked streamers here. We still need to know
@@ -693,6 +701,11 @@ def get_live_streamers(streamers: List[str], cfg: dict) -> List[str]:
                 open(out_path, "a", encoding="utf-8").write(result.stdout)
         except Exception:
             pass
+    # Feed checker stdout into the site's stdout buffer (tagged so the Stdout
+    # tab can filter them based on the "Show All" toggle).
+    if site is not None:
+        for _chk_line in result.stdout.splitlines():
+            site.add_stdout_line(_CHECKER_STDOUT_PREFIX + _chk_line)
     live = []
     for line in result.stdout.splitlines():
         if not line.strip():
@@ -1318,7 +1331,7 @@ def monitor_site(site: "SiteState") -> None:
             site.log_line("ERROR: No streamers configured.")
         else:
             site.log_line(f"Checking {len(streamers)} streamer(s)...")
-            live_now = get_live_streamers(streamers, cfg)
+            live_now = get_live_streamers(streamers, cfg, site=site)
             cfg = load_config(site.config_path)
 
             with site.dash_lock:
@@ -2035,11 +2048,23 @@ class JJDlpDashboard:
     def draw_stdout_tab(self, y1, x1, y2, x2):
         sel_site = self.sites[self.selected_site_idx] if self.sites else None
         lines = []
+        show_all = False
         if sel_site is not None:
+            show_all = sel_site.show_checker_stdout
             with sel_site.dash_lock:
-                lines = list(sel_site.dash_stdout_lines)
+                raw = list(sel_site.dash_stdout_lines)
+            if show_all:
+                # Strip the internal prefix tag before displaying
+                lines = [
+                    (ln[len(_CHECKER_STDOUT_PREFIX):] if ln.startswith(_CHECKER_STDOUT_PREFIX) else ln)
+                    for ln in raw
+                ]
+            else:
+                # Only downloader output (no checker prefix)
+                lines = [ln for ln in raw if not ln.startswith(_CHECKER_STDOUT_PREFIX)]
+        title = " STDOUT — Show All: ON  (A toggles) " if show_all else " STDOUT — Show All: OFF (A toggles) "
         self._stdout_scroll = self._draw_pipe_tab(
-            y1, x1, y2, x2, " STDOUT ", lines, self._stdout_scroll)
+            y1, x1, y2, x2, title, lines, self._stdout_scroll)
 
     def draw_stderr_tab(self, y1, x1, y2, x2):
         sel_site = self.sites[self.selected_site_idx] if self.sites else None
@@ -2117,10 +2142,19 @@ class JJDlpDashboard:
                      f"Input: {self._mgmt_buf}_")
         else:
             current_tab = self.TABS[self.selected_tab]
-            if current_tab in ("Log", "Stdout", "Stderr"):
+            if current_tab in ("Log", "Stderr"):
                 hints = (f"  LEFT/RIGHT: switch tabs"
                          f"  [: prev site  ]: next site"
                          f"  UP: scroll up  DOWN: scroll down"
+                         f"  C: colors  Q: quit  ")
+            elif current_tab == "Stdout":
+                sel_site = self.sites[self.selected_site_idx] if self.sites else None
+                show_all = sel_site.show_checker_stdout if sel_site else False
+                show_label = "ON " if show_all else "OFF"
+                hints = (f"  LEFT/RIGHT: switch tabs"
+                         f"  [: prev site  ]: next site"
+                         f"  UP: scroll up  DOWN: scroll down"
+                         f"  A: Show All [{show_label}]"
                          f"  C: colors  Q: quit  ")
             else:
                 hints = (f"  LEFT/RIGHT: switch tabs"
@@ -2297,7 +2331,12 @@ class JJDlpDashboard:
             elif tab == "Stderr":
                 self._stderr_scroll = max(0, self._stderr_scroll - 1)
         elif key in (ord('a'), ord('A')):
-            self._start_mgmt("add")
+            if current_tab_name == "Stdout" and self.sites:
+                sel = self.sites[self.selected_site_idx]
+                sel.show_checker_stdout = not sel.show_checker_stdout
+                self._stdout_scroll = 0   # reset scroll when toggling
+            else:
+                self._start_mgmt("add")
         elif key in (ord('r'), ord('R')):
             self._start_mgmt("remove")
         elif key in (ord('d'), ord('D')):
