@@ -128,7 +128,21 @@ def load_config(config_path: str) -> dict:
         except Exception:
             pass
         yt_dlp_path_raw = ""
-    yt_dlp_path           = yt_dlp_path_raw if yt_dlp_path_raw else "yt-dlp"
+    # Auto-detect bundled yt-dlp module in the project root
+    bundled_yt_dlp_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "yt-dlp")
+    bundled_yt_dlp_module = os.path.join(bundled_yt_dlp_dir, "yt_dlp")
+    
+    if os.path.isdir(bundled_yt_dlp_module):
+        # Inject the bundled directory into PYTHONPATH so subprocesses can find it
+        current_pp = os.environ.get("PYTHONPATH", "")
+        if bundled_yt_dlp_dir not in current_pp:
+            os.environ["PYTHONPATH"] = f"{bundled_yt_dlp_dir}{os.pathsep}{current_pp}" if current_pp else bundled_yt_dlp_dir
+        
+        default_yt_dlp = f"{sys.executable} -m yt_dlp"
+    else:
+        default_yt_dlp = "yt-dlp"
+
+    yt_dlp_path           = yt_dlp_path_raw if yt_dlp_path_raw else default_yt_dlp
     site_label            = general.get("SITE_LABEL", os.path.basename(config_path)).strip().strip('\"\'')
     progress_bar_max_hours = safe_int(general.get("PROGRESS_BAR_MAX_HOURS", 6), 6)
     _raw_pbw = general.get("PROGRESS_BAR_WIDTH", None)
@@ -448,7 +462,12 @@ def kill_proc(proc) -> None:
 
 
 def build_yt_dlp_command(yt_dlp_path: str, base_cmd: List[str], extra: List[str]) -> List[str]:
-    return [yt_dlp_path, *base_cmd, *extra]
+    # Support "python -m yt_dlp" or other commands with arguments
+    if " " in yt_dlp_path and not os.path.isfile(yt_dlp_path):
+        exec_parts = shlex.split(yt_dlp_path)
+    else:
+        exec_parts = [yt_dlp_path]
+    return [*exec_parts, *base_cmd, *extra]
 
 
 def cmd_display_str(cmd: List[str]) -> str:
