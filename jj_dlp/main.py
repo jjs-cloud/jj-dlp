@@ -131,16 +131,37 @@ def load_config(config_path: str) -> dict:
     # Auto-detect bundled yt-dlp module in the project root
     bundled_yt_dlp_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "yt-dlp")
     bundled_yt_dlp_module = os.path.join(bundled_yt_dlp_dir, "yt_dlp")
-    
+
+    startup_dbg(f"[YT_DLP] bundled_yt_dlp_dir={bundled_yt_dlp_dir!r}")
+    startup_dbg(f"[YT_DLP] bundled_yt_dlp_module={bundled_yt_dlp_module!r} exists={os.path.isdir(bundled_yt_dlp_module)}")
+    startup_dbg(f"[YT_DLP] sys.executable={sys.executable!r} platform={sys.platform!r}")
+    startup_dbg(f"[YT_DLP] yt_dlp_path_raw={yt_dlp_path_raw!r}")
+
     if os.path.isdir(bundled_yt_dlp_module):
         # Inject the bundled directory into PYTHONPATH so subprocesses can find it
         current_pp = os.environ.get("PYTHONPATH", "")
         if bundled_yt_dlp_dir not in current_pp:
             os.environ["PYTHONPATH"] = f"{bundled_yt_dlp_dir}{os.pathsep}{current_pp}" if current_pp else bundled_yt_dlp_dir
-        
-        default_yt_dlp = f"{sys.executable} -m yt_dlp"
+
+        # On Windows, sys.executable may be pythonw.exe (the windowless variant).
+        # Subprocesses spawned from pythonw.exe inherit broken pipe handles and
+        # produce no output at all — yt-dlp goes completely silent.
+        # Always force python.exe so the child process has a proper stdio environment.
+        _py_exe = sys.executable
+        if sys.platform == "win32":
+            _py_exe_lower = _py_exe.lower()
+            if _py_exe_lower.endswith("pythonw.exe"):
+                _py_exe = _py_exe[:-len("pythonw.exe")] + "python.exe"
+                startup_dbg(f"[YT_DLP] pythonw.exe detected — rewriting to python.exe: {_py_exe!r}")
+            else:
+                startup_dbg(f"[YT_DLP] python executable OK (not pythonw): {_py_exe!r}")
+
+        startup_dbg(f"[YT_DLP] PYTHONPATH set to: {os.environ['PYTHONPATH']!r}")
+        default_yt_dlp = f"{_py_exe} -m yt_dlp"
+        startup_dbg(f"[YT_DLP] bundled module found → default_yt_dlp={default_yt_dlp!r}")
     else:
         default_yt_dlp = "yt-dlp"
+        startup_dbg(f"[YT_DLP] bundled module NOT found → falling back to system yt-dlp")
 
     yt_dlp_path           = yt_dlp_path_raw if yt_dlp_path_raw else default_yt_dlp
     site_label            = general.get("SITE_LABEL", os.path.basename(config_path)).strip().strip('\"\'')
@@ -187,7 +208,7 @@ def load_config(config_path: str) -> dict:
         for key, val in parser.items("Downloader"):
             item = (val or key).strip()
             if item:
-                downloader_cmd.extend(shlex.split(item))
+                downloader_cmd.extend(shlex.split(item, posix=(sys.platform != "win32")))
 
     return {
         "streamers": streamers,
@@ -473,7 +494,7 @@ def kill_proc(proc) -> None:
 def build_yt_dlp_command(yt_dlp_path: str, base_cmd: List[str], extra: List[str]) -> List[str]:
     # Support "python -m yt_dlp" or other commands with arguments
     if " " in yt_dlp_path and not os.path.isfile(yt_dlp_path):
-        exec_parts = shlex.split(yt_dlp_path)
+        exec_parts = shlex.split(yt_dlp_path, posix=(sys.platform != "win32"))
     else:
         exec_parts = [yt_dlp_path]
     return [*exec_parts, *base_cmd, *extra]
@@ -651,9 +672,14 @@ def open_log_streams(cfg: dict):
 def _drain_pipe(pipe, log_fp, pipe_type: str,
                 ffmpeg_error_counter=None, ffmpeg_error_event=None,
                 streamer: str = "", site: Optional[SiteState] = None) -> None:
+    dbg(f"[DRAIN] thread started pipe_type={pipe_type!r} streamer={streamer!r} pipe={pipe!r}")
+    line_count = 0
     try:
         for raw in pipe:
             line = raw.decode(errors="replace").rstrip("\n")
+            line_count += 1
+            if line_count <= 3:
+                dbg(f"[DRAIN] pipe_type={pipe_type!r} streamer={streamer!r} line#{line_count}: {line[:200]!r}")
             if log_fp is not None:
                 try:
                     log_fp.write(line + "\n")
@@ -679,8 +705,9 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
                         if ffmpeg_error_counter[0] >= FFMPEG_ERROR_RESTART_THRESHOLD:
                             ffmpeg_error_event.set()
                         break
-    except Exception:
-        pass
+    except Exception as _drain_exc:
+        dbg(f"[DRAIN] pipe_type={pipe_type!r} streamer={streamer!r} EXCEPTION: {_drain_exc!r}")
+    dbg(f"[DRAIN] thread exiting pipe_type={pipe_type!r} streamer={streamer!r} total_lines={line_count}")
 
 
 def get_live_streamers(streamers: List[str], cfg: dict,
@@ -695,7 +722,17 @@ def get_live_streamers(streamers: List[str], cfg: dict,
         return []
     urls = [cfg["site_tmpl"].format(username=s) for s in streamers]
     cmd = build_yt_dlp_command(cfg["yt_dlp_path"], cfg["checker_cmd"], urls)
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    dbg(f"[CHECKER] yt_dlp_path={cfg['yt_dlp_path']!r}")
+    dbg(f"[CHECKER] cmd={cmd!r}")
+    dbg(f"[CHECKER] PYTHONPATH={os.environ.get('PYTHONPATH', '<not set>')!r}")
+    _run_kwargs: dict = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if sys.platform == "win32":
+        _run_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        dbg("[CHECKER] Windows: added CREATE_NO_WINDOW to subprocess.run")
+    result = subprocess.run(cmd, **_run_kwargs)
+    dbg(f"[CHECKER] returncode={result.returncode} stdout_len={len(result.stdout)} stderr_len={len(result.stderr)}")
+    if result.stderr:
+        dbg(f"[CHECKER] stderr (first 500 chars): {result.stderr[:500]!r}")
     if cfg["logging_enabled"]:
         out_path, err_path = get_log_file_paths(cfg)
         try:
@@ -876,8 +913,15 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
             site.log_line(f"cmd: {cmd_display_str(cmd)}")
 
             try:
-                proc = subprocess.Popen(cmd, stdout=out_target, stderr=err_target)
+                _popen_kwargs: dict = dict(stdout=out_target, stderr=err_target)
+                if sys.platform == "win32":
+                    _popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+                dbg(f"[POPEN] streamer={streamer!r} cmd={cmd!r}")
+                dbg(f"[POPEN] Windows CREATE_NO_WINDOW={'yes' if sys.platform == 'win32' else 'n/a'}")
+                dbg(f"[POPEN] PYTHONPATH={os.environ.get('PYTHONPATH', '<not set>')!r}")
+                proc = subprocess.Popen(cmd, **_popen_kwargs)
                 proc_start_time = time.time()
+                dbg(f"[POPEN] launched pid={proc.pid}")
 
                 site.register_proc(streamer, proc)
 
