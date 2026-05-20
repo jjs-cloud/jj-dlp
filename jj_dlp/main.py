@@ -102,6 +102,7 @@ def load_config(config_path: str) -> dict:
         if "{username}" in p:
             username_idx = i - len(tmpl_parts)
             break
+    panel_resize          = general.get("PANEL_RESIZE", "true").strip().lower() == "true"
     logging_enabled       = general.get("LOGGING", "false").strip().lower() == "true"
     log_path              = general.get("LOG_PATH", "").strip().strip('\"\'')
     split_logs            = general.get("SPLIT_LOGS", "false").strip().lower() == "true"
@@ -231,6 +232,7 @@ def load_config(config_path: str) -> dict:
         "popup_timeout": popup_timeout,
         "debug_logs": debug_logs,
         "debug_log_path": debug_log_path,
+        "panel_resize": panel_resize,
         "site_tmpl": site_tmpl,
         "username_idx": username_idx,
         "config_path": config_path,
@@ -1948,22 +1950,54 @@ class JJDlpDashboard:
         """
         n       = len(self.sites)
         cols    = min(2, n)
-        rows    = (n + cols - 1) // cols
+        if cols == 0:
+            return
 
         total_w = x2 - x1
         total_h = y2 - y1
 
+        base_rows = (n + cols - 1) // cols
+        base_panel_h = total_h // max(1, base_rows)
+        base_max_streamers = max(0, base_panel_h - 5)
+
+        site_zones = []
+        for site in self.sites:
+            cfg = site.get_cached_config()
+            panel_resize = cfg.get("panel_resize", True)
+            with site.dash_lock:
+                num_streamers = len(site.dash_all_streamers)
+            
+            if panel_resize and num_streamers > base_max_streamers:
+                site_zones.append(2)
+            else:
+                site_zones.append(1)
+
+        col_heights = [0] * cols
+        site_positions = []
+        
+        for span in site_zones:
+            if cols == 1:
+                col = 0
+            else:
+                col = 0 if col_heights[0] <= col_heights[1] else 1
+            
+            start_row = col_heights[col]
+            site_positions.append((col, start_row, span))
+            col_heights[col] += span
+
+        total_rows = max(max(col_heights), 1)
         panel_w = total_w // cols
-        panel_h = total_h // rows
+        panel_h = total_h // total_rows
 
         for idx, site in enumerate(self.sites):
-            col_idx = idx % cols
-            row_idx = idx // cols
+            col, start_row, span = site_positions[idx]
 
-            px1 = x1 + col_idx * panel_w
-            px2 = px1 + panel_w - (0 if col_idx == cols - 1 else 1)
-            py1 = y1 + row_idx * panel_h
-            py2 = py1 + panel_h - (0 if row_idx == rows - 1 else 1)
+            px1 = x1 + col * panel_w
+            px2 = px1 + panel_w - (0 if col == cols - 1 else 1)
+            py1 = y1 + start_row * panel_h
+            
+            end_row = start_row + span
+            py2 = py1 + span * panel_h - (0 if end_row == total_rows else 1)
 
             # Keep panels within bounds
             px2 = min(px2, x2)
