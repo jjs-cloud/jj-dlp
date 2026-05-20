@@ -164,6 +164,16 @@ def load_config(config_path: str) -> dict:
         default_yt_dlp = "yt-dlp"
         startup_dbg(f"[YT_DLP] bundled module NOT found → falling back to system yt-dlp")
 
+    # Resolve relative yt-dlp executable paths against the project root
+    # (the directory containing jj_dlp/), anchored to __file__ rather than
+    # CWD.  This mirrors how output_dir is handled and prevents
+    # FileNotFoundError on Linux when the working directory shifts between
+    # startup and subprocess launch.  Paths that already contain a space
+    # (e.g. "python -m yt_dlp") or are absolute are left unchanged.
+    if yt_dlp_path_raw and " " not in yt_dlp_path_raw and not os.path.isabs(yt_dlp_path_raw):
+        _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        yt_dlp_path_raw = os.path.join(_project_root, yt_dlp_path_raw)
+        startup_dbg(f"[YT_DLP] relative path resolved to absolute: {yt_dlp_path_raw!r}")
     yt_dlp_path           = yt_dlp_path_raw if yt_dlp_path_raw else default_yt_dlp
     site_label            = general.get("SITE_LABEL", os.path.basename(config_path)).strip().strip('\"\'')
     progress_bar_max_hours = safe_int(general.get("PROGRESS_BAR_MAX_HOURS", 6), 6)
