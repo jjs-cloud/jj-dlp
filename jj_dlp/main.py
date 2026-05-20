@@ -111,24 +111,14 @@ def load_config(config_path: str) -> dict:
     debug_logs            = general.get("DEBUG_LOGS", "false").strip().lower() == "true"
     debug_log_path_raw    = general.get("DEBUG_LOG_PATH", "").strip().strip('\"\'')
     debug_log_path        = debug_log_path_raw if debug_log_path_raw else ""
-    yt_dlp_path_raw       = general.get("YT_DLP_PATH", "").strip().strip('"\'')
-    if sys.platform != "win32" and "exe" in yt_dlp_path_raw.lower():
-        # Rewrite the config file, blanking out YT_DLP_PATH so it won't
-        # try to run a Windows .exe on Linux.
-        try:
-            with open(config_path, "r", encoding="utf-8") as _f:
-                _cfg_text = _f.read()
-            import re as _re
-            _cfg_text = _re.sub(
-                r"(?im)^([ \t]*YT_DLP_PATH[ \t]*=[ \t]*).*$",
-                r"\g<1>",
-                _cfg_text,
-            )
-            with open(config_path, "w", encoding="utf-8") as _f:
-                _f.write(_cfg_text)
-        except Exception:
-            pass
-        yt_dlp_path_raw = ""
+    # Select the platform-specific yt-dlp path key
+    if sys.platform == "win32":
+        yt_dlp_path_raw = general.get("YT_DLP_PATH_WINDOWS", "").strip().strip('"\'')
+    elif sys.platform == "darwin":
+        yt_dlp_path_raw = general.get("YT_DLP_PATH_MAC", "").strip().strip('"\'')
+    else:
+        yt_dlp_path_raw = general.get("YT_DLP_PATH_LINUX", "").strip().strip('"\'')
+    startup_dbg(f"[YT_DLP] platform={sys.platform!r} → yt_dlp_path_raw={yt_dlp_path_raw!r}")
     # Auto-detect bundled yt-dlp module in the project root
     bundled_yt_dlp_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "yt-dlp")
     bundled_yt_dlp_module = os.path.join(bundled_yt_dlp_dir, "yt_dlp")
@@ -164,6 +154,16 @@ def load_config(config_path: str) -> dict:
         default_yt_dlp = "yt-dlp"
         startup_dbg(f"[YT_DLP] bundled module NOT found → falling back to system yt-dlp")
 
+    # Resolve relative yt-dlp executable paths against the project root
+    # (the directory containing jj_dlp/), anchored to __file__ rather than
+    # CWD.  This mirrors how output_dir is handled and prevents
+    # FileNotFoundError on Linux when the working directory shifts between
+    # startup and subprocess launch.  Paths that already contain a space
+    # (e.g. "python -m yt_dlp") or are absolute are left unchanged.
+    if yt_dlp_path_raw and " " not in yt_dlp_path_raw and not os.path.isabs(yt_dlp_path_raw):
+        _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        yt_dlp_path_raw = os.path.join(_project_root, yt_dlp_path_raw)
+        startup_dbg(f"[YT_DLP] relative path resolved to absolute: {yt_dlp_path_raw!r}")
     yt_dlp_path           = yt_dlp_path_raw if yt_dlp_path_raw else default_yt_dlp
     site_label            = general.get("SITE_LABEL", os.path.basename(config_path)).strip().strip('\"\'')
     progress_bar_max_hours = safe_int(general.get("PROGRESS_BAR_MAX_HOURS", 6), 6)
