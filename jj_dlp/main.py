@@ -111,24 +111,14 @@ def load_config(config_path: str) -> dict:
     debug_logs            = general.get("DEBUG_LOGS", "false").strip().lower() == "true"
     debug_log_path_raw    = general.get("DEBUG_LOG_PATH", "").strip().strip('\"\'')
     debug_log_path        = debug_log_path_raw if debug_log_path_raw else ""
-    yt_dlp_path_raw       = general.get("YT_DLP_PATH", "").strip().strip('"\'')
-    if sys.platform != "win32" and "exe" in yt_dlp_path_raw.lower():
-        # Rewrite the config file, blanking out YT_DLP_PATH so it won't
-        # try to run a Windows .exe on Linux.
-        try:
-            with open(config_path, "r", encoding="utf-8") as _f:
-                _cfg_text = _f.read()
-            import re as _re
-            _cfg_text = _re.sub(
-                r"(?im)^([ \t]*YT_DLP_PATH[ \t]*=[ \t]*).*$",
-                r"\g<1>",
-                _cfg_text,
-            )
-            with open(config_path, "w", encoding="utf-8") as _f:
-                _f.write(_cfg_text)
-        except Exception:
-            pass
-        yt_dlp_path_raw = ""
+    # Select the platform-specific yt-dlp path key
+    if sys.platform == "win32":
+        yt_dlp_path_raw = general.get("YT_DLP_PATH_WINDOWS", "").strip().strip('"\'')
+    elif sys.platform == "darwin":
+        yt_dlp_path_raw = general.get("YT_DLP_PATH_MAC", "").strip().strip('"\'')
+    else:
+        yt_dlp_path_raw = general.get("YT_DLP_PATH_LINUX", "").strip().strip('"\'')
+    startup_dbg(f"[YT_DLP] platform={sys.platform!r} → yt_dlp_path_raw={yt_dlp_path_raw!r}")
     # Auto-detect bundled yt-dlp module in the project root
     bundled_yt_dlp_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "yt-dlp")
     bundled_yt_dlp_module = os.path.join(bundled_yt_dlp_dir, "yt_dlp")
