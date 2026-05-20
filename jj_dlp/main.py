@@ -490,7 +490,20 @@ def kill_proc(proc) -> None:
     if sys.platform == "win32":
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
     else:
-        proc.kill()
+        # PyInstaller yt-dlp binaries spawn two processes: a bootloader and the
+        # real Python worker.  proc.kill() only kills the bootloader; the worker
+        # becomes an orphan and keeps recording.  Kill the entire process group
+        # instead so both processes are terminated together.
+        import signal as _signal
+        try:
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, _signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            # Process already gone or pgid unavailable — fall back to direct kill
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
 
 def build_yt_dlp_command(yt_dlp_path: str, base_cmd: List[str], extra: List[str]) -> List[str]:
@@ -918,6 +931,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                 _popen_kwargs: dict = dict(stdout=out_target, stderr=err_target)
                 if sys.platform == "win32":
                     _popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+                else:
+                    # Put the child in its own process group so we can kill both
+                    # the PyInstaller bootloader and the real yt-dlp process at once.
+                    _popen_kwargs["start_new_session"] = True
                 dbg(f"[POPEN] streamer={streamer!r} cmd={cmd!r}")
                 dbg(f"[POPEN] Windows CREATE_NO_WINDOW={'yes' if sys.platform == 'win32' else 'n/a'}")
                 dbg(f"[POPEN] PYTHONPATH={os.environ.get('PYTHONPATH', '<not set>')!r}")
@@ -1073,11 +1090,14 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                         site.log_line(f"yt-dlp cmd: {cmd_display_str(next_cmd)}")
 
                         try:
-                            next_proc = subprocess.Popen(
-                                next_cmd,
+                            _next_popen_kwargs: dict = dict(
                                 stdout=next_out_target,
-                                stderr=next_err_target
+                                stderr=next_err_target,
                             )
+                            if sys.platform != "win32":
+                                # Same process-group isolation as the primary Popen above.
+                                _next_popen_kwargs["start_new_session"] = True
+                            next_proc = subprocess.Popen(next_cmd, **_next_popen_kwargs)
 
                             next_proc_start_time = time.time()
                             dbg(f"[SPLIT][record_stream] next_proc started pid={next_proc.pid} "
