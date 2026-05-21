@@ -174,7 +174,8 @@ def load_config(config_path: str) -> dict:
         f"-> parsed progress_bar_width={progress_bar_width}"
     )
     popup_cooldown         = safe_int(general.get("POPUP_COOLDOWN", 30), 30)
-    set_cookie_flag        = general.get("SET_COOKIE_FLAG", "true").strip().lower() not in ("false", "0", "no")
+    downloader_cookies     = general.get("DOWNLOADER_COOKIES", "true").strip().lower() not in ("false", "0", "no")
+    checker_cookies        = general.get("CHECKER_COOKIES", "false").strip().lower() not in ("false", "0", "no")
     ask_for_browser        = general.get("ASK_FOR_BROWSER", "true").strip().lower() not in ("false", "0", "no")
     site_order             = safe_int(general.get("SITE_ORDER", 999), 999)
     last_live_highlight    = safe_int(general.get("LAST_LIVE_HIGHLIGHT", 0), 0)
@@ -241,7 +242,8 @@ def load_config(config_path: str) -> dict:
         "progress_bar_width": progress_bar_width,
         "popup_cooldown": popup_cooldown,
         "disk_drives": disk_drives,
-        "set_cookie_flag": set_cookie_flag,
+        "downloader_cookies": downloader_cookies,
+        "checker_cookies": checker_cookies,
         "ask_for_browser": ask_for_browser,
         "site_order": site_order,
         "last_live_highlight": last_live_highlight,
@@ -2682,32 +2684,28 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
         safe_addstr(stdscr, 1, w - len(ts) - 3, ts, curses.color_pair(1))
         safe_addstr(stdscr, 7, 2, "-" * (w - 4), curses.color_pair(1))
 
-        # Title
-        safe_addstr(stdscr, 9, 2, "SELECT CONFIG FILE(S)", curses.color_pair(5) | curses.A_BOLD)
-
-        # Separator + browser sub-section header
-        files_row_end = 11 + len(chosen_files)
-        safe_addstr(stdscr, 11, 2, "-" * min(w - 4, 60), curses.color_pair(1))
-
-        # Selected config summary (read-only at this stage)
-        safe_addstr(stdscr, 10, 2,
-                    f"Config(s): {', '.join(chosen_files)}",
-                    curses.color_pair(4))
-
         # Browser sub-title
-        br_title_row = files_row_end + 1
+        br_title_row = 9
         safe_addstr(stdscr, br_title_row, 2,
                     "SELECT BROWSER",
                     curses.color_pair(5) | curses.A_BOLD)
         safe_addstr(stdscr, br_title_row + 1, 2,
-                    "",
+                    "Select your browser for the yt-dlp --cookies-from-browser option.",
                     curses.color_pair(3))
         safe_addstr(stdscr, br_title_row + 2, 2,
-                    "Select your browser for the yt-dlp cookies option.  You can select \"disabled\" if you do not want to use cookies",
+                    "Note: Chrome based browsers are not supported. Firefox is recommended.",
                     curses.color_pair(3))
+        applies_to_labels = [
+            file_cfgs[fname].get("site_label")
+            for fname in chosen_files
+            if file_cfgs[fname].get("downloader_cookies", True) or file_cfgs[fname].get("checker_cookies", False)
+        ]
+        safe_addstr(stdscr, br_title_row + 4, 2,
+                    f"Applies to: {', '.join(applies_to_labels)}",
+                    curses.color_pair(4))
 
         # Browser list (single-select radio buttons)
-        list_start_row = br_title_row + 4
+        list_start_row = br_title_row + 6
         for i, br in enumerate(browsers):
             row    = list_start_row + i
             dot    = "(*)" if i == br_cursor else "( )"
@@ -2746,10 +2744,11 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
             chosen_browser = browsers[br_cursor]
             for fname in chosen_files:
                 fpath = os.path.join(os.getcwd(), fname)
-                # SET_COOKIE_FLAG is per-file — only write cookies back if that
-                # specific config has it enabled (True is the default).
-                if file_cfgs[fname].get("set_cookie_flag", True):
-                    _write_browser_to_config(fpath, chosen_browser)
+                # DOWNLOADER_COOKIES and CHECKER_COOKIES are per-file.
+                write_dl = file_cfgs[fname].get("downloader_cookies", True)
+                write_ck = file_cfgs[fname].get("checker_cookies", False)
+                if write_dl or write_ck:
+                    _write_browser_to_config(fpath, chosen_browser, write_downloader=write_dl, write_checker=write_ck)
                 # If "Do not show again" was checked, persist ASK_FOR_BROWSER = False
                 if do_not_show:
                     _write_ask_for_browser_to_config(fpath, False)
