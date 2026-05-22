@@ -10,12 +10,13 @@ import configparser
 import re
 import json
 
-# AAdjust imports to work whether run as module or script
+# Adjust imports to work whether run as module or script
 try:
     from . import logger
     from .main import load_config, _load_global_json, _save_global_json
 except ImportError:
-    pass
+    import logger
+    from main import load_config, _load_global_json, _save_global_json
 
 REPO_ZIP_URL = "https://github.com/jjs-cloud/jj-dlp/archive/refs/heads/experimental.zip"
 API_COMMITS_URL = "https://api.github.com/repos/jjs-cloud/jj-dlp/commits/experimental"
