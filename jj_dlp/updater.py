@@ -102,20 +102,16 @@ def dbg(msg: str, exc: Exception | None = None) -> None:
 
 def _load_global_json() -> dict:
     path = _global_json_path()
-    dbg(f"_load_global_json: attempting to read global.json from: {path}")
+    dbg(f"_load_global_json: path={path}")
     try:
-        if os.path.exists(path):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    raw = f.read()
-                dbg(f"_load_global_json: on-disk contents before load:\n{raw}")
-            except Exception as e:
-                dbg(f"_load_global_json: failed to read raw contents", e)
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        dbg(f"_load_global_json: parsed data: {repr(data)}")
         if isinstance(data, dict):
             return data
+    except FileNotFoundError:
+        dbg(f"_load_global_json: file not found: {path}")
+    except json.JSONDecodeError as e:
+        dbg(f"_load_global_json: invalid JSON in {path}", e)
     except Exception as e:
         dbg("_load_global_json: exception while loading JSON", e)
     return {}
@@ -123,52 +119,28 @@ def _load_global_json() -> dict:
 
 def _save_global_json(data: dict) -> None:
     path = _global_json_path()
-    dbg(f"_save_global_json: attempting to save global.json to: {path}")
+    dbg(f"_save_global_json: path={path} update_info={data.get('update_info') if isinstance(data, dict) else None}")
     try:
-        # Dump targeted fields that are commonly relevant for update troubleshooting
-        try:
-            update_info = data.get('update_info', {}) if isinstance(data, dict) else None
-            latest_sha = update_info.get('latest_sha') if update_info else None
-            current_sha = update_info.get('current_sha') if update_info else None
-            update_available = update_info.get('update_available') if update_info else None
-            dbg(f"_save_global_json: writing update_info latest_sha={latest_sha} current_sha={current_sha} update_available={update_available}")
-        except Exception as e:
-            dbg("_save_global_json: failed to introspect update_info", e)
-
-        # Capture before-state
         if os.path.exists(path):
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     before = f.read()
-                dbg(f"_save_global_json: on-disk BEFORE write:\n{before}")
+                dbg(f"_save_global_json: before write size={len(before)}")
             except Exception as e:
-                dbg("_save_global_json: failed to read before-state", e)
+                dbg("_save_global_json: failed reading before-state", e)
 
-        # Write the file
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-            dbg("_save_global_json: write completed without exception")
-        except Exception as e:
-            dbg("_save_global_json: exception during write", e)
-            return
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        dbg("_save_global_json: write completed")
 
-        # Verify after-state
         try:
             with open(path, "r", encoding="utf-8") as f:
                 after = f.read()
-            dbg(f"_save_global_json: on-disk AFTER write:\n{after}")
-            # Try to parse and compare to detect whether the save was successful
-            try:
-                after_obj = json.loads(after)
-                equal = after_obj == data
-                dbg(f"_save_global_json: verification compare result: {equal}")
-            except Exception as e:
-                dbg("_save_global_json: failed to parse after-state JSON for verification", e)
+            dbg(f"_save_global_json: after write size={len(after)}")
         except Exception as e:
-            dbg("_save_global_json: failed to read after-state", e)
+            dbg("_save_global_json: failed reading after-state", e)
     except Exception as e:
-        dbg("_save_global_json: unexpected exception", e)
+        dbg("_save_global_json: exception writing global.json", e)
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -178,28 +150,29 @@ def check_for_updates_background():
         req = urllib.request.Request(API_COMMITS_URL, headers={'User-Agent': 'jj-dlp-updater'})
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode('utf-8'))
-            latest_sha = data['sha']
-            dbg(f"check_for_updates_background: fetched latest_sha={latest_sha}")
+        latest_sha = data.get('sha')
+        dbg(f"check_for_updates_background: fetched latest_sha={latest_sha}")
 
-            global_data = _load_global_json()
-            current_sha = global_data.get('update_info', {}).get('current_sha')
-            dbg(f"check_for_updates_background: current_sha from disk={current_sha}")
+        if not latest_sha:
+            dbg("check_for_updates_background: API response missing sha")
+            return
 
-            update_info = global_data.setdefault('update_info', {})
-            if current_sha:
-                update_info['update_available'] = current_sha != latest_sha
-            else:
-                # First-run baseline: record the current latest SHA so the next check
-                # can correctly detect a newer upstream commit.
-                update_info['current_sha'] = latest_sha
-                update_info['update_available'] = False
+        global_data = _load_global_json()
+        current_sha = global_data.get('update_info', {}).get('current_sha')
+        dbg(f"check_for_updates_background: current_sha={current_sha}")
 
-            update_info['latest_sha'] = latest_sha
-            dbg(f"check_for_updates_background: prepared update_info latest={update_info.get('latest_sha')} current={update_info.get('current_sha')} update_available={update_info.get('update_available')}")
-            _save_global_json(global_data)
-            dbg("check_for_updates_background: _save_global_json() returned (see debug.log for details)")
-    except Exception:
-        pass  # Silently fail in background
+        update_info = global_data.setdefault('update_info', {})
+        if current_sha:
+            update_info['update_available'] = current_sha != latest_sha
+        else:
+            update_info['current_sha'] = latest_sha
+            update_info['update_available'] = False
+
+        update_info['latest_sha'] = latest_sha
+        dbg(f"check_for_updates_background: update_info current_sha={update_info.get('current_sha')} latest_sha={latest_sha} update_available={update_info.get('update_available')}")
+        _save_global_json(global_data)
+    except Exception as e:
+        dbg("check_for_updates_background: failed during update check", e)
 
 
 def mark_update_completed():
@@ -225,6 +198,7 @@ def get_base_dir():
 
 
 def perform_update():
+    dbg("perform_update: starting update")
     print("\n--- jj-dlp Updater ---")
     
     temp_dir = tempfile.mkdtemp(prefix="jj_dlp_update_")
@@ -234,7 +208,9 @@ def perform_update():
     zip_path = os.path.join(temp_dir, "testing.zip")
     try:
         urllib.request.urlretrieve(REPO_ZIP_URL, zip_path)
+        dbg(f"perform_update: downloaded zip to {zip_path}")
     except Exception as e:
+        dbg("perform_update: download failed", e)
         print(f"Error downloading update: {e}")
         shutil.rmtree(temp_dir, ignore_errors=True)
         return
@@ -245,7 +221,9 @@ def perform_update():
     try:
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             zip_ref.extractall(extract_dir)
+        dbg(f"perform_update: extracted zip to {extract_dir}")
     except Exception as e:
+        dbg("perform_update: extraction failed", e)
         print(f"Error extracting update: {e}")
         shutil.rmtree(temp_dir, ignore_errors=True)
         return
@@ -259,42 +237,26 @@ def perform_update():
 
     base_dir = get_base_dir()
 
-    # Run stage 2 from the *downloaded* copy of updater.py, not the live one.
-    # This avoids any file-locking issues on Windows (you can't overwrite a
-    # .py file that Python currently has open), and ensures stage 2 uses the
-    # latest updater logic from the release being installed.  The old
-    # updater.py will be cleanly overwritten by copy_and_diff inside stage 2.
     new_updater_path = os.path.join(source_dir, "jj_dlp", "updater.py")
     curr_updater_path = os.path.join(base_dir, "jj_dlp", "updater.py")
     stage2_script = new_updater_path if os.path.exists(new_updater_path) else curr_updater_path
 
     print("Launching stage 2 of the updater...")
-    # Pass PYTHONIOENCODING=utf-8 so that Unicode characters printed by
-    # main.py at import time (e.g. the ✔ in plain_ffmpeg_check) don't cause a
-    # UnicodeEncodeError when the subprocess inherits a cp1252 console.
     stage2_env = os.environ.copy()
     stage2_env["PYTHONIOENCODING"] = "utf-8"
-    dbg(f"perform_update: launching stage2 script: {stage2_script} with source_dir={source_dir} base_dir={base_dir} temp_dir={temp_dir}")
-    # If the downloaded copy of updater.py exists, overwrite it with our
-    # instrumented copy so that stage 2 (which runs the downloaded script)
-    # will emit the same debug logs. Also set JJ_DLP_DEBUG_LOG_DIR so the
-    # copied script writes logs into the live package directory instead of
-    # leaving them in a temporary folder that gets removed.
+    dbg(f"perform_update: launching stage2 script: {stage2_script} source_dir={source_dir} base_dir={base_dir} temp_dir={temp_dir}")
     try:
         if os.path.exists(new_updater_path):
             try:
                 shutil.copy2(curr_updater_path, new_updater_path)
-                dbg(f"perform_update: copied instrumented updater to {new_updater_path}")
+                dbg(f"perform_update: copied current updater.py into downloaded stage2 updater at {new_updater_path}")
             except Exception as e:
-                dbg(f"perform_update: failed to copy instrumented updater to {new_updater_path}", e)
-        # Ensure stage2 writes debug.log into the real package dir
+                dbg("perform_update: failed to copy current updater to stage2 script", e)
         real_pkg_dir = os.path.dirname(os.path.abspath(__file__))
         stage2_env['JJ_DLP_DEBUG_LOG_DIR'] = real_pkg_dir
-        # Tell stage2 explicitly where the real global.json lives so it updates
-        # the live package state instead of a temp copy.
         stage2_env['JJ_DLP_GLOBAL_JSON_PATH'] = os.path.join(real_pkg_dir, 'global.json')
         stage2_env['JJ_DLP_GLOBAL_DIR'] = real_pkg_dir
-        dbg(f"perform_update: set JJ_DLP_DEBUG_LOG_DIR={stage2_env['JJ_DLP_DEBUG_LOG_DIR']} and JJ_DLP_GLOBAL_JSON_PATH={stage2_env['JJ_DLP_GLOBAL_JSON_PATH']}")
+        dbg(f"perform_update: set JJ_DLP_DEBUG_LOG_DIR={stage2_env['JJ_DLP_DEBUG_LOG_DIR']} JJ_DLP_GLOBAL_JSON_PATH={stage2_env['JJ_DLP_GLOBAL_JSON_PATH']}")
     except Exception as e:
         dbg("perform_update: unexpected error while preparing stage2 updater", e)
     try:
@@ -303,12 +265,14 @@ def perform_update():
             check=True,
             env=stage2_env,
         )
+        dbg("perform_update: stage2 subprocess completed")
     except subprocess.CalledProcessError as e:
+        dbg("perform_update: stage2 subprocess failed", e)
         print(f"Update failed during stage 2: {e}")
     except Exception as e:
+        dbg("perform_update: failed launching stage2", e)
         print(f"Error launching stage 2: {e}")
-        
-    # temp_dir is cleaned up in stage 2 or we can clean it up here if stage 2 failed
+    # temp_dir cleanup should happen in stage2
 
 
 def get_old_config_section(config_path, section_name):
@@ -412,6 +376,7 @@ def create_diff(old_content, new_content, file_path, diff_dir):
 
 
 def _stage2(source_dir, base_dir, temp_dir):
+    dbg(f"_stage2: starting stage2 source_dir={source_dir} base_dir={base_dir} temp_dir={temp_dir}")
     try:
         print("Running Stage 2 of update...")
         
@@ -491,7 +456,6 @@ def _stage2(source_dir, base_dir, temp_dir):
                 for item in os.listdir(src):
                     copy_and_diff(os.path.join(src, item), os.path.join(dst, item))
             else:
-                # Never overwrite global.json — it contains live runtime state.
                 if os.path.basename(dst) == "global.json":
                     return
                 if os.path.exists(dst):
@@ -501,15 +465,23 @@ def _stage2(source_dir, base_dir, temp_dir):
                         new_content = f.read()
                     if old_content != new_content and not dst.endswith(".conf"):
                         create_diff(old_content, new_content, dst, actual_diff_dir)
+                        if os.path.basename(dst) == "updater.py":
+                            dbg(f"_stage2.copy_and_diff: updater.py changed, copying {src} -> {dst}")
+                else:
+                    if os.path.basename(dst) == "updater.py":
+                        dbg(f"_stage2.copy_and_diff: copying new updater.py {src} -> {dst}")
                 shutil.copy2(src, dst)
                 
         copy_and_diff(source_dir, base_dir)
+
+        dbg("_stage2: files copied from source to base")
 
         # Ensure bin/ scripts are executable on Linux/macOS
         print("Setting executable permissions on bin/ files...")
         _mark_bin_executable(base_dir)
         
         mark_update_completed()
+        dbg("_stage2: marked update completed")
         
         print("\n" + "="*60)
         print("✅ Update completed successfully!")
@@ -524,7 +496,6 @@ def _stage2(source_dir, base_dir, temp_dir):
             
             print("\nLaunching jj-dlp...")
             try:
-                # Launch the main script and exit the updater
                 subprocess.Popen([sys.executable, main_script])
                 print("jj-dlp has been started.")
             except Exception as e:
@@ -535,6 +506,7 @@ def _stage2(source_dir, base_dir, temp_dir):
             input("Press Enter to exit...")
 
     except Exception as e:
+        dbg("_stage2: exception during stage2", e)
         print(f"Error during stage 2: {e}")
         import traceback
         traceback.print_exc()

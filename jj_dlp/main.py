@@ -2973,7 +2973,10 @@ def main() -> None:
     
     global UPDATE_AVAILABLE
     if any_check:
-        if is_update_available():
+        dbg(f"[UPDATER] enabled startup checker update_interval={update_interval}")
+        startup_available = is_update_available()
+        dbg(f"[UPDATER] startup read update_available={startup_available}")
+        if startup_available:
             with update_available_lock:
                 UPDATE_AVAILABLE = True
             print("\n[Updater] A new version of jj-dlp is available!")
@@ -2989,8 +2992,19 @@ def main() -> None:
             global UPDATE_AVAILABLE
             while True:
                 check_for_updates_background()
+                new_available = is_update_available()
                 with update_available_lock:
-                    UPDATE_AVAILABLE = is_update_available()
+                    prev_available = UPDATE_AVAILABLE
+                    UPDATE_AVAILABLE = new_available
+                dbg(f"[UPDATER] periodic check prev={prev_available} new={new_available}")
+                if not prev_available and new_available:
+                    print("\n[Updater] A new version of jj-dlp is available!")
+                    ans = _input_with_timeout("[Updater] Do you want to update now? (y/n) [timeout in 10s]: ", timeout_seconds=10)
+                    if ans == 'y':
+                        perform_update()
+                        sys.exit(0)
+                    elif ans is None:
+                        print("[Updater] No response received. Continuing with current version.")
                 time.sleep(update_interval * 60)
 
         threading.Thread(target=_periodic_update_checker, daemon=True).start()
