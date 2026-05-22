@@ -504,6 +504,10 @@ class SiteState:
 OUTPUT_MODE = 1
 output_mode_lock = threading.Lock()
 
+# Update availability flag (set during startup, read by dashboard)
+UPDATE_AVAILABLE = False
+update_available_lock = threading.Lock()
+
 FFMPEG_ERROR_PATTERNS: List[str] = [
     "timestamp discontinuity",
     "Packet corrupt",
@@ -1772,6 +1776,12 @@ class JJDlpDashboard:
         except Exception:
             pass
 
+        # Add Update Available row if applicable
+        with update_available_lock:
+            if UPDATE_AVAILABLE:
+                rows.append(("",               "",                 0))
+                rows.append(("Update",         "Available!",       self.C_WARN))
+
         inner_w = x2 - x1 - 2
         label_w = min(10, inner_w // 2)
 
@@ -2417,6 +2427,13 @@ class JJDlpDashboard:
         safe_addstr(self.stdscr, 1, w - len(sys_time_str) - 3, sys_time_str,
                     curses.color_pair(self.C_CHROME))
 
+        # Update Available indicator (below system time)
+        with update_available_lock:
+            if UPDATE_AVAILABLE:
+                update_str = "Update Available"
+                safe_addstr(self.stdscr, 2, w - len(update_str) - 3, update_str,
+                            curses.color_pair(self.C_WARN) | curses.A_BOLD)
+
         # Blank line after logo (row 7), then tab bar at row 8
         # (Logo occupies rows 1-6, row 7 is blank, tabs at row 8)
         self.draw_tabs(8, 2)
@@ -2825,6 +2842,35 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
     return chosen_files  # unreachable, satisfies type checker
 
 
+def _input_with_timeout(prompt: str, timeout_seconds: int = 10) -> Optional[str]:
+    """Prompt the user for input with a timeout.
+    
+    Returns the user's input (stripped) if they respond within timeout_seconds.
+    Returns None if the timeout expires without a response.
+    """
+    import sys
+    
+    result = []
+    
+    def _read_input():
+        try:
+            user_input = input(prompt)
+            result.append(user_input)
+        except (EOFError, KeyboardInterrupt):
+            result.append(None)
+    
+    thread = threading.Thread(target=_read_input, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_seconds)
+    
+    if thread.is_alive():
+        # Timeout occurred
+        print()  # New line after timeout
+        return None
+    
+    return result[0].strip() if result and result[0] is not None else None
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # main()
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2911,12 +2957,19 @@ def main() -> None:
     # CHECK_FOR_UPDATES is now a global setting.
     any_check = global_cfg.get("check_for_updates", True)
     
+    global UPDATE_AVAILABLE
     if any_check:
         if is_update_available():
-            ans = input("\n[Updater] A new version of jj-dlp is available! Do you want to update now? (y/n): ").strip().lower()
+            with update_available_lock:
+                UPDATE_AVAILABLE = True
+            print("\n[Updater] A new version of jj-dlp is available!")
+            ans = _input_with_timeout("[Updater] Do you want to update now? (y/n) [timeout in 10s]: ", timeout_seconds=10)
             if ans == 'y':
                 perform_update()
                 sys.exit(0)
+            elif ans is None:
+                print("[Updater] No response received. Continuing with current version.")
+            # If user said 'n' or anything else, just continue
         
         # Start background check for the next time
         threading.Thread(target=check_for_updates_background, daemon=True).start()
