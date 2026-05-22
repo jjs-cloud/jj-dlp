@@ -2980,7 +2980,13 @@ def main() -> None:
             with update_available_lock:
                 UPDATE_AVAILABLE = True
             print("\n[Updater] A new version of jj-dlp is available!")
-            ans = _input_with_timeout("[Updater] Do you want to update now? (y/n) [timeout in 10s]: ", timeout_seconds=10)
+            # If the curses dashboard is active, avoid blocking on stdin which
+            # would interfere with curses input handling. Skip interactive
+            # prompt in that case.
+            if _get_output_mode() == 1:
+                ans = None
+            else:
+                ans = _input_with_timeout("[Updater] Do you want to update now? (y/n) [timeout in 10s]: ", timeout_seconds=10)
             if ans == 'y':
                 perform_update()
                 sys.exit(0)
@@ -2999,7 +3005,12 @@ def main() -> None:
                 dbg(f"[UPDATER] periodic check prev={prev_available} new={new_available}")
                 if not prev_available and new_available:
                     print("\n[Updater] A new version of jj-dlp is available!")
-                    ans = _input_with_timeout("[Updater] Do you want to update now? (y/n) [timeout in 10s]: ", timeout_seconds=10)
+                    # Avoid prompting when curses dashboard is active to prevent
+                    # a background thread from stealing keyboard input.
+                    if _get_output_mode() == 1:
+                        ans = None
+                    else:
+                        ans = _input_with_timeout("[Updater] Do you want to update now? (y/n) [timeout in 10s]: ", timeout_seconds=10)
                     if ans == 'y':
                         perform_update()
                         sys.exit(0)
