@@ -10,7 +10,7 @@ import configparser
 import re
 import json
 
-# Adjust imports to work whether run as module or script
+# AAdjust imports to work whether run as module or script
 try:
     from . import logger
     from .main import load_config, _load_global_json, _save_global_json
