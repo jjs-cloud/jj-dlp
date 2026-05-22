@@ -47,17 +47,18 @@ class ConfigItem:
 
 
 # ── Keys that live in global.conf (never shown in per-site editor) ────────────
-_GLOBAL_KEYS = {"DISK_DRIVES", "DEBUG_LOGS", "DEBUG_LOG_PATH", "CHECK_FOR_UPDATES", "ASK_FOR_BROWSER"}
+_GLOBAL_KEYS = {"DISK_DRIVES", "DEBUG_LOGS", "DEBUG_LOG_PATH", "CHECK_FOR_UPDATES", "UPDATE_INTERVAL", "ASK_FOR_BROWSER"}
 
 
 class GlobalConfigEditor:
-    """Loads and edits global.conf — the five app-wide settings."""
+    """Loads and edits global.conf — the six app-wide settings."""
 
     GLOBAL_KEYS_ORDER = [
         "DISK_DRIVES",
         "DEBUG_LOGS",
         "DEBUG_LOG_PATH",
         "CHECK_FOR_UPDATES",
+        "UPDATE_INTERVAL",
         "ASK_FOR_BROWSER",
     ]
     GLOBAL_KEYS_COMMENTS = {
@@ -65,6 +66,7 @@ class GlobalConfigEditor:
         "DEBUG_LOGS":         "Enable debug logging (true/false).",
         "DEBUG_LOG_PATH":     "Path for the debug log file. Leave blank to use the default location.",
         "CHECK_FOR_UPDATES":  "Check for jj-dlp updates on startup (true/false).",
+        "UPDATE_INTERVAL":    "Update check interval in minutes.",
         "ASK_FOR_BROWSER":    "Show the browser-cookie picker on startup (true/false).",
     }
 
@@ -118,6 +120,9 @@ class GlobalConfigEditor:
             "# Check for updates on startup (true/false).\n",
             "CHECK_FOR_UPDATES = true\n",
             "\n",
+            "# Update check interval in minutes.\n",
+            "UPDATE_INTERVAL = 30\n",
+            "\n",
             "# Show the browser-cookie picker on startup (true/false).\n",
             "ASK_FOR_BROWSER = true\n",
         ]
@@ -170,6 +175,7 @@ class GlobalConfigEditor:
             "DEBUG_LOGS": "false",
             "DEBUG_LOG_PATH": "",
             "CHECK_FOR_UPDATES": "true",
+            "UPDATE_INTERVAL": "30",
             "ASK_FOR_BROWSER": "true",
         }
         val = defaults.get(key, "")

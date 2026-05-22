@@ -276,6 +276,7 @@ def load_global_config() -> dict:
         debug_logs        – bool
         debug_log_path    – str
         check_for_updates – bool
+        update_interval   – int
         ask_for_browser   – bool
     """
     path = get_global_conf_path()
@@ -298,13 +299,23 @@ def load_global_config() -> dict:
     disk_drives_raw = general.get("DISK_DRIVES", "").strip().strip('"\'')
     disk_drives = [d.strip() for d in disk_drives_raw.split(",") if d.strip()] if disk_drives_raw else []
 
+    def _int(key: str, default: int) -> int:
+        raw = general.get(key, "").strip()
+        try:
+            value = int(raw)
+            return value if value > 0 else default
+        except Exception:
+            return default
+
     debug_log_path_raw = general.get("DEBUG_LOG_PATH", "").strip().strip('"\'')
+    update_interval = _int("UPDATE_INTERVAL", 30)
 
     return {
         "disk_drives":        disk_drives,
         "debug_logs":         _bool("DEBUG_LOGS", False),
         "debug_log_path":     debug_log_path_raw,
         "check_for_updates":  _bool("CHECK_FOR_UPDATES", True),
+        "update_interval":    update_interval,
         "ask_for_browser":    _bool("ASK_FOR_BROWSER", True),
     }
 
@@ -2956,6 +2967,9 @@ def main() -> None:
     from .updater import check_for_updates_background, is_update_available, perform_update
     # CHECK_FOR_UPDATES is now a global setting.
     any_check = global_cfg.get("check_for_updates", True)
+    update_interval = global_cfg.get("update_interval", 30)
+    if update_interval <= 0:
+        update_interval = 30
     
     global UPDATE_AVAILABLE
     if any_check:
@@ -2970,9 +2984,16 @@ def main() -> None:
             elif ans is None:
                 print("[Updater] No response received. Continuing with current version.")
             # If user said 'n' or anything else, just continue
-        
-        # Start background check for the next time
-        threading.Thread(target=check_for_updates_background, daemon=True).start()
+
+        def _periodic_update_checker() -> None:
+            global UPDATE_AVAILABLE
+            while True:
+                check_for_updates_background()
+                with update_available_lock:
+                    UPDATE_AVAILABLE = is_update_available()
+                time.sleep(update_interval * 60)
+
+        threading.Thread(target=_periodic_update_checker, daemon=True).start()
 
     from . import logger as _logger
     with _logger.debug_log_lock:
