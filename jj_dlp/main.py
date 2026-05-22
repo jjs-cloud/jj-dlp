@@ -179,6 +179,7 @@ def load_config(config_path: str) -> dict:
     ask_for_browser        = general.get("ASK_FOR_BROWSER", "true").strip().lower() not in ("false", "0", "no")
     site_order             = safe_int(general.get("SITE_ORDER", 999), 999)
     last_live_highlight    = safe_int(general.get("LAST_LIVE_HIGHLIGHT", 0), 0)
+    check_for_updates      = general.get("CHECK_FOR_UPDATES", "true").strip().lower() not in ("false", "0", "no")
 
     # Disk drives to monitor (comma-separated paths/letters, e.g. "C:\,D:\,/home")
     disk_drives_raw = general.get("DISK_DRIVES", "").strip().strip('\"\'')
@@ -247,6 +248,7 @@ def load_config(config_path: str) -> dict:
         "ask_for_browser": ask_for_browser,
         "site_order": site_order,
         "last_live_highlight": last_live_highlight,
+        "check_for_updates": check_for_updates,
         "twitch_enabled": twitch_enabled,
         "twitch_client_id": twitch_client_id,
         "twitch_client_secret": twitch_client_secret,
@@ -629,7 +631,6 @@ def _modify_config_streamer(config_path: str, username: str, action: str) -> str
         removed = _remove_from_section("Streamers", username)
         messages.append(f"Removed '{username}' from [Streamers]." if removed else f"'{username}' not found.")
         _add_to_section("Block", username)
-        messages.append(f"Added '{username}' to [Block].")
     elif action == "disable":
         in_streamers = False
         if "Streamers" in section_starts:
@@ -2166,7 +2167,7 @@ class JJDlpDashboard:
             else:
                 # Only downloader output (no checker prefix)
                 lines = [ln for ln in raw if not ln.startswith(_CHECKER_STDOUT_PREFIX)]
-        title = " STDOUT — Show All: ON  (A toggles) " if show_all else " STDOUT — Show All: OFF (A toggles) "
+        title = " STDOUT — Show All: ON  (Press A to toggle) " if show_all else " STDOUT — Show All: OFF (Press A to toggle) "
         self._stdout_scroll = self._draw_pipe_tab(
             y1, x1, y2, x2, title, lines, self._stdout_scroll)
 
@@ -2185,7 +2186,7 @@ class JJDlpDashboard:
                 ]
             else:
                 lines = [ln for ln in raw if not ln.startswith(_CHECKER_STDERR_PREFIX)]
-        title = " STDERR — Show All: ON  (A toggles) " if show_all else " STDERR — Show All: OFF (A toggles) "
+        title = " STDERR — Show All: ON  (Press A to toggle) " if show_all else " STDERR — Show All: OFF (Press A to toggle) "
         self._stderr_scroll = self._draw_pipe_tab(
             y1, x1, y2, x2, title, lines, self._stderr_scroll)
 
@@ -2774,7 +2775,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="jj-dlp multi-site stream recorder")
     parser.add_argument("--config", nargs="+", default=None,
                         help="Path(s) to config file(s). Omit to auto-discover.")
+    parser.add_argument("--update", action="store_true", help="Update jj-dlp to the latest version")
     args = parser.parse_args()
+
+    if args.update:
+        from .updater import perform_update
+        perform_update()
+        sys.exit(0)
 
     # ── Config discovery / selection ──────────────────────────────────────────
     if args.config is not None:
@@ -2820,6 +2827,20 @@ def main() -> None:
 
     # ── Global config / debug setup ───────────────────────────────────────────
     initial_cfg = load_config(config_paths[0])
+
+    # ── Updater logic ─────────────────────────────────────────────────────────
+    from .updater import check_for_updates_background, is_update_available, perform_update
+    any_check = any(load_config(cp).get("check_for_updates", True) for cp in config_paths)
+    
+    if any_check:
+        if is_update_available():
+            ans = input("\n[Updater] A new version of jj-dlp is available! Do you want to update now? (y/n): ").strip().lower()
+            if ans == 'y':
+                perform_update()
+                sys.exit(0)
+        
+        # Start background check for the next time
+        threading.Thread(target=check_for_updates_background, daemon=True).start()
 
     from . import logger as _logger
     with _logger.debug_log_lock:
