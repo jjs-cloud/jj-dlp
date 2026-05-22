@@ -9,6 +9,8 @@ import subprocess
 import configparser
 import re
 import json
+import traceback
+import datetime
 
 # When run directly as a script (e.g. stage-2 update), ensure the project root
 # is on sys.path so that jj_dlp is importable as a proper package.
@@ -50,23 +52,96 @@ def _global_json_path() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "global.json")
 
 
-def _load_global_json() -> dict:
+def dbg(msg: str, exc: Exception | None = None) -> None:
+    """Append a timestamped debug message to debug.log next to this package.
+
+    Designed to be safe to call when updater.py is executed as a standalone
+    stage-2 script.  Dumps optional exception tracebacks and keeps a simple
+    append-only log for post-mortem inspection.
+    """
     try:
-        with open(_global_json_path(), "r", encoding="utf-8") as f:
+        log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug.log")
+        ts = datetime.datetime.utcnow().isoformat() + "Z"
+        with open(log_path, "a", encoding="utf-8") as lf:
+            lf.write(f"[{ts}] {msg}\n")
+            if exc is not None:
+                lf.write("""Exception traceback:\n""")
+                lf.write(''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+                lf.write("\n")
+    except Exception:
+        # Never raise from the debugger helper
+        pass
+
+
+def _load_global_json() -> dict:
+    path = _global_json_path()
+    dbg(f"_load_global_json: attempting to read global.json from: {path}")
+    try:
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    raw = f.read()
+                dbg(f"_load_global_json: on-disk contents before load:\n{raw}")
+            except Exception as e:
+                dbg(f"_load_global_json: failed to read raw contents", e)
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
+        dbg(f"_load_global_json: parsed data: {repr(data)}")
         if isinstance(data, dict):
             return data
-    except Exception:
-        pass
+    except Exception as e:
+        dbg("_load_global_json: exception while loading JSON", e)
     return {}
 
 
 def _save_global_json(data: dict) -> None:
+    path = _global_json_path()
+    dbg(f"_save_global_json: attempting to save global.json to: {path}")
     try:
-        with open(_global_json_path(), "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except Exception:
-        pass
+        # Dump targeted fields that are commonly relevant for update troubleshooting
+        try:
+            update_info = data.get('update_info', {}) if isinstance(data, dict) else None
+            latest_sha = update_info.get('latest_sha') if update_info else None
+            current_sha = update_info.get('current_sha') if update_info else None
+            update_available = update_info.get('update_available') if update_info else None
+            dbg(f"_save_global_json: writing update_info latest_sha={latest_sha} current_sha={current_sha} update_available={update_available}")
+        except Exception as e:
+            dbg("_save_global_json: failed to introspect update_info", e)
+
+        # Capture before-state
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    before = f.read()
+                dbg(f"_save_global_json: on-disk BEFORE write:\n{before}")
+            except Exception as e:
+                dbg("_save_global_json: failed to read before-state", e)
+
+        # Write the file
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            dbg("_save_global_json: write completed without exception")
+        except Exception as e:
+            dbg("_save_global_json: exception during write", e)
+            return
+
+        # Verify after-state
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                after = f.read()
+            dbg(f"_save_global_json: on-disk AFTER write:\n{after}")
+            # Try to parse and compare to detect whether the save was successful
+            try:
+                after_obj = json.loads(after)
+                equal = after_obj == data
+                dbg(f"_save_global_json: verification compare result: {equal}")
+            except Exception as e:
+                dbg("_save_global_json: failed to parse after-state JSON for verification", e)
+        except Exception as e:
+            dbg("_save_global_json: failed to read after-state", e)
+    except Exception as e:
+        dbg("_save_global_json: unexpected exception", e)
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -77,10 +152,12 @@ def check_for_updates_background():
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode('utf-8'))
             latest_sha = data['sha']
-            
+            dbg(f"check_for_updates_background: fetched latest_sha={latest_sha}")
+
             global_data = _load_global_json()
             current_sha = global_data.get('update_info', {}).get('current_sha')
-            
+            dbg(f"check_for_updates_background: current_sha from disk={current_sha}")
+
             update_info = global_data.setdefault('update_info', {})
             if current_sha:
                 update_info['update_available'] = current_sha != latest_sha
@@ -89,9 +166,11 @@ def check_for_updates_background():
                 # can correctly detect a newer upstream commit.
                 update_info['current_sha'] = latest_sha
                 update_info['update_available'] = False
-                
+
             update_info['latest_sha'] = latest_sha
+            dbg(f"check_for_updates_background: prepared update_info latest={update_info.get('latest_sha')} current={update_info.get('current_sha')} update_available={update_info.get('update_available')}")
             _save_global_json(global_data)
+            dbg("check_for_updates_background: _save_global_json() returned (see debug.log for details)")
     except Exception:
         pass  # Silently fail in background
 
@@ -103,7 +182,9 @@ def mark_update_completed():
     if latest_sha:
         update_info['current_sha'] = latest_sha
     update_info['update_available'] = False
+    dbg(f"mark_update_completed: updating update_info to current_sha={update_info.get('current_sha')} latest_sha={update_info.get('latest_sha')} update_available={update_info.get('update_available')}")
     _save_global_json(global_data)
+    dbg("mark_update_completed: _save_global_json() returned (see debug.log for details)")
 
 
 def is_update_available():
@@ -166,6 +247,7 @@ def perform_update():
     # UnicodeEncodeError when the subprocess inherits a cp1252 console.
     stage2_env = os.environ.copy()
     stage2_env["PYTHONIOENCODING"] = "utf-8"
+    dbg(f"perform_update: launching stage2 script: {stage2_script} with source_dir={source_dir} base_dir={base_dir} temp_dir={temp_dir}")
     try:
         subprocess.run(
             [sys.executable, stage2_script, "--stage2", source_dir, base_dir, temp_dir],
