@@ -509,15 +509,39 @@ def _stage2(source_dir, base_dir, temp_dir):
         _mark_bin_executable(base_dir)
         
         mark_update_completed()
-        print("Update completed successfully! Diff files are available in the 'diff' directory.")
         
+        print("\n" + "="*60)
+        print("✅ Update completed successfully!")
+        print(f"   Diff files are available in the 'diff' directory.")
+        print("="*60)
+
+        # === NEW: Prompt user before launching main script ===
+        main_script = os.path.join(base_dir, "jj-dlp.py")
+        
+        if os.path.exists(main_script):
+            input("\nPress Enter to start jj-dlp... ")
+            
+            print("\nLaunching jj-dlp...")
+            try:
+                # Launch the main script and exit the updater
+                subprocess.Popen([sys.executable, main_script])
+                print("jj-dlp has been started.")
+            except Exception as e:
+                print(f"Failed to launch jj-dlp: {e}")
+                input("Press Enter to exit...")
+        else:
+            print(f"\nWarning: Could not find main script at: {main_script}")
+            input("Press Enter to exit...")
+
     except Exception as e:
         print(f"Error during stage 2: {e}")
         import traceback
         traceback.print_exc()
+        input("\nPress Enter to exit...")
     finally:
         print(f"Cleaning up temporary directory: {temp_dir}")
         shutil.rmtree(temp_dir, ignore_errors=True)
+
 
 
 if __name__ == "__main__":
