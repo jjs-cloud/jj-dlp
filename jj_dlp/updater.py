@@ -60,7 +60,16 @@ def dbg(msg: str, exc: Exception | None = None) -> None:
     append-only log for post-mortem inspection.
     """
     try:
-        log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug.log")
+        # Allow tests or stage2 to redirect logs to a specific directory.
+        forced_dir = os.environ.get('JJ_DLP_DEBUG_LOG_DIR')
+        if forced_dir:
+            try:
+                os.makedirs(forced_dir, exist_ok=True)
+            except Exception:
+                pass
+            log_path = os.path.join(forced_dir, "debug.log")
+        else:
+            log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug.log")
         ts = datetime.datetime.utcnow().isoformat() + "Z"
         with open(log_path, "a", encoding="utf-8") as lf:
             lf.write(f"[{ts}] {msg}\n")
@@ -248,6 +257,23 @@ def perform_update():
     stage2_env = os.environ.copy()
     stage2_env["PYTHONIOENCODING"] = "utf-8"
     dbg(f"perform_update: launching stage2 script: {stage2_script} with source_dir={source_dir} base_dir={base_dir} temp_dir={temp_dir}")
+    # If the downloaded copy of updater.py exists, overwrite it with our
+    # instrumented copy so that stage 2 (which runs the downloaded script)
+    # will emit the same debug logs. Also set JJ_DLP_DEBUG_LOG_DIR so the
+    # copied script writes logs into the live package directory instead of
+    # leaving them in a temporary folder that gets removed.
+    try:
+        if os.path.exists(new_updater_path):
+            try:
+                shutil.copy2(curr_updater_path, new_updater_path)
+                dbg(f"perform_update: copied instrumented updater to {new_updater_path}")
+            except Exception as e:
+                dbg(f"perform_update: failed to copy instrumented updater to {new_updater_path}", e)
+        # Ensure stage2 writes debug.log into the real package dir
+        stage2_env['JJ_DLP_DEBUG_LOG_DIR'] = os.path.dirname(os.path.abspath(__file__))
+        dbg(f"perform_update: set JJ_DLP_DEBUG_LOG_DIR={stage2_env['JJ_DLP_DEBUG_LOG_DIR']}")
+    except Exception as e:
+        dbg("perform_update: unexpected error while preparing stage2 updater", e)
     try:
         subprocess.run(
             [sys.executable, stage2_script, "--stage2", source_dir, base_dir, temp_dir],
