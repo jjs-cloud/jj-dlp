@@ -84,12 +84,6 @@ def perform_update():
     temp_dir = tempfile.mkdtemp(prefix="jj_dlp_update_")
     print(f"Temporary files will be saved to: {temp_dir}")
     
-    ans = input("Do you want to proceed with the update? (y/n): ").strip().lower()
-    if ans != 'y':
-        print("Update cancelled.")
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        return
-
     print("Downloading latest version from GitHub...")
     zip_path = os.path.join(temp_dir, "testing.zip")
     try:
@@ -117,8 +111,7 @@ def perform_update():
     else:
         source_dir = extract_dir
 
-    # User requested: "make sure the updater itself gets updated first when the user runs --update"
-    # We copy the new updater.py over the current one, then launch it for stage 2.
+    # Update the updater script first
     base_dir = get_base_dir()
     new_updater_path = os.path.join(source_dir, "jj_dlp", "updater.py")
     curr_updater_path = os.path.join(base_dir, "jj_dlp", "updater.py")
