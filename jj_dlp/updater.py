@@ -11,19 +11,21 @@ import re
 import json
 
 # When run directly as a script (e.g. stage-2 update), ensure the project root
-# is on sys.path so that jj_dlp is importable as a proper package..
+# is on sys.path so that jj_dlp is importable as a proper package.
 _pkg_dir = os.path.dirname(os.path.abspath(__file__))   # …/jj_dlp
 _project_root = os.path.dirname(_pkg_dir)               # …/jj-dlp
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-# Adjust imports to work whether run as module or script
+# Adjust imports to work whether run as module or script.
+# NOTE: load_config is still imported for external callers; _load/_save_global_json
+# are intentionally NOT imported from main — see the local helpers below.
 try:
     from . import logger
-    from .main import load_config, _load_global_json, _save_global_json
+    from .main import load_config
 except ImportError:
     from jj_dlp import logger
-    from jj_dlp.main import load_config, _load_global_json, _save_global_json
+    from jj_dlp.main import load_config
 
 REPO_ZIP_URL = "https://github.com/jjs-cloud/jj-dlp/archive/refs/heads/testing.zip"
 API_COMMITS_URL = "https://api.github.com/repos/jjs-cloud/jj-dlp/commits/testing"
@@ -34,6 +36,39 @@ PRESERVED_KEYS = [
     "OUTPUT_TMPL", "LAST_LIVE_HIGHLIGHT", "DISK_DRIVES", "POPUP_NOTIFICATIONS", 
     "POPUP_TIMEOUT", "POPUP_COOLDOWN", "PROGRESS_BAR_MAX_HOURS", "PROGRESS_BAR_WIDTH"
 ]
+
+# ── Local global.json helpers ─────────────────────────────────────────────────
+# These deliberately do NOT delegate to main._load_global_json / _save_global_json.
+# main.py sets its _GLOBAL_JSON_PATH at module-import time.  When updater.py runs
+# as a standalone stage-2 script, importing main.py executes module-level code
+# (ffmpeg checks, curses init, etc.) that can raise exceptions and abort the
+# import — leaving mark_update_completed() unreachable and global.json stale.
+# Using __file__ here keeps path resolution self-contained and always correct.
+
+def _global_json_path() -> str:
+    """Return the absolute path to global.json, anchored to this file's package dir."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "global.json")
+
+
+def _load_global_json() -> dict:
+    try:
+        with open(_global_json_path(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_global_json(data: dict) -> None:
+    try:
+        with open(_global_json_path(), "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 def check_for_updates_background():
     """Checks for updates in the background and saves the status to global.json."""
@@ -46,37 +81,40 @@ def check_for_updates_background():
             global_data = _load_global_json()
             current_sha = global_data.get('update_info', {}).get('current_sha')
             
+            update_info = global_data.setdefault('update_info', {})
             if current_sha:
-                global_data.setdefault('update_info', {})['update_available'] = current_sha != latest_sha
+                update_info['update_available'] = current_sha != latest_sha
             else:
                 # First-run baseline: record the current latest SHA so the next check
                 # can correctly detect a newer upstream commit.
-                global_data.setdefault('update_info', {})['current_sha'] = latest_sha
-                global_data.setdefault('update_info', {})['update_available'] = False
+                update_info['current_sha'] = latest_sha
+                update_info['update_available'] = False
                 
-            global_data.setdefault('update_info', {})['latest_sha'] = latest_sha
+            update_info['latest_sha'] = latest_sha
             _save_global_json(global_data)
-    except Exception as e:
-        pass # Silently fail in background
+    except Exception:
+        pass  # Silently fail in background
+
 
 def mark_update_completed():
     global_data = _load_global_json()
-    latest_sha = global_data.get('update_info', {}).get('latest_sha')
+    update_info = global_data.setdefault('update_info', {})
+    latest_sha = update_info.get('latest_sha')
     if latest_sha:
-        global_data.setdefault('update_info', {})['current_sha'] = latest_sha
-    global_data.setdefault('update_info', {})['update_available'] = False
+        update_info['current_sha'] = latest_sha
+    update_info['update_available'] = False
     _save_global_json(global_data)
+
 
 def is_update_available():
     global_data = _load_global_json()
     return global_data.get('update_info', {}).get('update_available', False)
 
+
 def get_base_dir():
     # Return the directory containing jj-dlp.py
-    if __name__ == "__main__":
-        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    else:
-        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 def perform_update():
     print("\n--- jj-dlp Updater ---")
@@ -141,6 +179,7 @@ def perform_update():
         
     # temp_dir is cleaned up in stage 2 or we can clean it up here if stage 2 failed
 
+
 def get_old_config_section(config_path, section_name):
     try:
         parser = configparser.ConfigParser(allow_no_value=True, interpolation=None)
@@ -150,6 +189,7 @@ def get_old_config_section(config_path, section_name):
     except Exception:
         pass
     return ""
+
 
 def inject_preserved_keys(new_text, old_config_path):
     parser = configparser.ConfigParser(allow_no_value=True, interpolation=None)
@@ -170,6 +210,7 @@ def inject_preserved_keys(new_text, old_config_path):
             if pattern.search(new_text):
                 new_text = pattern.sub(rf"\1 {old_val}", new_text)
     return new_text
+
 
 def replace_section(text, sec_name, new_content):
     lines = text.splitlines()
@@ -201,6 +242,7 @@ def replace_section(text, sec_name, new_content):
         
     return "\n".join(out)
 
+
 def _mark_bin_executable(base_dir):
     """Mark all files in <base_dir>/bin/ as executable on Linux and macOS."""
     if sys.platform == "win32":
@@ -213,7 +255,6 @@ def _mark_bin_executable(base_dir):
         if not os.path.isfile(fpath):
             continue
         current = os.stat(fpath).st_mode
-        # Add owner/group/other execute bits (rwxr-xr-x style)
         executable_mode = current | 0o111
         if current != executable_mode:
             os.chmod(fpath, executable_mode)
@@ -236,14 +277,11 @@ def create_diff(old_content, new_content, file_path, diff_dir):
         with open(diff_file, 'w', encoding='utf-8') as f:
             f.writelines(diff)
 
+
 def _stage2(source_dir, base_dir, temp_dir):
     try:
         print("Running Stage 2 of update...")
         
-        diff_dir = os.path.join(base_dir, "jj-dlp", "diff")
-        diff_dir_legacy = os.path.join(base_dir, "diff") # If jj-dlp is the root
-        
-        # Decide which diff dir to use. If jj-dlp/jj_dlp exists, base_dir is jj-dlp.
         actual_diff_dir = os.path.join(base_dir, "diff")
         
         # Clear diff dir
@@ -277,7 +315,6 @@ def _stage2(source_dir, base_dir, temp_dir):
             print("The updater may overwrite or merge them unpredictably. Please consolidate them later.\n")
             
         # Process configs from source_dir
-        # The new zip has a configs/ directory probably, or a default jj-dlp.conf
         new_configs = []
         src_configs_dir = os.path.join(source_dir, "configs")
         if os.path.exists(src_configs_dir):
@@ -285,8 +322,6 @@ def _stage2(source_dir, base_dir, temp_dir):
         if os.path.exists(os.path.join(source_dir, "jj-dlp.conf")):
             new_configs.append(os.path.join(source_dir, "jj-dlp.conf"))
             
-        # For each existing user config, if there's a matching new config, merge it.
-        # If there are multiple new configs, we can just map by filename.
         new_config_map = {os.path.basename(p): p for p in new_configs}
         
         for user_cfg in config_files:
@@ -309,12 +344,12 @@ def _stage2(source_dir, base_dir, temp_dir):
                 
                 create_diff(old_content, merged_content, user_cfg, actual_diff_dir)
                 
-                # Write the merged content back to the new config file in the temp dir,
-                # so that the next step (copytree) will install the merged version.
                 with open(new_cfg_path, 'w', encoding='utf-8') as f:
                     f.write(merged_content)
                     
-        # Now copy all files from source_dir to base_dir
+        # Now copy all files from source_dir to base_dir.
+        # global.json is excluded: it holds runtime state (update SHAs, last-live
+        # timestamps, etc.) that must never be overwritten by a repo copy.
         print("Installing new files...")
         
         def copy_and_diff(src, dst):
@@ -323,13 +358,15 @@ def _stage2(source_dir, base_dir, temp_dir):
                 for item in os.listdir(src):
                     copy_and_diff(os.path.join(src, item), os.path.join(dst, item))
             else:
+                # Never overwrite global.json — it contains live runtime state.
+                if os.path.basename(dst) == "global.json":
+                    return
                 if os.path.exists(dst):
                     with open(dst, 'r', encoding='utf-8', errors='ignore') as f:
                         old_content = f.read()
                     with open(src, 'r', encoding='utf-8', errors='ignore') as f:
                         new_content = f.read()
-                    if old_content != new_content and not dst.endswith(".conf"): 
-                        # We already diffed configs
+                    if old_content != new_content and not dst.endswith(".conf"):
                         create_diff(old_content, new_content, dst, actual_diff_dir)
                 shutil.copy2(src, dst)
                 
@@ -349,6 +386,7 @@ def _stage2(source_dir, base_dir, temp_dir):
     finally:
         print(f"Cleaning up temporary directory: {temp_dir}")
         shutil.rmtree(temp_dir, ignore_errors=True)
+
 
 if __name__ == "__main__":
     if len(sys.argv) > 4 and sys.argv[1] == "--stage2":
