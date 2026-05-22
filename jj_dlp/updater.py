@@ -10,13 +10,20 @@ import configparser
 import re
 import json
 
+# When run directly as a script (e.g. stage-2 update), ensure the project root
+# is on sys.path so that jj_dlp is importable as a proper package.
+_pkg_dir = os.path.dirname(os.path.abspath(__file__))   # …/jj_dlp
+_project_root = os.path.dirname(_pkg_dir)               # …/jj-dlp
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 # Adjust imports to work whether run as module or script
 try:
     from . import logger
     from .main import load_config, _load_global_json, _save_global_json
 except ImportError:
-    import logger
-    from main import load_config, _load_global_json, _save_global_json
+    from jj_dlp import logger
+    from jj_dlp.main import load_config, _load_global_json, _save_global_json
 
 REPO_ZIP_URL = "https://github.com/jjs-cloud/jj-dlp/archive/refs/heads/experimental.zip"
 API_COMMITS_URL = "https://api.github.com/repos/jjs-cloud/jj-dlp/commits/experimental"
@@ -121,9 +128,18 @@ def perform_update():
         shutil.copy2(new_updater_path, curr_updater_path)
     
     print("Launching stage 2 of the updater...")
-    # Relaunch the (now updated) updater.py as a script to finish installation
+    # Relaunch the (now updated) updater.py as a script to finish installation.
+    # Pass PYTHONIOENCODING=utf-8 so that Unicode characters printed by
+    # main.py at import time (e.g. the ✔ in plain_ffmpeg_check) don't cause a
+    # UnicodeEncodeError when the subprocess inherits a cp1252 console.
+    stage2_env = os.environ.copy()
+    stage2_env["PYTHONIOENCODING"] = "utf-8"
     try:
-        subprocess.run([sys.executable, curr_updater_path, "--stage2", source_dir, base_dir, temp_dir], check=True)
+        subprocess.run(
+            [sys.executable, curr_updater_path, "--stage2", source_dir, base_dir, temp_dir],
+            check=True,
+            env=stage2_env,
+        )
     except subprocess.CalledProcessError as e:
         print(f"Update failed during stage 2: {e}")
     except Exception as e:
