@@ -84,8 +84,10 @@ class GlobalConfigEditor:
 
     @staticmethod
     def _find_global_conf() -> str:
-        """Return the path to global.conf next to the CWD."""
-        return os.path.abspath("global.conf")
+        """Return the path to global.conf inside the configs/ directory."""
+        config_dir = os.path.abspath("configs")
+        os.makedirs(config_dir, exist_ok=True)          # Ensure directory exists
+        return os.path.join(config_dir, "global.conf")
 
     def _ensure_loaded(self):
         if not self._loaded:
@@ -104,7 +106,7 @@ class GlobalConfigEditor:
         self._parse()
 
     def _create_default(self):
-        """Write a minimal global.conf with all five keys."""
+        """Write a minimal global.conf with all keys in the configs/ folder."""
         lines = [
             "[General]\n",
             "\n",
