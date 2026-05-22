@@ -11,7 +11,7 @@ import re
 import json
 
 # When run directly as a script (e.g. stage-2 update), ensure the project root
-# is on sys.path so that jj_dlp is importable as a proper package.
+# is on sys.path so that jj_dlp is importable as a proper package..
 _pkg_dir = os.path.dirname(os.path.abspath(__file__))   # …/jj_dlp
 _project_root = os.path.dirname(_pkg_dir)               # …/jj-dlp
 if _project_root not in sys.path:
@@ -111,17 +111,18 @@ def perform_update():
     else:
         source_dir = extract_dir
 
-    # Update the updater script first
     base_dir = get_base_dir()
+
+    # Run stage 2 from the *downloaded* copy of updater.py, not the live one.
+    # This avoids any file-locking issues on Windows (you can't overwrite a
+    # .py file that Python currently has open), and ensures stage 2 uses the
+    # latest updater logic from the release being installed.  The old
+    # updater.py will be cleanly overwritten by copy_and_diff inside stage 2.
     new_updater_path = os.path.join(source_dir, "jj_dlp", "updater.py")
     curr_updater_path = os.path.join(base_dir, "jj_dlp", "updater.py")
-    
-    if os.path.exists(new_updater_path):
-        print("Updating the updater script first...")
-        shutil.copy2(new_updater_path, curr_updater_path)
-    
+    stage2_script = new_updater_path if os.path.exists(new_updater_path) else curr_updater_path
+
     print("Launching stage 2 of the updater...")
-    # Relaunch the (now updated) updater.py as a script to finish installation.
     # Pass PYTHONIOENCODING=utf-8 so that Unicode characters printed by
     # main.py at import time (e.g. the ✔ in plain_ffmpeg_check) don't cause a
     # UnicodeEncodeError when the subprocess inherits a cp1252 console.
@@ -129,7 +130,7 @@ def perform_update():
     stage2_env["PYTHONIOENCODING"] = "utf-8"
     try:
         subprocess.run(
-            [sys.executable, curr_updater_path, "--stage2", source_dir, base_dir, temp_dir],
+            [sys.executable, stage2_script, "--stage2", source_dir, base_dir, temp_dir],
             check=True,
             env=stage2_env,
         )
