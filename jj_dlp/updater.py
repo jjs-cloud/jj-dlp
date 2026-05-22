@@ -449,10 +449,14 @@ def _stage2(source_dir, base_dir, temp_dir):
         
         def copy_and_diff(src, dst):
             if os.path.isdir(src):
+                if os.path.basename(src) == "__pycache__":
+                    return
                 os.makedirs(dst, exist_ok=True)
                 for item in os.listdir(src):
                     copy_and_diff(os.path.join(src, item), os.path.join(dst, item))
             else:
+                if os.path.basename(dst).endswith(".pyc"):
+                    return
                 if os.path.basename(dst) == "global.json":
                     return
                 if os.path.exists(dst):
