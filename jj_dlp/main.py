@@ -35,7 +35,7 @@ from .browser_config import (
     _write_ask_for_browser_to_config,
 )
 
-# ── ffmpeg dependency check (must happen before curses is initialised) ────────
+# ── ffmpeg dependency check (must happen before curses is initialised)) ────────
 if not plain_ffmpeg_check():
     print("\njj-dlp  ·  Aborted during ffmpeg check.")
     sys.exit(1)
