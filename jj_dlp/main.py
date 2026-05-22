@@ -263,7 +263,15 @@ _GLOBAL_CONF_NAME: str = "global.conf"
 
 
 def get_global_conf_path() -> str:
-    """Return the absolute path to global.conf, located next to jj-dlp.conf / configs/."""
+    """Return the absolute path to global.conf.
+
+    Prefer configs/global.conf and fall back to global.conf in the current
+    working directory for backwards compatibility.
+    """
+    config_dir = os.path.abspath("configs")
+    global_conf_in_configs = os.path.join(config_dir, _GLOBAL_CONF_NAME)
+    if os.path.exists(global_conf_in_configs):
+        return global_conf_in_configs
     return os.path.abspath(_GLOBAL_CONF_NAME)
 
 
