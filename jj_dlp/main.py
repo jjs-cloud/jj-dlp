@@ -2853,6 +2853,12 @@ def main() -> None:
         config_paths = []
         for p in args.config:
             ap = os.path.abspath(p)
+            if os.path.basename(ap) == _GLOBAL_CONF_NAME:
+                # global.conf is always loaded separately via load_global_config();
+                # passing it via --config would create a spurious site panel.
+                startup_dbg(f"[CONFIG] Ignoring {ap!r} from --config — global.conf is loaded automatically.")
+                print(f"Note: {_GLOBAL_CONF_NAME} is loaded automatically and does not need to be passed via --config. Skipping.")
+                continue
             if not os.path.isfile(ap):
                 print(f"ERROR: Config file not found: {ap}", file=sys.stderr)
                 sys.exit(1)
