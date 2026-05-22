@@ -2979,8 +2979,13 @@ def main() -> None:
         if startup_available:
             with update_available_lock:
                 UPDATE_AVAILABLE = True
-            # Only show the dashboard indicator when an update is available.
-            # Do not perform an interactive prompt while curses is running.
+            print("\n[Updater] A new version of jj-dlp is available!")
+            ans = _input_with_timeout("[Updater] Do you want to update now? (y/n) [timeout in 10s]: ", timeout_seconds=10)
+            if ans == 'y':
+                perform_update()
+                sys.exit(0)
+            elif ans is None:
+                print("[Updater] No response received. Continuing with current version.")
 
         def _periodic_update_checker() -> None:
             global UPDATE_AVAILABLE
@@ -2991,9 +2996,8 @@ def main() -> None:
                     prev_available = UPDATE_AVAILABLE
                     UPDATE_AVAILABLE = new_available
                 dbg(f"[UPDATER] periodic check prev={prev_available} new={new_available}")
-                if not prev_available and new_available:
-                    # Update the dashboard indicator only; do not prompt interactively.
-                    pass
+                # When an update becomes available while the dashboard is active,
+                # only use the dashboard indicator and do not prompt interactively.
                 time.sleep(update_interval * 60)
 
         threading.Thread(target=_periodic_update_checker, daemon=True).start()
