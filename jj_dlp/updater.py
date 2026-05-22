@@ -207,6 +207,25 @@ def replace_section(text, sec_name, new_content):
         
     return "\n".join(out)
 
+def _mark_bin_executable(base_dir):
+    """Mark all files in <base_dir>/bin/ as executable on Linux and macOS."""
+    if sys.platform == "win32":
+        return
+    bin_dir = os.path.join(base_dir, "bin")
+    if not os.path.isdir(bin_dir):
+        return
+    for fname in os.listdir(bin_dir):
+        fpath = os.path.join(bin_dir, fname)
+        if not os.path.isfile(fpath):
+            continue
+        current = os.stat(fpath).st_mode
+        # Add owner/group/other execute bits (rwxr-xr-x style)
+        executable_mode = current | 0o111
+        if current != executable_mode:
+            os.chmod(fpath, executable_mode)
+            print(f"  Marked executable: bin/{fname}")
+
+
 def create_diff(old_content, new_content, file_path, diff_dir):
     old_lines = old_content.splitlines(keepends=True)
     new_lines = new_content.splitlines(keepends=True)
@@ -321,6 +340,10 @@ def _stage2(source_dir, base_dir, temp_dir):
                 shutil.copy2(src, dst)
                 
         copy_and_diff(source_dir, base_dir)
+
+        # Ensure bin/ scripts are executable on Linux/macOS
+        print("Setting executable permissions on bin/ files...")
+        _mark_bin_executable(base_dir)
         
         mark_update_completed()
         print("Update completed successfully! Diff files are available in the 'diff' directory.")
