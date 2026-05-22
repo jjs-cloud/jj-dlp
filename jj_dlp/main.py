@@ -258,6 +258,57 @@ def load_config(config_path: str) -> dict:
     }
 
 
+# ── Global config filename (always silently loaded; never shown in chooser) ───
+_GLOBAL_CONF_NAME: str = "global.conf"
+
+
+def get_global_conf_path() -> str:
+    """Return the absolute path to global.conf, located next to jj-dlp.conf / configs/."""
+    return os.path.abspath(_GLOBAL_CONF_NAME)
+
+
+def load_global_config() -> dict:
+    """Load global.conf and return the keys that are truly global.
+
+    Returns a dict with the following keys (with safe defaults if the file does
+    not exist or a key is absent):
+        disk_drives       – list[str]
+        debug_logs        – bool
+        debug_log_path    – str
+        check_for_updates – bool
+        ask_for_browser   – bool
+    """
+    path = get_global_conf_path()
+    parser = configparser.ConfigParser(allow_no_value=True, interpolation=None)
+    try:
+        parser.read(path, encoding="utf-8")
+    except Exception:
+        pass
+
+    general = parser["General"] if parser.has_section("General") else {}
+
+    def _bool(key: str, default: bool) -> bool:
+        raw = general.get(key, "").strip().lower()
+        if raw in ("true", "1", "yes"):
+            return True
+        if raw in ("false", "0", "no"):
+            return False
+        return default
+
+    disk_drives_raw = general.get("DISK_DRIVES", "").strip().strip('"\'')
+    disk_drives = [d.strip() for d in disk_drives_raw.split(",") if d.strip()] if disk_drives_raw else []
+
+    debug_log_path_raw = general.get("DEBUG_LOG_PATH", "").strip().strip('"\'')
+
+    return {
+        "disk_drives":        disk_drives,
+        "debug_logs":         _bool("DEBUG_LOGS", False),
+        "debug_log_path":     debug_log_path_raw,
+        "check_for_updates":  _bool("CHECK_FOR_UPDATES", True),
+        "ask_for_browser":    _bool("ASK_FOR_BROWSER", True),
+    }
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Per-site state
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1521,9 +1572,10 @@ class JJDlpDashboard:
     # ── Tab definitions — add/remove tabs here ──────────────────────────────
     TABS = ["Dashboard", "Log", "EventSub", "Config"]
 
-    def __init__(self, stdscr, sites: List["SiteState"]):
+    def __init__(self, stdscr, sites: List["SiteState"], global_cfg: dict = None):
         self.stdscr       = stdscr
         self.sites        = sites
+        self.global_cfg   = global_cfg or {}   # app-wide settings from global.conf
         
         # --- Dynamic Tab Logic ---
         # Start with the mandatory tabs
@@ -1735,13 +1787,22 @@ class JJDlpDashboard:
                             str(val)[:inner_w - label_w - 1],
                             curses.color_pair(cpair) | curses.A_BOLD)
 
-        # Disk space rows — aggregate drives from ALL site configs
+        # Disk space rows — drives from global.conf take precedence; fall back to per-site
         disk_row_y = y1 + 2 + len(rows) + 1
         try:
-            # Collect unique drives across every loaded config
             seen_drives: list = []
             seen_drives_set: set = set()
             fallback_dir = None
+
+            # 1. Global drives (from global.conf) — shown first if configured
+            global_drives = self.global_cfg.get("disk_drives", [])
+            for d in global_drives:
+                key = os.path.normcase(d)
+                if key not in seen_drives_set:
+                    seen_drives_set.add(key)
+                    seen_drives.append(d)
+
+            # 2. Per-site drives (merged in, deduped)
             for _site in self.sites:
                 try:
                     _cfg = _site.get_cached_config()
@@ -2652,9 +2713,13 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
         for fname in chosen_files
     }
 
-    # Show the page if ANY selected config has ASK_FOR_BROWSER = True (default).
-    # Only skip when every selected config has explicitly opted out.
-    if not any(file_cfgs[f].get("ask_for_browser", True) for f in chosen_files):
+    # ASK_FOR_BROWSER is now a global setting; read it from global.conf.
+    # Fall back to per-site values for backwards compatibility.
+    _global_cfg = load_global_config()
+    ask = _global_cfg.get("ask_for_browser", None)
+    if ask is None:
+        ask = any(file_cfgs[f].get("ask_for_browser", True) for f in chosen_files)
+    if not ask:
         return chosen_files
 
     first_fpath = os.path.join(os.getcwd(), chosen_files[0])
@@ -2807,6 +2872,9 @@ def main() -> None:
             for d in search_dirs:
                 for f in os.listdir(d):
                     if f.endswith(".conf") and os.path.isfile(os.path.join(d, f)):
+                        # global.conf is always loaded silently; never shown in the chooser
+                        if f == _GLOBAL_CONF_NAME:
+                            continue
                         rel = os.path.relpath(os.path.join(d, f), cwd)
                         if rel not in found:
                             found.append(rel)
@@ -2828,9 +2896,14 @@ def main() -> None:
     # ── Global config / debug setup ───────────────────────────────────────────
     initial_cfg = load_config(config_paths[0])
 
+    # Load global.conf — app-wide settings, independent of any site config.
+    global_cfg = load_global_config()
+    startup_dbg(f"[GLOBAL] loaded global.conf: {global_cfg!r}")
+
     # ── Updater logic ─────────────────────────────────────────────────────────
     from .updater import check_for_updates_background, is_update_available, perform_update
-    any_check = any(load_config(cp).get("check_for_updates", True) for cp in config_paths)
+    # CHECK_FOR_UPDATES is now a global setting.
+    any_check = global_cfg.get("check_for_updates", True)
     
     if any_check:
         if is_update_available():
@@ -2844,15 +2917,15 @@ def main() -> None:
 
     from . import logger as _logger
     with _logger.debug_log_lock:
-        any_debug = any(load_config(cp).get("debug_logs", False) for cp in config_paths)
+        # DEBUG_LOGS / DEBUG_LOG_PATH are now global settings.
+        any_debug = global_cfg.get("debug_logs", False)
         _logger.DEBUG_LOGS_ENABLED = any_debug
         if any_debug:
-            # Use the debug_log_path from whichever config has debug enabled
-            for cp in config_paths:
-                cfg_i = load_config(cp)
-                if cfg_i.get("debug_logs", False):
-                    _logger.DEBUG_LOG_PATH = get_debug_log_path(cfg_i)
-                    break
+            raw_path = global_cfg.get("debug_log_path", "")
+            if raw_path:
+                _logger.DEBUG_LOG_PATH = raw_path
+            else:
+                _logger.DEBUG_LOG_PATH = get_debug_log_path(load_config(config_paths[0]))
         
     # ── Launch per-site state + threads ──────────────────────────────────────
     sites: List[SiteState] = []
@@ -2890,7 +2963,7 @@ def main() -> None:
                 stdscr.refresh()
                 stdscr.getch()
                 return
-            JJDlpDashboard(stdscr, sites).run()
+            JJDlpDashboard(stdscr, sites, global_cfg=global_cfg).run()
 
         while True:
             with output_mode_lock:
