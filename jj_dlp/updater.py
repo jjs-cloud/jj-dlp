@@ -335,10 +335,12 @@ def inject_preserved_keys(new_text, old_config_path):
                 old_val = parser.get(sec, key)
                 break
         if old_val is not None:
-            # Find the key in the new text and replace its value
+            # Find the key in the new text and replace its value.
+            # Use a callable replacement so literal backslashes in old_val
+            # are not interpreted as regex replacement escapes.
             pattern = re.compile(rf"^([ \t]*{key}[ \t]*=).*$", re.IGNORECASE | re.MULTILINE)
             if pattern.search(new_text):
-                new_text = pattern.sub(rf"\1 {old_val}", new_text)
+                new_text = pattern.sub(lambda m, val=old_val: f"{m.group(1)} {val}", new_text)
     return new_text
 
 
