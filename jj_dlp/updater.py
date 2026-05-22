@@ -48,7 +48,24 @@ PRESERVED_KEYS = [
 # Using __file__ here keeps path resolution self-contained and always correct.
 
 def _global_json_path() -> str:
-    """Return the absolute path to global.json, anchored to this file's package dir."""
+    """Return the absolute path to global.json.
+
+    Behavior:
+    - If the environment variable `JJ_DLP_GLOBAL_JSON_PATH` is set, return that
+      value (useful for telling a stage-2 updater where the real global.json
+      lives when the script is being executed from a temporary folder).
+    - If `JJ_DLP_GLOBAL_DIR` is set, return `<dir>/global.json`.
+    - Otherwise, return the path anchored to this file's package dir.
+    """
+    # Highest priority: explicit full path
+    env_path = os.environ.get('JJ_DLP_GLOBAL_JSON_PATH')
+    if env_path:
+        return env_path
+    # Directory override
+    env_dir = os.environ.get('JJ_DLP_GLOBAL_DIR')
+    if env_dir:
+        return os.path.join(env_dir, 'global.json')
+    # Default: package-local global.json
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "global.json")
 
 
@@ -270,8 +287,13 @@ def perform_update():
             except Exception as e:
                 dbg(f"perform_update: failed to copy instrumented updater to {new_updater_path}", e)
         # Ensure stage2 writes debug.log into the real package dir
-        stage2_env['JJ_DLP_DEBUG_LOG_DIR'] = os.path.dirname(os.path.abspath(__file__))
-        dbg(f"perform_update: set JJ_DLP_DEBUG_LOG_DIR={stage2_env['JJ_DLP_DEBUG_LOG_DIR']}")
+        real_pkg_dir = os.path.dirname(os.path.abspath(__file__))
+        stage2_env['JJ_DLP_DEBUG_LOG_DIR'] = real_pkg_dir
+        # Tell stage2 explicitly where the real global.json lives so it updates
+        # the live package state instead of a temp copy.
+        stage2_env['JJ_DLP_GLOBAL_JSON_PATH'] = os.path.join(real_pkg_dir, 'global.json')
+        stage2_env['JJ_DLP_GLOBAL_DIR'] = real_pkg_dir
+        dbg(f"perform_update: set JJ_DLP_DEBUG_LOG_DIR={stage2_env['JJ_DLP_DEBUG_LOG_DIR']} and JJ_DLP_GLOBAL_JSON_PATH={stage2_env['JJ_DLP_GLOBAL_JSON_PATH']}")
     except Exception as e:
         dbg("perform_update: unexpected error while preparing stage2 updater", e)
     try:
