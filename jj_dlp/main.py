@@ -35,7 +35,7 @@ from .browser_config import (
     _write_ask_for_browser_to_config,
 )
 
-# ── ffmpeg dependency check (must happen before curses is initialised)) ────────
+# ── ffmpeg dependency check (must happen before curses is initialised) ────────
 if not plain_ffmpeg_check():
     print("\njj-dlp  ·  Aborted during ffmpeg check.")
     sys.exit(1)
@@ -2979,20 +2979,8 @@ def main() -> None:
         if startup_available:
             with update_available_lock:
                 UPDATE_AVAILABLE = True
-            print("\n[Updater] A new version of jj-dlp is available!")
-            # If the curses dashboard is active, avoid blocking on stdin which
-            # would interfere with curses input handling. Skip interactive
-            # prompt in that case.
-            if _get_output_mode() == 1:
-                ans = None
-            else:
-                ans = _input_with_timeout("[Updater] Do you want to update now? (y/n) [timeout in 10s]: ", timeout_seconds=10)
-            if ans == 'y':
-                perform_update()
-                sys.exit(0)
-            elif ans is None:
-                print("[Updater] No response received. Continuing with current version.")
-            # If user said 'n' or anything else, just continue
+            # Only show the dashboard indicator when an update is available.
+            # Do not perform an interactive prompt while curses is running.
 
         def _periodic_update_checker() -> None:
             global UPDATE_AVAILABLE
@@ -3004,18 +2992,8 @@ def main() -> None:
                     UPDATE_AVAILABLE = new_available
                 dbg(f"[UPDATER] periodic check prev={prev_available} new={new_available}")
                 if not prev_available and new_available:
-                    print("\n[Updater] A new version of jj-dlp is available!")
-                    # Avoid prompting when curses dashboard is active to prevent
-                    # a background thread from stealing keyboard input.
-                    if _get_output_mode() == 1:
-                        ans = None
-                    else:
-                        ans = _input_with_timeout("[Updater] Do you want to update now? (y/n) [timeout in 10s]: ", timeout_seconds=10)
-                    if ans == 'y':
-                        perform_update()
-                        sys.exit(0)
-                    elif ans is None:
-                        print("[Updater] No response received. Continuing with current version.")
+                    # Update the dashboard indicator only; do not prompt interactively.
+                    pass
                 time.sleep(update_interval * 60)
 
         threading.Thread(target=_periodic_update_checker, daemon=True).start()
