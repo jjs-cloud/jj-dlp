@@ -38,9 +38,12 @@ def check_for_updates_background():
             global_data = _load_global_json()
             current_sha = global_data.get('update_info', {}).get('current_sha')
             
-            if current_sha and current_sha != latest_sha:
-                global_data.setdefault('update_info', {})['update_available'] = True
+            if current_sha:
+                global_data.setdefault('update_info', {})['update_available'] = current_sha != latest_sha
             else:
+                # First-run baseline: record the current latest SHA so the next check
+                # can correctly detect a newer upstream commit.
+                global_data.setdefault('update_info', {})['current_sha'] = latest_sha
                 global_data.setdefault('update_info', {})['update_available'] = False
                 
             global_data.setdefault('update_info', {})['latest_sha'] = latest_sha
