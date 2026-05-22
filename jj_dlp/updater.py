@@ -247,12 +247,9 @@ def perform_update():
     stage2_env["PYTHONIOENCODING"] = "utf-8"
     dbg(f"perform_update: launching stage2 script: {stage2_script} source_dir={source_dir} base_dir={base_dir} temp_dir={temp_dir}")
     try:
-        if os.path.exists(new_updater_path):
-            try:
-                shutil.copy2(curr_updater_path, new_updater_path)
-                dbg(f"perform_update: copied current updater.py into downloaded stage2 updater at {new_updater_path}")
-            except Exception as e:
-                dbg("perform_update: failed to copy current updater to stage2 script", e)
+        # Use the downloaded updater.py (which has the latest logic from the repo).
+        # This ensures it can cleanly overwrite the base_dir updater.py without
+        # running into the catch-22 of copying the old version back over itself.
         real_pkg_dir = os.path.dirname(os.path.abspath(__file__))
         stage2_env['JJ_DLP_DEBUG_LOG_DIR'] = real_pkg_dir
         stage2_env['JJ_DLP_GLOBAL_JSON_PATH'] = os.path.join(real_pkg_dir, 'global.json')
