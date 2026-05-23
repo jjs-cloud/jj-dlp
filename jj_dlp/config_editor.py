@@ -47,7 +47,7 @@ class ConfigItem:
 
 
 # ── Keys that live in global.conf (never shown in per-site editor) ────────────
-_GLOBAL_KEYS = {"DISK_DRIVES", "DEBUG_LOGS", "DEBUG_LOG_PATH", "CHECK_FOR_UPDATES", "UPDATE_INTERVAL", "ASK_FOR_BROWSER", "ASK_FOR_CONFIG"}
+_GLOBAL_KEYS = {"DISK_DRIVES", "DEBUG_LOGS", "DEBUG_LOG_PATH", "CHECK_FOR_UPDATES", "UPDATE_INTERVAL", "ASK_FOR_BROWSER", "ASK_FOR_CONFIG","UPDATE_BRANCH"}
 
 
 class GlobalConfigEditor:
@@ -61,6 +61,7 @@ class GlobalConfigEditor:
         "UPDATE_INTERVAL",
         "ASK_FOR_BROWSER",
         "ASK_FOR_CONFIG",
+        "UPDATE_BRANCH",
     ]
     GLOBAL_KEYS_COMMENTS = {
         "DISK_DRIVES":        "Comma-separated list of drives or paths to show disk info in the system panel. (e.g. C:\\,D:\\  or  /home,/mnt/data).",
@@ -70,6 +71,7 @@ class GlobalConfigEditor:
         "UPDATE_INTERVAL":    "Number of minutes between app update checks.",
         "ASK_FOR_BROWSER":    "Show the browser chooser on startup (true/false).",
         "ASK_FOR_CONFIG":     "Show the config file chooser on startup (true/false).",
+        "UPDATE_BRANCH":      "Which branch of jj-dlp to update to. (main, testing, or experimental).",
     }
 
     def __init__(self, dashboard, on_save=None):
