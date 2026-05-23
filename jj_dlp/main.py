@@ -2982,7 +2982,7 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
                     _write_browser_to_config(fpath, chosen_browser, write_downloader=write_dl, write_checker=write_ck)
                 # If "Do not show again" was checked, persist ASK_FOR_BROWSER = False
                 if do_not_show:
-                    _write_ask_for_browser_to_config(fpath, False)
+                    _write_global_conf_key("ASK_FOR_BROWSER", "false")
             return chosen_files
         elif key in (ord('q'), ord('Q'), 27):
             sys.exit(0)
