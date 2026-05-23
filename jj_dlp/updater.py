@@ -29,15 +29,36 @@ except ImportError:
     from jj_dlp import logger
     from jj_dlp.main import load_config
 
-REPO_ZIP_URL = "https://github.com/jjs-cloud/jj-dlp/archive/refs/heads/main.zip"
-API_COMMITS_URL = "https://api.github.com/repos/jjs-cloud/jj-dlp/commits/main"
+_REPO_BASE = "https://github.com/jjs-cloud/jj-dlp"
+_API_BASE   = "https://api.github.com/repos/jjs-cloud/jj-dlp"
+_VALID_BRANCHES = {"main", "testing", "experimental"}
+
+
+def _get_update_branch() -> str:
+    """Return the configured update branch (falls back to 'main' if unset or invalid)."""
+    try:
+        from jj_dlp.main import load_global_config
+        branch = load_global_config().get("update_branch", "main")
+    except Exception:
+        branch = "main"
+    return branch if branch in _VALID_BRANCHES else "main"
+
+
+def _repo_zip_url(branch: str) -> str:
+    return f"{_REPO_BASE}/archive/refs/heads/{branch}.zip"
+
+
+def _api_commits_url(branch: str) -> str:
+    return f"{_API_BASE}/commits/{branch}"
+
 
 PRESERVED_SECTIONS = ["Streamers", "Block"]
 PRESERVED_KEYS = [
     "SITE_LABEL", "SITE_ORDER", "PANEL_RESIZE", "SPLIT_AFTER", "OUTPUT_DIR", 
     "OUTPUT_TMPL", "LAST_LIVE_HIGHLIGHT", "DISK_DRIVES", "POPUP_NOTIFICATIONS", 
     "POPUP_TIMEOUT", "POPUP_COOLDOWN", "PROGRESS_BAR_MAX_HOURS", "PROGRESS_BAR_WIDTH", 
-    "DEBUG_LOGS", "DEBUG_LOG_PATH", "CHECK_FOR_UPDATES", "UPDATE_INTERVAL"
+    "DEBUG_LOGS", "DEBUG_LOG_PATH", "CHECK_FOR_UPDATES", "UPDATE_INTERVAL",
+    "UPDATE_BRANCH"
 ]
 
 # ── Local global.json helpers ─────────────────────────────────────────────────
@@ -178,7 +199,10 @@ def _save_global_json(data: dict) -> None:
 def check_for_updates_background():
     """Checks for updates in the background and saves the status to global.json."""
     try:
-        req = urllib.request.Request(API_COMMITS_URL, headers={'User-Agent': 'jj-dlp-updater'})
+        branch = _get_update_branch()
+        api_commits_url = _api_commits_url(branch)
+        dbg(f"[UPDATE_CHECK] check_for_updates_background: branch={branch} url={api_commits_url}")
+        req = urllib.request.Request(api_commits_url, headers={'User-Agent': 'jj-dlp-updater'})
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode('utf-8'))
         latest_sha = data.get('sha')
@@ -232,13 +256,17 @@ def perform_update():
     dbg("[PERFORM] perform_update: starting update")
     print("\n--- jj-dlp Updater ---")
     
+    branch = _get_update_branch()
+    repo_zip_url = _repo_zip_url(branch)
+    dbg(f"[PERFORM] perform_update: branch={branch} url={repo_zip_url}")
+
     temp_dir = tempfile.mkdtemp(prefix="jj_dlp_update_")
     print(f"Temporary files will be saved to: {temp_dir}")
     
-    print("Downloading latest version from GitHub...")
+    print(f"Downloading latest version from GitHub (branch: {branch})...")
     zip_path = os.path.join(temp_dir, "main.zip")
     try:
-        req = urllib.request.Request(REPO_ZIP_URL, headers={'User-Agent': 'jj-dlp-updater'})
+        req = urllib.request.Request(repo_zip_url, headers={'User-Agent': 'jj-dlp-updater'})
         with urllib.request.urlopen(req, timeout=30) as response:
             with open(zip_path, 'wb') as out_file:
                 shutil.copyfileobj(response, out_file)

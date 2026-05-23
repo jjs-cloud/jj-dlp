@@ -287,6 +287,7 @@ def load_global_config() -> dict:
         debug_log_path    – str
         check_for_updates – bool
         update_interval   – int
+        update_branch     – str   ("main", "testing", or "experimental")
         ask_for_browser   – bool
     """
     path = get_global_conf_path()
@@ -320,12 +321,17 @@ def load_global_config() -> dict:
     debug_log_path_raw = general.get("DEBUG_LOG_PATH", "").strip().strip('"\'')
     update_interval = _int("UPDATE_INTERVAL", 30)
 
+    _valid_branches = {"main", "testing", "experimental"}
+    _raw_branch = general.get("UPDATE_BRANCH", "main").strip().lower()
+    update_branch = _raw_branch if _raw_branch in _valid_branches else "main"
+
     return {
         "disk_drives":        disk_drives,
         "debug_logs":         _bool("DEBUG_LOGS", False),
         "debug_log_path":     debug_log_path_raw,
         "check_for_updates":  _bool("CHECK_FOR_UPDATES", True),
         "update_interval":    update_interval,
+        "update_branch":      update_branch,
         "ask_for_browser":    _bool("ASK_FOR_BROWSER", True),
         "ask_for_config":     _bool("ASK_FOR_CONFIG", True),
     }
