@@ -72,7 +72,7 @@ class GlobalConfigEditor:
 
     def __init__(self, dashboard, on_save=None):
         self.dashboard = dashboard
-        self._on_save = on_save          # callable(new_cfg: dict) | None 
+        self._on_save = on_save          # callable(new_cfg: dict) | None
         self.conf_path = self._find_global_conf()
         self.lines: list = []
         self.items: list = []

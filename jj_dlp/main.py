@@ -450,34 +450,6 @@ class SiteState:
         self._cfg_cache_time:     float = 0.0
         self._cfg_cache_lock:     threading.Lock = threading.Lock()
 
-    def apply_global_cfg(self, new_cfg: dict) -> None:
-        """
-        Called by GlobalConfigEditor after global.conf is saved.
-        Applies any runtime-changeable settings without requiring a restart.
-        """
-        import logger as _logger   # already imported at top as _logger; adjust if needed
-
-        # ── DEBUG_LOGS / DEBUG_LOG_PATH ───────────────────────────────────────
-        new_enabled = new_cfg.get("DEBUG_LOGS", "false").strip().lower() == "true"
-        new_path    = new_cfg.get("DEBUG_LOG_PATH", "").strip().strip('"\'')
-
-        with _logger.debug_log_lock:
-            _logger.DEBUG_LOGS_ENABLED = new_enabled
-            if new_enabled:
-                if new_path:
-                    _logger.DEBUG_LOG_PATH = new_path
-                elif not _logger.DEBUG_LOG_PATH:
-                    # Fall back to the first site's resolved path
-                    _logger.DEBUG_LOG_PATH = get_debug_log_path(
-                        load_config(self.sites[0].config_path)
-                    )
-            # If disabling, leave DEBUG_LOG_PATH as-is so re-enabling reuses it
-
-        _logger.dbg(
-            f"[CONFIG] apply_global_cfg: DEBUG_LOGS={new_enabled} "
-            f"DEBUG_LOG_PATH={_logger.DEBUG_LOG_PATH!r}"
-        )
-
     def register_proc(self, streamer: str, proc) -> None:
         """Register an active yt-dlp subprocess so stop() can kill it."""
         with self._procs_lock:
@@ -2655,6 +2627,36 @@ class JJDlpDashboard:
         elif 32 <= key < 127:
             self._mgmt_buf += chr(key)
         return True
+
+    # ── Live global-config apply (no restart needed) ──────────────────────────
+    def apply_global_cfg(self, new_cfg: dict) -> None:
+        """
+        Called by GlobalConfigEditor immediately after global.conf is saved.
+        Applies runtime-changeable settings to the live process so that changes
+        like DEBUG_LOGS take effect without restarting the script.
+        """
+        from . import logger as _logger
+
+        # ── DEBUG_LOGS / DEBUG_LOG_PATH ───────────────────────────────────────
+        new_enabled = new_cfg.get("DEBUG_LOGS", "false").strip().lower() == "true"
+        new_path    = new_cfg.get("DEBUG_LOG_PATH", "").strip().strip('"\'')
+
+        with _logger.debug_log_lock:
+            _logger.DEBUG_LOGS_ENABLED = new_enabled
+            if new_enabled:
+                if new_path:
+                    _logger.DEBUG_LOG_PATH = new_path
+                elif not _logger.DEBUG_LOG_PATH:
+                    # Fall back to the first site's resolved path
+                    _logger.DEBUG_LOG_PATH = get_debug_log_path(
+                        load_config(self.sites[0].config_path)
+                    )
+            # If disabling, leave DEBUG_LOG_PATH as-is so re-enabling reuses it
+
+        _logger.dbg(
+            f"[CONFIG] apply_global_cfg: DEBUG_LOGS={new_enabled} "
+            f"DEBUG_LOG_PATH={_logger.DEBUG_LOG_PATH!r}"
+        )
 
     # ── Run loop ──────────────────────────────────────────────────────────────
     def run(self):
