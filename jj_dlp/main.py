@@ -2992,30 +2992,64 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
 
 def _input_with_timeout(prompt: str, timeout_seconds: int = 10) -> Optional[str]:
     """Prompt the user for input with a timeout.
-    
+
     Returns the user's input (stripped) if they respond within timeout_seconds.
     Returns None if the timeout expires without a response.
     """
-    import sys
-    
+    print(prompt, end="", flush=True)
+
+    if sys.platform == "win32" and sys.stdin.isatty():
+        import msvcrt
+
+        buf = []
+        end_time = time.time() + timeout_seconds
+        while time.time() < end_time:
+            if msvcrt.kbhit():
+                ch = msvcrt.getwch()
+                if ch in ("\r", "\n"):
+                    print()
+                    return "".join(buf).strip()
+                if ch == "\x03":
+                    raise KeyboardInterrupt
+                if ch == "\x08":
+                    if buf:
+                        buf.pop()
+                        print("\b \b", end="", flush=True)
+                    continue
+                buf.append(ch)
+            time.sleep(0.01)
+        print()
+        return None
+
+    try:
+        import select
+        fd = sys.stdin.fileno()
+        rlist, _, _ = select.select([sys.stdin], [], [], timeout_seconds)
+        if rlist:
+            line = sys.stdin.readline()
+            if line == "":
+                return None
+            return line.strip()
+    except Exception:
+        pass
+
+    # Fallback for non-tty or unsupported environments.
     result = []
-    
+
     def _read_input():
         try:
-            user_input = input(prompt)
+            user_input = input()
             result.append(user_input)
         except (EOFError, KeyboardInterrupt):
             result.append(None)
-    
+
     thread = threading.Thread(target=_read_input, daemon=True)
     thread.start()
     thread.join(timeout=timeout_seconds)
-    
     if thread.is_alive():
-        # Timeout occurred
-        print()  # New line after timeout
+        print()
         return None
-    
+
     return result[0].strip() if result and result[0] is not None else None
 
 
