@@ -29,8 +29,8 @@ except ImportError:
     from jj_dlp import logger
     from jj_dlp.main import load_config
 
-REPO_ZIP_URL = "https://github.com/jjs-cloud/jj-dlp/archive/refs/heads/testing.zip"
-API_COMMITS_URL = "https://api.github.com/repos/jjs-cloud/jj-dlp/commits/testing"
+REPO_ZIP_URL = "https://github.com/jjs-cloud/jj-dlp/archive/refs/heads/main.zip"
+API_COMMITS_URL = "https://api.github.com/repos/jjs-cloud/jj-dlp/commits/main"
 
 PRESERVED_SECTIONS = ["Streamers", "Block"]
 PRESERVED_KEYS = [
@@ -236,7 +236,7 @@ def perform_update():
     print(f"Temporary files will be saved to: {temp_dir}")
     
     print("Downloading latest version from GitHub...")
-    zip_path = os.path.join(temp_dir, "testing.zip")
+    zip_path = os.path.join(temp_dir, "main.zip")
     try:
         urllib.request.urlretrieve(REPO_ZIP_URL, zip_path)
         dbg(f"[PERFORM] perform_update: downloaded zip to {zip_path}")
@@ -259,7 +259,7 @@ def perform_update():
         shutil.rmtree(temp_dir, ignore_errors=True)
         return
 
-    # The zip usually contains a single folder like 'jj-dlp-testing'
+    # The zip usually contains a single folder like 'jj-dlp-main'
     extracted_items = os.listdir(extract_dir)
     if len(extracted_items) == 1 and os.path.isdir(os.path.join(extract_dir, extracted_items[0])):
         source_dir = os.path.join(extract_dir, extracted_items[0])

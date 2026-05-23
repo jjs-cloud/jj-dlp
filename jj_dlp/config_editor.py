@@ -63,12 +63,12 @@ class GlobalConfigEditor:
         "ASK_FOR_CONFIG",
     ]
     GLOBAL_KEYS_COMMENTS = {
-        "DISK_DRIVES":        "Comma-separated drives/paths to show disk usage for (e.g. C:\\,D:\\  or  /home,/mnt/data).",
-        "DEBUG_LOGS":         "Enable debug logging (true/false).",
-        "DEBUG_LOG_PATH":     "Path for the debug log file. Leave blank to use the default location.",
-        "CHECK_FOR_UPDATES":  "Check for jj-dlp updates on startup (true/false).",
-        "UPDATE_INTERVAL":    "Update check interval in minutes.",
-        "ASK_FOR_BROWSER":    "Show the browser-cookie picker on startup (true/false).",
+        "DISK_DRIVES":        "Comma-separated list of drives or paths to show disk info in the system panel. (e.g. C:\\,D:\\  or  /home,/mnt/data).",
+        "DEBUG_LOGS":         "Enable debug logging to a file(true/false).",
+        "DEBUG_LOG_PATH":     "Path for the debug log file. Can be a relative or absolute path (e.g. logs/debug.log)",
+        "CHECK_FOR_UPDATES":  "Whether to periodically check for app updates (true/false).",
+        "UPDATE_INTERVAL":    "Number of minutes between app update checks.",
+        "ASK_FOR_BROWSER":    "Show the browser chooser on startup (true/false).",
         "ASK_FOR_CONFIG":     "Show the config file chooser on startup (true/false).",
     }
 
