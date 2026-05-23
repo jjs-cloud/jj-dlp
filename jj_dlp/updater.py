@@ -529,7 +529,7 @@ def _stage2(source_dir, base_dir, temp_dir):
     finally:
         print(f"Cleaning up temporary directory: {temp_dir}")
         shutil.rmtree(temp_dir, ignore_errors=True)
-
+        input("\nPress Enter to exit...")
 
 
 if __name__ == "__main__":
