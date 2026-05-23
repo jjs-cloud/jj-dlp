@@ -2,6 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
+__version__ = "1.0.0"
 
 import subprocess
 import time
@@ -38,7 +39,7 @@ from .browser_config import (
 
 # ── ffmpeg dependency check (must happen before curses is initialised) ────────
 if not plain_ffmpeg_check():
-    print("\njj-dlp  ·  Aborted during ffmpeg check.")
+    print(f"\njj-dlp v{__version__}  ·  Aborted during ffmpeg check.")
     sys.exit(1)
 
 # ── Run the curses check before importing curses at module level ──────────────
@@ -2518,12 +2519,21 @@ class JJDlpDashboard:
         safe_addstr(self.stdscr, 1, w - len(sys_time_str) - 3, sys_time_str,
                     curses.color_pair(self.C_CHROME))
 
+        # Track the next available row on the right side
+        next_right_row = 2
+
         # Update Available indicator (below system time)
         with update_available_lock:
             if UPDATE_AVAILABLE:
                 update_str = "Update Available"
-                safe_addstr(self.stdscr, 2, w - len(update_str) - 3, update_str,
+                safe_addstr(self.stdscr, next_right_row, w - len(update_str) - 3, update_str,
                             curses.color_pair(self.C_WARN) | curses.A_BOLD)
+                next_right_row += 1
+        
+        # App version indicator (Below Update Available, or directly below time)
+        version_str = f"v{__version__}"
+        safe_addstr(self.stdscr, next_right_row, w - len(version_str) - 3, version_str,
+                    curses.color_pair(self.C_DIM))
 
         # Blank line after logo (row 7), then tab bar at row 8
         # (Logo occupies rows 1-6, row 7 is blank, tabs at row 8)
@@ -3285,7 +3295,7 @@ def main() -> None:
                 except Exception:
                     pass
 
-        print("\njj-dlp  ·  Shutting down...")
+        print(f"\njj-dlp v{__version__}  ·  Shutting down...")
         active = [t for site in sites for t in site.recording_threads if t.is_alive()]
         if active:
             print(f"Waiting for {len(active)} active recording(s) to finish...")
