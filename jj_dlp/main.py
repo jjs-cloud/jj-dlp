@@ -26,6 +26,7 @@ from .logger import (
     DEBUG_LOGS_ENABLED, DEBUG_LOG_PATH, debug_log_lock,
     ENABLE_CRASH_LOG,
     configure as _configure_logger,
+    configure_filters as _configure_dbg_filters,
 )
 
 from .browser_config import (
@@ -55,7 +56,7 @@ _SCRIPT_START_TIME: float = time.time()
 # ══════════════════════════════════════════════════════════════════════════════
 
 def load_config(config_path: str) -> dict:
-    startup_dbg(f"load_config called with: {config_path!r}")
+    startup_dbg(f"[CONFIG] load_config called with: {config_path!r}")
     if not os.path.isfile(config_path):
         print(f"ERROR: Config file not found at: {config_path}", file=sys.stderr)
         sys.exit(1)
@@ -64,7 +65,7 @@ def load_config(config_path: str) -> dict:
     try:
         parser.read(config_path, encoding="utf-8")
     except Exception as _e:
-        startup_dbg(f"load_config: configparser FAILED — {type(_e).__name__}: {_e}")
+        startup_dbg(f"[CONFIG] load_config: configparser FAILED — {type(_e).__name__}: {_e}")
         raise
 
     streamers = []
@@ -544,6 +545,27 @@ def _get_output_mode() -> int:
         return OUTPUT_MODE
 
 _configure_logger(_get_output_mode)
+
+# ── Per-tag debug filter ───────────────────────────────────────────────────────
+# Set any tag to False to silence that group in the debug log.
+# Changes here take effect immediately on the next dbg() call.
+#
+#   DRAIN    — yt-dlp stdout/stderr pipe drain threads
+#   CHECKER  — liveness-check subprocess calls
+#   SPLIT    — split-recording file-tracking logic
+#   POPEN    — yt-dlp process launch details
+#   PERF     — performance timing summaries (high-frequency; off by default)
+#   UPDATER  — update checker and periodic updater thread
+#
+MAIN_DBG_FILTERS: dict[str, bool] = {
+    "DRAIN":   True,
+    "CHECKER": True,
+    "SPLIT":   True,
+    "POPEN":   True,
+    "PERF":    False,   # high-frequency; disable unless actively profiling
+    "UPDATER": True,
+}
+_configure_dbg_filters(MAIN_DBG_FILTERS)
 
 # DEBUG_LOGS_ENABLED / DEBUG_LOG_PATH / debug_log_lock are imported from logger.
 
