@@ -12,11 +12,12 @@ Public API
 ----------
 startup_dbg(msg)          Write a line to the startup log (if enabled).
 startup_dbg_flush()       Write the opening banner (argv, cwd, python path).
-dbg(msg)                  Write to debug log.
+dbg(msg)                  Write to debug log (filtered by DBG_FILTERS).
 log_crash(e)              Write an unhandled exception to jj-dlp-crash.log.
 get_debug_log_path(cfg)   Resolve the debug log path from a config dict.
 get_log_path(cfg)         Resolve the activity log path from a config dict.
 get_log_file_paths(cfg)   Return (stdout_path, stderr_path) for yt-dlp logging.
+configure_filters(d)      Replace DBG_FILTERS with a new tag→bool dict.
 """
 
 import os
@@ -51,6 +52,43 @@ def configure(output_mode_fn) -> None:
     """
     global _output_mode_ref
     _output_mode_ref = output_mode_fn
+
+
+# ── Per-tag debug filter ───────────────────────────────────────────────────────
+# Controls which [TAG] groups appear in the debug log.
+# Keys must match the bracketed tag at the start of each dbg() message exactly.
+# Set a tag to False to silence all dbg() calls that begin with [TAG].
+# Set to True to allow them through (subject to DEBUG_LOGS_ENABLED being on).
+#
+# Tags used in main.py:
+#   DRAIN    — yt-dlp stdout/stderr pipe drain threads
+#   CHECKER  — liveness-check subprocess calls
+#   SPLIT    — split-recording file-tracking logic
+#   POPEN    — yt-dlp process launch details
+#   PERF     — performance timing summaries (high-frequency)
+#   UPDATER  — update checker and periodic updater thread
+#
+DBG_FILTERS: dict[str, bool] = {
+    "DRAIN":   True,
+    "CHECKER": True,
+    "SPLIT":   True,
+    "POPEN":   True,
+    "PERF":    True,
+    "UPDATER": True,
+}
+
+_dbg_filters_lock = threading.Lock()
+
+
+def configure_filters(filters: dict[str, bool]) -> None:
+    """
+    Replace the active DBG_FILTERS with *filters*.
+    Call once from main after the filter dict is defined there.
+    Filters set here override the defaults above.
+    """
+    global DBG_FILTERS
+    with _dbg_filters_lock:
+        DBG_FILTERS = dict(filters)
 
 
 # ── Startup log ───────────────────────────────────────────────────────────────
@@ -95,7 +133,24 @@ def _write_debug_log(msg: str) -> None:
 def dbg(msg: str, site_name: str = "") -> None:
     """
     Write msg (with timestamp and optional site name) to the debug log.
+
+    The message is dropped silently if its leading [TAG] appears in
+    DBG_FILTERS with a value of False.  Messages with no recognisable
+    [TAG] are always written.
     """
+    # ── Tag-based filter ──────────────────────────────────────────────────────
+    # Extract the first [TAG] token from the message, e.g. "[DRAIN]" -> "DRAIN".
+    # A compound tag like "[SPLIT][wait_for_streamer_file]" uses only the first
+    # bracket group as the filter key so a single switch covers the whole group.
+    if msg.startswith("["):
+        end = msg.find("]")
+        if end > 1:
+            tag = msg[1:end]
+            with _dbg_filters_lock:
+                allowed = DBG_FILTERS.get(tag, True)   # unknown tags pass through
+            if not allowed:
+                return
+
     ts   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # Prepend site name if provided

@@ -26,6 +26,7 @@ from .logger import (
     DEBUG_LOGS_ENABLED, DEBUG_LOG_PATH, debug_log_lock,
     ENABLE_CRASH_LOG,
     configure as _configure_logger,
+    configure_filters as _configure_dbg_filters,
 )
 
 from .browser_config import (
@@ -55,7 +56,7 @@ _SCRIPT_START_TIME: float = time.time()
 # ══════════════════════════════════════════════════════════════════════════════
 
 def load_config(config_path: str) -> dict:
-    startup_dbg(f"load_config called with: {config_path!r}")
+    startup_dbg(f"[CONFIG] load_config called with: {config_path!r}")
     if not os.path.isfile(config_path):
         print(f"ERROR: Config file not found at: {config_path}", file=sys.stderr)
         sys.exit(1)
@@ -64,7 +65,7 @@ def load_config(config_path: str) -> dict:
     try:
         parser.read(config_path, encoding="utf-8")
     except Exception as _e:
-        startup_dbg(f"load_config: configparser FAILED — {type(_e).__name__}: {_e}")
+        startup_dbg(f"[CONFIG] load_config: configparser FAILED — {type(_e).__name__}: {_e}")
         raise
 
     streamers = []
@@ -179,6 +180,7 @@ def load_config(config_path: str) -> dict:
     ask_for_browser        = general.get("ASK_FOR_BROWSER", "true").strip().lower() not in ("false", "0", "no")
     site_order             = safe_int(general.get("SITE_ORDER", 999), 999)
     last_live_highlight    = safe_int(general.get("LAST_LIVE_HIGHLIGHT", 0), 0)
+    check_for_updates      = general.get("CHECK_FOR_UPDATES", "true").strip().lower() not in ("false", "0", "no")
 
     # Disk drives to monitor (comma-separated paths/letters, e.g. "C:\,D:\,/home")
     disk_drives_raw = general.get("DISK_DRIVES", "").strip().strip('\"\'')
@@ -247,6 +249,7 @@ def load_config(config_path: str) -> dict:
         "ask_for_browser": ask_for_browser,
         "site_order": site_order,
         "last_live_highlight": last_live_highlight,
+        "check_for_updates": check_for_updates,
         "twitch_enabled": twitch_enabled,
         "twitch_client_id": twitch_client_id,
         "twitch_client_secret": twitch_client_secret,
@@ -256,11 +259,131 @@ def load_config(config_path: str) -> dict:
     }
 
 
+# ── Global config filename (always silently loaded; never shown in chooser) ───
+_GLOBAL_CONF_NAME: str = "global.conf"
+
+
+def get_global_conf_path() -> str:
+    """Return the absolute path to global.conf.
+
+    Prefer configs/global.conf and fall back to global.conf in the current
+    working directory for backwards compatibility.
+    """
+    config_dir = os.path.abspath("configs")
+    global_conf_in_configs = os.path.join(config_dir, _GLOBAL_CONF_NAME)
+    if os.path.exists(global_conf_in_configs):
+        return global_conf_in_configs
+    return os.path.abspath(_GLOBAL_CONF_NAME)
+
+
+def load_global_config() -> dict:
+    """Load global.conf and return the keys that are truly global.
+
+    Returns a dict with the following keys (with safe defaults if the file does
+    not exist or a key is absent):
+        disk_drives       – list[str]
+        debug_logs        – bool
+        debug_log_path    – str
+        check_for_updates – bool
+        update_interval   – int
+        ask_for_browser   – bool
+    """
+    path = get_global_conf_path()
+    parser = configparser.ConfigParser(allow_no_value=True, interpolation=None)
+    try:
+        parser.read(path, encoding="utf-8")
+    except Exception:
+        pass
+
+    general = parser["General"] if parser.has_section("General") else {}
+
+    def _bool(key: str, default: bool) -> bool:
+        raw = general.get(key, "").strip().lower()
+        if raw in ("true", "1", "yes"):
+            return True
+        if raw in ("false", "0", "no"):
+            return False
+        return default
+
+    disk_drives_raw = general.get("DISK_DRIVES", "").strip().strip('"\'')
+    disk_drives = [d.strip() for d in disk_drives_raw.split(",") if d.strip()] if disk_drives_raw else []
+
+    def _int(key: str, default: int) -> int:
+        raw = general.get(key, "").strip()
+        try:
+            value = int(raw)
+            return value if value > 0 else default
+        except Exception:
+            return default
+
+    debug_log_path_raw = general.get("DEBUG_LOG_PATH", "").strip().strip('"\'')
+    update_interval = _int("UPDATE_INTERVAL", 30)
+
+    return {
+        "disk_drives":        disk_drives,
+        "debug_logs":         _bool("DEBUG_LOGS", False),
+        "debug_log_path":     debug_log_path_raw,
+        "check_for_updates":  _bool("CHECK_FOR_UPDATES", True),
+        "update_interval":    update_interval,
+        "ask_for_browser":    _bool("ASK_FOR_BROWSER", True),
+        "ask_for_config":     _bool("ASK_FOR_CONFIG", True),
+    }
+
+def _write_global_conf_key(key: str, value: str) -> None:
+    path = get_global_conf_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception:
+        lines = ["[General]\n"]
+
+    section_found = False
+    in_general = False
+    replaced = False
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            if s[1:-1] == "General":
+                section_found = True
+                in_general = True
+            else:
+                in_general = False
+        elif in_general and "=" in s:
+            k, _ = s.split("=", 1)
+            if k.strip().upper() == key.upper():
+                lines[i] = f"{key.upper()} = {value}\n"
+                replaced = True
+                break
+
+    if not replaced:
+        if not section_found:
+            lines.insert(0, "[General]\n")
+            lines.insert(1, f"{key.upper()} = {value}\n")
+        else:
+            in_general = False
+            insert_idx = len(lines)
+            for i, line in enumerate(lines):
+                s = line.strip()
+                if s.startswith("[") and s.endswith("]"):
+                    if s[1:-1] == "General":
+                        in_general = True
+                    elif in_general:
+                        insert_idx = i
+                        break
+            lines.insert(insert_idx, f"{key.upper()} = {value}\n")
+
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+    except Exception:
+        pass
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Per-site state
 # ══════════════════════════════════════════════════════════════════════════════
 
-_GLOBAL_JSON_PATH: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "global.json")
+_GLOBAL_JSON_PATH: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "global.json") 
 _global_json_lock: threading.Lock = threading.Lock()
 
 
@@ -451,6 +574,10 @@ class SiteState:
 OUTPUT_MODE = 1
 output_mode_lock = threading.Lock()
 
+# Update availability flag (set during startup, read by dashboard)
+UPDATE_AVAILABLE = False
+update_available_lock = threading.Lock()
+
 FFMPEG_ERROR_PATTERNS: List[str] = [
     "timestamp discontinuity",
     "Packet corrupt",
@@ -468,6 +595,27 @@ def _get_output_mode() -> int:
         return OUTPUT_MODE
 
 _configure_logger(_get_output_mode)
+
+# ── Per-tag debug filter ───────────────────────────────────────────────────────
+# Set any tag to False to silence that group in the debug log.
+# Changes here take effect immediately on the next dbg() call.
+#
+#   DRAIN    — yt-dlp stdout/stderr pipe drain threads
+#   CHECKER  — liveness-check subprocess calls
+#   SPLIT    — split-recording file-tracking logic
+#   POPEN    — yt-dlp process launch details
+#   PERF     — performance timing summaries (high-frequency; off by default)
+#   UPDATER  — update checker and periodic updater thread
+#
+MAIN_DBG_FILTERS: dict[str, bool] = {
+    "DRAIN":   True,
+    "CHECKER": True,
+    "SPLIT":   True,
+    "POPEN":   True,
+    "PERF":    False,   # high-frequency; disable unless actively profiling
+    "UPDATER": True,
+}
+_configure_dbg_filters(MAIN_DBG_FILTERS)
 
 # DEBUG_LOGS_ENABLED / DEBUG_LOG_PATH / debug_log_lock are imported from logger.
 
@@ -629,7 +777,6 @@ def _modify_config_streamer(config_path: str, username: str, action: str) -> str
         removed = _remove_from_section("Streamers", username)
         messages.append(f"Removed '{username}' from [Streamers]." if removed else f"'{username}' not found.")
         _add_to_section("Block", username)
-        messages.append(f"Added '{username}' to [Block].")
     elif action == "disable":
         in_streamers = False
         if "Streamers" in section_starts:
@@ -1520,9 +1667,10 @@ class JJDlpDashboard:
     # ── Tab definitions — add/remove tabs here ──────────────────────────────
     TABS = ["Dashboard", "Log", "EventSub", "Config"]
 
-    def __init__(self, stdscr, sites: List["SiteState"]):
+    def __init__(self, stdscr, sites: List["SiteState"], global_cfg: dict = None):
         self.stdscr       = stdscr
         self.sites        = sites
+        self.global_cfg   = global_cfg or {}   # app-wide settings from global.conf
         
         # --- Dynamic Tab Logic ---
         # Start with the mandatory tabs
@@ -1719,6 +1867,12 @@ class JJDlpDashboard:
         except Exception:
             pass
 
+        # Add Update Available row if applicable
+        with update_available_lock:
+            if UPDATE_AVAILABLE:
+                rows.append(("",               "",                 0))
+                rows.append(("Update",         "Available!",       self.C_WARN))
+
         inner_w = x2 - x1 - 2
         label_w = min(10, inner_w // 2)
 
@@ -1734,13 +1888,22 @@ class JJDlpDashboard:
                             str(val)[:inner_w - label_w - 1],
                             curses.color_pair(cpair) | curses.A_BOLD)
 
-        # Disk space rows — aggregate drives from ALL site configs
+        # Disk space rows — drives from global.conf take precedence; fall back to per-site
         disk_row_y = y1 + 2 + len(rows) + 1
         try:
-            # Collect unique drives across every loaded config
             seen_drives: list = []
             seen_drives_set: set = set()
             fallback_dir = None
+
+            # 1. Global drives (from global.conf) — shown first if configured
+            global_drives = self.global_cfg.get("disk_drives", [])
+            for d in global_drives:
+                key = os.path.normcase(d)
+                if key not in seen_drives_set:
+                    seen_drives_set.add(key)
+                    seen_drives.append(d)
+
+            # 2. Per-site drives (merged in, deduped)
             for _site in self.sites:
                 try:
                     _cfg = _site.get_cached_config()
@@ -2166,7 +2329,7 @@ class JJDlpDashboard:
             else:
                 # Only downloader output (no checker prefix)
                 lines = [ln for ln in raw if not ln.startswith(_CHECKER_STDOUT_PREFIX)]
-        title = " STDOUT — Show All: ON  (A toggles) " if show_all else " STDOUT — Show All: OFF (A toggles) "
+        title = " STDOUT — Show All: ON  (Press A to toggle) " if show_all else " STDOUT — Show All: OFF (Press A to toggle) "
         self._stdout_scroll = self._draw_pipe_tab(
             y1, x1, y2, x2, title, lines, self._stdout_scroll)
 
@@ -2185,7 +2348,7 @@ class JJDlpDashboard:
                 ]
             else:
                 lines = [ln for ln in raw if not ln.startswith(_CHECKER_STDERR_PREFIX)]
-        title = " STDERR — Show All: ON  (A toggles) " if show_all else " STDERR — Show All: OFF (A toggles) "
+        title = " STDERR — Show All: ON  (Press A to toggle) " if show_all else " STDERR — Show All: OFF (Press A to toggle) "
         self._stderr_scroll = self._draw_pipe_tab(
             y1, x1, y2, x2, title, lines, self._stderr_scroll)
 
@@ -2355,6 +2518,13 @@ class JJDlpDashboard:
         safe_addstr(self.stdscr, 1, w - len(sys_time_str) - 3, sys_time_str,
                     curses.color_pair(self.C_CHROME))
 
+        # Update Available indicator (below system time)
+        with update_available_lock:
+            if UPDATE_AVAILABLE:
+                update_str = "Update Available"
+                safe_addstr(self.stdscr, 2, w - len(update_str) - 3, update_str,
+                            curses.color_pair(self.C_WARN) | curses.A_BOLD)
+
         # Blank line after logo (row 7), then tab bar at row 8
         # (Logo occupies rows 1-6, row 7 is blank, tabs at row 8)
         self.draw_tabs(8, 2)
@@ -2508,6 +2678,36 @@ class JJDlpDashboard:
             self._mgmt_buf += chr(key)
         return True
 
+    # ── Live global-config apply (no restart needed) ──────────────────────────
+    def apply_global_cfg(self, new_cfg: dict) -> None:
+        """
+        Called by GlobalConfigEditor immediately after global.conf is saved.
+        Applies runtime-changeable settings to the live process so that changes
+        like DEBUG_LOGS take effect without restarting the script.
+        """
+        from . import logger as _logger
+
+        # ── DEBUG_LOGS / DEBUG_LOG_PATH ───────────────────────────────────────
+        new_enabled = new_cfg.get("DEBUG_LOGS", "false").strip().lower() == "true"
+        new_path    = new_cfg.get("DEBUG_LOG_PATH", "").strip().strip('"\'')
+
+        with _logger.debug_log_lock:
+            _logger.DEBUG_LOGS_ENABLED = new_enabled
+            if new_enabled:
+                if new_path:
+                    _logger.DEBUG_LOG_PATH = new_path
+                elif not _logger.DEBUG_LOG_PATH:
+                    # Fall back to the first site's resolved path
+                    _logger.DEBUG_LOG_PATH = get_debug_log_path(
+                        load_config(self.sites[0].config_path)
+                    )
+            # If disabling, leave DEBUG_LOG_PATH as-is so re-enabling reuses it
+
+        _logger.dbg(
+            f"[CONFIG] apply_global_cfg: DEBUG_LOGS={new_enabled} "
+            f"DEBUG_LOG_PATH={_logger.DEBUG_LOG_PATH!r}"
+        )
+
     # ── Run loop ──────────────────────────────────────────────────────────────
     def run(self):
         curses.curs_set(0)
@@ -2556,13 +2756,11 @@ class JJDlpDashboard:
 # Multi-select startup chooser
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
+def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
     """
-    MenuWorks-style config file chooser, followed by a browser-cookie picker.
-    Phase 1 — config files:  Space = toggle [x],  Enter = confirm,  Q = quit.
-    Phase 2 — browser:       ↑/↓ navigate,        Enter = confirm,  Q = quit.
+    MenuWorks-style config file chooser.
+    Space = toggle [x],  Enter = confirm,  Q = quit.
     Returns list of selected config file paths (at least 1).
-    Writes the chosen browser back into each selected config file.
     """
     curses.start_color()
     curses.use_default_colors()
@@ -2580,6 +2778,7 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
     selected  = set(range(len(found)))   # start with all config files selected
     cursor    = 0
     n         = len(found)
+    do_not_show_config = False
 
     while True:
         stdscr.erase()
@@ -2616,10 +2815,18 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
                 attr = curses.color_pair(1)
             safe_addstr(stdscr, row, 4, f"  {checked}  {name}", attr)
 
+        # "Do not show again" checkbox
+        dna_row = 12 + n + 1
+        dna_box = "[x]" if do_not_show_config else "[ ]"
+        dna_attr = curses.color_pair(3) | curses.A_BOLD if do_not_show_config else curses.color_pair(3)
+        safe_addstr(stdscr, dna_row, 4,
+                    f"  {dna_box}  Do not show again (press D to toggle)",
+                    dna_attr)
+
         # Footer
         sel_count = len(selected)
         footer = (f"  {sel_count} file(s) selected  "
-                  f"↑/↓ navigate  Space toggle  Enter confirm  ")
+                  f"↑/↓ navigate  Space toggle  Enter confirm  D do not show  ")
         safe_addstr(stdscr, h - 1, 0,
                     footer.ljust(w - 1)[:w - 1],
                     curses.color_pair(5) | curses.A_BOLD)
@@ -2637,24 +2844,48 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
                     selected.discard(cursor)
             else:
                 selected.add(cursor)
+        elif key in (ord('d'), ord('D')):
+            do_not_show_config = not do_not_show_config
         elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
             if selected:
                 chosen_files = [found[i] for i in sorted(selected)]
-                break
+                
+                # Save chosen config files to global.json
+                global_data = _load_global_json()
+                global_data["startup_configs"] = chosen_files
+                _save_global_json(global_data)
+                
+                if do_not_show_config:
+                    _write_global_conf_key("ASK_FOR_CONFIG", "false")
+                
+                return chosen_files
         elif key in (ord('q'), ord('Q'), 27):
             sys.exit(0)
 
-    # ── Phase 2: browser / cookie selection ──────────────────────────────────
+def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
+    """
+    Browser-cookie picker.
+    ↑/↓ navigate, Enter = confirm, Q = quit.
+    Writes the chosen browser back into each selected config file.
+    Returns chosen_files unmodified.
+    """
+    curses.start_color()
+    curses.use_default_colors()
+    curses.init_pair(1, curses.COLOR_CYAN,    curses.COLOR_BLACK)
+    curses.init_pair(2, curses.COLOR_WHITE,   curses.COLOR_BLUE)
+    curses.init_pair(3, curses.COLOR_YELLOW,  curses.COLOR_BLACK)
+    curses.init_pair(4, curses.COLOR_GREEN,   curses.COLOR_BLACK)
+    curses.init_pair(5, curses.COLOR_WHITE,   curses.COLOR_CYAN)
+    curses.init_pair(6, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
+
+    curses.curs_set(0)
+    stdscr.keypad(True)
+
     # Build a per-file config map for all selected files (used for flag checks).
     file_cfgs = {
         fname: load_config(os.path.join(os.getcwd(), fname))
         for fname in chosen_files
     }
-
-    # Show the page if ANY selected config has ASK_FOR_BROWSER = True (default).
-    # Only skip when every selected config has explicitly opted out.
-    if not any(file_cfgs[f].get("ask_for_browser", True) for f in chosen_files):
-        return chosen_files
 
     first_fpath = os.path.join(os.getcwd(), chosen_files[0])
 
@@ -2751,12 +2982,41 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
                     _write_browser_to_config(fpath, chosen_browser, write_downloader=write_dl, write_checker=write_ck)
                 # If "Do not show again" was checked, persist ASK_FOR_BROWSER = False
                 if do_not_show:
-                    _write_ask_for_browser_to_config(fpath, False)
+                    _write_global_conf_key("ASK_FOR_BROWSER", "false")
             return chosen_files
         elif key in (ord('q'), ord('Q'), 27):
             sys.exit(0)
 
     return chosen_files  # unreachable, satisfies type checker
+
+
+def _input_with_timeout(prompt: str, timeout_seconds: int = 10) -> Optional[str]:
+    """Prompt the user for input with a timeout.
+    
+    Returns the user's input (stripped) if they respond within timeout_seconds.
+    Returns None if the timeout expires without a response.
+    """
+    import sys
+    
+    result = []
+    
+    def _read_input():
+        try:
+            user_input = input(prompt)
+            result.append(user_input)
+        except (EOFError, KeyboardInterrupt):
+            result.append(None)
+    
+    thread = threading.Thread(target=_read_input, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_seconds)
+    
+    if thread.is_alive():
+        # Timeout occurred
+        print()  # New line after timeout
+        return None
+    
+    return result[0].strip() if result and result[0] is not None else None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2774,13 +3034,25 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="jj-dlp multi-site stream recorder")
     parser.add_argument("--config", nargs="+", default=None,
                         help="Path(s) to config file(s). Omit to auto-discover.")
+    parser.add_argument("--update", action="store_true", help="Update jj-dlp to the latest version")
     args = parser.parse_args()
+
+    if args.update:
+        from .updater import perform_update
+        perform_update()
+        sys.exit(0)
 
     # ── Config discovery / selection ──────────────────────────────────────────
     if args.config is not None:
         config_paths = []
         for p in args.config:
             ap = os.path.abspath(p)
+            if os.path.basename(ap) == _GLOBAL_CONF_NAME:
+                # global.conf is always loaded separately via load_global_config();
+                # passing it via --config would create a spurious site panel.
+                startup_dbg(f"[CONFIG] Ignoring {ap!r} from --config — global.conf is loaded automatically.")
+                print(f"Note: {_GLOBAL_CONF_NAME} is loaded automatically and does not need to be passed via --config. Skipping.")
+                continue
             if not os.path.isfile(ap):
                 print(f"ERROR: Config file not found: {ap}", file=sys.stderr)
                 sys.exit(1)
@@ -2800,6 +3072,9 @@ def main() -> None:
             for d in search_dirs:
                 for f in os.listdir(d):
                     if f.endswith(".conf") and os.path.isfile(os.path.join(d, f)):
+                        # global.conf is always loaded silently; never shown in the chooser
+                        if f == _GLOBAL_CONF_NAME:
+                            continue
                         rel = os.path.relpath(os.path.join(d, f), cwd)
                         if rel not in found:
                             found.append(rel)
@@ -2812,26 +3087,94 @@ def main() -> None:
                 sys.exit(1)
             if len(found) == 1:
                 print(f"Using: {found[0]}")
-                config_paths = [os.path.join(cwd, found[0])]
+                chosen = [found[0]]
             else:
-                # Multi-select chooser
-                chosen = curses.wrapper(_curses_multiselect, found)
-                config_paths = [os.path.join(cwd, f) for f in chosen]
+                # Load global.conf to check if we should show the UI
+                global_cfg = load_global_config()
+                ask_for_config = global_cfg.get("ask_for_config", True)
+                
+                # Load global.json to see if we have saved configs
+                global_data = _load_global_json()
+                saved_configs = global_data.get("startup_configs", [])
+                
+                if not ask_for_config and saved_configs and all(c in found for c in saved_configs):
+                    chosen = saved_configs
+                else:
+                    # Multi-select chooser
+                    chosen = curses.wrapper(_curses_choose_config, found)
+                    
+            # ASK_FOR_BROWSER logic
+            _global_cfg = load_global_config()
+            ask_for_browser = _global_cfg.get("ask_for_browser", None)
+            if ask_for_browser is None:
+                # Fall back to per-site values for backwards compatibility
+                ask_for_browser = any(
+                    load_config(os.path.join(cwd, f)).get("ask_for_browser", True) 
+                    for f in chosen
+                )
+            
+            if ask_for_browser:
+                chosen = curses.wrapper(_curses_choose_browser, chosen)
+
+            config_paths = [os.path.join(cwd, f) for f in chosen]
 
     # ── Global config / debug setup ───────────────────────────────────────────
     initial_cfg = load_config(config_paths[0])
 
+    # Load global.conf — app-wide settings, independent of any site config.
+    global_cfg = load_global_config()
+    startup_dbg(f"[GLOBAL] loaded global.conf: {global_cfg!r}")
+
+    # ── Updater logic ─────────────────────────────────────────────────────────
+    from .updater import check_for_updates_background, is_update_available, perform_update
+    # CHECK_FOR_UPDATES is now a global setting.
+    any_check = global_cfg.get("check_for_updates", True)
+    update_interval = global_cfg.get("update_interval", 30)
+    if update_interval <= 0:
+        update_interval = 30
+    
+    global UPDATE_AVAILABLE
+    if any_check:
+        dbg(f"[UPDATER] enabled startup checker update_interval={update_interval}")
+        startup_available = is_update_available()
+        dbg(f"[UPDATER] startup read update_available={startup_available}")
+        if startup_available:
+            with update_available_lock:
+                UPDATE_AVAILABLE = True
+            print("\n[Updater] A new version of jj-dlp is available!")
+            ans = _input_with_timeout("[Updater] Do you want to update now? (y/n) [timeout in 10s]: ", timeout_seconds=10)
+            if ans == 'y':
+                perform_update()
+                sys.exit(0)
+            elif ans is None:
+                print("[Updater] No response received. Continuing with current version.")
+
+        def _periodic_update_checker() -> None:
+            global UPDATE_AVAILABLE
+            while True:
+                check_for_updates_background()
+                new_available = is_update_available()
+                with update_available_lock:
+                    prev_available = UPDATE_AVAILABLE
+                    UPDATE_AVAILABLE = new_available
+                dbg(f"[UPDATER] periodic check prev={prev_available} new={new_available}")
+                # When an update becomes available while the dashboard is active,
+                # only use the dashboard indicator and do not prompt interactively.
+                time.sleep(update_interval * 60)
+
+        threading.Thread(target=_periodic_update_checker, daemon=True).start()
+
     from . import logger as _logger
     with _logger.debug_log_lock:
-        any_debug = any(load_config(cp).get("debug_logs", False) for cp in config_paths)
+        # DEBUG_LOGS / DEBUG_LOG_PATH are now global settings.
+        any_debug = global_cfg.get("debug_logs", False)
         _logger.DEBUG_LOGS_ENABLED = any_debug
         if any_debug:
-            # Use the debug_log_path from whichever config has debug enabled
-            for cp in config_paths:
-                cfg_i = load_config(cp)
-                if cfg_i.get("debug_logs", False):
-                    _logger.DEBUG_LOG_PATH = get_debug_log_path(cfg_i)
-                    break
+            raw_path = global_cfg.get("debug_log_path", "")
+            if raw_path:
+                _logger.DEBUG_LOG_PATH = raw_path
+            else:
+                _logger.DEBUG_LOG_PATH = get_debug_log_path(load_config(config_paths[0]))
         
     # ── Launch per-site state + threads ──────────────────────────────────────
     sites: List[SiteState] = []
@@ -2869,7 +3212,7 @@ def main() -> None:
                 stdscr.refresh()
                 stdscr.getch()
                 return
-            JJDlpDashboard(stdscr, sites).run()
+            JJDlpDashboard(stdscr, sites, global_cfg=global_cfg).run()
 
         while True:
             with output_mode_lock:
