@@ -326,7 +326,57 @@ def load_global_config() -> dict:
         "check_for_updates":  _bool("CHECK_FOR_UPDATES", True),
         "update_interval":    update_interval,
         "ask_for_browser":    _bool("ASK_FOR_BROWSER", True),
+        "ask_for_config":     _bool("ASK_FOR_CONFIG", True),
     }
+
+def _write_global_conf_key(key: str, value: str) -> None:
+    path = get_global_conf_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception:
+        lines = ["[General]\n"]
+
+    section_found = False
+    in_general = False
+    replaced = False
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            if s[1:-1] == "General":
+                section_found = True
+                in_general = True
+            else:
+                in_general = False
+        elif in_general and "=" in s:
+            k, _ = s.split("=", 1)
+            if k.strip().upper() == key.upper():
+                lines[i] = f"{key.upper()} = {value}\n"
+                replaced = True
+                break
+
+    if not replaced:
+        if not section_found:
+            lines.insert(0, "[General]\n")
+            lines.insert(1, f"{key.upper()} = {value}\n")
+        else:
+            in_general = False
+            insert_idx = len(lines)
+            for i, line in enumerate(lines):
+                s = line.strip()
+                if s.startswith("[") and s.endswith("]"):
+                    if s[1:-1] == "General":
+                        in_general = True
+                    elif in_general:
+                        insert_idx = i
+                        break
+            lines.insert(insert_idx, f"{key.upper()} = {value}\n")
+
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+    except Exception:
+        pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2730,6 +2780,7 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
     selected  = set(range(len(found)))   # start with all config files selected
     cursor    = 0
     n         = len(found)
+    do_not_show_config = False
 
     while True:
         stdscr.erase()
@@ -2766,10 +2817,18 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
                 attr = curses.color_pair(1)
             safe_addstr(stdscr, row, 4, f"  {checked}  {name}", attr)
 
+        # "Do not show again" checkbox
+        dna_row = 12 + n + 1
+        dna_box = "[x]" if do_not_show_config else "[ ]"
+        dna_attr = curses.color_pair(3) | curses.A_BOLD if do_not_show_config else curses.color_pair(3)
+        safe_addstr(stdscr, dna_row, 4,
+                    f"  {dna_box}  Do not show again (press D to toggle)",
+                    dna_attr)
+
         # Footer
         sel_count = len(selected)
         footer = (f"  {sel_count} file(s) selected  "
-                  f"↑/↓ navigate  Space toggle  Enter confirm  ")
+                  f"↑/↓ navigate  Space toggle  Enter confirm  D do not show  ")
         safe_addstr(stdscr, h - 1, 0,
                     footer.ljust(w - 1)[:w - 1],
                     curses.color_pair(5) | curses.A_BOLD)
@@ -2787,9 +2846,20 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
                     selected.discard(cursor)
             else:
                 selected.add(cursor)
+        elif key in (ord('d'), ord('D')):
+            do_not_show_config = not do_not_show_config
         elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
             if selected:
                 chosen_files = [found[i] for i in sorted(selected)]
+                
+                # Save chosen config files to global.json
+                global_data = _load_global_json()
+                global_data["startup_configs"] = chosen_files
+                _save_global_json(global_data)
+                
+                if do_not_show_config:
+                    _write_global_conf_key("ASK_FOR_CONFIG", "false")
+                
                 break
         elif key in (ord('q'), ord('Q'), 27):
             sys.exit(0)
@@ -3012,8 +3082,20 @@ def main() -> None:
                 print(f"Using: {found[0]}")
                 config_paths = [os.path.join(cwd, found[0])]
             else:
-                # Multi-select chooser
-                chosen = curses.wrapper(_curses_multiselect, found)
+                # Load global.conf to check if we should show the UI
+                global_cfg = load_global_config()
+                ask_for_config = global_cfg.get("ask_for_config", True)
+                
+                # Load global.json to see if we have saved configs
+                global_data = _load_global_json()
+                saved_configs = global_data.get("startup_configs", [])
+                
+                if not ask_for_config and saved_configs and all(c in found for c in saved_configs):
+                    chosen = saved_configs
+                else:
+                    # Multi-select chooser
+                    chosen = curses.wrapper(_curses_multiselect, found)
+                    
                 config_paths = [os.path.join(cwd, f) for f in chosen]
 
     # ── Global config / debug setup ───────────────────────────────────────────

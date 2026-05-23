@@ -47,7 +47,7 @@ class ConfigItem:
 
 
 # ── Keys that live in global.conf (never shown in per-site editor) ────────────
-_GLOBAL_KEYS = {"DISK_DRIVES", "DEBUG_LOGS", "DEBUG_LOG_PATH", "CHECK_FOR_UPDATES", "UPDATE_INTERVAL", "ASK_FOR_BROWSER"}
+_GLOBAL_KEYS = {"DISK_DRIVES", "DEBUG_LOGS", "DEBUG_LOG_PATH", "CHECK_FOR_UPDATES", "UPDATE_INTERVAL", "ASK_FOR_BROWSER", "ASK_FOR_CONFIG"}
 
 
 class GlobalConfigEditor:
@@ -60,6 +60,7 @@ class GlobalConfigEditor:
         "CHECK_FOR_UPDATES",
         "UPDATE_INTERVAL",
         "ASK_FOR_BROWSER",
+        "ASK_FOR_CONFIG",
     ]
     GLOBAL_KEYS_COMMENTS = {
         "DISK_DRIVES":        "Comma-separated drives/paths to show disk usage for (e.g. C:\\,D:\\  or  /home,/mnt/data).",
@@ -68,6 +69,7 @@ class GlobalConfigEditor:
         "CHECK_FOR_UPDATES":  "Check for jj-dlp updates on startup (true/false).",
         "UPDATE_INTERVAL":    "Update check interval in minutes.",
         "ASK_FOR_BROWSER":    "Show the browser-cookie picker on startup (true/false).",
+        "ASK_FOR_CONFIG":     "Show the config file chooser on startup (true/false).",
     }
 
     def __init__(self, dashboard, on_save=None):
@@ -128,6 +130,9 @@ class GlobalConfigEditor:
             "\n",
             "# Show the browser-cookie picker on startup (true/false).\n",
             "ASK_FOR_BROWSER = true\n",
+            "\n",
+            "# Show the config file chooser on startup (true/false).\n",
+            "ASK_FOR_CONFIG = true\n",
         ]
         try:
             with open(self.conf_path, "w", encoding="utf-8") as f:
@@ -180,6 +185,7 @@ class GlobalConfigEditor:
             "CHECK_FOR_UPDATES": "true",
             "UPDATE_INTERVAL": "30",
             "ASK_FOR_BROWSER": "true",
+            "ASK_FOR_CONFIG": "true",
         }
         val = defaults.get(key, "")
         new_line = f"{key} = {val}\n"
