@@ -70,8 +70,9 @@ class GlobalConfigEditor:
         "ASK_FOR_BROWSER":    "Show the browser-cookie picker on startup (true/false).",
     }
 
-    def __init__(self, dashboard):
+    def __init__(self, dashboard, on_save=None):
         self.dashboard = dashboard
+        self._on_save = on_save          # callable(new_cfg: dict) | None 
         self.conf_path = self._find_global_conf()
         self.lines: list = []
         self.items: list = []
@@ -211,6 +212,11 @@ class GlobalConfigEditor:
         # Reload so line indices stay accurate
         self._loaded = False
         self._load()
+
+        # Apply changes to live globals immediately (e.g. DEBUG_LOGS)
+        if self._on_save:
+            new_cfg = {item.key: item.value for item in self.items}
+            self._on_save(new_cfg)
 
     def handle_key(self, key) -> bool:
         """Handle a keypress in the global editor section. Returns True if consumed."""
@@ -356,7 +362,10 @@ class ConfigEditor:
         self._focus = "global"
 
         # Sub-editor for global.conf
-        self.global_editor = GlobalConfigEditor(parent_dashboard)
+        self.global_editor = GlobalConfigEditor(
+            parent_dashboard,
+            on_save=getattr(parent_dashboard, "apply_global_cfg", None),
+        )
 
     def load_config(self, config_path):
         self.current_site_path = config_path
