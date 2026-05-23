@@ -24,6 +24,18 @@ import subprocess
 import shutil
 
 
+def _is_root() -> bool:
+    """Return True if the current process is running as root/superuser.
+
+    ``os.geteuid`` does not exist on Windows; this helper centralises the
+    platform guard so callers never reach the attribute directly.
+    """
+    # os.geteuid is a POSIX-only API and raises AttributeError on Windows.
+    # We only need sudo-elevation on POSIX systems anyway, so returning False
+    # on Windows is both safe and correct.
+    return getattr(os, "geteuid", lambda: -1)() == 0
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # curses detection & installation
 # ══════════════════════════════════════════════════════════════════════════════
@@ -108,7 +120,7 @@ def install_curses_auto(progress_cb=None) -> tuple:
             _emit(msg)
             return False, msg
 
-        if os.geteuid() != 0:
+        if not _is_root():
             cmd = ["sudo"] + cmd
 
         _emit(f"Attempting: {' '.join(cmd)} ...")
@@ -329,7 +341,7 @@ def install_ffmpeg_auto(progress_cb=None) -> tuple:
             if progress_cb:
                 progress_cb(msg)
             return False, msg
-        if os.geteuid() != 0:
+        if not _is_root():
             cmd = ["sudo"] + cmd
 
     try:
