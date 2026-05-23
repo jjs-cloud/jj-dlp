@@ -238,7 +238,10 @@ def perform_update():
     print("Downloading latest version from GitHub...")
     zip_path = os.path.join(temp_dir, "main.zip")
     try:
-        urllib.request.urlretrieve(REPO_ZIP_URL, zip_path)
+        req = urllib.request.Request(REPO_ZIP_URL, headers={'User-Agent': 'jj-dlp-updater'})
+        with urllib.request.urlopen(req, timeout=30) as response:
+            with open(zip_path, 'wb') as out_file:
+                shutil.copyfileobj(response, out_file)
         dbg(f"[PERFORM] perform_update: downloaded zip to {zip_path}")
     except Exception as e:
         dbg("[PERFORM] perform_update: download failed", e)
