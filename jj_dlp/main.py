@@ -2991,9 +2991,9 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
 
 
 def _input_with_timeout(prompt: str, timeout_seconds: int = 10) -> Optional[str]:
-    """Prompt the user for input with a timeout.
+    """Prompt the user for a single keypress (y/n) with a timeout.
 
-    Returns the user's input (stripped) if they respond within timeout_seconds.
+    Returns the character immediately when pressed — no Enter required.
     Returns None if the timeout expires without a response.
     """
     print(prompt, end="", flush=True)
@@ -3001,39 +3001,42 @@ def _input_with_timeout(prompt: str, timeout_seconds: int = 10) -> Optional[str]
     if sys.platform == "win32" and sys.stdin.isatty():
         import msvcrt
 
-        buf = []
         end_time = time.time() + timeout_seconds
         while time.time() < end_time:
             if msvcrt.kbhit():
                 ch = msvcrt.getwch()
-                if ch in ("\r", "\n"):
-                    print()
-                    return "".join(buf).strip()
                 if ch == "\x03":
                     raise KeyboardInterrupt
-                if ch == "\x08":
-                    if buf:
-                        buf.pop()
-                        print("\b \b", end="", flush=True)
-                    continue
-                buf.append(ch)
+                print(ch)  # echo the character
+                return ch.lower()
             time.sleep(0.01)
         print()
         return None
 
-    try:
+    # Unix / macOS: use termios to switch to raw (no-echo, no-buffering) mode.
+    if sys.stdin.isatty():
         import select
-        fd = sys.stdin.fileno()
-        rlist, _, _ = select.select([sys.stdin], [], [], timeout_seconds)
-        if rlist:
-            line = sys.stdin.readline()
-            if line == "":
-                return None
-            return line.strip()
-    except Exception:
-        pass
+        import termios
+        import tty
 
-    # Fallback for non-tty or unsupported environments.
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            rlist, _, _ = select.select([sys.stdin], [], [], timeout_seconds)
+            if rlist:
+                ch = sys.stdin.read(1)
+                print(ch)  # echo the character
+                if ch == "\x03":
+                    raise KeyboardInterrupt
+                return ch.lower()
+            else:
+                print()
+                return None
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    # Fallback for non-tty environments (pipes, CI, etc.) — still line-buffered.
     result = []
 
     def _read_input():
@@ -3050,7 +3053,7 @@ def _input_with_timeout(prompt: str, timeout_seconds: int = 10) -> Optional[str]
         print()
         return None
 
-    return result[0].strip() if result and result[0] is not None else None
+    return result[0].strip()[:1].lower() if result and result[0] is not None else None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
