@@ -2756,13 +2756,11 @@ class JJDlpDashboard:
 # Multi-select startup chooser
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
+def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
     """
-    MenuWorks-style config file chooser, followed by a browser-cookie picker.
-    Phase 1 — config files:  Space = toggle [x],  Enter = confirm,  Q = quit.
-    Phase 2 — browser:       ↑/↓ navigate,        Enter = confirm,  Q = quit.
+    MenuWorks-style config file chooser.
+    Space = toggle [x],  Enter = confirm,  Q = quit.
     Returns list of selected config file paths (at least 1).
-    Writes the chosen browser back into each selected config file.
     """
     curses.start_color()
     curses.use_default_colors()
@@ -2860,25 +2858,34 @@ def _curses_multiselect(stdscr, found: List[str]) -> List[str]:
                 if do_not_show_config:
                     _write_global_conf_key("ASK_FOR_CONFIG", "false")
                 
-                break
+                return chosen_files
         elif key in (ord('q'), ord('Q'), 27):
             sys.exit(0)
 
-    # ── Phase 2: browser / cookie selection ──────────────────────────────────
+def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
+    """
+    Browser-cookie picker.
+    ↑/↓ navigate, Enter = confirm, Q = quit.
+    Writes the chosen browser back into each selected config file.
+    Returns chosen_files unmodified.
+    """
+    curses.start_color()
+    curses.use_default_colors()
+    curses.init_pair(1, curses.COLOR_CYAN,    curses.COLOR_BLACK)
+    curses.init_pair(2, curses.COLOR_WHITE,   curses.COLOR_BLUE)
+    curses.init_pair(3, curses.COLOR_YELLOW,  curses.COLOR_BLACK)
+    curses.init_pair(4, curses.COLOR_GREEN,   curses.COLOR_BLACK)
+    curses.init_pair(5, curses.COLOR_WHITE,   curses.COLOR_CYAN)
+    curses.init_pair(6, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
+
+    curses.curs_set(0)
+    stdscr.keypad(True)
+
     # Build a per-file config map for all selected files (used for flag checks).
     file_cfgs = {
         fname: load_config(os.path.join(os.getcwd(), fname))
         for fname in chosen_files
     }
-
-    # ASK_FOR_BROWSER is now a global setting; read it from global.conf.
-    # Fall back to per-site values for backwards compatibility.
-    _global_cfg = load_global_config()
-    ask = _global_cfg.get("ask_for_browser", None)
-    if ask is None:
-        ask = any(file_cfgs[f].get("ask_for_browser", True) for f in chosen_files)
-    if not ask:
-        return chosen_files
 
     first_fpath = os.path.join(os.getcwd(), chosen_files[0])
 
@@ -3080,7 +3087,7 @@ def main() -> None:
                 sys.exit(1)
             if len(found) == 1:
                 print(f"Using: {found[0]}")
-                config_paths = [os.path.join(cwd, found[0])]
+                chosen = [found[0]]
             else:
                 # Load global.conf to check if we should show the UI
                 global_cfg = load_global_config()
@@ -3094,9 +3101,22 @@ def main() -> None:
                     chosen = saved_configs
                 else:
                     # Multi-select chooser
-                    chosen = curses.wrapper(_curses_multiselect, found)
+                    chosen = curses.wrapper(_curses_choose_config, found)
                     
-                config_paths = [os.path.join(cwd, f) for f in chosen]
+            # ASK_FOR_BROWSER logic
+            _global_cfg = load_global_config()
+            ask_for_browser = _global_cfg.get("ask_for_browser", None)
+            if ask_for_browser is None:
+                # Fall back to per-site values for backwards compatibility
+                ask_for_browser = any(
+                    load_config(os.path.join(cwd, f)).get("ask_for_browser", True) 
+                    for f in chosen
+                )
+            
+            if ask_for_browser:
+                chosen = curses.wrapper(_curses_choose_browser, chosen)
+
+            config_paths = [os.path.join(cwd, f) for f in chosen]
 
     # ── Global config / debug setup ───────────────────────────────────────────
     initial_cfg = load_config(config_paths[0])
