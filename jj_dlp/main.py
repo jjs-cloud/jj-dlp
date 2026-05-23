@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.0.0"
+__version__ = "1.0.2"
 
 import subprocess
 import time
