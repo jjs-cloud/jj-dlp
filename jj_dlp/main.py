@@ -1896,6 +1896,7 @@ class JJDlpDashboard:
 
             # 1. Global drives (from global.conf) — shown first if configured
             global_drives = self.global_cfg.get("disk_drives", [])
+            dbg(f"[DISK] global_drives from global.conf: {global_drives!r}")
             for d in global_drives:
                 key = os.path.normcase(d)
                 if key not in seen_drives_set:
@@ -1907,6 +1908,7 @@ class JJDlpDashboard:
                 try:
                     _cfg = _site.get_cached_config()
                     drives_for_site = _cfg.get("disk_drives", [])
+                    dbg(f"[DISK] site={_site.config_path!r} drives_for_site={drives_for_site!r}")
                     if drives_for_site:
                         for d in drives_for_site:
                             key = os.path.normcase(d)
@@ -1915,9 +1917,14 @@ class JJDlpDashboard:
                                 seen_drives.append(d)
                     elif fallback_dir is None:
                         fallback_dir = _cfg.get("output_dir", "/")
-                except Exception:
-                    pass
+                        dbg(f"[DISK] no drives_for_site — fallback_dir set to: {fallback_dir!r}")
+                except Exception as _disk_site_exc:
+                    dbg(f"[DISK] exception reading site config: {_disk_site_exc!r}")
+
+            dbg(f"[DISK] seen_drives={seen_drives!r} fallback_dir={fallback_dir!r}")
             drives = seen_drives if seen_drives else ([fallback_dir] if fallback_dir else ["/"])
+            dbg(f"[DISK] final drives list: {drives!r}")
+
             if disk_row_y < y2 - 1:
                 safe_addstr(self.stdscr, disk_row_y, x1 + 2, "── Disk ──",
                             curses.color_pair(self.C_SYSTEM))
@@ -1926,9 +1933,11 @@ class JJDlpDashboard:
                 if disk_row_y >= y2 - 1:
                     break
                 try:
+                    dbg(f"[DISK] calling shutil.disk_usage({drive!r}) — exists={os.path.exists(drive)}")
                     usage = shutil.disk_usage(drive)
                     pct   = (usage.used / usage.total * 100) if usage.total else 0
                     free_gb = usage.free / (1024**3)
+                    dbg(f"[DISK] {drive!r} → free={free_gb:.1f}G pct={pct:.0f}%")
                     # Short label: last component or drive letter
                     drv_label = os.path.basename(drive.rstrip("/\\")) or drive
                     drv_label = drv_label[:6]
@@ -1938,10 +1947,10 @@ class JJDlpDashboard:
                                 disk_str[:inner_w],
                                 curses.color_pair(color))
                     disk_row_y += 1
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception as _disk_exc:
+                    dbg(f"[DISK] shutil.disk_usage({drive!r}) FAILED: {type(_disk_exc).__name__}: {_disk_exc}")
+        except Exception as _disk_outer_exc:
+            dbg(f"[DISK] outer exception in disk section: {type(_disk_outer_exc).__name__}: {_disk_outer_exc}")
 
         # Uptime at bottom
         safe_addstr(self.stdscr, y2 - 1, x1 + 2,
