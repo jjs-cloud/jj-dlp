@@ -367,7 +367,7 @@ class ConfigEditor:
         self.editing_item = None
 
         # Which panel has keyboard focus: "global" or "site"
-        self._focus = "global"
+        self._focus = "site"
 
         # Sub-editor for global.conf
         self.global_editor = GlobalConfigEditor(
@@ -457,29 +457,35 @@ class ConfigEditor:
             site = self.sites[self.selected_site_idx]
             self.load_config(site.config_path)
 
-        # ── Layout: split the content area into a top global strip + bottom site area
-        #   Global panel: y1 .. y1+global_h  (fixed height = number of global keys + 2 for borders)
-        global_h = len(GlobalConfigEditor.GLOBAL_KEYS_ORDER) + 2  # border top + bottom
-        global_y1 = y1
-        global_y2 = y1 + global_h
-        site_y1   = global_y2 + 1   # one blank row separator
-        site_y2   = y2
+        # ── Layout: side-by-side columns
+        #   Site Config (left, wider) | Global Settings (right, narrower)
+        total_w = x2 - x1
+        # Global panel gets ~38% of width, site gets the rest
+        global_w = max(30, int(total_w * 0.38))
+        site_w   = total_w - global_w - 1   # -1 for the column gap
 
-        # ── Draw global settings panel ────────────────────────────────────────
-        self.global_editor.draw(stdscr, global_y1, x1, global_y2, x2,
-                                is_active=(self._focus == "global"))
+        site_x1   = x1
+        site_x2   = x1 + site_w
+        global_x1 = site_x2 + 1
+        global_x2 = x2
 
-        # ── Focus indicator row between panels ────────────────────────────────
-        if self._focus == "global":
-            focus_hint = "  Tab: switch to Site Config ▼  "
+        # ── Tab hint row at top ───────────────────────────────────────────────
+        if self._focus == "site":
+            focus_hint = "  Tab: switch to Global Settings ►  "
         else:
-            focus_hint = "  Tab: switch to Global Settings ▲  "
-        safe_addstr(stdscr, global_y2 + 0, x1 + 1, focus_hint,
+            focus_hint = "  ◄ Tab: switch to Site Config  "
+        safe_addstr(stdscr, y1, x1 + 1, focus_hint,
                     curses.color_pair(self.dashboard.C_DIM))
 
-        # ── Draw Site Selector ────────────────────────────────────────────────
-        tab_x = x1 + 1
-        safe_addstr(stdscr, site_y1, x1, "  Site: ",
+        content_y1 = y1 + 1
+
+        # ── Draw global settings panel (right, narrower) ──────────────────────
+        self.global_editor.draw(stdscr, content_y1, global_x1, y2, global_x2,
+                                is_active=(self._focus == "global"))
+
+        # ── Draw Site Selector above the site box ─────────────────────────────
+        tab_x = site_x1 + 1
+        safe_addstr(stdscr, content_y1, site_x1, "  Site: ",
                     curses.color_pair(self.dashboard.C_DIM))
         tab_x += 8
         for i, site in enumerate(self.sites):
@@ -488,31 +494,32 @@ class ConfigEditor:
             attr = (curses.color_pair(self.dashboard.C_HILIGHT) | curses.A_BOLD
                     if i == self.selected_site_idx
                     else curses.color_pair(self.dashboard.C_CHROME))
-            safe_addstr(stdscr, site_y1, tab_x, label, attr)
+            safe_addstr(stdscr, content_y1, tab_x, label, attr)
             tab_x += len(label) + 1
 
         if self._focus == "site":
             mode_str = " [ SITE CONFIG ] "
-            safe_addstr(stdscr, site_y1, x2 - len(mode_str) - 2, mode_str,
+            safe_addstr(stdscr, content_y1, site_x2 - len(mode_str) - 1, mode_str,
                         curses.color_pair(self.dashboard.C_LIVE) | curses.A_BOLD)
 
-        # ── Draw per-site editor box ──────────────────────────────────────────
-        draw_box(stdscr, site_y1 + 1, x1, site_y2, x2, self.dashboard.C_CHROME)
-        safe_addstr(stdscr, site_y1 + 1, x1 + 2, " SITE CONFIGURATION ",
+        # ── Draw per-site editor box (left, wider) ────────────────────────────
+        site_box_y1 = content_y1 + 1
+        draw_box(stdscr, site_box_y1, site_x1, y2, site_x2, self.dashboard.C_CHROME)
+        safe_addstr(stdscr, site_box_y1, site_x1 + 2, " SITE CONFIGURATION ",
                     curses.color_pair(self.dashboard.C_INVHEAD) | curses.A_BOLD)
 
         if not self.items:
-            safe_addstr(stdscr, site_y1 + 3, x1 + 4,
+            safe_addstr(stdscr, site_box_y1 + 2, site_x1 + 4,
                         "No configurable items found.",
                         curses.color_pair(self.dashboard.C_DIM))
         else:
-            visible_rows = (site_y2 - site_y1) - 5
+            visible_rows = (y2 - site_box_y1) - 2
             if self.selected_idx < self.scroll_offset:
                 self.scroll_offset = self.selected_idx
             elif self.selected_idx >= self.scroll_offset + visible_rows:
                 self.scroll_offset = self.selected_idx - visible_rows + 1
 
-            row_y = site_y1 + 2
+            row_y = site_box_y1 + 1
             for i in range(self.scroll_offset,
                            min(len(self.items), self.scroll_offset + visible_rows)):
                 item = self.items[i]
@@ -530,15 +537,15 @@ class ConfigEditor:
                     disp_text = f"[{item.key}]"
                     sec_attr = (curses.color_pair(self.dashboard.C_HILIGHT) | curses.A_BOLD
                                 if is_selected else curses.color_pair(self.dashboard.C_WARN) | curses.A_BOLD)
-                    safe_addstr(stdscr, row_y, x1 + 2, prefix + disp_text, sec_attr)
+                    safe_addstr(stdscr, row_y, site_x1 + 2, prefix + disp_text, sec_attr)
                 else:
                     key_attr = (attr if is_selected
                                 else curses.color_pair(self.dashboard.C_WARN) | curses.A_BOLD)
                     val_attr = (attr if is_selected
                                 else curses.color_pair(self.dashboard.C_LIVE))
-                    safe_addstr(stdscr, row_y, x1 + 2, prefix + f"{item.key:<25}", key_attr)
+                    safe_addstr(stdscr, row_y, site_x1 + 2, prefix + f"{item.key:<25}", key_attr)
                     if item.has_equals:
-                        safe_addstr(stdscr, row_y, x1 + 29, "= " + str(item.value), val_attr)
+                        safe_addstr(stdscr, row_y, site_x1 + 29, "= " + str(item.value), val_attr)
                 row_y += 1
 
         # Draw popup (whichever sub-editor owns it)
