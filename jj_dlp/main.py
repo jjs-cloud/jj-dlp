@@ -1701,7 +1701,12 @@ class JJDlpDashboard:
         self._log_scroll    = 0
         self._stdout_scroll = 0
         self._stderr_scroll = 0
-        
+
+        # Disk usage cache — refreshed at most once every 10 seconds
+        self._disk_cache_time: float = 0.0
+        self._disk_cache_drives: list = []
+        self._disk_cache_results: list = []  # list of (drive, usage) or (drive, None) on error
+
         from .config_editor import ConfigEditor
         self.config_editor = ConfigEditor(self)
 
@@ -1890,65 +1895,75 @@ class JJDlpDashboard:
         # Disk space rows — drives from global.conf take precedence; fall back to per-site
         disk_row_y = y1 + 2 + len(rows) + 1
         try:
-            seen_drives: list = []
-            seen_drives_set: set = set()
-            fallback_dir = None
+            now = time.monotonic()
+            if now - self._disk_cache_time >= 10.0:
+                # Rebuild the drives list
+                seen_drives: list = []
+                seen_drives_set: set = set()
+                fallback_dir = None
 
-            # 1. Global drives (from global.conf) — shown first if configured
-            global_drives = self.global_cfg.get("disk_drives", [])
-            dbg(f"[DISK] global_drives from global.conf: {global_drives!r}")
-            for d in global_drives:
-                key = os.path.normcase(d)
-                if key not in seen_drives_set:
-                    seen_drives_set.add(key)
-                    seen_drives.append(d)
+                # 1. Global drives (from global.conf) — shown first if configured
+                global_drives = self.global_cfg.get("disk_drives", [])
+                for d in global_drives:
+                    key = os.path.normcase(d)
+                    if key not in seen_drives_set:
+                        seen_drives_set.add(key)
+                        seen_drives.append(d)
 
-            # 2. Per-site drives (merged in, deduped)
-            for _site in self.sites:
-                try:
-                    _cfg = _site.get_cached_config()
-                    drives_for_site = _cfg.get("disk_drives", [])
-                    dbg(f"[DISK] site={_site.config_path!r} drives_for_site={drives_for_site!r}")
-                    if drives_for_site:
-                        for d in drives_for_site:
-                            key = os.path.normcase(d)
-                            if key not in seen_drives_set:
-                                seen_drives_set.add(key)
-                                seen_drives.append(d)
-                    elif fallback_dir is None:
-                        fallback_dir = _cfg.get("output_dir", "/")
-                        dbg(f"[DISK] no drives_for_site — fallback_dir set to: {fallback_dir!r}")
-                except Exception as _disk_site_exc:
-                    dbg(f"[DISK] exception reading site config: {_disk_site_exc!r}")
+                # 2. Per-site drives (merged in, deduped)
+                for _site in self.sites:
+                    try:
+                        _cfg = _site.get_cached_config()
+                        drives_for_site = _cfg.get("disk_drives", [])
+                        if drives_for_site:
+                            for d in drives_for_site:
+                                key = os.path.normcase(d)
+                                if key not in seen_drives_set:
+                                    seen_drives_set.add(key)
+                                    seen_drives.append(d)
+                        elif fallback_dir is None:
+                            fallback_dir = _cfg.get("output_dir", "/")
+                    except Exception as _disk_site_exc:
+                        dbg(f"[DISK] exception reading site config: {_disk_site_exc!r}")
 
-            dbg(f"[DISK] seen_drives={seen_drives!r} fallback_dir={fallback_dir!r}")
-            drives = seen_drives if seen_drives else ([fallback_dir] if fallback_dir else ["/"])
-            dbg(f"[DISK] final drives list: {drives!r}")
+                drives = seen_drives if seen_drives else ([fallback_dir] if fallback_dir else ["/"])
+                dbg(f"[DISK] refreshing cache — drives={drives!r}")
+
+                # Query disk usage for each drive and cache the results
+                results = []
+                for drive in drives:
+                    try:
+                        usage = shutil.disk_usage(drive)
+                        results.append((drive, usage))
+                        dbg(f"[DISK] {drive!r} → free={usage.free/(1024**3):.1f}G")
+                    except Exception as _disk_exc:
+                        results.append((drive, None))
+                        dbg(f"[DISK] shutil.disk_usage({drive!r}) FAILED: {type(_disk_exc).__name__}: {_disk_exc}")
+
+                self._disk_cache_drives  = drives
+                self._disk_cache_results = results
+                self._disk_cache_time    = now
 
             if disk_row_y < y2 - 1:
                 safe_addstr(self.stdscr, disk_row_y, x1 + 2, "── Disk ──",
                             curses.color_pair(self.C_SYSTEM))
                 disk_row_y += 1
-            for drive in drives:
+            for drive, usage in self._disk_cache_results:
                 if disk_row_y >= y2 - 1:
                     break
-                try:
-                    dbg(f"[DISK] calling shutil.disk_usage({drive!r}) — exists={os.path.exists(drive)}")
-                    usage = shutil.disk_usage(drive)
-                    pct   = (usage.used / usage.total * 100) if usage.total else 0
-                    free_gb = usage.free / (1024**3)
-                    dbg(f"[DISK] {drive!r} → free={free_gb:.1f}G pct={pct:.0f}%")
-                    # Short label: last component or drive letter
-                    drv_label = os.path.basename(drive.rstrip("/\\")) or drive
-                    drv_label = drv_label[:6]
-                    disk_str  = f"{drv_label:<6} {free_gb:>4.1f}G {pct:>3.0f}%"
-                    color = self.C_LIVE if pct < 80 else (self.C_WARN if pct < 95 else self.C_REC)
-                    safe_addstr(self.stdscr, disk_row_y, x1 + 2,
-                                disk_str[:inner_w],
-                                curses.color_pair(color))
-                    disk_row_y += 1
-                except Exception as _disk_exc:
-                    dbg(f"[DISK] shutil.disk_usage({drive!r}) FAILED: {type(_disk_exc).__name__}: {_disk_exc}")
+                if usage is None:
+                    continue
+                pct     = (usage.used / usage.total * 100) if usage.total else 0
+                free_gb = usage.free / (1024**3)
+                # Short label: last component or drive letter
+                drv_label = os.path.basename(drive.rstrip("/\\")) or drive
+                drv_label = drv_label[:6]
+                disk_str  = f"{drv_label:<6} {free_gb:>4.1f}G {pct:>3.0f}%"
+                color = self.C_LIVE if pct < 80 else (self.C_WARN if pct < 95 else self.C_REC)
+                safe_addstr(self.stdscr, disk_row_y, x1 + 2,
+                            disk_str[:inner_w],
+                            curses.color_pair(color))
+                disk_row_y += 1
         except Exception as _disk_outer_exc:
             dbg(f"[DISK] outer exception in disk section: {type(_disk_outer_exc).__name__}: {_disk_outer_exc}")
 
