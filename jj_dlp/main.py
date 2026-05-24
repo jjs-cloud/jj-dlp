@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 import subprocess
 import time
@@ -37,15 +37,7 @@ from .browser_config import (
     _write_ask_for_browser_to_config,
 )
 
-# ── ffmpeg dependency check (must happen before curses is initialised) ────────
-if not plain_ffmpeg_check():
-    print(f"\njj-dlp v{__version__}  ·  Aborted during ffmpeg check.")
-    sys.exit(1)
-
-# ── Run the curses check before importing curses at module level ──────────────
-ensure_curses()
-
-import curses  # noqa: E402  (intentionally placed after the availability check)
+import curses  # noqa: E402
 
 
 # ── Script start time (for uptime display) ───────────────────────────────────
@@ -3077,6 +3069,16 @@ def _input_with_timeout(prompt: str, timeout_seconds: int = 10) -> Optional[str]
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
+    # ── Pre-flight dependency checks ──────────────────────────────────────────
+    # Must run before any yt-dlp activity so the user sees a clear error
+    # rather than a confusing partially-functional dashboard.
+    # Kept inside main() (not at module scope) so that importing from this
+    # module never triggers interactive prompts or sys.exit().
+    ensure_curses()
+    if not plain_ffmpeg_check():
+        print(f"\njj-dlp v{__version__}  ·  Aborted during ffmpeg check.")
+        sys.exit(1)
+
     _script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if os.getcwd() != _script_dir:
         os.chdir(_script_dir)
