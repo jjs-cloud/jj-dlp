@@ -469,18 +469,18 @@ class ConfigEditor:
         global_x1 = site_x2 + 1
         global_x2 = x2
 
-        # ── Tab hint row at top ───────────────────────────────────────────────
+        content_y1 = y1
+
+        # ── Tab hint row above the global panel ───────────────────────────────
         if self._focus == "site":
             focus_hint = "  Tab: switch to Global Settings ►  "
         else:
             focus_hint = "  ◄ Tab: switch to Site Config  "
-        safe_addstr(stdscr, y1, x1 + 1, focus_hint,
+        safe_addstr(stdscr, content_y1, global_x1, focus_hint,
                     curses.color_pair(self.dashboard.C_DIM))
 
-        content_y1 = y1 + 1
-
         # ── Draw global settings panel (right, narrower) ──────────────────────
-        self.global_editor.draw(stdscr, content_y1, global_x1, y2, global_x2,
+        self.global_editor.draw(stdscr, content_y1 + 1, global_x1, y2, global_x2,
                                 is_active=(self._focus == "global"))
 
         # ── Draw Site Selector above the site box ─────────────────────────────
@@ -497,14 +497,13 @@ class ConfigEditor:
             safe_addstr(stdscr, content_y1, tab_x, label, attr)
             tab_x += len(label) + 1
 
-        if self._focus == "site":
-            mode_str = " [ SITE CONFIG ] "
-            safe_addstr(stdscr, content_y1, site_x2 - len(mode_str) - 1, mode_str,
-                        curses.color_pair(self.dashboard.C_LIVE) | curses.A_BOLD)
-
         # ── Draw per-site editor box (left, wider) ────────────────────────────
         site_box_y1 = content_y1 + 1
         draw_box(stdscr, site_box_y1, site_x1, y2, site_x2, self.dashboard.C_CHROME)
+        if self._focus == "site":
+            mode_str = " [ SITE CONFIG ] "
+            safe_addstr(stdscr, site_box_y1, site_x2 - len(mode_str) - 1, mode_str,
+                        curses.color_pair(self.dashboard.C_LIVE) | curses.A_BOLD)
         safe_addstr(stdscr, site_box_y1, site_x1 + 2, " SITE CONFIGURATION ",
                     curses.color_pair(self.dashboard.C_INVHEAD) | curses.A_BOLD)
 
