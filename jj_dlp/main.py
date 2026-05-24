@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.1.0"
+__version__ = "1.1.4"
 
 import subprocess
 import time
@@ -37,15 +37,7 @@ from .browser_config import (
     _write_ask_for_browser_to_config,
 )
 
-# ── ffmpeg dependency check (must happen before curses is initialised)) ────────
-if not plain_ffmpeg_check():
-    print(f"\njj-dlp v{__version__}  ·  Aborted during ffmpeg check.")
-    sys.exit(1)
-
-# ── Run the curses check before importing curses at module level ──────────────
-ensure_curses()
-
-import curses  # noqa: E402  (intentionally placed after the availability check)
+import curses  # noqa: E402
 
 
 # ── Script start time (for uptime display) ───────────────────────────────────
@@ -1709,7 +1701,12 @@ class JJDlpDashboard:
         self._log_scroll    = 0
         self._stdout_scroll = 0
         self._stderr_scroll = 0
-        
+
+        # Disk usage cache — refreshed at most once every 10 seconds
+        self._disk_cache_time: float = 0.0
+        self._disk_cache_drives: list = []
+        self._disk_cache_results: list = []  # list of (drive, usage) or (drive, None) on error
+
         from .config_editor import ConfigEditor
         self.config_editor = ConfigEditor(self)
 
@@ -1898,58 +1895,77 @@ class JJDlpDashboard:
         # Disk space rows — drives from global.conf take precedence; fall back to per-site
         disk_row_y = y1 + 2 + len(rows) + 1
         try:
-            seen_drives: list = []
-            seen_drives_set: set = set()
-            fallback_dir = None
+            now = time.monotonic()
+            if now - self._disk_cache_time >= 10.0:
+                # Rebuild the drives list
+                seen_drives: list = []
+                seen_drives_set: set = set()
+                fallback_dir = None
 
-            # 1. Global drives (from global.conf) — shown first if configured
-            global_drives = self.global_cfg.get("disk_drives", [])
-            for d in global_drives:
-                key = os.path.normcase(d)
-                if key not in seen_drives_set:
-                    seen_drives_set.add(key)
-                    seen_drives.append(d)
+                # 1. Global drives (from global.conf) — shown first if configured
+                global_drives = self.global_cfg.get("disk_drives", [])
+                for d in global_drives:
+                    key = os.path.normcase(d)
+                    if key not in seen_drives_set:
+                        seen_drives_set.add(key)
+                        seen_drives.append(d)
 
-            # 2. Per-site drives (merged in, deduped)
-            for _site in self.sites:
-                try:
-                    _cfg = _site.get_cached_config()
-                    drives_for_site = _cfg.get("disk_drives", [])
-                    if drives_for_site:
-                        for d in drives_for_site:
-                            key = os.path.normcase(d)
-                            if key not in seen_drives_set:
-                                seen_drives_set.add(key)
-                                seen_drives.append(d)
-                    elif fallback_dir is None:
-                        fallback_dir = _cfg.get("output_dir", "/")
-                except Exception:
-                    pass
-            drives = seen_drives if seen_drives else ([fallback_dir] if fallback_dir else ["/"])
+                # 2. Per-site drives (merged in, deduped)
+                for _site in self.sites:
+                    try:
+                        _cfg = _site.get_cached_config()
+                        drives_for_site = _cfg.get("disk_drives", [])
+                        if drives_for_site:
+                            for d in drives_for_site:
+                                key = os.path.normcase(d)
+                                if key not in seen_drives_set:
+                                    seen_drives_set.add(key)
+                                    seen_drives.append(d)
+                        elif fallback_dir is None:
+                            fallback_dir = _cfg.get("output_dir", "/")
+                    except Exception as _disk_site_exc:
+                        dbg(f"[DISK] exception reading site config: {_disk_site_exc!r}")
+
+                drives = seen_drives if seen_drives else ([fallback_dir] if fallback_dir else ["/"])
+                dbg(f"[DISK] refreshing cache — drives={drives!r}")
+
+                # Query disk usage for each drive and cache the results
+                results = []
+                for drive in drives:
+                    try:
+                        usage = shutil.disk_usage(drive)
+                        results.append((drive, usage))
+                        dbg(f"[DISK] {drive!r} → free={usage.free/(1024**3):.1f}G")
+                    except Exception as _disk_exc:
+                        results.append((drive, None))
+                        dbg(f"[DISK] shutil.disk_usage({drive!r}) FAILED: {type(_disk_exc).__name__}: {_disk_exc}")
+
+                self._disk_cache_drives  = drives
+                self._disk_cache_results = results
+                self._disk_cache_time    = now
+
             if disk_row_y < y2 - 1:
                 safe_addstr(self.stdscr, disk_row_y, x1 + 2, "── Disk ──",
                             curses.color_pair(self.C_SYSTEM))
                 disk_row_y += 1
-            for drive in drives:
+            for drive, usage in self._disk_cache_results:
                 if disk_row_y >= y2 - 1:
                     break
-                try:
-                    usage = shutil.disk_usage(drive)
-                    pct   = (usage.used / usage.total * 100) if usage.total else 0
-                    free_gb = usage.free / (1024**3)
-                    # Short label: last component or drive letter
-                    drv_label = os.path.basename(drive.rstrip("/\\")) or drive
-                    drv_label = drv_label[:6]
-                    disk_str  = f"{drv_label:<6} {free_gb:>4.1f}G {pct:>3.0f}%"
-                    color = self.C_LIVE if pct < 80 else (self.C_WARN if pct < 95 else self.C_REC)
-                    safe_addstr(self.stdscr, disk_row_y, x1 + 2,
-                                disk_str[:inner_w],
-                                curses.color_pair(color))
-                    disk_row_y += 1
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                if usage is None:
+                    continue
+                pct     = (usage.used / usage.total * 100) if usage.total else 0
+                free_gb = usage.free / (1024**3)
+                # Short label: last component or drive letter
+                drv_label = os.path.basename(drive.rstrip("/\\")) or drive
+                drv_label = drv_label[:6]
+                disk_str  = f"{drv_label:<6} {free_gb:>4.1f}G {pct:>3.0f}%"
+                color = self.C_LIVE if pct < 80 else (self.C_WARN if pct < 95 else self.C_REC)
+                safe_addstr(self.stdscr, disk_row_y, x1 + 2,
+                            disk_str[:inner_w],
+                            curses.color_pair(color))
+                disk_row_y += 1
+        except Exception as _disk_outer_exc:
+            dbg(f"[DISK] outer exception in disk section: {type(_disk_outer_exc).__name__}: {_disk_outer_exc}")
 
         # Uptime at bottom
         safe_addstr(self.stdscr, y2 - 1, x1 + 2,
@@ -3077,6 +3093,16 @@ def _input_with_timeout(prompt: str, timeout_seconds: int = 10) -> Optional[str]
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
+    # ── Pre-flight dependency checks ──────────────────────────────────────────
+    # Must run before any yt-dlp activity so the user sees a clear error
+    # rather than a confusing partially-functional dashboard.
+    # Kept inside main() (not at module scope) so that importing from this
+    # module never triggers interactive prompts or sys.exit().
+    ensure_curses()
+    if not plain_ffmpeg_check():
+        print(f"\njj-dlp v{__version__}  ·  Aborted during ffmpeg check.")
+        sys.exit(1)
+
     _script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if os.getcwd() != _script_dir:
         os.chdir(_script_dir)

@@ -58,7 +58,7 @@ PRESERVED_KEYS = [
     "OUTPUT_TMPL", "LAST_LIVE_HIGHLIGHT", "DISK_DRIVES", "POPUP_NOTIFICATIONS", 
     "POPUP_TIMEOUT", "POPUP_COOLDOWN", "PROGRESS_BAR_MAX_HOURS", "PROGRESS_BAR_WIDTH", 
     "DEBUG_LOGS", "DEBUG_LOG_PATH", "CHECK_FOR_UPDATES", "UPDATE_INTERVAL",
-    "UPDATE_BRANCH"
+    "UPDATE_BRANCH", "ASK_FOR_CONFIG", "ASK_FOR_BROWSER"
 ]
 
 # ── Local global.json helpers ─────────────────────────────────────────────────
@@ -140,7 +140,7 @@ def dbg(msg: str, exc: Exception | None = None) -> None:
             log_path = os.path.join(forced_dir, "debug.log")
         else:
             log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug.log")
-        ts = datetime.datetime.utcnow().isoformat() + "Z"
+        ts = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
         with open(log_path, "a", encoding="utf-8") as lf:
             lf.write(f"[{ts}] {msg}\n")
             if exc is not None:

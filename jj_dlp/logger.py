@@ -66,15 +66,17 @@ def configure(output_mode_fn) -> None:
 #   SPLIT    — split-recording file-tracking logic
 #   POPEN    — yt-dlp process launch details
 #   PERF     — performance timing summaries (high-frequency)
+#   DISK     — disk usage display in the system panel
 #   UPDATER  — update checker and periodic updater thread
 #
 DBG_FILTERS: dict[str, bool] = {
-    "DRAIN":   True,
-    "CHECKER": True,
-    "SPLIT":   True,
-    "POPEN":   True,
-    "PERF":    True,
-    "UPDATER": True,
+    "DRAIN":   False,
+    "CHECKER": False,
+    "SPLIT":   False,
+    "POPEN":   False,
+    "PERF":    False,
+    "DISK":    True,
+    "UPDATER": False,
 }
 
 _dbg_filters_lock = threading.Lock()
