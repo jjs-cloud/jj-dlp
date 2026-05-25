@@ -1539,7 +1539,6 @@ def monitor_site(site: "SiteState") -> None:
         if not streamers:
             site.log_line("ERROR: No streamers configured.")
         else:
-            site.log_line(f"Checking {len(streamers)} streamer(s)...")
             live_now = get_live_streamers(streamers, cfg, site=site)
             cfg = load_config(site.config_path)
 
@@ -1562,7 +1561,6 @@ def monitor_site(site: "SiteState") -> None:
                 site.log_line("All streamers offline.")
 
         wait_secs = cfg.get("check_interval", 60)
-        site.log_line(f"Next check in {wait_secs}s")
         deadline = time.time() + wait_secs
 
         while not site._stop_event.is_set():
