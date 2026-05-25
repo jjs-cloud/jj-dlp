@@ -354,15 +354,34 @@ def _write_global_conf_key(key: str, value: str) -> None:
 # Per-site state
 # ══════════════════════════════════════════════════════════════════════════════
 
-_GLOBAL_JSON_PATH: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "global.json") 
 _global_json_lock: threading.Lock = threading.Lock()
 
 
+def _global_json_path() -> str:
+    """Return the absolute path to global.json.
+
+    Resolution order:
+    - ``JJ_DLP_GLOBAL_JSON_PATH`` env var: explicit full path (used by the
+      stage-2 updater subprocess so it always writes to the real global.json,
+      not the one inside a temporary extraction folder).
+    - ``JJ_DLP_GLOBAL_DIR`` env var: directory override; ``global.json`` is
+      appended.
+    - Default: ``global.json`` next to this file (inside the package dir).
+    """
+    env_path = os.environ.get("JJ_DLP_GLOBAL_JSON_PATH")
+    if env_path:
+        return env_path
+    env_dir = os.environ.get("JJ_DLP_GLOBAL_DIR")
+    if env_dir:
+        return os.path.join(env_dir, "global.json")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "global.json")
+
+
 def _load_global_json() -> dict:
-    """Load the global.json file from the script's directory.  Returns an empty
-    dict if the file does not exist or cannot be parsed."""
+    """Load the global.json file.  Returns an empty dict if the file does not
+    exist or cannot be parsed."""
     try:
-        with open(_GLOBAL_JSON_PATH, "r", encoding="utf-8") as f:
+        with open(_global_json_path(), "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict):
             return data
@@ -372,9 +391,9 @@ def _load_global_json() -> dict:
 
 
 def _save_global_json(data: dict) -> None:
-    """Write *data* to global.json atomically.  Silently ignores errors."""
+    """Write *data* to global.json.  Silently ignores errors."""
     try:
-        with open(_GLOBAL_JSON_PATH, "w", encoding="utf-8") as f:
+        with open(_global_json_path(), "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
     except Exception:
         pass

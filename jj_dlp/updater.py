@@ -20,14 +20,12 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 # Adjust imports to work whether run as module or script.
-# NOTE: load_config is still imported for external callers; _load/_save_global_json
-# are intentionally NOT imported from main — see the local helpers below.
 try:
     from . import logger
-    from .main import load_config
+    from .main import load_config, _load_global_json, _save_global_json
 except ImportError:
     from jj_dlp import logger
-    from jj_dlp.main import load_config
+    from jj_dlp.main import load_config, _load_global_json, _save_global_json
 
 _REPO_BASE = "https://github.com/jjs-cloud/jj-dlp"
 _API_BASE   = "https://api.github.com/repos/jjs-cloud/jj-dlp"
@@ -62,49 +60,17 @@ try:
 except ImportError:
     from jj_dlp.config_editor import PRESERVED_KEYS
 
-# ── Local global.json helpers ─────────────────────────────────────────────────
-# These deliberately do NOT delegate to main._load_global_json / _save_global_json.
-# main.py sets its _GLOBAL_JSON_PATH at module-import time.  When updater.py runs
-# as a standalone stage-2 script, importing main.py executes module-level code
-# (ffmpeg checks, curses init, etc.) that can raise exceptions and abort the
-# import — leaving mark_update_completed() unreachable and global.json stale.
-# Using __file__ here keeps path resolution self-contained and always correct.
-
-def _global_json_path() -> str:
-    """Return the absolute path to global.json.
-
-    Behavior:
-    - If the environment variable `JJ_DLP_GLOBAL_JSON_PATH` is set, return that
-      value (useful for telling a stage-2 updater where the real global.json
-      lives when the script is being executed from a temporary folder).
-    - If `JJ_DLP_GLOBAL_DIR` is set, return `<dir>/global.json`.
-    - Otherwise, return the path anchored to this file's package dir.
-    """
-    # Highest priority: explicit full path
-    env_path = os.environ.get('JJ_DLP_GLOBAL_JSON_PATH')
-    if env_path:
-        return env_path
-    # Directory override
-    env_dir = os.environ.get('JJ_DLP_GLOBAL_DIR')
-    if env_dir:
-        return os.path.join(env_dir, 'global.json')
-    # Default: package-local global.json
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "global.json")
-
-
 # ── Per-tag debug filter ───────────────────────────────────────────────────────
 # Controls which [TAG] groups appear in updater's debug.log.
 # updater.py has its own copy because it can run as a standalone stage-2 script
 # (no access to logger.py's DBG_FILTERS).  Tags used here:
 #
-#   GLOBAL_JSON  — _load_global_json / _save_global_json read/write calls
 #   UPDATE_CHECK — check_for_updates_background, is_update_available
 #   MARK_DONE    — mark_update_completed
 #   PERFORM      — perform_update download / extract / stage2 launch
 #   STAGE2       — _stage2 copy and install logic
 #
 UPDATER_DBG_FILTERS: dict[str, bool] = {
-    "GLOBAL_JSON":  True,
     "UPDATE_CHECK": True,
     "MARK_DONE":    True,
     "PERFORM":      True,
@@ -152,48 +118,6 @@ def dbg(msg: str, exc: Exception | None = None) -> None:
         # Never raise from the debugger helper
         pass
 
-
-def _load_global_json() -> dict:
-    path = _global_json_path()
-    dbg(f"[GLOBAL_JSON] _load_global_json: path={path}")
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return data
-    except FileNotFoundError:
-        dbg(f"[GLOBAL_JSON] _load_global_json: file not found: {path}")
-    except json.JSONDecodeError as e:
-        dbg(f"[GLOBAL_JSON] _load_global_json: invalid JSON in {path}", e)
-    except Exception as e:
-        dbg("[GLOBAL_JSON] _load_global_json: exception while loading JSON", e)
-    return {}
-
-
-def _save_global_json(data: dict) -> None:
-    path = _global_json_path()
-    dbg(f"[GLOBAL_JSON] _save_global_json: path={path} update_info={data.get('update_info') if isinstance(data, dict) else None}")
-    try:
-        if os.path.exists(path):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    before = f.read()
-                dbg(f"[GLOBAL_JSON] _save_global_json: before write size={len(before)}")
-            except Exception as e:
-                dbg("[GLOBAL_JSON] _save_global_json: failed reading before-state", e)
-
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        dbg("[GLOBAL_JSON] _save_global_json: write completed")
-
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                after = f.read()
-            dbg(f"[GLOBAL_JSON] _save_global_json: after write size={len(after)}")
-        except Exception as e:
-            dbg("[GLOBAL_JSON] _save_global_json: failed reading after-state", e)
-    except Exception as e:
-        dbg("[GLOBAL_JSON] _save_global_json: exception writing global.json", e)
 
 # ─────────────────────────────────────────────────────────────────────────────
 
