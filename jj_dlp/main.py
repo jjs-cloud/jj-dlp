@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.2.8"
+__version__ = "1.2.9"
 
 import subprocess
 import time
@@ -905,7 +905,7 @@ def get_live_streamers(streamers: List[str], cfg: dict,
     return live
 
 
-def wait_for_streamer_file(output_dir, streamer, proc_start_time, timeout=15.0, interval=0.5):
+def wait_for_streamer_file(output_dir, streamer, proc_start_time, timeout=15.0, interval=2.0):
     start = time.time()
     dbg(f"[SPLIT][wait_for_streamer_file] START streamer={streamer!r} output_dir={output_dir!r} "
         f"proc_start_time={proc_start_time:.3f} timeout={timeout}")
@@ -913,6 +913,7 @@ def wait_for_streamer_file(output_dir, streamer, proc_start_time, timeout=15.0, 
         if os.path.isdir(output_dir):
             all_files = os.listdir(output_dir)
             candidate_files = []
+            skipped_count = 0
             for f in all_files:
                 fpath = os.path.join(output_dir, f)
                 if not os.path.isfile(fpath):
@@ -923,9 +924,7 @@ def wait_for_streamer_file(output_dir, streamer, proc_start_time, timeout=15.0, 
                 if name_match and time_match:
                     candidate_files.append(fpath)
                 elif name_match and not time_match:
-                    dbg(f"[SPLIT][wait_for_streamer_file] SKIPPED (too old) file={f!r} "
-                        f"mtime={mtime:.3f} proc_start_time={proc_start_time:.3f} "
-                        f"age_delta={proc_start_time - mtime:.3f}s")
+                    skipped_count += 1
             if candidate_files:
                 chosen = max(candidate_files, key=os.path.getmtime)
                 dbg(f"[SPLIT][wait_for_streamer_file] FOUND file={chosen!r} "
@@ -933,7 +932,8 @@ def wait_for_streamer_file(output_dir, streamer, proc_start_time, timeout=15.0, 
                 return chosen
             else:
                 dbg(f"[SPLIT][wait_for_streamer_file] no match yet "
-                    f"elapsed={time.time()-start:.2f}s total_files={len(all_files)}")
+                    f"elapsed={time.time()-start:.2f}s total_files={len(all_files)} "
+                    f"skipped_too_old={skipped_count}")
         else:
             dbg(f"[SPLIT][wait_for_streamer_file] output_dir does not exist: {output_dir!r}")
         time.sleep(interval)
@@ -943,9 +943,13 @@ def wait_for_streamer_file(output_dir, streamer, proc_start_time, timeout=15.0, 
 
 def get_streamer_file_size(output_dir, streamer, cfg=None,
                            last_growth_time=None, stall_timeout=None,
-                           stall_check_interval=None, proc_start_time=None):
+                           stall_check_interval=None, proc_start_time=None,
+                           known_filename=None):
     try:
-        filename = wait_for_streamer_file(output_dir, streamer, proc_start_time) if os.path.isdir(output_dir) else None
+        if known_filename:
+            filename = known_filename
+        else:
+            filename = wait_for_streamer_file(output_dir, streamer, proc_start_time) if os.path.isdir(output_dir) else None
         size = os.path.getsize(filename) if filename else 0
         stall_detected = False
         if last_growth_time is not None and stall_timeout is not None:
@@ -1112,7 +1116,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                 output_dir,
                 streamer,
                 cfg=cfg,
-                proc_start_time=proc_start_time
+                proc_start_time=proc_start_time,
+                known_filename=active_file,
             )
 
             last_growth_time     = time.time()
