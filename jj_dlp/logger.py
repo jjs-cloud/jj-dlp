@@ -75,8 +75,9 @@ DBG_FILTERS: dict[str, bool] = {
     "SPLIT":   False,
     "POPEN":   False,
     "PERF":    False,
-    "DISK":    True,
+    "DISK":    False,
     "UPDATER": False,
+    "KILL":    True,
 }
 
 _dbg_filters_lock = threading.Lock()
