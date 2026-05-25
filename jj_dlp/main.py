@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.2.9"
+__version__ = "1.2.10"
 
 import subprocess
 import time
@@ -48,19 +48,59 @@ _SCRIPT_START_TIME: float = time.time()
 # Config loading
 # ══════════════════════════════════════════════════════════════════════════════
 
-def load_config(config_path: str) -> dict:
-    startup_dbg(f"[CONFIG] load_config called with: {config_path!r}")
-    if not os.path.isfile(config_path):
-        print(f"ERROR: Config file not found at: {config_path}", file=sys.stderr)
-        sys.exit(1)
-
-    parser = configparser.ConfigParser(allow_no_value=True, interpolation=None)
+def _safe_int(value, default):
+    """Convert *value* to int, returning *default* on failure."""
     try:
-        parser.read(config_path, encoding="utf-8")
-    except Exception as _e:
-        startup_dbg(f"[CONFIG] load_config: configparser FAILED — {type(_e).__name__}: {_e}")
-        raise
+        return int(value)
+    except Exception:
+        return default
 
+
+def _parse_general_section(general, config_path: str) -> dict:
+    """Read all site-scoped CONFIG_KEYS from the [General] section.
+
+    Returns a flat dict keyed by the lower-cased config key name.
+    Boolean and integer defaults are coerced automatically; string values are
+    stripped of surrounding whitespace and quotes.  ``output_dir`` is resolved
+    to an absolute path, and ``site_label`` defaults to the config filename.
+    """
+    cfg_dict: dict = {}
+    for kdef in CONFIG_KEYS:
+        if kdef.scope != "site":
+            continue
+        raw = general.get(kdef.name, kdef.default)
+        if raw is None:
+            raw = kdef.default
+
+        val_str = str(raw).strip().strip('"\'')
+
+        if kdef.default.lower() in ("true", "false"):
+            val = val_str.lower() not in ("false", "0", "no")
+        elif kdef.default.isdigit():
+            val = _safe_int(val_str, _safe_int(kdef.default, 0))
+        else:
+            val = val_str
+
+        cfg_dict[kdef.name.lower()] = val
+
+    if not os.path.isabs(cfg_dict["output_dir"]):
+        cfg_dict["output_dir"] = os.path.abspath(cfg_dict["output_dir"])
+
+    # SITE_LABEL defaults to the config filename rather than a fixed string.
+    site_label = general.get("SITE_LABEL", os.path.basename(config_path))
+    if site_label is None:
+        site_label = os.path.basename(config_path)
+    cfg_dict["site_label"] = str(site_label).strip().strip('"\'')
+
+    startup_dbg(
+        f"[BAR_WIDTH] _parse_general_section: "
+        f"progress_bar_width={cfg_dict.get('progress_bar_width')}"
+    )
+    return cfg_dict
+
+
+def _parse_streamers_and_blocked(parser: configparser.ConfigParser) -> tuple:
+    """Return (streamers, blocked) lists from [Streamers] and [Block] sections."""
     streamers = []
     if parser.has_section("Streamers"):
         for key, _ in parser.items("Streamers"):
@@ -73,48 +113,31 @@ def load_config(config_path: str) -> dict:
             if key.strip():
                 blocked.append(key.strip().lower())
 
-    general = parser["General"] if parser.has_section("General") else {}
+    return streamers, blocked
 
-    def safe_int(value, default):
-        try:
-            return int(value)
-        except Exception:
-            return default
 
-    # ── Read all registered site keys using CONFIG_KEYS as the source of truth ─
-    cfg_dict = {}
-    for kdef in CONFIG_KEYS:
-        if kdef.scope != "site":
-            continue
-        raw = general.get(kdef.name, kdef.default)
-        if raw is None:
-            raw = kdef.default
-            
-        val_str = str(raw).strip().strip('\"\'')
-        
-        if kdef.default.lower() in ("true", "false"):
-            val = val_str.lower() not in ("false", "0", "no")
-        elif kdef.default.isdigit():
-            val = safe_int(val_str, safe_int(kdef.default, 0))
-        else:
-            val = val_str
-            
-        cfg_dict[kdef.name.lower()] = val
-
-    cfg_dict["streamers"] = streamers
-    cfg_dict["blocked"] = blocked
-
-    if not os.path.isabs(cfg_dict["output_dir"]):
-        cfg_dict["output_dir"] = os.path.abspath(cfg_dict["output_dir"])
-
+def _parse_twitch_section(parser: configparser.ConfigParser) -> dict:
+    """Extract all Twitch-related settings from the [Twitch] section."""
     twitch_cfg = parser["Twitch"] if parser.has_section("Twitch") else {}
-    twitch_client_id     = twitch_cfg.get("CLIENT_ID", "").strip().strip('"\'')
-    twitch_client_secret = twitch_cfg.get("CLIENT_SECRET", "").strip().strip('"\'')
-    twitch_webhook_secret= twitch_cfg.get("WEBHOOK_SECRET", "jj-dlp-secret").strip().strip('"\'')
-    twitch_callback_url  = twitch_cfg.get("CALLBACK_URL", "").strip().strip('"\'')
-    twitch_webhook_port  = safe_int(twitch_cfg.get("WEBHOOK_PORT", 8888), 8888)
-    twitch_enabled       = bool(twitch_client_id and twitch_client_secret and twitch_callback_url)
+    client_id     = twitch_cfg.get("CLIENT_ID", "").strip().strip('"\'')
+    client_secret = twitch_cfg.get("CLIENT_SECRET", "").strip().strip('"\'')
+    webhook_secret = twitch_cfg.get("WEBHOOK_SECRET", "jj-dlp-secret").strip().strip('"\'')
+    callback_url  = twitch_cfg.get("CALLBACK_URL", "").strip().strip('"\'')
+    webhook_port  = _safe_int(twitch_cfg.get("WEBHOOK_PORT", 8888), 8888)
+    enabled       = bool(client_id and client_secret and callback_url)
 
+    return {
+        "twitch_enabled": enabled,
+        "twitch_client_id": client_id,
+        "twitch_client_secret": client_secret,
+        "twitch_webhook_secret": webhook_secret,
+        "twitch_callback_url": callback_url,
+        "twitch_webhook_port": webhook_port,
+    }
+
+
+def _parse_checker_and_downloader(parser: configparser.ConfigParser) -> tuple:
+    """Return (checker_cmd, downloader_cmd) lists from [Checker] and [Downloader]."""
     checker_cmd = []
     if parser.has_section("Checker"):
         for key, val in parser.items("Checker"):
@@ -129,94 +152,134 @@ def load_config(config_path: str) -> dict:
             if item:
                 downloader_cmd.extend(shlex.split(item, posix=(sys.platform != "win32")))
 
-    # ── SITE_TMPL — needs username_idx derived from the value ─────────────────
+    return checker_cmd, downloader_cmd
+
+
+def _derive_username_idx(cfg_dict: dict) -> Optional[int]:
+    """Return the negative URL-path index where ``{username}`` appears in SITE_TMPL.
+
+    Returns ``None`` when SITE_TMPL is absent or contains no ``{username}``
+    placeholder.
+    """
     site_tmpl = cfg_dict.get("site_tmpl", "")
-    tmpl_parts = urlparse(site_tmpl).path.rstrip("/").split("/") if site_tmpl else []
-    username_idx = None
-    for i, p in enumerate(tmpl_parts):
-        if "{username}" in p:
-            username_idx = i - len(tmpl_parts)
-            break
+    if not site_tmpl:
+        return None
+    tmpl_parts = urlparse(site_tmpl).path.rstrip("/").split("/")
+    for i, part in enumerate(tmpl_parts):
+        if "{username}" in part:
+            return i - len(tmpl_parts)
+    return None
 
-    # ── SITE_LABEL — default is the config filename, not a fixed string ───────
-    site_label = general.get("SITE_LABEL", os.path.basename(config_path))
-    if site_label is None:
-        site_label = os.path.basename(config_path)
-    cfg_dict["site_label"] = str(site_label).strip().strip('"\'')
 
-    # ── YT_DLP_PATH — platform-specific key selection + bundled-module logic ──
-    if sys.platform == "win32":
-        yt_dlp_path_raw = cfg_dict.get("yt_dlp_path_windows", "")
-    elif sys.platform == "darwin":
-        yt_dlp_path_raw = cfg_dict.get("yt_dlp_path_mac", "")
-    else:
-        yt_dlp_path_raw = cfg_dict.get("yt_dlp_path_linux", "")
+def _resolve_yt_dlp_path(cfg_dict: dict) -> str:
+    """Determine the yt-dlp invocation string for the current platform.
+
+    Resolution order:
+    1. The platform-specific config key (YT_DLP_PATH_WINDOWS / _MAC / _LINUX).
+       Relative paths are anchored to the project root (the directory that
+       contains the jj_dlp/ package), not to CWD.
+    2. A bundled ``yt-dlp/yt_dlp`` module next to the project root.
+       When found, PYTHONPATH is updated so subprocesses can import it, and
+       ``python -m yt_dlp`` is used as the command.  On Windows, ``pythonw.exe``
+       is silently rewritten to ``python.exe`` so child processes have working
+       stdio handles.
+    3. The system ``yt-dlp`` binary as a last resort.
+    """
+    # 1. Pick the platform-specific raw path from config.
+    platform_key_map = {
+        "win32":  "yt_dlp_path_windows",
+        "darwin": "yt_dlp_path_mac",
+    }
+    platform_key = platform_key_map.get(sys.platform, "yt_dlp_path_linux")
+    yt_dlp_path_raw = cfg_dict.get(platform_key, "")
     startup_dbg(f"[YT_DLP] platform={sys.platform!r} → yt_dlp_path_raw={yt_dlp_path_raw!r}")
 
-    # Auto-detect bundled yt-dlp module in the project root
-    bundled_yt_dlp_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "yt-dlp")
+    # 2. Detect a bundled yt-dlp module sitting next to the project root.
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    bundled_yt_dlp_dir    = os.path.join(project_root, "yt-dlp")
     bundled_yt_dlp_module = os.path.join(bundled_yt_dlp_dir, "yt_dlp")
 
     startup_dbg(f"[YT_DLP] bundled_yt_dlp_dir={bundled_yt_dlp_dir!r}")
-    startup_dbg(f"[YT_DLP] bundled_yt_dlp_module={bundled_yt_dlp_module!r} exists={os.path.isdir(bundled_yt_dlp_module)}")
+    startup_dbg(f"[YT_DLP] bundled_yt_dlp_module={bundled_yt_dlp_module!r} "
+                f"exists={os.path.isdir(bundled_yt_dlp_module)}")
     startup_dbg(f"[YT_DLP] sys.executable={sys.executable!r} platform={sys.platform!r}")
-    startup_dbg(f"[YT_DLP] yt_dlp_path_raw={yt_dlp_path_raw!r}")
 
     if os.path.isdir(bundled_yt_dlp_module):
-        # Inject the bundled directory into PYTHONPATH so subprocesses can find it
-        current_pp = os.environ.get("PYTHONPATH", "")
-        if bundled_yt_dlp_dir not in current_pp:
-            os.environ["PYTHONPATH"] = f"{bundled_yt_dlp_dir}{os.pathsep}{current_pp}" if current_pp else bundled_yt_dlp_dir
-
-        # On Windows, sys.executable may be pythonw.exe (the windowless variant).
-        # Subprocesses spawned from pythonw.exe inherit broken pipe handles and
-        # produce no output at all — yt-dlp goes completely silent.
-        # Always force python.exe so the child process has a proper stdio environment.
-        _py_exe = sys.executable
-        if sys.platform == "win32":
-            _py_exe_lower = _py_exe.lower()
-            if _py_exe_lower.endswith("pythonw.exe"):
-                _py_exe = _py_exe[:-len("pythonw.exe")] + "python.exe"
-                startup_dbg(f"[YT_DLP] pythonw.exe detected — rewriting to python.exe: {_py_exe!r}")
-            else:
-                startup_dbg(f"[YT_DLP] python executable OK (not pythonw): {_py_exe!r}")
-
-        startup_dbg(f"[YT_DLP] PYTHONPATH set to: {os.environ.get('PYTHONPATH', '')!r}")
-        default_yt_dlp = f"{_py_exe} -m yt_dlp"
+        _inject_bundled_pythonpath(bundled_yt_dlp_dir)
+        py_exe = _resolve_python_executable()
+        default_yt_dlp = f"{py_exe} -m yt_dlp"
         startup_dbg(f"[YT_DLP] bundled module found → default_yt_dlp={default_yt_dlp!r}")
     else:
         default_yt_dlp = "yt-dlp"
-        startup_dbg(f"[YT_DLP] bundled module NOT found → falling back to system yt-dlp")
+        startup_dbg("[YT_DLP] bundled module NOT found → falling back to system yt-dlp")
 
-    # Resolve relative yt-dlp executable paths against the project root
-    # (the directory containing jj_dlp/), anchored to __file__ rather than
-    # CWD.  This mirrors how output_dir is handled and prevents
-    # FileNotFoundError on Linux when the working directory shifts between
-    # startup and subprocess launch.  Paths that already contain a space
-    # (e.g. "python -m yt_dlp") or are absolute are left unchanged.
+    # Resolve a bare relative path (no spaces, not absolute) against the project
+    # root so that FileNotFoundError can't occur when CWD shifts after startup.
     if yt_dlp_path_raw and " " not in yt_dlp_path_raw and not os.path.isabs(yt_dlp_path_raw):
-        _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        yt_dlp_path_raw = os.path.join(_project_root, yt_dlp_path_raw)
+        yt_dlp_path_raw = os.path.join(project_root, yt_dlp_path_raw)
         startup_dbg(f"[YT_DLP] relative path resolved to absolute: {yt_dlp_path_raw!r}")
-    yt_dlp_path = yt_dlp_path_raw if yt_dlp_path_raw else default_yt_dlp
 
-    startup_dbg(
-        f"[BAR_WIDTH] load_config: raw PROGRESS_BAR_WIDTH from file={cfg_dict.get('progress_bar_width')}  "
-        f"-> parsed progress_bar_width={cfg_dict.get('progress_bar_width')}"
-    )
+    return yt_dlp_path_raw if yt_dlp_path_raw else default_yt_dlp
+
+
+def _inject_bundled_pythonpath(bundled_yt_dlp_dir: str) -> None:
+    """Prepend *bundled_yt_dlp_dir* to PYTHONPATH if it is not already present."""
+    current_pp = os.environ.get("PYTHONPATH", "")
+    if bundled_yt_dlp_dir not in current_pp:
+        os.environ["PYTHONPATH"] = (
+            f"{bundled_yt_dlp_dir}{os.pathsep}{current_pp}" if current_pp
+            else bundled_yt_dlp_dir
+        )
+    startup_dbg(f"[YT_DLP] PYTHONPATH set to: {os.environ.get('PYTHONPATH', '')!r}")
+
+
+def _resolve_python_executable() -> str:
+    """Return the path to python.exe, rewriting pythonw.exe on Windows.
+
+    Subprocesses spawned from ``pythonw.exe`` inherit broken pipe handles and
+    produce no output — yt-dlp goes completely silent.  Forcing ``python.exe``
+    gives the child process a proper stdio environment.
+    """
+    py_exe = sys.executable
+    if sys.platform == "win32" and py_exe.lower().endswith("pythonw.exe"):
+        py_exe = py_exe[:-len("pythonw.exe")] + "python.exe"
+        startup_dbg(f"[YT_DLP] pythonw.exe detected — rewriting to python.exe: {py_exe!r}")
+    else:
+        startup_dbg(f"[YT_DLP] python executable OK (not pythonw): {py_exe!r}")
+    return py_exe
+
+
+def load_config(config_path: str) -> dict:
+    """Read a site config file and return a fully-resolved settings dict."""
+    startup_dbg(f"[CONFIG] load_config called with: {config_path!r}")
+    if not os.path.isfile(config_path):
+        print(f"ERROR: Config file not found at: {config_path}", file=sys.stderr)
+        sys.exit(1)
+
+    parser = configparser.ConfigParser(allow_no_value=True, interpolation=None)
+    try:
+        parser.read(config_path, encoding="utf-8")
+    except Exception as _e:
+        startup_dbg(f"[CONFIG] load_config: configparser FAILED — {type(_e).__name__}: {_e}")
+        raise
+
+    general = parser["General"] if parser.has_section("General") else {}
+
+    cfg_dict = _parse_general_section(general, config_path)
+
+    streamers, blocked = _parse_streamers_and_blocked(parser)
+    cfg_dict["streamers"] = streamers
+    cfg_dict["blocked"]   = blocked
+
+    checker_cmd, downloader_cmd = _parse_checker_and_downloader(parser)
 
     cfg_dict.update({
-        "checker_cmd": checker_cmd,
+        "checker_cmd":    checker_cmd,
         "downloader_cmd": downloader_cmd,
-        "username_idx": username_idx,
-        "config_path": config_path,
-        "yt_dlp_path": yt_dlp_path,
-        "twitch_enabled": twitch_enabled,
-        "twitch_client_id": twitch_client_id,
-        "twitch_client_secret": twitch_client_secret,
-        "twitch_webhook_secret": twitch_webhook_secret,
-        "twitch_callback_url": twitch_callback_url,
-        "twitch_webhook_port": twitch_webhook_port,
+        "username_idx":   _derive_username_idx(cfg_dict),
+        "config_path":    config_path,
+        "yt_dlp_path":    _resolve_yt_dlp_path(cfg_dict),
+        **_parse_twitch_section(parser),
     })
 
     return cfg_dict
