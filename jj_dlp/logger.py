@@ -43,15 +43,18 @@ debug_log_lock = threading.Lock()
 # ── References to output-mode state (injected by main module at startup) ──────
 # These are set by jj-dlp.py via configure() so logger doesn't import main.
 _output_mode_ref  = None   # callable() -> int  (1=curses, 2=terminal)
+_dashboard_log_ref = None  # callable(str) -> None
 
 
-def configure(output_mode_fn) -> None:
+def configure(output_mode_fn, dashboard_log_fn=None) -> None:
     """
-    Inject accessor for OUTPUT_MODE.
+    Inject accessor for OUTPUT_MODE and an optional dashboard logger.
     Call once from jj-dlp.py after the globals are defined there.
     """
-    global _output_mode_ref
+    global _output_mode_ref, _dashboard_log_ref
     _output_mode_ref = output_mode_fn
+    if dashboard_log_fn is not None:
+        _dashboard_log_ref = dashboard_log_fn
 
 
 # ── Per-tag debug filter ───────────────────────────────────────────────────────
@@ -119,7 +122,10 @@ def startup_dbg_flush() -> None:
 
 # ── Runtime debug log ─────────────────────────────────────────────────────────
 
+_last_debug_err = ""
+
 def _write_debug_log(msg: str) -> None:
+    global _last_debug_err
     with debug_log_lock:
         enabled = DEBUG_LOGS_ENABLED
         path    = DEBUG_LOG_PATH
@@ -129,8 +135,12 @@ def _write_debug_log(msg: str) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:
             f.write(msg + "\n")
-    except Exception:
-        pass
+        _last_debug_err = ""
+    except Exception as e:
+        err_msg = f"DEBUG LOG ERROR: Could not write to {path}: {e}"
+        if _dashboard_log_ref and err_msg != _last_debug_err:
+            _dashboard_log_ref(err_msg)
+            _last_debug_err = err_msg
 
 
 def dbg(msg: str, site_name: str = "") -> None:

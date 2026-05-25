@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.2.6"
+__version__ = "1.2.7"
 
 import subprocess
 import time
@@ -3255,6 +3255,11 @@ def main() -> None:
     for cp in config_paths:
         site = SiteState(cp)
         sites.append(site)
+
+    def _dash_log(msg: str):
+        for s in sites:
+            s.log_line(msg)
+    _logger.configure(_get_output_mode, _dash_log)
 
     # Sort sites by site_order so they appear in the desired positions in the dashboard
     sites.sort(key=lambda s: s.site_order)
