@@ -19,6 +19,26 @@ class ConfigItem:
 _GLOBAL_KEYS = {"DISK_DRIVES", "DEBUG_LOGS", "DEBUG_LOG_PATH", "CHECK_FOR_UPDATES", "UPDATE_INTERVAL", "ASK_FOR_BROWSER", "ASK_FOR_CONFIG","UPDATE_BRANCH"}
 
 
+def _wrap_text(text: str, width: int) -> list:
+    """Word-wrap text to fit within `width` columns, returning a list of lines."""
+    if not text or width <= 0:
+        return []
+    words = text.split()
+    lines, current = [], ""
+    for word in words:
+        if current:
+            if len(current) + 1 + len(word) <= width:
+                current += " " + word
+            else:
+                lines.append(current)
+                current = word
+        else:
+            current = word
+    if current:
+        lines.append(current)
+    return lines
+
+
 class GlobalConfigEditor:
     """Loads and edits global.conf — the six app-wide settings."""
 
@@ -266,30 +286,12 @@ class GlobalConfigEditor:
         if self.popup_mode and self.editing_item:
             self._draw_popup(stdscr)
 
-    def _wrap_text(self, text: str, width: int) -> list:
-        if not text or width <= 0:
-            return []
-        words = text.split()
-        lines, current = [], ""
-        for word in words:
-            if current:
-                if len(current) + 1 + len(word) <= width:
-                    current += " " + word
-                else:
-                    lines.append(current)
-                    current = word
-            else:
-                current = word
-        if current:
-            lines.append(current)
-        return lines
-
     def _draw_popup(self, stdscr):
         db = self.dashboard
         h, w = stdscr.getmaxyx()
         box_w = min(60, w - 4)
         inner_w = box_w - 4
-        comment_lines = self._wrap_text(self.editing_item.comment, inner_w) if self.editing_item.comment else []
+        comment_lines = _wrap_text(self.editing_item.comment, inner_w) if self.editing_item.comment else []
         inner_rows = 4 + len(comment_lines) + (1 if comment_lines else 0)
         box_h = max(inner_rows + 1, 7)
         box_h = min(box_h, h - 4)
@@ -522,25 +524,6 @@ class ConfigEditor:
         elif self._focus == "site" and self.popup_mode and self.editing_item:
             self.draw_popup(stdscr)
 
-    def _wrap_text(self, text: str, width: int) -> list:
-        """Word-wrap text to fit within `width` columns, returning a list of lines."""
-        if not text or width <= 0:
-            return []
-        words = text.split()
-        lines, current = [], ""
-        for word in words:
-            if current:
-                if len(current) + 1 + len(word) <= width:
-                    current += " " + word
-                else:
-                    lines.append(current)
-                    current = word
-            else:
-                current = word
-        if current:
-            lines.append(current)
-        return lines
-
     def draw_popup(self, stdscr):
         h, w = stdscr.getmaxyx()
         box_w = min(60, w - 4)
@@ -548,7 +531,7 @@ class ConfigEditor:
 
         comment_lines = []
         if self.editing_item and self.editing_item.comment:
-            comment_lines = self._wrap_text(self.editing_item.comment, inner_w)
+            comment_lines = _wrap_text(self.editing_item.comment, inner_w)
 
         inner_rows = 4 + len(comment_lines) + (1 if comment_lines else 0)
         box_h = inner_rows + 1
