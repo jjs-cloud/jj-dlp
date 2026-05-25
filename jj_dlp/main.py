@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.2.2"
+__version__ = "1.2.3"
 
 import subprocess
 import time
@@ -2167,7 +2167,7 @@ class JJDlpDashboard:
             with site.dash_lock:
                 num_streamers = len(site.dash_all_streamers)
             
-            if panel_resize and num_streamers > base_max_streamers:
+            if panel_resize and num_streamers >= base_max_streamers:
                 site_zones.append(2)
             else:
                 site_zones.append(1)
