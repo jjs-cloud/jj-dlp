@@ -32,6 +32,11 @@ _API_BASE   = "https://api.github.com/repos/jjs-cloud/jj-dlp"
 _VALID_BRANCHES = {"main", "testing", "experimental"}
 
 
+class UpdateError(Exception):
+    """Custom exception raised during updating."""
+    pass
+
+
 def _get_update_branch() -> str:
     """Return the configured update branch (falls back to 'main' if unset or invalid)."""
     try:
@@ -466,6 +471,7 @@ def _stage2(source_dir, base_dir, temp_dir):
                         print(f"\nERROR: The file '{dst}' is currently in use (Text file busy).")
                         print("Please ensure that jj-dlp, yt-dlp, and ffmpeg are fully closed and not running in the background.")
                         print("You may need to manually kill any stuck 'yt-dlp' or 'ffmpeg' processes and try again.\n")
+                        raise UpdateError(f"The file '{dst}' is currently in use (Text file busy).")
                     raise
                 
         copy_and_diff(source_dir, base_dir)
@@ -484,6 +490,8 @@ def _stage2(source_dir, base_dir, temp_dir):
         print(f"   Diff files are available in the 'diff' directory.")
         print("="*60)
 
+    except UpdateError as e:
+        dbg(f"[STAGE2] _stage2: clean abort: {e}")
     except Exception as e:
         dbg("[STAGE2] _stage2: exception during stage2", e)
         print(f"Error during stage 2: {e}")
