@@ -3,37 +3,6 @@ import shutil
 import curses
 from datetime import datetime
 
-def draw_box(stdscr, y1, x1, y2, x2, pair):
-    h, w = stdscr.getmaxyx()
-    def safe_ch(y, x, ch):
-        if 0 <= y < h and 0 <= x < w - 1:
-            try:
-                stdscr.addch(y, x, ch, curses.color_pair(pair))
-            except curses.error:
-                pass
-    for x in range(x1 + 1, x2):
-        safe_ch(y1, x, curses.ACS_HLINE)
-        safe_ch(y2, x, curses.ACS_HLINE)
-    for y in range(y1 + 1, y2):
-        safe_ch(y, x1, curses.ACS_VLINE)
-        safe_ch(y, x2, curses.ACS_VLINE)
-    safe_ch(y1, x1, curses.ACS_ULCORNER)
-    safe_ch(y1, x2, curses.ACS_URCORNER)
-    safe_ch(y2, x1, curses.ACS_LLCORNER)
-    safe_ch(y2, x2, curses.ACS_LRCORNER)
-
-def safe_addstr(stdscr, y, x, text, attr=0):
-    h, w = stdscr.getmaxyx()
-    if y < 0 or y >= h or x < 0 or x >= w:
-        return
-    max_len = w - x - 1
-    if max_len <= 0:
-        return
-    try:
-        stdscr.addstr(y, x, str(text)[:max_len], attr)
-    except curses.error:
-        pass
-
 
 class ConfigItem:
     def __init__(self, line_idx: int, is_section: bool, key: str, value: str, has_equals: bool, raw_line: str, comment: str = ""):
@@ -267,12 +236,12 @@ class GlobalConfigEditor:
         self._ensure_loaded()
         db = self.dashboard
 
-        draw_box(stdscr, y1, x1, y2, x2, db.C_SYSTEM)
+        self.dashboard.draw_box(stdscr, y1, x1, y2, x2, db.C_SYSTEM)
         title = " GLOBAL SETTINGS "
-        safe_addstr(stdscr, y1, x1 + 2, title, curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
+        self.dashboard.safe_addstr(stdscr, y1, x1 + 2, title, curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
         if is_active:
             mode_str = " [ GLOBAL ] "
-            safe_addstr(stdscr, y1, x2 - len(mode_str) - 1, mode_str,
+            self.dashboard.safe_addstr(stdscr, y1, x2 - len(mode_str) - 1, mode_str,
                         curses.color_pair(db.C_LIVE) | curses.A_BOLD)
 
         visible_rows = (y2 - y1) - 2
@@ -290,8 +259,8 @@ class GlobalConfigEditor:
                         if is_sel else curses.color_pair(db.C_WARN) | curses.A_BOLD)
             val_attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
                         if is_sel else curses.color_pair(db.C_LIVE))
-            safe_addstr(stdscr, row_y, x1 + 1, prefix + f"{item.key:<22}", key_attr)
-            safe_addstr(stdscr, row_y, x1 + 26, "= " + str(item.value), val_attr)
+            self.dashboard.safe_addstr(stdscr, row_y, x1 + 1, prefix + f"{item.key:<22}", key_attr)
+            self.dashboard.safe_addstr(stdscr, row_y, x1 + 26, "= " + str(item.value), val_attr)
             row_y += 1
 
         if self.popup_mode and self.editing_item:
@@ -329,26 +298,26 @@ class GlobalConfigEditor:
         by2 = by1 + box_h
         bx2 = bx1 + box_w
         for y in range(by1, by2 + 1):
-            safe_addstr(stdscr, y, bx1, " " * (box_w + 1), curses.color_pair(db.C_NORMAL))
-        draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
-        safe_addstr(stdscr, by1, bx1 + 2, " EDIT GLOBAL VALUE ",
+            self.dashboard.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), curses.color_pair(db.C_NORMAL))
+        self.dashboard.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
+        self.dashboard.safe_addstr(stdscr, by1, bx1 + 2, " EDIT GLOBAL VALUE ",
                     curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
         row = by1 + 2
-        safe_addstr(stdscr, row, bx1 + 2, f"Key: {self.editing_item.key}",
+        self.dashboard.safe_addstr(stdscr, row, bx1 + 2, f"Key: {self.editing_item.key}",
                     curses.color_pair(db.C_CHROME))
         row += 1
         if comment_lines:
             for cl in comment_lines:
-                safe_addstr(stdscr, row, bx1 + 2, cl, curses.color_pair(db.C_DIM))
+                self.dashboard.safe_addstr(stdscr, row, bx1 + 2, cl, curses.color_pair(db.C_DIM))
                 row += 1
             row += 1
         else:
             row += 1
-        safe_addstr(stdscr, row, bx1 + 2, "New Value:",
+        self.dashboard.safe_addstr(stdscr, row, bx1 + 2, "New Value:",
                     curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
-        safe_addstr(stdscr, row, bx1 + 13, (self.popup_buf + "_")[:box_w - 15],
+        self.dashboard.safe_addstr(stdscr, row, bx1 + 13, (self.popup_buf + "_")[:box_w - 15],
                     curses.color_pair(db.C_NORMAL) | curses.A_BOLD)
-        safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel ",
+        self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel ",
                     curses.color_pair(db.C_INVHEAD))
 
 
@@ -476,7 +445,7 @@ class ConfigEditor:
             focus_hint = "  Tab: switch to Global Settings ►  "
         else:
             focus_hint = "  ◄ Tab: switch to Site Config  "
-        safe_addstr(stdscr, content_y1, global_x1, focus_hint,
+        self.dashboard.safe_addstr(stdscr, content_y1, global_x1, focus_hint,
                     curses.color_pair(self.dashboard.C_DIM))
 
         # ── Draw global settings panel (right, narrower) ──────────────────────
@@ -485,7 +454,7 @@ class ConfigEditor:
 
         # ── Draw Site Selector above the site box ─────────────────────────────
         tab_x = site_x1 + 1
-        safe_addstr(stdscr, content_y1, site_x1, "  Site: ",
+        self.dashboard.safe_addstr(stdscr, content_y1, site_x1, "  Site: ",
                     curses.color_pair(self.dashboard.C_DIM))
         tab_x += 8
         for i, site in enumerate(self.sites):
@@ -494,21 +463,21 @@ class ConfigEditor:
             attr = (curses.color_pair(self.dashboard.C_HILIGHT) | curses.A_BOLD
                     if i == self.selected_site_idx
                     else curses.color_pair(self.dashboard.C_CHROME))
-            safe_addstr(stdscr, content_y1, tab_x, label, attr)
+            self.dashboard.safe_addstr(stdscr, content_y1, tab_x, label, attr)
             tab_x += len(label) + 1
 
         # ── Draw per-site editor box (left, wider) ────────────────────────────
         site_box_y1 = content_y1 + 1
-        draw_box(stdscr, site_box_y1, site_x1, y2, site_x2, self.dashboard.C_CHROME)
+        self.dashboard.draw_box(stdscr, site_box_y1, site_x1, y2, site_x2, self.dashboard.C_CHROME)
         if self._focus == "site":
             mode_str = " [ SITE CONFIG ] "
-            safe_addstr(stdscr, site_box_y1, site_x2 - len(mode_str) - 1, mode_str,
+            self.dashboard.safe_addstr(stdscr, site_box_y1, site_x2 - len(mode_str) - 1, mode_str,
                         curses.color_pair(self.dashboard.C_LIVE) | curses.A_BOLD)
-        safe_addstr(stdscr, site_box_y1, site_x1 + 2, " SITE CONFIGURATION ",
+        self.dashboard.safe_addstr(stdscr, site_box_y1, site_x1 + 2, " SITE CONFIGURATION ",
                     curses.color_pair(self.dashboard.C_INVHEAD) | curses.A_BOLD)
 
         if not self.items:
-            safe_addstr(stdscr, site_box_y1 + 2, site_x1 + 4,
+            self.dashboard.safe_addstr(stdscr, site_box_y1 + 2, site_x1 + 4,
                         "No configurable items found.",
                         curses.color_pair(self.dashboard.C_DIM))
         else:
@@ -536,15 +505,15 @@ class ConfigEditor:
                     disp_text = f"[{item.key}]"
                     sec_attr = (curses.color_pair(self.dashboard.C_HILIGHT) | curses.A_BOLD
                                 if is_selected else curses.color_pair(self.dashboard.C_WARN) | curses.A_BOLD)
-                    safe_addstr(stdscr, row_y, site_x1 + 2, prefix + disp_text, sec_attr)
+                    self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 2, prefix + disp_text, sec_attr)
                 else:
                     key_attr = (attr if is_selected
                                 else curses.color_pair(self.dashboard.C_WARN) | curses.A_BOLD)
                     val_attr = (attr if is_selected
                                 else curses.color_pair(self.dashboard.C_LIVE))
-                    safe_addstr(stdscr, row_y, site_x1 + 2, prefix + f"{item.key:<25}", key_attr)
+                    self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 2, prefix + f"{item.key:<25}", key_attr)
                     if item.has_equals:
-                        safe_addstr(stdscr, row_y, site_x1 + 29, "= " + str(item.value), val_attr)
+                        self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 29, "= " + str(item.value), val_attr)
                 row_y += 1
 
         # Draw popup (whichever sub-editor owns it)
@@ -592,28 +561,28 @@ class ConfigEditor:
         bx2 = bx1 + box_w
 
         for y in range(by1, by2 + 1):
-            safe_addstr(stdscr, y, bx1, " " * (box_w + 1), curses.color_pair(self.dashboard.C_NORMAL))
+            self.dashboard.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), curses.color_pair(self.dashboard.C_NORMAL))
 
-        draw_box(stdscr, by1, bx1, by2, bx2, self.dashboard.C_WARN)
+        self.dashboard.draw_box(stdscr, by1, bx1, by2, bx2, self.dashboard.C_WARN)
         title = " EDIT CONFIG VALUE "
-        safe_addstr(stdscr, by1, bx1 + 2, title, curses.color_pair(self.dashboard.C_WARN) | curses.A_BOLD)
+        self.dashboard.safe_addstr(stdscr, by1, bx1 + 2, title, curses.color_pair(self.dashboard.C_WARN) | curses.A_BOLD)
 
         row = by1 + 2
-        safe_addstr(stdscr, row, bx1 + 2, f"Key: {self.editing_item.key}", curses.color_pair(self.dashboard.C_CHROME))
+        self.dashboard.safe_addstr(stdscr, row, bx1 + 2, f"Key: {self.editing_item.key}", curses.color_pair(self.dashboard.C_CHROME))
         row += 1
 
         if comment_lines:
             for cl in comment_lines:
-                safe_addstr(stdscr, row, bx1 + 2, cl, curses.color_pair(self.dashboard.C_DIM))
+                self.dashboard.safe_addstr(stdscr, row, bx1 + 2, cl, curses.color_pair(self.dashboard.C_DIM))
                 row += 1
             row += 1
         else:
             row += 1
 
-        safe_addstr(stdscr, row, bx1 + 2, "New Value:", curses.color_pair(self.dashboard.C_WARN) | curses.A_BOLD)
-        safe_addstr(stdscr, row, bx1 + 13, (self.popup_buf + "_")[:box_w - 15], curses.color_pair(self.dashboard.C_NORMAL) | curses.A_BOLD)
+        self.dashboard.safe_addstr(stdscr, row, bx1 + 2, "New Value:", curses.color_pair(self.dashboard.C_WARN) | curses.A_BOLD)
+        self.dashboard.safe_addstr(stdscr, row, bx1 + 13, (self.popup_buf + "_")[:box_w - 15], curses.color_pair(self.dashboard.C_NORMAL) | curses.A_BOLD)
 
-        safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel ", curses.color_pair(self.dashboard.C_INVHEAD))
+        self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel ", curses.color_pair(self.dashboard.C_INVHEAD))
 
     def handle_key(self, key) -> bool:
         """Returns True if the key was consumed by the editor."""

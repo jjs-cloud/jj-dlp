@@ -1617,38 +1617,6 @@ def _live_bar(seconds: float, width: int = 14, max_secs: int = 6 * 3600) -> str:
     filled = min(int(width * seconds / max(1, max_secs)), width)
     return "█" * filled + "░" * (width - filled)
 
-def draw_box(stdscr, y1, x1, y2, x2, pair):
-    h, w = stdscr.getmaxyx()
-    def safe_ch(y, x, ch):
-        if 0 <= y < h and 0 <= x < w - 1:
-            try:
-                stdscr.addch(y, x, ch, curses.color_pair(pair))
-            except curses.error:
-                pass
-    for x in range(x1 + 1, x2):
-        safe_ch(y1, x, curses.ACS_HLINE)
-        safe_ch(y2, x, curses.ACS_HLINE)
-    for y in range(y1 + 1, y2):
-        safe_ch(y, x1, curses.ACS_VLINE)
-        safe_ch(y, x2, curses.ACS_VLINE)
-    safe_ch(y1, x1, curses.ACS_ULCORNER)
-    safe_ch(y1, x2, curses.ACS_URCORNER)
-    safe_ch(y2, x1, curses.ACS_LLCORNER)
-    safe_ch(y2, x2, curses.ACS_LRCORNER)
-
-def safe_addstr(stdscr, y, x, text, attr=0):
-    h, w = stdscr.getmaxyx()
-    if y < 0 or y >= h or x < 0 or x >= w:
-        return
-    max_len = w - x - 1
-    if max_len <= 0:
-        return
-    try:
-        stdscr.addstr(y, x, str(text)[:max_len], attr)
-    except curses.error:
-        pass
-
-
 class JJDlpDashboard:
     """
     MenuWorks-style curses TUI.
@@ -1660,6 +1628,39 @@ class JJDlpDashboard:
     To change panel order, just reorder the sites list passed to __init__.
     Panel grid: sites[0]=top-left, sites[1]=top-right, sites[2]=bot-left, etc.
     """
+
+    @staticmethod
+    def draw_box(stdscr, y1, x1, y2, x2, pair):
+        h, w = stdscr.getmaxyx()
+        def safe_ch(y, x, ch):
+            if 0 <= y < h and 0 <= x < w - 1:
+                try:
+                    stdscr.addch(y, x, ch, curses.color_pair(pair))
+                except curses.error:
+                    pass
+        for x in range(x1 + 1, x2):
+            safe_ch(y1, x, curses.ACS_HLINE)
+            safe_ch(y2, x, curses.ACS_HLINE)
+        for y in range(y1 + 1, y2):
+            safe_ch(y, x1, curses.ACS_VLINE)
+            safe_ch(y, x2, curses.ACS_VLINE)
+        safe_ch(y1, x1, curses.ACS_ULCORNER)
+        safe_ch(y1, x2, curses.ACS_URCORNER)
+        safe_ch(y2, x1, curses.ACS_LLCORNER)
+        safe_ch(y2, x2, curses.ACS_LRCORNER)
+
+    @staticmethod
+    def safe_addstr(stdscr, y, x, text, attr=0):
+        h, w = stdscr.getmaxyx()
+        if y < 0 or y >= h or x < 0 or x >= w:
+            return
+        max_len = w - x - 1
+        if max_len <= 0:
+            return
+        try:
+            stdscr.addstr(y, x, str(text)[:max_len], attr)
+        except curses.error:
+            pass
 
     FLASH_CYCLE = 8
 
@@ -1799,7 +1800,7 @@ class JJDlpDashboard:
     # ── Logo ─────────────────────────────────────────────────────────────────
     def draw_logo(self, y, x):
         for i, line in enumerate(ASCII_LOGO):
-            safe_addstr(self.stdscr, y + i, x, line,
+            self.safe_addstr(self.stdscr, y + i, x, line,
                         curses.color_pair(self.C_LOGO) | curses.A_BOLD)
 
     # ── Tab bar ──────────────────────────────────────────────────────────────
@@ -1807,17 +1808,17 @@ class JJDlpDashboard:
         for i, tab in enumerate(self.TABS):
             label = f"  {tab}  "
             if i == self.selected_tab:
-                safe_addstr(self.stdscr, y, x, label,
+                self.safe_addstr(self.stdscr, y, x, label,
                             curses.color_pair(self.C_HILIGHT) | curses.A_BOLD)
             else:
-                safe_addstr(self.stdscr, y, x, label, curses.color_pair(self.C_INVHEAD))
+                self.safe_addstr(self.stdscr, y, x, label, curses.color_pair(self.C_INVHEAD))
             x += len(label) + 1
 
     # ── System status sidebar ────────────────────────────────────────────────
     def draw_system_panel(self, y1, x1, y2, x2):
         """Draws the SYSTEM info panel (from demo). Placed in the sidebar."""
-        draw_box(self.stdscr, y1, x1, y2, x2, self.C_SYSTEM)
-        safe_addstr(self.stdscr, y1, x1 + 2, " SYSTEM ",
+        self.draw_box(self.stdscr, y1, x1, y2, x2, self.C_SYSTEM)
+        self.safe_addstr(self.stdscr, y1, x1 + 2, " SYSTEM ",
                     curses.color_pair(self.C_SYSTEM) | curses.A_BOLD)
 
         # Aggregate counts across all sites
@@ -1885,10 +1886,10 @@ class JJDlpDashboard:
             if row_y >= y2 - 1:
                 break
             if label:
-                safe_addstr(self.stdscr, row_y, x1 + 2,
+                self.safe_addstr(self.stdscr, row_y, x1 + 2,
                             label[:label_w].ljust(label_w),
                             curses.color_pair(self.C_DIM))
-                safe_addstr(self.stdscr, row_y, x1 + 2 + label_w + 1,
+                self.safe_addstr(self.stdscr, row_y, x1 + 2 + label_w + 1,
                             str(val)[:inner_w - label_w - 1],
                             curses.color_pair(cpair) | curses.A_BOLD)
 
@@ -1945,7 +1946,7 @@ class JJDlpDashboard:
                 self._disk_cache_time    = now
 
             if disk_row_y < y2 - 1:
-                safe_addstr(self.stdscr, disk_row_y, x1 + 2, "── Disk ──",
+                self.safe_addstr(self.stdscr, disk_row_y, x1 + 2, "── Disk ──",
                             curses.color_pair(self.C_SYSTEM))
                 disk_row_y += 1
             for drive, usage in self._disk_cache_results:
@@ -1960,7 +1961,7 @@ class JJDlpDashboard:
                 drv_label = drv_label[:6]
                 disk_str  = f"{drv_label:<6} {free_gb:>4.1f}G {pct:>3.0f}%"
                 color = self.C_LIVE if pct < 80 else (self.C_WARN if pct < 95 else self.C_REC)
-                safe_addstr(self.stdscr, disk_row_y, x1 + 2,
+                self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
                             disk_str[:inner_w],
                             curses.color_pair(color))
                 disk_row_y += 1
@@ -1968,7 +1969,7 @@ class JJDlpDashboard:
             dbg(f"[DISK] outer exception in disk section: {type(_disk_outer_exc).__name__}: {_disk_outer_exc}")
 
         # Uptime at bottom
-        safe_addstr(self.stdscr, y2 - 1, x1 + 2,
+        self.safe_addstr(self.stdscr, y2 - 1, x1 + 2,
                     f"Up: {uptime_str}"[:inner_w],
                     curses.color_pair(self.C_CHROME))
 
@@ -1981,7 +1982,7 @@ class JJDlpDashboard:
         now = time.time()
         #Pick border color based on selection
         border_pair = self.C_HILIGHT if is_selected else self.C_CHROME
-        draw_box(self.stdscr, y1, x1, y2, x2, border_pair)
+        self.draw_box(self.stdscr, y1, x1, y2, x2, border_pair)
 
         # ── Panel header ──
         _panel_cfg = site.get_cached_config()
@@ -2013,23 +2014,23 @@ class JJDlpDashboard:
         header_y = y1
         # Site label on top border
         label_text = f"  {cfg_label}  "
-        safe_addstr(self.stdscr, header_y, x1 + 2, label_text,
+        self.safe_addstr(self.stdscr, header_y, x1 + 2, label_text,
                     curses.color_pair(self.C_CHROME) | curses.A_BOLD)
 
         # Status badge row
         badge_y = y1 + 1
         bx = x1 + 2
-        safe_addstr(self.stdscr, badge_y, bx,
+        self.safe_addstr(self.stdscr, badge_y, bx,
                     f"LIVE:{live_cnt}",  curses.color_pair(self.C_LIVE) | curses.A_BOLD)
         bx += 7
-        safe_addstr(self.stdscr, badge_y, bx,
+        self.safe_addstr(self.stdscr, badge_y, bx,
                     f"REC:{rec_cnt}",    curses.color_pair(self.C_REC) | curses.A_BOLD)
         bx += 6
-        safe_addstr(self.stdscr, badge_y, bx,
+        self.safe_addstr(self.stdscr, badge_y, bx,
                     f"OFF:{off_cnt}",    curses.color_pair(self.C_DIM))
         bx += 6
         if dis_cnt:
-            safe_addstr(self.stdscr, badge_y, bx,
+            self.safe_addstr(self.stdscr, badge_y, bx,
                         f"DIS:{dis_cnt}", curses.color_pair(self.C_DISABLED))
 
         # ── Streamer rows ──
@@ -2112,19 +2113,19 @@ class JJDlpDashboard:
                 dur_str     = ""
 
             col = x1 + 2
-            safe_addstr(self.stdscr, row_y, col,
+            self.safe_addstr(self.stdscr, row_y, col,
                         s[:name_w].ljust(name_w), name_attr)
             col += name_w + 1
-            safe_addstr(self.stdscr, row_y, col,
+            self.safe_addstr(self.stdscr, row_y, col,
                         status_str[:7].ljust(7), status_attr)
             col += 8
-            safe_addstr(self.stdscr, row_y, col, bar_str, bar_attr)
+            self.safe_addstr(self.stdscr, row_y, col, bar_str, bar_attr)
             col += bar_w + 1
             if dur_str:
-                safe_addstr(self.stdscr, row_y, col,
+                self.safe_addstr(self.stdscr, row_y, col,
                             dur_str[:9].ljust(9), curses.color_pair(self.C_CHROME))
             else:
-                safe_addstr(self.stdscr, row_y, col, " " * 9, 0)
+                self.safe_addstr(self.stdscr, row_y, col, " " * 9, 0)
             col += 10
             if last_live_str:
                 # Highlight in C_LIVE if streamer was live within LAST_LIVE_HIGHLIGHT days
@@ -2134,13 +2135,13 @@ class JJDlpDashboard:
                     ll_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
                 else:
                     ll_attr = curses.color_pair(self.C_DIM)
-                safe_addstr(self.stdscr, row_y, col,
+                self.safe_addstr(self.stdscr, row_y, col,
                             last_live_str[:last_live_w],
                             ll_attr)
 
         # ── Countdown ──
         nxt = max(0.0, next_in)
-        safe_addstr(self.stdscr, y2 - 1, x1 + 2,
+        self.safe_addstr(self.stdscr, y2 - 1, x1 + 2,
                     f"Next check: {nxt:>4.0f}s",
                     curses.color_pair(self.C_WARN) | curses.A_BOLD)
 
@@ -2238,7 +2239,7 @@ class JJDlpDashboard:
         # Site selector across the top
         sel_site = self.sites[self.selected_site_idx] if self.sites else None
         tab_x    = x1 + 1
-        safe_addstr(self.stdscr, y1, x1, "  Site: ",
+        self.safe_addstr(self.stdscr, y1, x1, "  Site: ",
                     curses.color_pair(self.C_DIM))
         tab_x += 8
         for i, site in enumerate(self.sites):
@@ -2248,9 +2249,9 @@ class JJDlpDashboard:
             attr  = (curses.color_pair(self.C_HILIGHT) | curses.A_BOLD
                      if i == self.selected_site_idx
                      else curses.color_pair(self.C_CHROME))
-            safe_addstr(self.stdscr, y1, tab_x, label, attr)
+            self.safe_addstr(self.stdscr, y1, tab_x, label, attr)
             tab_x += len(label) + 1
-        safe_addstr(self.stdscr, y1 + 1, x1 + 2, " ACTIVITY LOG ",
+        self.safe_addstr(self.stdscr, y1 + 1, x1 + 2, " ACTIVITY LOG ",
                     curses.color_pair(self.C_DIM) | curses.A_BOLD)
 
         if sel_site is None:
@@ -2280,12 +2281,12 @@ class JJDlpDashboard:
                 attr = curses.color_pair(self.C_REC)
             elif "Next check" in line:
                 attr = curses.color_pair(self.C_WARN)
-            safe_addstr(self.stdscr, y1 + 2 + i, x1 + 2, line, attr)
+            self.safe_addstr(self.stdscr, y1 + 2 + i, x1 + 2, line, attr)
 
         # Scroll indicator
         if max_scroll > 0:
             scroll_info = f" ↑{self._log_scroll}/{max_scroll} " if self._log_scroll else " (end) "
-            safe_addstr(self.stdscr, y1 + 1, x2 - len(scroll_info) - 1,
+            self.safe_addstr(self.stdscr, y1 + 1, x2 - len(scroll_info) - 1,
                         scroll_info, curses.color_pair(self.C_WARN))
 
     def _draw_pipe_tab(self, y1, x1, y2, x2, title: str, lines: List[str],
@@ -2293,7 +2294,7 @@ class JJDlpDashboard:
         """Draw a pipe-output tab. Returns the clamped scroll value."""
         sel_site = self.sites[self.selected_site_idx] if self.sites else None
         tab_x    = x1 + 1
-        safe_addstr(self.stdscr, y1, x1, "  Site: ",
+        self.safe_addstr(self.stdscr, y1, x1, "  Site: ",
                     curses.color_pair(self.C_DIM))
         tab_x += 8
         for i, site in enumerate(self.sites):
@@ -2303,11 +2304,11 @@ class JJDlpDashboard:
             attr  = (curses.color_pair(self.C_HILIGHT) | curses.A_BOLD
                      if i == self.selected_site_idx
                      else curses.color_pair(self.C_CHROME))
-            safe_addstr(self.stdscr, y1, tab_x, label, attr)
+            self.safe_addstr(self.stdscr, y1, tab_x, label, attr)
             tab_x += len(label) + 1
 
-        draw_box(self.stdscr, y1 + 1, x1, y2, x2, self.C_DIM)
-        safe_addstr(self.stdscr, y1 + 1, x1 + 2, f" {title} ",
+        self.draw_box(self.stdscr, y1 + 1, x1, y2, x2, self.C_DIM)
+        self.safe_addstr(self.stdscr, y1 + 1, x1 + 2, f" {title} ",
                     curses.color_pair(self.C_DIM) | curses.A_BOLD)
 
         if sel_site is None:
@@ -2324,13 +2325,13 @@ class JJDlpDashboard:
         view  = wrapped[start : start + visible_rows]
 
         for i, line in enumerate(view):
-            safe_addstr(self.stdscr, y1 + 2 + i, x1 + 2, line,
+            self.safe_addstr(self.stdscr, y1 + 2 + i, x1 + 2, line,
                         curses.color_pair(self.C_DIM))
 
         # Scroll indicator
         if max_scroll > 0:
             scroll_info = f" ↑{scroll}/{max_scroll} " if scroll else " (end) "
-            safe_addstr(self.stdscr, y1 + 1, x2 - len(scroll_info) - 1,
+            self.safe_addstr(self.stdscr, y1 + 1, x2 - len(scroll_info) - 1,
                         scroll_info, curses.color_pair(self.C_WARN))
 
         return scroll
@@ -2377,8 +2378,8 @@ class JJDlpDashboard:
 
     # ── EventSub tab ─────────────────────────────────────────────────────────
     def draw_eventsub_tab(self, y1, x1, y2, x2):
-        draw_box(self.stdscr, y1, x1, y2, x2, self.C_CHROME)
-        safe_addstr(self.stdscr, y1, x1 + 2, " TWITCH EVENTSUB ",
+        self.draw_box(self.stdscr, y1, x1, y2, x2, self.C_CHROME)
+        self.safe_addstr(self.stdscr, y1, x1 + 2, " TWITCH EVENTSUB ",
                     curses.color_pair(self.C_INVHEAD) | curses.A_BOLD)
 
         row_y = y1 + 2
@@ -2387,13 +2388,13 @@ class JJDlpDashboard:
                 break
             lbl = site.get_cached_config().get("site_label",
                               os.path.basename(site.config_path))
-            safe_addstr(self.stdscr, row_y, x1 + 2, f"-- {lbl} --",
+            self.safe_addstr(self.stdscr, row_y, x1 + 2, f"-- {lbl} --",
                         curses.color_pair(self.C_WARN) | curses.A_BOLD)
             row_y += 1
 
             es = site.eventsub_state
             if es is None:
-                safe_addstr(self.stdscr, row_y, x1 + 4, "EventSub not available",
+                self.safe_addstr(self.stdscr, row_y, x1 + 4, "EventSub not available",
                             curses.color_pair(self.C_DIM))
                 row_y += 2
                 continue
@@ -2421,9 +2422,9 @@ class JJDlpDashboard:
             for label, val, cpair in rows:
                 if row_y >= y2 - 1:
                     break
-                safe_addstr(self.stdscr, row_y, x1 + 4,
+                self.safe_addstr(self.stdscr, row_y, x1 + 4,
                             f"{label:<16}", curses.color_pair(self.C_INVHEAD))
-                safe_addstr(self.stdscr, row_y, x1 + 21, val, curses.color_pair(cpair))
+                self.safe_addstr(self.stdscr, row_y, x1 + 21, val, curses.color_pair(cpair))
                 row_y += 1
             row_y += 1
 
@@ -2470,7 +2471,7 @@ class JJDlpDashboard:
                          f"  [: prev site  ]: next site"
                          f"  A: add streamer R: remove streamer D: disable streamer"
                          f"  C: colors  Q: quit  ")
-        safe_addstr(self.stdscr, h - 1, 0,
+        self.safe_addstr(self.stdscr, h - 1, 0,
                     hints.ljust(w - 1)[:w - 1],
                     curses.color_pair(self.C_INVHEAD))
 
@@ -2492,38 +2493,38 @@ class JJDlpDashboard:
 
         # Fill background
         for y in range(by1, by2 + 1):
-            safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1),
+            self.safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1),
                         curses.color_pair(self.C_NORMAL))
 
-        draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_WARN)
+        self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_WARN)
         title = f" {action.upper()} STREAMER "
         site_lbl = site.get_cached_config().get("site_label",
                                os.path.basename(site.config_path))
-        safe_addstr(self.stdscr, by1, bx1 + 2, title,
+        self.safe_addstr(self.stdscr, by1, bx1 + 2, title,
                     curses.color_pair(self.C_WARN) | curses.A_BOLD)
-        safe_addstr(self.stdscr, by1 + 1, bx1 + 2,
+        self.safe_addstr(self.stdscr, by1 + 1, bx1 + 2,
                     f"Site: {site_lbl}", curses.color_pair(self.C_DIM))
 
         row = by1 + 3
         if all_s:
-            safe_addstr(self.stdscr, row, bx1 + 2, "Streamers:",
+            self.safe_addstr(self.stdscr, row, bx1 + 2, "Streamers:",
                         curses.color_pair(self.C_CHROME))
             row += 1
             for s in all_s:
                 if row >= by2 - 4:
                     break
-                safe_addstr(self.stdscr, row, bx1 + 4, f"- {s}",
+                self.safe_addstr(self.stdscr, row, bx1 + 4, f"- {s}",
                             curses.color_pair(self.C_DIM))
                 row += 1
 
         row = by2 - 4
         if self._mgmt_result:
-            safe_addstr(self.stdscr, row, bx1 + 2, self._mgmt_result[:box_w - 4],
+            self.safe_addstr(self.stdscr, row, bx1 + 2, self._mgmt_result[:box_w - 4],
                         curses.color_pair(self.C_LIVE) | curses.A_BOLD)
         row = by2 - 2
-        safe_addstr(self.stdscr, row, bx1 + 2, "Username:",
+        self.safe_addstr(self.stdscr, row, bx1 + 2, "Username:",
                     curses.color_pair(self.C_WARN) | curses.A_BOLD)
-        safe_addstr(self.stdscr, row, bx1 + 12,
+        self.safe_addstr(self.stdscr, row, bx1 + 12,
                     (self._mgmt_buf + "_")[:box_w - 14],
                     curses.color_pair(self.C_NORMAL) | curses.A_BOLD)
 
@@ -2538,7 +2539,7 @@ class JJDlpDashboard:
 
         # System time top-right
         sys_time_str = datetime.now().strftime("%Y-%m-%d  %H:%M:%S")
-        safe_addstr(self.stdscr, 1, w - len(sys_time_str) - 3, sys_time_str,
+        self.safe_addstr(self.stdscr, 1, w - len(sys_time_str) - 3, sys_time_str,
                     curses.color_pair(self.C_CHROME))
 
         # Track the next available row on the right side
@@ -2548,13 +2549,13 @@ class JJDlpDashboard:
         with update_available_lock:
             if UPDATE_AVAILABLE:
                 update_str = "Update Available"
-                safe_addstr(self.stdscr, next_right_row, w - len(update_str) - 3, update_str,
+                self.safe_addstr(self.stdscr, next_right_row, w - len(update_str) - 3, update_str,
                             curses.color_pair(self.C_WARN) | curses.A_BOLD)
                 next_right_row += 1
         
         # App version indicator (Below Update Available, or directly below time)
         version_str = f"v{__version__}"
-        safe_addstr(self.stdscr, next_right_row, w - len(version_str) - 3, version_str,
+        self.safe_addstr(self.stdscr, next_right_row, w - len(version_str) - 3, version_str,
                     curses.color_pair(self.C_DIM))
 
         # Blank line after logo (row 7), then tab bar at row 8
@@ -2562,7 +2563,7 @@ class JJDlpDashboard:
         self.draw_tabs(8, 2)
 
         # Separator
-        safe_addstr(self.stdscr, 9, 1, "-" * (w - 2), curses.color_pair(self.C_CHROME))
+        self.safe_addstr(self.stdscr, 9, 1, "-" * (w - 2), curses.color_pair(self.C_CHROME))
 
         # Content area starts at row 10
         content_y1 = 10
@@ -2819,18 +2820,18 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
 
         # Logo
         for i, line in enumerate(ASCII_LOGO):
-            safe_addstr(stdscr, 1 + i, 2, line, curses.color_pair(6) | curses.A_BOLD)
+            JJDlpDashboard.safe_addstr(stdscr, 1 + i, 2, line, curses.color_pair(6) | curses.A_BOLD)
 
         ts = time.strftime("%Y-%m-%d  %H:%M:%S")
-        safe_addstr(stdscr, 1, w - len(ts) - 3, ts, curses.color_pair(1))
-        safe_addstr(stdscr, 7, 2, "-" * (w - 4), curses.color_pair(1))
+        JJDlpDashboard.safe_addstr(stdscr, 1, w - len(ts) - 3, ts, curses.color_pair(1))
+        JJDlpDashboard.safe_addstr(stdscr, 7, 2, "-" * (w - 4), curses.color_pair(1))
 
         # Title
         title = "SELECT CONFIG FILE(S)"
-        safe_addstr(stdscr, 9, 2, title, curses.color_pair(5) | curses.A_BOLD)
+        JJDlpDashboard.safe_addstr(stdscr, 9, 2, title, curses.color_pair(5) | curses.A_BOLD)
 
         # Instructions
-        safe_addstr(stdscr, 10, 2,
+        JJDlpDashboard.safe_addstr(stdscr, 10, 2,
                     "Space = toggle [x]   Enter = confirm   Q = quit",
                     curses.color_pair(3))
 
@@ -2845,13 +2846,13 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
                 attr = curses.color_pair(4) | curses.A_BOLD
             else:
                 attr = curses.color_pair(1)
-            safe_addstr(stdscr, row, 4, f"  {checked}  {name}", attr)
+            JJDlpDashboard.safe_addstr(stdscr, row, 4, f"  {checked}  {name}", attr)
 
         # "Do not show again" checkbox
         dna_row = 12 + n + 1
         dna_box = "[x]" if do_not_show_config else "[ ]"
         dna_attr = curses.color_pair(3) | curses.A_BOLD if do_not_show_config else curses.color_pair(3)
-        safe_addstr(stdscr, dna_row, 4,
+        JJDlpDashboard.safe_addstr(stdscr, dna_row, 4,
                     f"  {dna_box}  Do not show again (press D to toggle)",
                     dna_attr)
 
@@ -2859,7 +2860,7 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
         sel_count = len(selected)
         footer = (f"  {sel_count} file(s) selected  "
                   f"↑/↓ navigate  Space toggle  Enter confirm  D do not show  ")
-        safe_addstr(stdscr, h - 1, 0,
+        JJDlpDashboard.safe_addstr(stdscr, h - 1, 0,
                     footer.ljust(w - 1)[:w - 1],
                     curses.color_pair(5) | curses.A_BOLD)
 
@@ -2941,21 +2942,21 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
 
         # Logo
         for i, line in enumerate(ASCII_LOGO):
-            safe_addstr(stdscr, 1 + i, 2, line, curses.color_pair(6) | curses.A_BOLD)
+            JJDlpDashboard.safe_addstr(stdscr, 1 + i, 2, line, curses.color_pair(6) | curses.A_BOLD)
 
         ts = time.strftime("%Y-%m-%d  %H:%M:%S")
-        safe_addstr(stdscr, 1, w - len(ts) - 3, ts, curses.color_pair(1))
-        safe_addstr(stdscr, 7, 2, "-" * (w - 4), curses.color_pair(1))
+        JJDlpDashboard.safe_addstr(stdscr, 1, w - len(ts) - 3, ts, curses.color_pair(1))
+        JJDlpDashboard.safe_addstr(stdscr, 7, 2, "-" * (w - 4), curses.color_pair(1))
 
         # Browser sub-title
         br_title_row = 9
-        safe_addstr(stdscr, br_title_row, 2,
+        JJDlpDashboard.safe_addstr(stdscr, br_title_row, 2,
                     "SELECT BROWSER",
                     curses.color_pair(5) | curses.A_BOLD)
-        safe_addstr(stdscr, br_title_row + 1, 2,
+        JJDlpDashboard.safe_addstr(stdscr, br_title_row + 1, 2,
                     "Select your browser for the yt-dlp --cookies-from-browser option.",
                     curses.color_pair(3))
-        safe_addstr(stdscr, br_title_row + 2, 2,
+        JJDlpDashboard.safe_addstr(stdscr, br_title_row + 2, 2,
                     "Note: Chrome based browsers are not supported. Firefox is recommended.",
                     curses.color_pair(3))
         applies_to_labels = [
@@ -2963,7 +2964,7 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
             for fname in chosen_files
             if file_cfgs[fname].get("downloader_cookies", True) or file_cfgs[fname].get("checker_cookies", False)
         ]
-        safe_addstr(stdscr, br_title_row + 4, 2,
+        JJDlpDashboard.safe_addstr(stdscr, br_title_row + 4, 2,
                     f"Applies to: {', '.join(applies_to_labels)}",
                     curses.color_pair(4))
 
@@ -2978,19 +2979,19 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
             else:
                 attr = curses.color_pair(1)
             label = f"  {dot}  {br}" + ("  ← remove cookies option" if br == "disabled" else "")
-            safe_addstr(stdscr, row, 4, label, attr)
+            JJDlpDashboard.safe_addstr(stdscr, row, 4, label, attr)
 
         # "Do not show again" checkbox (below the browser list)
         dna_row  = list_start_row + nb + 1
         dna_box  = "[x]" if do_not_show else "[ ]"
         dna_attr = curses.color_pair(3) | curses.A_BOLD if do_not_show else curses.color_pair(3)
-        safe_addstr(stdscr, dna_row, 4,
+        JJDlpDashboard.safe_addstr(stdscr, dna_row, 4,
                     f"  {dna_box}  Do not show again (press D to toggle)",
                     dna_attr)
 
         # Footer
         footer = "  ↑/↓ navigate  Enter = confirm  D = do not show again  Q = quit  "
-        safe_addstr(stdscr, h - 1, 0,
+        JJDlpDashboard.safe_addstr(stdscr, h - 1, 0,
                     footer.ljust(w - 1)[:w - 1],
                     curses.color_pair(5) | curses.A_BOLD)
 
