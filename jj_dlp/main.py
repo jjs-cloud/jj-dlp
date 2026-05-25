@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.2.4"
+__version__ = "1.2.5"
 
 import subprocess
 import time
@@ -627,7 +627,9 @@ KEYBIND_LABELS = {
 # ══════════════════════════════════════════════════════════════════════════════
 
 def kill_proc(proc) -> None:
+    dbg(f"[KILL] Attempting to kill proc.pid={proc.pid}")
     if sys.platform == "win32":
+        dbg(f"[KILL] win32: using taskkill on pid={proc.pid}")
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
     else:
         # PyInstaller yt-dlp binaries spawn two processes: a bootloader and the
@@ -637,13 +639,17 @@ def kill_proc(proc) -> None:
         import signal as _signal
         try:
             pgid = os.getpgid(proc.pid)
+            dbg(f"[KILL] Linux: found pgid={pgid} for pid={proc.pid}, sending SIGKILL to pgid")
             os.killpg(pgid, _signal.SIGKILL)
-        except (ProcessLookupError, OSError):
+            dbg(f"[KILL] Linux: successfully sent SIGKILL to pgid={pgid}")
+        except (ProcessLookupError, OSError) as e:
             # Process already gone or pgid unavailable — fall back to direct kill
+            dbg(f"[KILL] Linux: pgid lookup or killpg failed for pid={proc.pid} ({e}), falling back to proc.kill()")
             try:
                 proc.kill()
-            except Exception:
-                pass
+                dbg(f"[KILL] Linux: successfully called proc.kill() for pid={proc.pid}")
+            except Exception as e2:
+                dbg(f"[KILL] Linux: proc.kill() failed for pid={proc.pid} ({e2})")
 
 
 def build_yt_dlp_command(yt_dlp_path: str, base_cmd: List[str], extra: List[str]) -> List[str]:

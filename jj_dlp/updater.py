@@ -458,7 +458,15 @@ def _stage2(source_dir, base_dir, temp_dir):
                 else:
                     if os.path.basename(dst) == "updater.py":
                         dbg(f"[STAGE2] _stage2.copy_and_diff: copying new updater.py {src} -> {dst}")
-                shutil.copy2(src, dst)
+                try:
+                    shutil.copy2(src, dst)
+                except OSError as e:
+                    import errno
+                    if getattr(e, 'errno', None) == errno.ETXTBSY:
+                        print(f"\nERROR: The file '{dst}' is currently in use (Text file busy).")
+                        print("Please ensure that jj-dlp, yt-dlp, and ffmpeg are fully closed and not running in the background.")
+                        print("You may need to manually kill any stuck 'yt-dlp' or 'ffmpeg' processes and try again.\n")
+                    raise
                 
         copy_and_diff(source_dir, base_dir)
 
