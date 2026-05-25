@@ -259,7 +259,7 @@ class GlobalConfigEditor:
 
     def save(self):
         """Write self.lines back to global.conf with a backup."""
-        backup_dir = "backups"
+        backup_dir = os.path.join(os.path.dirname(os.path.abspath(self.conf_path)), "backups")
         os.makedirs(backup_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         backup_path = os.path.join(backup_dir, f"global.conf.{timestamp}.bak")
@@ -462,7 +462,7 @@ class ConfigEditor:
             return
 
         # Create backup
-        backup_dir = "backups"
+        backup_dir = os.path.join(os.path.dirname(os.path.abspath(self.current_site_path)), "backups")
         os.makedirs(backup_dir, exist_ok=True)
         base = os.path.basename(self.current_site_path)
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
