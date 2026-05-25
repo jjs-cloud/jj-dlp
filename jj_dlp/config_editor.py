@@ -2,6 +2,7 @@ import os
 import shutil
 import curses
 from datetime import datetime
+from typing import NamedTuple
 
 
 class ConfigItem:
@@ -15,8 +16,116 @@ class ConfigItem:
         self.comment = comment  # Help text parsed from the # line(s) above this key
 
 
-# ── Keys that live in global.conf (never shown in per-site editor) ────────────
-_GLOBAL_KEYS = {"DISK_DRIVES", "DEBUG_LOGS", "DEBUG_LOG_PATH", "CHECK_FOR_UPDATES", "UPDATE_INTERVAL", "ASK_FOR_BROWSER", "ASK_FOR_CONFIG","UPDATE_BRANCH"}
+# ══════════════════════════════════════════════════════════════════════════════
+# Single source of truth for all config keys
+#
+# scope    : "global"  → lives in global.conf, shown in GlobalConfigEditor
+#            "site"    → lives in per-site .conf, shown in site ConfigEditor
+# default  : value written when the key is missing / a fresh file is created
+# preserve : True  → value is carried over from the user's file during an update
+#            False → value is reset to the new template default on update
+# comment  : help text shown in the edit popup
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _KeyDef(NamedTuple):
+    name:     str
+    scope:    str   # "global" | "site"
+    default:  str
+    preserve: bool
+    comment:  str
+
+
+CONFIG_KEYS: tuple[_KeyDef, ...] = (
+    # ── Global keys (global.conf) ─────────────────────────────────────────────
+    _KeyDef("DISK_DRIVES",           "global", "",      True,
+            "Comma-separated list of drives or paths to show disk info in the system panel. "
+            "(e.g. C:\\,D:\\ or /home,/mnt/data)."),
+    _KeyDef("DEBUG_LOGS",            "global", "false", True,
+            "Enable debug logging to a file (true/false)."),
+    _KeyDef("DEBUG_LOG_PATH",        "global", "",      True,
+            "Path for the debug log file. Can be a relative or absolute path (e.g. logs/debug.log)."),
+    _KeyDef("CHECK_FOR_UPDATES",     "global", "true",  True,
+            "Whether to periodically check for app updates (true/false)."),
+    _KeyDef("UPDATE_INTERVAL",       "global", "30",    True,
+            "Number of minutes between app update checks."),
+    _KeyDef("ASK_FOR_BROWSER",       "global", "true",  True,
+            "Show the browser chooser on startup (true/false)."),
+    _KeyDef("ASK_FOR_CONFIG",        "global", "true",  True,
+            "Show the config file chooser on startup (true/false)."),
+    _KeyDef("UPDATE_BRANCH",         "global", "main",  True,
+            "Which branch of jj-dlp to update to. (main, testing, or experimental)."),
+
+    # ── Site keys (per-site .conf) ────────────────────────────────────────────
+    _KeyDef("SITE_LABEL",            "site",   "",      True,
+            "Display label for this site in the dashboard."),
+    _KeyDef("SITE_ORDER",            "site",   "999",   True,
+            "Sort position of this site in the dashboard (lower = further left)."),
+    _KeyDef("CHECK_INTERVAL",        "site",   "60",    False,
+            "Seconds between liveness checks for this site."),
+    _KeyDef("OUTPUT_DIR",            "site",   "recordings", True,
+            "Directory where recordings are saved."),
+    _KeyDef("OUTPUT_TMPL",           "site",   "%(title)s [%(id)s].%(ext)s", True,
+            "yt-dlp output filename template."),
+    _KeyDef("COOLDOWN_AFTER_RECORDING", "site", "5",   False,
+            "Seconds to wait after a recording ends before checking again."),
+    _KeyDef("SPLIT_AFTER",           "site",   "0",    True,
+            "Split recordings after this many seconds (0 = disabled)."),
+    _KeyDef("STALL_CHECK_INTERVAL",  "site",   "30",   False,
+            "Seconds between stall-detection checks."),
+    _KeyDef("STALL_TIMEOUT",         "site",   "120",  False,
+            "Seconds without output before a recording is considered stalled."),
+    _KeyDef("CONFIG_CHECK_INTERVAL", "site",   "3",    False,
+            "Seconds between config-file reload checks."),
+    _KeyDef("SITE_TMPL",             "site",   "",     False,
+            "URL template used to build the stream URL from a username."),
+    _KeyDef("PANEL_RESIZE",          "site",   "true", True,
+            "Allow the dashboard panel to be resized (true/false)."),
+    _KeyDef("LOGGING",               "site",   "false", False,
+            "Enable per-site log files (true/false)."),
+    _KeyDef("LOG_PATH",              "site",   "",     False,
+            "Path for per-site log files."),
+    _KeyDef("SPLIT_LOGS",            "site",   "false", False,
+            "Write a separate log file per recording session (true/false)."),
+    _KeyDef("POPUP_NOTIFICATIONS",   "site",   "true", True,
+            "Show popup notifications for recording events (true/false)."),
+    _KeyDef("POPUP_TIMEOUT",         "site",   "15",   True,
+            "Seconds a notification popup stays visible."),
+    _KeyDef("POPUP_COOLDOWN",        "site",   "30",   True,
+            "Minimum seconds between successive popups for the same site."),
+    _KeyDef("YT_DLP_PATH_WINDOWS",   "site",   "",     False,
+            "Path to yt-dlp executable on Windows. Leave blank to use the bundled copy."),
+    _KeyDef("YT_DLP_PATH_MAC",       "site",   "",     False,
+            "Path to yt-dlp executable on macOS. Leave blank to use the bundled copy."),
+    _KeyDef("YT_DLP_PATH_LINUX",     "site",   "",     False,
+            "Path to yt-dlp executable on Linux. Leave blank to use the bundled copy."),
+    _KeyDef("PROGRESS_BAR_MAX_HOURS","site",   "6",    True,
+            "Maximum hours shown on the recording progress bar."),
+    _KeyDef("PROGRESS_BAR_WIDTH",    "site",   "14",   True,
+            "Width (in characters) of the recording progress bar."),
+    _KeyDef("DOWNLOADER_COOKIES",    "site",   "true", False,
+            "Pass browser cookies to yt-dlp for downloading (true/false)."),
+    _KeyDef("CHECKER_COOKIES",       "site",   "false", False,
+            "Pass browser cookies to yt-dlp for liveness checks (true/false)."),
+    _KeyDef("LAST_LIVE_HIGHLIGHT",   "site",   "0",    True,
+            "Seconds to highlight a streamer after they were last seen live (0 = disabled)."),
+)
+
+# ── Derived helpers (consumed by this module and importable by others) ─────────
+
+# Keys that belong in global.conf — used to filter them out of the site editor
+_GLOBAL_KEYS: set[str] = {k.name for k in CONFIG_KEYS if k.scope == "global"}
+
+# Ordered list of global key names (preserves declaration order above)
+_GLOBAL_KEYS_ORDER: list[str] = [k.name for k in CONFIG_KEYS if k.scope == "global"]
+
+# Default values keyed by name — for both scopes
+_KEY_DEFAULTS: dict[str, str] = {k.name: k.default for k in CONFIG_KEYS}
+
+# Help comments keyed by name
+_KEY_COMMENTS: dict[str, str] = {k.name: k.comment for k in CONFIG_KEYS}
+
+# Keys that must be preserved across an update (both global and site)
+PRESERVED_KEYS: list[str] = [k.name for k in CONFIG_KEYS if k.preserve]
 
 
 def _wrap_text(text: str, width: int) -> list:
@@ -40,28 +149,11 @@ def _wrap_text(text: str, width: int) -> list:
 
 
 class GlobalConfigEditor:
-    """Loads and edits global.conf — the six app-wide settings."""
+    """Loads and edits global.conf — the app-wide settings."""
 
-    GLOBAL_KEYS_ORDER = [
-        "DISK_DRIVES",
-        "DEBUG_LOGS",
-        "DEBUG_LOG_PATH",
-        "CHECK_FOR_UPDATES",
-        "UPDATE_INTERVAL",
-        "ASK_FOR_BROWSER",
-        "ASK_FOR_CONFIG",
-        "UPDATE_BRANCH",
-    ]
-    GLOBAL_KEYS_COMMENTS = {
-        "DISK_DRIVES":        "Comma-separated list of drives or paths to show disk info in the system panel. (e.g. C:\\,D:\\  or  /home,/mnt/data).",
-        "DEBUG_LOGS":         "Enable debug logging to a file(true/false).",
-        "DEBUG_LOG_PATH":     "Path for the debug log file. Can be a relative or absolute path (e.g. logs/debug.log)",
-        "CHECK_FOR_UPDATES":  "Whether to periodically check for app updates (true/false).",
-        "UPDATE_INTERVAL":    "Number of minutes between app update checks.",
-        "ASK_FOR_BROWSER":    "Show the browser chooser on startup (true/false).",
-        "ASK_FOR_CONFIG":     "Show the config file chooser on startup (true/false).",
-        "UPDATE_BRANCH":      "Which branch of jj-dlp to update to. (main, testing, or experimental).",
-    }
+    # Derived from CONFIG_KEYS — no duplication needed here
+    GLOBAL_KEYS_ORDER    = _GLOBAL_KEYS_ORDER
+    GLOBAL_KEYS_COMMENTS = _KEY_COMMENTS
 
     def __init__(self, dashboard, on_save=None):
         self.dashboard = dashboard
@@ -100,31 +192,14 @@ class GlobalConfigEditor:
         self._parse()
 
     def _create_default(self):
-        """Write a minimal global.conf with all keys in the configs/ folder."""
-        lines = [
-            "[General]\n",
-            "\n",
-            "# Comma-separated disk drives/mount points to monitor.\n",
-            "DISK_DRIVES =\n",
-            "\n",
-            "# Enable debug logging (true/false).\n",
-            "DEBUG_LOGS = false\n",
-            "\n",
-            "# Path for the debug log file. Leave blank to use the default location.\n",
-            "DEBUG_LOG_PATH =\n",
-            "\n",
-            "# Check for updates on startup (true/false).\n",
-            "CHECK_FOR_UPDATES = true\n",
-            "\n",
-            "# Update check interval in minutes.\n",
-            "UPDATE_INTERVAL = 30\n",
-            "\n",
-            "# Show the browser-cookie picker on startup (true/false).\n",
-            "ASK_FOR_BROWSER = true\n",
-            "\n",
-            "# Show the config file chooser on startup (true/false).\n",
-            "ASK_FOR_CONFIG = true\n",
-        ]
+        """Write a minimal global.conf with all global keys in the configs/ folder."""
+        lines = ["[General]\n", "\n"]
+        for kdef in CONFIG_KEYS:
+            if kdef.scope != "global":
+                continue
+            lines.append(f"# {kdef.comment}\n")
+            lines.append(f"{kdef.name} = {kdef.default}\n")
+            lines.append("\n")
         try:
             with open(self.conf_path, "w", encoding="utf-8") as f:
                 f.writelines(lines)
@@ -169,16 +244,7 @@ class GlobalConfigEditor:
 
     def _append_key(self, key: str):
         """Append a missing key to the [General] section of self.lines and self.items."""
-        defaults = {
-            "DISK_DRIVES": "",
-            "DEBUG_LOGS": "false",
-            "DEBUG_LOG_PATH": "",
-            "CHECK_FOR_UPDATES": "true",
-            "UPDATE_INTERVAL": "30",
-            "ASK_FOR_BROWSER": "true",
-            "ASK_FOR_CONFIG": "true",
-        }
-        val = defaults.get(key, "")
+        val = _KEY_DEFAULTS.get(key, "")
         new_line = f"{key} = {val}\n"
         # Find end of [General] section or end of file
         insert_at = len(self.lines)

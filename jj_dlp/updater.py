@@ -53,13 +53,14 @@ def _api_commits_url(branch: str) -> str:
 
 
 PRESERVED_SECTIONS = ["Streamers", "Block"]
-PRESERVED_KEYS = [
-    "SITE_LABEL", "SITE_ORDER", "PANEL_RESIZE", "SPLIT_AFTER", "OUTPUT_DIR", 
-    "OUTPUT_TMPL", "LAST_LIVE_HIGHLIGHT", "DISK_DRIVES", "POPUP_NOTIFICATIONS", 
-    "POPUP_TIMEOUT", "POPUP_COOLDOWN", "PROGRESS_BAR_MAX_HOURS", "PROGRESS_BAR_WIDTH", 
-    "DEBUG_LOGS", "DEBUG_LOG_PATH", "CHECK_FOR_UPDATES", "UPDATE_INTERVAL",
-    "UPDATE_BRANCH", "ASK_FOR_CONFIG", "ASK_FOR_BROWSER"
-]
+
+# ── Preserved keys: imported from the single source of truth in config_editor ─
+# The authoritative definition lives in config_editor.CONFIG_KEYS (preserve=True).
+# Importing here avoids maintaining a separate list in this file.
+try:
+    from .config_editor import PRESERVED_KEYS
+except ImportError:
+    from jj_dlp.config_editor import PRESERVED_KEYS
 
 # ── Local global.json helpers ─────────────────────────────────────────────────
 # These deliberately do NOT delegate to main._load_global_json / _save_global_json.

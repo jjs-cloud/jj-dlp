@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.1.6"
+__version__ = "1.2.0"
 
 import subprocess
 import time
@@ -36,6 +36,7 @@ from .browser_config import (
     _write_browser_to_config,
     _write_ask_for_browser_to_config,
 )
+from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS
 
 import curses  # noqa: E402
 
@@ -81,38 +82,78 @@ def load_config(config_path: str) -> dict:
         except Exception:
             return default
 
-    check_interval        = safe_int(general.get("CHECK_INTERVAL", 60), 60)
-    output_dir            = general.get("OUTPUT_DIR", "recordings").strip().strip('\"\'')
-    output_tmpl           = general.get("OUTPUT_TMPL", "%(title)s [%(id)s].%(ext)s").strip().strip('\"\'')
-    cooldown              = safe_int(general.get("COOLDOWN_AFTER_RECORDING", 5), 5)
-    split_after          = safe_int(general.get("SPLIT_AFTER", 0), 0)
-    stall_check_interval  = safe_int(general.get("STALL_CHECK_INTERVAL", 30), 30)
-    stall_timeout         = safe_int(general.get("STALL_TIMEOUT", 120), 120)
-    config_check_interval = safe_int(general.get("CONFIG_CHECK_INTERVAL", 3), 3)
-    site_tmpl             = general.get("SITE_TMPL", "").strip().strip('"\'')
+    # ── Read all registered site keys using CONFIG_KEYS as the source of truth ─
+    cfg_dict = {}
+    for kdef in CONFIG_KEYS:
+        if kdef.scope != "site":
+            continue
+        raw = general.get(kdef.name, kdef.default)
+        if raw is None:
+            raw = kdef.default
+            
+        val_str = str(raw).strip().strip('\"\'')
+        
+        if kdef.default.lower() in ("true", "false"):
+            val = val_str.lower() not in ("false", "0", "no")
+        elif kdef.default.isdigit():
+            val = safe_int(val_str, safe_int(kdef.default, 0))
+        else:
+            val = val_str
+            
+        cfg_dict[kdef.name.lower()] = val
+
+    cfg_dict["streamers"] = streamers
+    cfg_dict["blocked"] = blocked
+
+    if not os.path.isabs(cfg_dict["output_dir"]):
+        cfg_dict["output_dir"] = os.path.abspath(cfg_dict["output_dir"])
+
+    twitch_cfg = parser["Twitch"] if parser.has_section("Twitch") else {}
+    twitch_client_id     = twitch_cfg.get("CLIENT_ID", "").strip().strip('"\'')
+    twitch_client_secret = twitch_cfg.get("CLIENT_SECRET", "").strip().strip('"\'')
+    twitch_webhook_secret= twitch_cfg.get("WEBHOOK_SECRET", "jj-dlp-secret").strip().strip('"\'')
+    twitch_callback_url  = twitch_cfg.get("CALLBACK_URL", "").strip().strip('"\'')
+    twitch_webhook_port  = safe_int(twitch_cfg.get("WEBHOOK_PORT", 8888), 8888)
+    twitch_enabled       = bool(twitch_client_id and twitch_client_secret and twitch_callback_url)
+
+    checker_cmd = []
+    if parser.has_section("Checker"):
+        for key, val in parser.items("Checker"):
+            item = (val or key).strip()
+            if item:
+                checker_cmd.append(item)
+
+    downloader_cmd = []
+    if parser.has_section("Downloader"):
+        for key, val in parser.items("Downloader"):
+            item = (val or key).strip()
+            if item:
+                downloader_cmd.extend(shlex.split(item, posix=(sys.platform != "win32")))
+
+    # ── SITE_TMPL — needs username_idx derived from the value ─────────────────
+    site_tmpl = cfg_dict.get("site_tmpl", "")
     tmpl_parts = urlparse(site_tmpl).path.rstrip("/").split("/") if site_tmpl else []
     username_idx = None
     for i, p in enumerate(tmpl_parts):
         if "{username}" in p:
             username_idx = i - len(tmpl_parts)
             break
-    panel_resize          = general.get("PANEL_RESIZE", "true").strip().lower() == "true"
-    logging_enabled       = general.get("LOGGING", "false").strip().lower() == "true"
-    log_path              = general.get("LOG_PATH", "").strip().strip('\"\'')
-    split_logs            = general.get("SPLIT_LOGS", "false").strip().lower() == "true"
-    popup_notifications   = general.get("POPUP_NOTIFICATIONS", "true").strip().lower() == "true"
-    popup_timeout         = safe_int(general.get("POPUP_TIMEOUT", 15), 15)
-    debug_logs            = general.get("DEBUG_LOGS", "false").strip().lower() == "true"
-    debug_log_path_raw    = general.get("DEBUG_LOG_PATH", "").strip().strip('\"\'')
-    debug_log_path        = debug_log_path_raw if debug_log_path_raw else ""
-    # Select the platform-specific yt-dlp path key
+
+    # ── SITE_LABEL — default is the config filename, not a fixed string ───────
+    site_label = general.get("SITE_LABEL", os.path.basename(config_path))
+    if site_label is None:
+        site_label = os.path.basename(config_path)
+    cfg_dict["site_label"] = str(site_label).strip().strip('"\'')
+
+    # ── YT_DLP_PATH — platform-specific key selection + bundled-module logic ──
     if sys.platform == "win32":
-        yt_dlp_path_raw = general.get("YT_DLP_PATH_WINDOWS", "").strip().strip('"\'')
+        yt_dlp_path_raw = cfg_dict.get("yt_dlp_path_windows", "")
     elif sys.platform == "darwin":
-        yt_dlp_path_raw = general.get("YT_DLP_PATH_MAC", "").strip().strip('"\'')
+        yt_dlp_path_raw = cfg_dict.get("yt_dlp_path_mac", "")
     else:
-        yt_dlp_path_raw = general.get("YT_DLP_PATH_LINUX", "").strip().strip('"\'')
+        yt_dlp_path_raw = cfg_dict.get("yt_dlp_path_linux", "")
     startup_dbg(f"[YT_DLP] platform={sys.platform!r} → yt_dlp_path_raw={yt_dlp_path_raw!r}")
+
     # Auto-detect bundled yt-dlp module in the project root
     bundled_yt_dlp_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "yt-dlp")
     bundled_yt_dlp_module = os.path.join(bundled_yt_dlp_dir, "yt_dlp")
@@ -141,7 +182,7 @@ def load_config(config_path: str) -> dict:
             else:
                 startup_dbg(f"[YT_DLP] python executable OK (not pythonw): {_py_exe!r}")
 
-        startup_dbg(f"[YT_DLP] PYTHONPATH set to: {os.environ['PYTHONPATH']!r}")
+        startup_dbg(f"[YT_DLP] PYTHONPATH set to: {os.environ.get('PYTHONPATH', '')!r}")
         default_yt_dlp = f"{_py_exe} -m yt_dlp"
         startup_dbg(f"[YT_DLP] bundled module found → default_yt_dlp={default_yt_dlp!r}")
     else:
@@ -158,100 +199,31 @@ def load_config(config_path: str) -> dict:
         _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         yt_dlp_path_raw = os.path.join(_project_root, yt_dlp_path_raw)
         startup_dbg(f"[YT_DLP] relative path resolved to absolute: {yt_dlp_path_raw!r}")
-    yt_dlp_path           = yt_dlp_path_raw if yt_dlp_path_raw else default_yt_dlp
-    site_label            = general.get("SITE_LABEL", os.path.basename(config_path)).strip().strip('\"\'')
-    progress_bar_max_hours = safe_int(general.get("PROGRESS_BAR_MAX_HOURS", 6), 6)
-    _raw_pbw = general.get("PROGRESS_BAR_WIDTH", None)
-    progress_bar_width     = safe_int(general.get("PROGRESS_BAR_WIDTH", 14), 14)
+    yt_dlp_path = yt_dlp_path_raw if yt_dlp_path_raw else default_yt_dlp
+
     startup_dbg(
-        f"[BAR_WIDTH] load_config: raw PROGRESS_BAR_WIDTH from file={_raw_pbw!r}  "
-        f"-> parsed progress_bar_width={progress_bar_width}"
+        f"[BAR_WIDTH] load_config: raw PROGRESS_BAR_WIDTH from file={cfg_dict.get('progress_bar_width')}  "
+        f"-> parsed progress_bar_width={cfg_dict.get('progress_bar_width')}"
     )
-    popup_cooldown         = safe_int(general.get("POPUP_COOLDOWN", 30), 30)
-    downloader_cookies     = general.get("DOWNLOADER_COOKIES", "true").strip().lower() not in ("false", "0", "no")
-    checker_cookies        = general.get("CHECKER_COOKIES", "false").strip().lower() not in ("false", "0", "no")
-    ask_for_browser        = general.get("ASK_FOR_BROWSER", "true").strip().lower() not in ("false", "0", "no")
-    site_order             = safe_int(general.get("SITE_ORDER", 999), 999)
-    last_live_highlight    = safe_int(general.get("LAST_LIVE_HIGHLIGHT", 0), 0)
-    check_for_updates      = general.get("CHECK_FOR_UPDATES", "true").strip().lower() not in ("false", "0", "no")
 
-    # Disk drives to monitor (comma-separated paths/letters, e.g. "C:\,D:\,/home")
-    disk_drives_raw = general.get("DISK_DRIVES", "").strip().strip('\"\'')
-    if disk_drives_raw:
-        disk_drives = [d.strip() for d in disk_drives_raw.split(",") if d.strip()]
-    else:
-        disk_drives = []
-
-    if not os.path.isabs(output_dir):
-        output_dir = os.path.abspath(output_dir)
-
-    twitch_cfg = parser["Twitch"] if parser.has_section("Twitch") else {}
-    twitch_client_id     = twitch_cfg.get("CLIENT_ID", "").strip().strip('"\'')
-    twitch_client_secret = twitch_cfg.get("CLIENT_SECRET", "").strip().strip('"\'')
-    twitch_webhook_secret= twitch_cfg.get("WEBHOOK_SECRET", "jj-dlp-secret").strip().strip('"\'')
-    twitch_callback_url  = twitch_cfg.get("CALLBACK_URL", "").strip().strip('"\'')
-    twitch_webhook_port  = safe_int(twitch_cfg.get("WEBHOOK_PORT", 8888), 8888)
-    twitch_enabled       = bool(twitch_client_id and twitch_client_secret and twitch_callback_url)
-
-    checker_cmd = []
-    if parser.has_section("Checker"):
-        for key, val in parser.items("Checker"):
-            item = (val or key).strip()
-            if item:
-                checker_cmd.append(item)
-
-    downloader_cmd = []
-    if parser.has_section("Downloader"):
-        for key, val in parser.items("Downloader"):
-            item = (val or key).strip()
-            if item:
-                downloader_cmd.extend(shlex.split(item, posix=(sys.platform != "win32")))
-
-    return {
-        "streamers": streamers,
-        "blocked": blocked,
-        "check_interval": check_interval,
-        "output_dir": output_dir,
-        "output_tmpl": output_tmpl,
-        "cooldown": cooldown,
-        "split_after": split_after,
-        "stall_check_interval": stall_check_interval,
-        "stall_timeout": stall_timeout,
-        "yt_dlp_path": yt_dlp_path,
+    cfg_dict.update({
         "checker_cmd": checker_cmd,
         "downloader_cmd": downloader_cmd,
-        "config_check_interval": config_check_interval,
-        "logging_enabled": logging_enabled,
-        "log_path": log_path,
-        "split_logs": split_logs,
-        "popup_notifications": popup_notifications,
-        "popup_timeout": popup_timeout,
-        "debug_logs": debug_logs,
-        "debug_log_path": debug_log_path,
-        "panel_resize": panel_resize,
-        "site_tmpl": site_tmpl,
         "username_idx": username_idx,
         "config_path": config_path,
-        "site_label": site_label,
-        "progress_bar_max_hours": progress_bar_max_hours,
-        "progress_bar_width": progress_bar_width,
-        "popup_cooldown": popup_cooldown,
-        "disk_drives": disk_drives,
-        "downloader_cookies": downloader_cookies,
-        "checker_cookies": checker_cookies,
-        "ask_for_browser": ask_for_browser,
-        "site_order": site_order,
-        "last_live_highlight": last_live_highlight,
-        "check_for_updates": check_for_updates,
+        "yt_dlp_path": yt_dlp_path,
         "twitch_enabled": twitch_enabled,
         "twitch_client_id": twitch_client_id,
         "twitch_client_secret": twitch_client_secret,
         "twitch_webhook_secret": twitch_webhook_secret,
         "twitch_callback_url": twitch_callback_url,
         "twitch_webhook_port": twitch_webhook_port,
-    }
+    })
+
+    return cfg_dict
 
 
+# ── Global config filename (always silently loaded; never shown in chooser) ───
 # ── Global config filename (always silently loaded; never shown in chooser) ───
 _GLOBAL_CONF_NAME: str = "global.conf"
 
@@ -810,7 +782,7 @@ def _modify_config_streamer(config_path: str, username: str, action: str) -> str
 
 def open_log_streams(cfg: dict):
     log_out_fp = log_err_fp = None
-    if cfg.get("logging_enabled"):
+    if cfg.get("logging"):
         out_path, err_path = get_log_file_paths(cfg)
         try:
             log_out_fp = open(out_path, "a", encoding="utf-8")
@@ -896,7 +868,7 @@ def get_live_streamers(streamers: List[str], cfg: dict,
     dbg(f"[CHECKER] returncode={result.returncode} stdout_len={len(result.stdout)} stderr_len={len(result.stderr)}")
     if result.stderr:
         dbg(f"[CHECKER] stderr (first 500 chars): {result.stderr[:500]!r}")
-    if cfg["logging_enabled"]:
+    if cfg["logging"]:
         out_path, err_path = get_log_file_paths(cfg)
         try:
             if result.stdout:
@@ -1183,7 +1155,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                     with site.lock:
                         site.currently_recording.discard(streamer)
 
-                    time.sleep(cfg["cooldown"])
+                    time.sleep(cfg["cooldown_after_recording"])
                     return
 
                 if ffmpeg_error_event.is_set():
@@ -1441,7 +1413,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
         with site.lock:
             site.currently_recording.discard(streamer)
 
-        time.sleep(cfg["cooldown"])
+        time.sleep(cfg["cooldown_after_recording"])
 
 
 def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
@@ -1865,8 +1837,8 @@ class JJDlpDashboard:
         # Fill logging/popups from first site's config
         try:
             cfg0 = self.sites[0].get_cached_config() if self.sites else {}
-            rows[7] = ("Logging", "ON" if cfg0.get("logging_enabled") else "OFF",
-                       self.C_LIVE if cfg0.get("logging_enabled") else self.C_DIM)
+            rows[7] = ("Logging", "ON" if cfg0.get("logging") else "OFF",
+                       self.C_LIVE if cfg0.get("logging") else self.C_DIM)
             rows[8] = ("Popups",  "ON" if cfg0.get("popup_notifications") else "OFF",
                        self.C_LIVE if cfg0.get("popup_notifications") else self.C_DIM)
         except Exception:
