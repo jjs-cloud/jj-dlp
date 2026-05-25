@@ -27,7 +27,6 @@ from .logger import (
     DEBUG_LOGS_ENABLED, DEBUG_LOG_PATH, debug_log_lock,
     ENABLE_CRASH_LOG,
     configure as _configure_logger,
-    configure_filters as _configure_dbg_filters,
 )
 
 from .browser_config import (
@@ -585,27 +584,6 @@ def _get_output_mode() -> int:
         return OUTPUT_MODE
 
 _configure_logger(_get_output_mode)
-
-# ── Per-tag debug filter ───────────────────────────────────────────────────────
-# Set any tag to False to silence that group in the debug log.
-# Changes here take effect immediately on the next dbg() call.
-#
-#   DRAIN    — yt-dlp stdout/stderr pipe drain threads
-#   CHECKER  — liveness-check subprocess calls
-#   SPLIT    — split-recording file-tracking logic
-#   POPEN    — yt-dlp process launch details
-#   PERF     — performance timing summaries (high-frequency; off by default)
-#   UPDATER  — update checker and periodic updater thread
-#
-MAIN_DBG_FILTERS: dict[str, bool] = {
-    "DRAIN":   True,
-    "CHECKER": True,
-    "SPLIT":   True,
-    "POPEN":   True,
-    "PERF":    False,   # high-frequency; disable unless actively profiling
-    "UPDATER": True,
-}
-_configure_dbg_filters(MAIN_DBG_FILTERS)
 
 # DEBUG_LOGS_ENABLED / DEBUG_LOG_PATH / debug_log_lock are imported from logger.
 

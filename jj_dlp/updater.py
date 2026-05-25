@@ -131,20 +131,20 @@ def check_for_updates_background():
     try:
         branch = _get_update_branch()
         api_commits_url = _api_commits_url(branch)
-        dbg(f"[UPDATE_CHECK] check_for_updates_background: branch={branch} url={api_commits_url}")
+        dbg(f"[UPDATER][UPDATE_CHECK] check_for_updates_background: branch={branch} url={api_commits_url}")
         req = urllib.request.Request(api_commits_url, headers={'User-Agent': 'jj-dlp-updater'})
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode('utf-8'))
         latest_sha = data.get('sha')
-        dbg(f"[UPDATE_CHECK] check_for_updates_background: fetched latest_sha={latest_sha}")
+        dbg(f"[UPDATER][UPDATE_CHECK] check_for_updates_background: fetched latest_sha={latest_sha}")
 
         if not latest_sha:
-            dbg("[UPDATE_CHECK] check_for_updates_background: API response missing sha")
+            dbg("[UPDATER][UPDATE_CHECK] check_for_updates_background: API response missing sha")
             return
 
         global_data = _load_global_json()
         current_sha = global_data.get('update_info', {}).get('current_sha')
-        dbg(f"[UPDATE_CHECK] check_for_updates_background: current_sha={current_sha}")
+        dbg(f"[UPDATER][UPDATE_CHECK] check_for_updates_background: current_sha={current_sha}")
 
         update_info = global_data.setdefault('update_info', {})
         if current_sha:
@@ -154,10 +154,10 @@ def check_for_updates_background():
             update_info['update_available'] = False
 
         update_info['latest_sha'] = latest_sha
-        dbg(f"[UPDATE_CHECK] check_for_updates_background: update_info current_sha={update_info.get('current_sha')} latest_sha={latest_sha} update_available={update_info.get('update_available')}")
+        dbg(f"[UPDATER][UPDATE_CHECK] check_for_updates_background: update_info current_sha={update_info.get('current_sha')} latest_sha={latest_sha} update_available={update_info.get('update_available')}")
         _save_global_json(global_data)
     except Exception as e:
-        dbg("[UPDATE_CHECK] check_for_updates_background: failed during update check", e)
+        dbg("[UPDATER][UPDATE_CHECK] check_for_updates_background: failed during update check", e)
 
 
 def mark_update_completed():
@@ -167,9 +167,9 @@ def mark_update_completed():
     if latest_sha:
         update_info['current_sha'] = latest_sha
     update_info['update_available'] = False
-    dbg(f"[MARK_DONE] mark_update_completed: updating update_info to current_sha={update_info.get('current_sha')} latest_sha={update_info.get('latest_sha')} update_available={update_info.get('update_available')}")
+    dbg(f"[UPDATER][MARK_DONE] mark_update_completed: updating update_info to current_sha={update_info.get('current_sha')} latest_sha={update_info.get('latest_sha')} update_available={update_info.get('update_available')}")
     _save_global_json(global_data)
-    dbg("[MARK_DONE] mark_update_completed: _save_global_json() returned (see debug.log for details)")
+    dbg("[UPDATER][MARK_DONE] mark_update_completed: _save_global_json() returned (see debug.log for details)")
 
 
 def is_update_available():
@@ -183,12 +183,12 @@ def get_base_dir():
 
 
 def perform_update():
-    dbg("[PERFORM] perform_update: starting update")
+    dbg("[UPDATER][PERFORM] perform_update: starting update")
     print("\n--- jj-dlp Updater ---")
     
     branch = _get_update_branch()
     repo_zip_url = _repo_zip_url(branch)
-    dbg(f"[PERFORM] perform_update: branch={branch} url={repo_zip_url}")
+    dbg(f"[UPDATER][PERFORM] perform_update: branch={branch} url={repo_zip_url}")
 
     temp_dir = tempfile.mkdtemp(prefix="jj_dlp_update_")
     print(f"Temporary files will be saved to: {temp_dir}")
@@ -200,9 +200,9 @@ def perform_update():
         with urllib.request.urlopen(req, timeout=30) as response:
             with open(zip_path, 'wb') as out_file:
                 shutil.copyfileobj(response, out_file)
-        dbg(f"[PERFORM] perform_update: downloaded zip to {zip_path}")
+        dbg(f"[UPDATER][PERFORM] perform_update: downloaded zip to {zip_path}")
     except Exception as e:
-        dbg("[PERFORM] perform_update: download failed", e)
+        dbg("[UPDATER][PERFORM] perform_update: download failed", e)
         print(f"Error downloading update: {e}")
         shutil.rmtree(temp_dir, ignore_errors=True)
         return
@@ -213,9 +213,9 @@ def perform_update():
     try:
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             zip_ref.extractall(extract_dir)
-        dbg(f"[PERFORM] perform_update: extracted zip to {extract_dir}")
+        dbg(f"[UPDATER][PERFORM] perform_update: extracted zip to {extract_dir}")
     except Exception as e:
-        dbg("[PERFORM] perform_update: extraction failed", e)
+        dbg("[UPDATER][PERFORM] perform_update: extraction failed", e)
         print(f"Error extracting update: {e}")
         shutil.rmtree(temp_dir, ignore_errors=True)
         return
@@ -236,7 +236,7 @@ def perform_update():
     print("Launching stage 2 of the updater...")
     stage2_env = os.environ.copy()
     stage2_env["PYTHONIOENCODING"] = "utf-8"
-    dbg(f"[PERFORM] perform_update: launching stage2 script: {stage2_script} source_dir={source_dir} base_dir={base_dir} temp_dir={temp_dir}")
+    dbg(f"[UPDATER][PERFORM] perform_update: launching stage2 script: {stage2_script} source_dir={source_dir} base_dir={base_dir} temp_dir={temp_dir}")
     try:
         # Use the downloaded updater.py (which has the latest logic from the repo).
         # This ensures it can cleanly overwrite the base_dir updater.py without
@@ -245,21 +245,21 @@ def perform_update():
         stage2_env['JJ_DLP_DEBUG_LOG_DIR'] = real_pkg_dir
         stage2_env['JJ_DLP_GLOBAL_JSON_PATH'] = os.path.join(real_pkg_dir, 'global.json')
         stage2_env['JJ_DLP_GLOBAL_DIR'] = real_pkg_dir
-        dbg(f"[PERFORM] perform_update: set JJ_DLP_DEBUG_LOG_DIR={stage2_env['JJ_DLP_DEBUG_LOG_DIR']} JJ_DLP_GLOBAL_JSON_PATH={stage2_env['JJ_DLP_GLOBAL_JSON_PATH']}")
+        dbg(f"[UPDATER][PERFORM] perform_update: set JJ_DLP_DEBUG_LOG_DIR={stage2_env['JJ_DLP_DEBUG_LOG_DIR']} JJ_DLP_GLOBAL_JSON_PATH={stage2_env['JJ_DLP_GLOBAL_JSON_PATH']}")
     except Exception as e:
-        dbg("[PERFORM] perform_update: unexpected error while preparing stage2 updater", e)
+        dbg("[UPDATER][PERFORM] perform_update: unexpected error while preparing stage2 updater", e)
     try:
         subprocess.run(
             [sys.executable, stage2_script, "--stage2", source_dir, base_dir, temp_dir],
             check=True,
             env=stage2_env,
         )
-        dbg("[PERFORM] perform_update: stage2 subprocess completed")
+        dbg("[UPDATER][PERFORM] perform_update: stage2 subprocess completed")
     except subprocess.CalledProcessError as e:
-        dbg("[PERFORM] perform_update: stage2 subprocess failed", e)
+        dbg("[UPDATER][PERFORM] perform_update: stage2 subprocess failed", e)
         print(f"Update failed during stage 2: {e}")
     except Exception as e:
-        dbg("[PERFORM] perform_update: failed launching stage2", e)
+        dbg("[UPDATER][PERFORM] perform_update: failed launching stage2", e)
         print(f"Error launching stage 2: {e}")
     # temp_dir cleanup should happen in stage2
 
@@ -365,7 +365,7 @@ def create_diff(old_content, new_content, file_path, diff_dir):
 
 
 def _stage2(source_dir, base_dir, temp_dir):
-    dbg(f"[STAGE2] _stage2: starting stage2 source_dir={source_dir} base_dir={base_dir} temp_dir={temp_dir}")
+    dbg(f"[UPDATER][STAGE2] _stage2: starting stage2 source_dir={source_dir} base_dir={base_dir} temp_dir={temp_dir}")
     try:
         print("Running Stage 2 of update...")
         
@@ -459,10 +459,10 @@ def _stage2(source_dir, base_dir, temp_dir):
                     if old_content != new_content and not dst.endswith(".conf"):
                         create_diff(old_content, new_content, dst, actual_diff_dir)
                         if os.path.basename(dst) == "updater.py":
-                            dbg(f"[STAGE2] _stage2.copy_and_diff: updater.py changed, copying {src} -> {dst}")
+                            dbg(f"[UPDATER][STAGE2] _stage2.copy_and_diff: updater.py changed, copying {src} -> {dst}")
                 else:
                     if os.path.basename(dst) == "updater.py":
-                        dbg(f"[STAGE2] _stage2.copy_and_diff: copying new updater.py {src} -> {dst}")
+                        dbg(f"[UPDATER][STAGE2] _stage2.copy_and_diff: copying new updater.py {src} -> {dst}")
                 try:
                     shutil.copy2(src, dst)
                 except OSError as e:
@@ -476,14 +476,14 @@ def _stage2(source_dir, base_dir, temp_dir):
                 
         copy_and_diff(source_dir, base_dir)
 
-        dbg("[STAGE2] _stage2: files copied from source to base")
+        dbg("[UPDATER][STAGE2] _stage2: files copied from source to base")
 
         # Ensure bin/ scripts are executable on Linux/macOS
         print("Setting executable permissions on bin/ files...")
         _mark_bin_executable(base_dir)
         
         mark_update_completed()
-        dbg("[STAGE2] _stage2: marked update completed")
+        dbg("[UPDATER][STAGE2] _stage2: marked update completed")
         
         print("\n" + "="*60)
         print("✅ Update completed successfully!")
@@ -491,9 +491,9 @@ def _stage2(source_dir, base_dir, temp_dir):
         print("="*60)
 
     except UpdateError as e:
-        dbg(f"[STAGE2] _stage2: clean abort: {e}")
+        dbg(f"[UPDATER][STAGE2] _stage2: clean abort: {e}")
     except Exception as e:
-        dbg("[STAGE2] _stage2: exception during stage2", e)
+        dbg("[UPDATER][STAGE2] _stage2: exception during stage2", e)
         print(f"Error during stage 2: {e}")
         import traceback
         traceback.print_exc()

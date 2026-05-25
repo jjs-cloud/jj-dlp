@@ -184,7 +184,7 @@ class TwitchEventSub:
         )
         self._mgr_thread.start()
 
-        self._dbg("[EventSub] start(): HTTP and manager threads launched")
+        self._dbg("[TWITCH][EventSub] start(): HTTP and manager threads launched")
 
     def stop(self, timeout: float = 5.0) -> None:
         """Signal shutdown; optionally wait for threads to exit."""

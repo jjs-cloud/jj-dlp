@@ -63,7 +63,7 @@ def configure(output_mode_fn, dashboard_log_fn=None) -> None:
 # Set a tag to False to silence all dbg() calls that begin with [TAG].
 # Set to True to allow them through (subject to DEBUG_LOGS_ENABLED being on).
 #
-# Tags used in main.py:
+# Tags used in jj-dlp:
 #   DRAIN    — yt-dlp stdout/stderr pipe drain threads
 #   CHECKER  — liveness-check subprocess calls
 #   SPLIT    — split-recording file-tracking logic
@@ -71,6 +71,8 @@ def configure(output_mode_fn, dashboard_log_fn=None) -> None:
 #   PERF     — performance timing summaries (high-frequency)
 #   DISK     — disk usage display in the system panel
 #   UPDATER  — update checker and periodic updater thread
+#   TWITCH   — twitch eventsub and token operations
+#   KILL     — yt-dlp process termination
 #
 DBG_FILTERS: dict[str, bool] = {
     "DRAIN":   False,
@@ -80,21 +82,11 @@ DBG_FILTERS: dict[str, bool] = {
     "PERF":    False,
     "DISK":    False,
     "UPDATER": False,
+    "TWITCH":  False,
     "KILL":    True,
 }
 
 _dbg_filters_lock = threading.Lock()
-
-
-def configure_filters(filters: dict[str, bool]) -> None:
-    """
-    Replace the active DBG_FILTERS with *filters*.
-    Call once from main after the filter dict is defined there.
-    Filters set here override the defaults above.
-    """
-    global DBG_FILTERS
-    with _dbg_filters_lock:
-        DBG_FILTERS = dict(filters)
 
 
 # ── Startup log ───────────────────────────────────────────────────────────────
@@ -160,7 +152,7 @@ def dbg(msg: str, site_name: str = "") -> None:
         if end > 1:
             tag = msg[1:end]
             with _dbg_filters_lock:
-                allowed = DBG_FILTERS.get(tag, True)   # unknown tags pass through
+                allowed = DBG_FILTERS.get(tag, False)   # unknown tags are dropped
             if not allowed:
                 return
 
