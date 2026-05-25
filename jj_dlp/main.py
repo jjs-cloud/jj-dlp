@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.2.3"
+__version__ = "1.2.4"
 
 import subprocess
 import time
@@ -1555,7 +1555,6 @@ def monitor_site(site: "SiteState") -> None:
                         site.dash_live_since[s] = time.time()
 
             if live_now:
-                site.log_line(f"Live now: {', '.join(live_now)}")
                 start_recording_if_needed(live_now, cfg, site)
             else:
                 site.log_line("All streamers offline.")
