@@ -134,11 +134,10 @@ def _write_ask_for_browser_to_config(config_path: str, value: bool) -> None:
 
     val_str = "True" if value else "False"
     key_name = "ASK_FOR_BROWSER"
-    import re as _re
 
     # Try to update an existing ASK_FOR_BROWSER line anywhere in the file
     for i, line in enumerate(lines):
-        if _re.match(r"^\s*ASK_FOR_BROWSER\s*=", line, _re.IGNORECASE):
+        if re.match(r"^\s*ASK_FOR_BROWSER\s*=", line, re.IGNORECASE):
             lines[i] = f"ASK_FOR_BROWSER = {val_str}\n"
             try:
                 with open(config_path, "w", encoding="utf-8") as f:
