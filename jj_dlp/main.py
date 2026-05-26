@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.1.4"
+__version__ = "1.2.13"
 
 import subprocess
 import time
@@ -27,7 +27,6 @@ from .logger import (
     DEBUG_LOGS_ENABLED, DEBUG_LOG_PATH, debug_log_lock,
     ENABLE_CRASH_LOG,
     configure as _configure_logger,
-    configure_filters as _configure_dbg_filters,
 )
 
 from .browser_config import (
@@ -36,6 +35,7 @@ from .browser_config import (
     _write_browser_to_config,
     _write_ask_for_browser_to_config,
 )
+from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS
 
 import curses  # noqa: E402
 
@@ -48,19 +48,59 @@ _SCRIPT_START_TIME: float = time.time()
 # Config loading
 # ══════════════════════════════════════════════════════════════════════════════
 
-def load_config(config_path: str) -> dict:
-    startup_dbg(f"[CONFIG] load_config called with: {config_path!r}")
-    if not os.path.isfile(config_path):
-        print(f"ERROR: Config file not found at: {config_path}", file=sys.stderr)
-        sys.exit(1)
-
-    parser = configparser.ConfigParser(allow_no_value=True, interpolation=None)
+def _safe_int(value, default):
+    """Convert *value* to int, returning *default* on failure."""
     try:
-        parser.read(config_path, encoding="utf-8")
-    except Exception as _e:
-        startup_dbg(f"[CONFIG] load_config: configparser FAILED — {type(_e).__name__}: {_e}")
-        raise
+        return int(value)
+    except Exception:
+        return default
 
+
+def _parse_general_section(general, config_path: str) -> dict:
+    """Read all site-scoped CONFIG_KEYS from the [General] section.
+
+    Returns a flat dict keyed by the lower-cased config key name.
+    Boolean and integer defaults are coerced automatically; string values are
+    stripped of surrounding whitespace and quotes.  ``output_dir`` is resolved
+    to an absolute path, and ``site_label`` defaults to the config filename.
+    """
+    cfg_dict: dict = {}
+    for kdef in CONFIG_KEYS:
+        if kdef.scope != "site":
+            continue
+        raw = general.get(kdef.name, kdef.default)
+        if raw is None:
+            raw = kdef.default
+
+        val_str = str(raw).strip().strip('"\'')
+
+        if kdef.default.lower() in ("true", "false"):
+            val = val_str.lower() not in ("false", "0", "no")
+        elif kdef.default.isdigit():
+            val = _safe_int(val_str, _safe_int(kdef.default, 0))
+        else:
+            val = val_str
+
+        cfg_dict[kdef.name.lower()] = val
+
+    if not os.path.isabs(cfg_dict["output_dir"]):
+        cfg_dict["output_dir"] = os.path.abspath(cfg_dict["output_dir"])
+
+    # SITE_LABEL defaults to the config filename rather than a fixed string.
+    site_label = general.get("SITE_LABEL", os.path.basename(config_path))
+    if site_label is None:
+        site_label = os.path.basename(config_path)
+    cfg_dict["site_label"] = str(site_label).strip().strip('"\'')
+
+    startup_dbg(
+        f"[BAR_WIDTH] _parse_general_section: "
+        f"progress_bar_width={cfg_dict.get('progress_bar_width')}"
+    )
+    return cfg_dict
+
+
+def _parse_streamers_and_blocked(parser: configparser.ConfigParser) -> tuple:
+    """Return (streamers, blocked) lists from [Streamers] and [Block] sections."""
     streamers = []
     if parser.has_section("Streamers"):
         for key, _ in parser.items("Streamers"):
@@ -73,126 +113,31 @@ def load_config(config_path: str) -> dict:
             if key.strip():
                 blocked.append(key.strip().lower())
 
-    general = parser["General"] if parser.has_section("General") else {}
+    return streamers, blocked
 
-    def safe_int(value, default):
-        try:
-            return int(value)
-        except Exception:
-            return default
 
-    check_interval        = safe_int(general.get("CHECK_INTERVAL", 60), 60)
-    output_dir            = general.get("OUTPUT_DIR", "recordings").strip().strip('\"\'')
-    output_tmpl           = general.get("OUTPUT_TMPL", "%(title)s [%(id)s].%(ext)s").strip().strip('\"\'')
-    cooldown              = safe_int(general.get("COOLDOWN_AFTER_RECORDING", 5), 5)
-    split_after          = safe_int(general.get("SPLIT_AFTER", 0), 0)
-    stall_check_interval  = safe_int(general.get("STALL_CHECK_INTERVAL", 30), 30)
-    stall_timeout         = safe_int(general.get("STALL_TIMEOUT", 120), 120)
-    config_check_interval = safe_int(general.get("CONFIG_CHECK_INTERVAL", 3), 3)
-    site_tmpl             = general.get("SITE_TMPL", "").strip().strip('"\'')
-    tmpl_parts = urlparse(site_tmpl).path.rstrip("/").split("/") if site_tmpl else []
-    username_idx = None
-    for i, p in enumerate(tmpl_parts):
-        if "{username}" in p:
-            username_idx = i - len(tmpl_parts)
-            break
-    panel_resize          = general.get("PANEL_RESIZE", "true").strip().lower() == "true"
-    logging_enabled       = general.get("LOGGING", "false").strip().lower() == "true"
-    log_path              = general.get("LOG_PATH", "").strip().strip('\"\'')
-    split_logs            = general.get("SPLIT_LOGS", "false").strip().lower() == "true"
-    popup_notifications   = general.get("POPUP_NOTIFICATIONS", "true").strip().lower() == "true"
-    popup_timeout         = safe_int(general.get("POPUP_TIMEOUT", 15), 15)
-    debug_logs            = general.get("DEBUG_LOGS", "false").strip().lower() == "true"
-    debug_log_path_raw    = general.get("DEBUG_LOG_PATH", "").strip().strip('\"\'')
-    debug_log_path        = debug_log_path_raw if debug_log_path_raw else ""
-    # Select the platform-specific yt-dlp path key
-    if sys.platform == "win32":
-        yt_dlp_path_raw = general.get("YT_DLP_PATH_WINDOWS", "").strip().strip('"\'')
-    elif sys.platform == "darwin":
-        yt_dlp_path_raw = general.get("YT_DLP_PATH_MAC", "").strip().strip('"\'')
-    else:
-        yt_dlp_path_raw = general.get("YT_DLP_PATH_LINUX", "").strip().strip('"\'')
-    startup_dbg(f"[YT_DLP] platform={sys.platform!r} → yt_dlp_path_raw={yt_dlp_path_raw!r}")
-    # Auto-detect bundled yt-dlp module in the project root
-    bundled_yt_dlp_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "yt-dlp")
-    bundled_yt_dlp_module = os.path.join(bundled_yt_dlp_dir, "yt_dlp")
-
-    startup_dbg(f"[YT_DLP] bundled_yt_dlp_dir={bundled_yt_dlp_dir!r}")
-    startup_dbg(f"[YT_DLP] bundled_yt_dlp_module={bundled_yt_dlp_module!r} exists={os.path.isdir(bundled_yt_dlp_module)}")
-    startup_dbg(f"[YT_DLP] sys.executable={sys.executable!r} platform={sys.platform!r}")
-    startup_dbg(f"[YT_DLP] yt_dlp_path_raw={yt_dlp_path_raw!r}")
-
-    if os.path.isdir(bundled_yt_dlp_module):
-        # Inject the bundled directory into PYTHONPATH so subprocesses can find it
-        current_pp = os.environ.get("PYTHONPATH", "")
-        if bundled_yt_dlp_dir not in current_pp:
-            os.environ["PYTHONPATH"] = f"{bundled_yt_dlp_dir}{os.pathsep}{current_pp}" if current_pp else bundled_yt_dlp_dir
-
-        # On Windows, sys.executable may be pythonw.exe (the windowless variant).
-        # Subprocesses spawned from pythonw.exe inherit broken pipe handles and
-        # produce no output at all — yt-dlp goes completely silent.
-        # Always force python.exe so the child process has a proper stdio environment.
-        _py_exe = sys.executable
-        if sys.platform == "win32":
-            _py_exe_lower = _py_exe.lower()
-            if _py_exe_lower.endswith("pythonw.exe"):
-                _py_exe = _py_exe[:-len("pythonw.exe")] + "python.exe"
-                startup_dbg(f"[YT_DLP] pythonw.exe detected — rewriting to python.exe: {_py_exe!r}")
-            else:
-                startup_dbg(f"[YT_DLP] python executable OK (not pythonw): {_py_exe!r}")
-
-        startup_dbg(f"[YT_DLP] PYTHONPATH set to: {os.environ['PYTHONPATH']!r}")
-        default_yt_dlp = f"{_py_exe} -m yt_dlp"
-        startup_dbg(f"[YT_DLP] bundled module found → default_yt_dlp={default_yt_dlp!r}")
-    else:
-        default_yt_dlp = "yt-dlp"
-        startup_dbg(f"[YT_DLP] bundled module NOT found → falling back to system yt-dlp")
-
-    # Resolve relative yt-dlp executable paths against the project root
-    # (the directory containing jj_dlp/), anchored to __file__ rather than
-    # CWD.  This mirrors how output_dir is handled and prevents
-    # FileNotFoundError on Linux when the working directory shifts between
-    # startup and subprocess launch.  Paths that already contain a space
-    # (e.g. "python -m yt_dlp") or are absolute are left unchanged.
-    if yt_dlp_path_raw and " " not in yt_dlp_path_raw and not os.path.isabs(yt_dlp_path_raw):
-        _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        yt_dlp_path_raw = os.path.join(_project_root, yt_dlp_path_raw)
-        startup_dbg(f"[YT_DLP] relative path resolved to absolute: {yt_dlp_path_raw!r}")
-    yt_dlp_path           = yt_dlp_path_raw if yt_dlp_path_raw else default_yt_dlp
-    site_label            = general.get("SITE_LABEL", os.path.basename(config_path)).strip().strip('\"\'')
-    progress_bar_max_hours = safe_int(general.get("PROGRESS_BAR_MAX_HOURS", 6), 6)
-    _raw_pbw = general.get("PROGRESS_BAR_WIDTH", None)
-    progress_bar_width     = safe_int(general.get("PROGRESS_BAR_WIDTH", 14), 14)
-    startup_dbg(
-        f"[BAR_WIDTH] load_config: raw PROGRESS_BAR_WIDTH from file={_raw_pbw!r}  "
-        f"-> parsed progress_bar_width={progress_bar_width}"
-    )
-    popup_cooldown         = safe_int(general.get("POPUP_COOLDOWN", 30), 30)
-    downloader_cookies     = general.get("DOWNLOADER_COOKIES", "true").strip().lower() not in ("false", "0", "no")
-    checker_cookies        = general.get("CHECKER_COOKIES", "false").strip().lower() not in ("false", "0", "no")
-    ask_for_browser        = general.get("ASK_FOR_BROWSER", "true").strip().lower() not in ("false", "0", "no")
-    site_order             = safe_int(general.get("SITE_ORDER", 999), 999)
-    last_live_highlight    = safe_int(general.get("LAST_LIVE_HIGHLIGHT", 0), 0)
-    check_for_updates      = general.get("CHECK_FOR_UPDATES", "true").strip().lower() not in ("false", "0", "no")
-
-    # Disk drives to monitor (comma-separated paths/letters, e.g. "C:\,D:\,/home")
-    disk_drives_raw = general.get("DISK_DRIVES", "").strip().strip('\"\'')
-    if disk_drives_raw:
-        disk_drives = [d.strip() for d in disk_drives_raw.split(",") if d.strip()]
-    else:
-        disk_drives = []
-
-    if not os.path.isabs(output_dir):
-        output_dir = os.path.abspath(output_dir)
-
+def _parse_twitch_section(parser: configparser.ConfigParser) -> dict:
+    """Extract all Twitch-related settings from the [Twitch] section."""
     twitch_cfg = parser["Twitch"] if parser.has_section("Twitch") else {}
-    twitch_client_id     = twitch_cfg.get("CLIENT_ID", "").strip().strip('"\'')
-    twitch_client_secret = twitch_cfg.get("CLIENT_SECRET", "").strip().strip('"\'')
-    twitch_webhook_secret= twitch_cfg.get("WEBHOOK_SECRET", "jj-dlp-secret").strip().strip('"\'')
-    twitch_callback_url  = twitch_cfg.get("CALLBACK_URL", "").strip().strip('"\'')
-    twitch_webhook_port  = safe_int(twitch_cfg.get("WEBHOOK_PORT", 8888), 8888)
-    twitch_enabled       = bool(twitch_client_id and twitch_client_secret and twitch_callback_url)
+    client_id     = twitch_cfg.get("CLIENT_ID", "").strip().strip('"\'')
+    client_secret = twitch_cfg.get("CLIENT_SECRET", "").strip().strip('"\'')
+    webhook_secret = twitch_cfg.get("WEBHOOK_SECRET", "jj-dlp-secret").strip().strip('"\'')
+    callback_url  = twitch_cfg.get("CALLBACK_URL", "").strip().strip('"\'')
+    webhook_port  = _safe_int(twitch_cfg.get("WEBHOOK_PORT", 8888), 8888)
+    enabled       = bool(client_id and client_secret and callback_url)
 
+    return {
+        "twitch_enabled": enabled,
+        "twitch_client_id": client_id,
+        "twitch_client_secret": client_secret,
+        "twitch_webhook_secret": webhook_secret,
+        "twitch_callback_url": callback_url,
+        "twitch_webhook_port": webhook_port,
+    }
+
+
+def _parse_checker_and_downloader(parser: configparser.ConfigParser) -> tuple:
+    """Return (checker_cmd, downloader_cmd) lists from [Checker] and [Downloader]."""
     checker_cmd = []
     if parser.has_section("Checker"):
         for key, val in parser.items("Checker"):
@@ -207,51 +152,140 @@ def load_config(config_path: str) -> dict:
             if item:
                 downloader_cmd.extend(shlex.split(item, posix=(sys.platform != "win32")))
 
-    return {
-        "streamers": streamers,
-        "blocked": blocked,
-        "check_interval": check_interval,
-        "output_dir": output_dir,
-        "output_tmpl": output_tmpl,
-        "cooldown": cooldown,
-        "split_after": split_after,
-        "stall_check_interval": stall_check_interval,
-        "stall_timeout": stall_timeout,
-        "yt_dlp_path": yt_dlp_path,
-        "checker_cmd": checker_cmd,
-        "downloader_cmd": downloader_cmd,
-        "config_check_interval": config_check_interval,
-        "logging_enabled": logging_enabled,
-        "log_path": log_path,
-        "split_logs": split_logs,
-        "popup_notifications": popup_notifications,
-        "popup_timeout": popup_timeout,
-        "debug_logs": debug_logs,
-        "debug_log_path": debug_log_path,
-        "panel_resize": panel_resize,
-        "site_tmpl": site_tmpl,
-        "username_idx": username_idx,
-        "config_path": config_path,
-        "site_label": site_label,
-        "progress_bar_max_hours": progress_bar_max_hours,
-        "progress_bar_width": progress_bar_width,
-        "popup_cooldown": popup_cooldown,
-        "disk_drives": disk_drives,
-        "downloader_cookies": downloader_cookies,
-        "checker_cookies": checker_cookies,
-        "ask_for_browser": ask_for_browser,
-        "site_order": site_order,
-        "last_live_highlight": last_live_highlight,
-        "check_for_updates": check_for_updates,
-        "twitch_enabled": twitch_enabled,
-        "twitch_client_id": twitch_client_id,
-        "twitch_client_secret": twitch_client_secret,
-        "twitch_webhook_secret": twitch_webhook_secret,
-        "twitch_callback_url": twitch_callback_url,
-        "twitch_webhook_port": twitch_webhook_port,
+    return checker_cmd, downloader_cmd
+
+
+def _derive_username_idx(cfg_dict: dict) -> Optional[int]:
+    """Return the negative URL-path index where ``{username}`` appears in SITE_TMPL.
+
+    Returns ``None`` when SITE_TMPL is absent or contains no ``{username}``
+    placeholder.
+    """
+    site_tmpl = cfg_dict.get("site_tmpl", "")
+    if not site_tmpl:
+        return None
+    tmpl_parts = urlparse(site_tmpl).path.rstrip("/").split("/")
+    for i, part in enumerate(tmpl_parts):
+        if "{username}" in part:
+            return i - len(tmpl_parts)
+    return None
+
+
+def _resolve_yt_dlp_path(cfg_dict: dict) -> str:
+    """Determine the yt-dlp invocation string for the current platform.
+
+    Resolution order:
+    1. The platform-specific config key (YT_DLP_PATH_WINDOWS / _MAC / _LINUX).
+       Relative paths are anchored to the project root (the directory that
+       contains the jj_dlp/ package), not to CWD.
+    2. A bundled ``yt-dlp/yt_dlp`` module next to the project root.
+       When found, PYTHONPATH is updated so subprocesses can import it, and
+       ``python -m yt_dlp`` is used as the command.  On Windows, ``pythonw.exe``
+       is silently rewritten to ``python.exe`` so child processes have working
+       stdio handles.
+    3. The system ``yt-dlp`` binary as a last resort.
+    """
+    # 1. Pick the platform-specific raw path from config.
+    platform_key_map = {
+        "win32":  "yt_dlp_path_windows",
+        "darwin": "yt_dlp_path_mac",
     }
+    platform_key = platform_key_map.get(sys.platform, "yt_dlp_path_linux")
+    yt_dlp_path_raw = cfg_dict.get(platform_key, "")
+    startup_dbg(f"[YT_DLP] platform={sys.platform!r} → yt_dlp_path_raw={yt_dlp_path_raw!r}")
+
+    # 2. Detect a bundled yt-dlp module sitting next to the project root.
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    bundled_yt_dlp_dir    = os.path.join(project_root, "yt-dlp")
+    bundled_yt_dlp_module = os.path.join(bundled_yt_dlp_dir, "yt_dlp")
+
+    startup_dbg(f"[YT_DLP] bundled_yt_dlp_dir={bundled_yt_dlp_dir!r}")
+    startup_dbg(f"[YT_DLP] bundled_yt_dlp_module={bundled_yt_dlp_module!r} "
+                f"exists={os.path.isdir(bundled_yt_dlp_module)}")
+    startup_dbg(f"[YT_DLP] sys.executable={sys.executable!r} platform={sys.platform!r}")
+
+    if os.path.isdir(bundled_yt_dlp_module):
+        _inject_bundled_pythonpath(bundled_yt_dlp_dir)
+        py_exe = _resolve_python_executable()
+        default_yt_dlp = f"{py_exe} -m yt_dlp"
+        startup_dbg(f"[YT_DLP] bundled module found → default_yt_dlp={default_yt_dlp!r}")
+    else:
+        default_yt_dlp = "yt-dlp"
+        startup_dbg("[YT_DLP] bundled module NOT found → falling back to system yt-dlp")
+
+    # Resolve a bare relative path (no spaces, not absolute) against the project
+    # root so that FileNotFoundError can't occur when CWD shifts after startup.
+    if yt_dlp_path_raw and " " not in yt_dlp_path_raw and not os.path.isabs(yt_dlp_path_raw):
+        yt_dlp_path_raw = os.path.join(project_root, yt_dlp_path_raw)
+        startup_dbg(f"[YT_DLP] relative path resolved to absolute: {yt_dlp_path_raw!r}")
+
+    return yt_dlp_path_raw if yt_dlp_path_raw else default_yt_dlp
 
 
+def _inject_bundled_pythonpath(bundled_yt_dlp_dir: str) -> None:
+    """Prepend *bundled_yt_dlp_dir* to PYTHONPATH if it is not already present."""
+    current_pp = os.environ.get("PYTHONPATH", "")
+    if bundled_yt_dlp_dir not in current_pp:
+        os.environ["PYTHONPATH"] = (
+            f"{bundled_yt_dlp_dir}{os.pathsep}{current_pp}" if current_pp
+            else bundled_yt_dlp_dir
+        )
+    startup_dbg(f"[YT_DLP] PYTHONPATH set to: {os.environ.get('PYTHONPATH', '')!r}")
+
+
+def _resolve_python_executable() -> str:
+    """Return the path to python.exe, rewriting pythonw.exe on Windows.
+
+    Subprocesses spawned from ``pythonw.exe`` inherit broken pipe handles and
+    produce no output — yt-dlp goes completely silent.  Forcing ``python.exe``
+    gives the child process a proper stdio environment.
+    """
+    py_exe = sys.executable
+    if sys.platform == "win32" and py_exe.lower().endswith("pythonw.exe"):
+        py_exe = py_exe[:-len("pythonw.exe")] + "python.exe"
+        startup_dbg(f"[YT_DLP] pythonw.exe detected — rewriting to python.exe: {py_exe!r}")
+    else:
+        startup_dbg(f"[YT_DLP] python executable OK (not pythonw): {py_exe!r}")
+    return py_exe
+
+
+def load_config(config_path: str) -> dict:
+    """Read a site config file and return a fully-resolved settings dict."""
+    startup_dbg(f"[CONFIG] load_config called with: {config_path!r}")
+    if not os.path.isfile(config_path):
+        print(f"ERROR: Config file not found at: {config_path}", file=sys.stderr)
+        sys.exit(1)
+
+    parser = configparser.ConfigParser(allow_no_value=True, interpolation=None)
+    try:
+        parser.read(config_path, encoding="utf-8")
+    except Exception as _e:
+        startup_dbg(f"[CONFIG] load_config: configparser FAILED — {type(_e).__name__}: {_e}")
+        raise
+
+    general = parser["General"] if parser.has_section("General") else {}
+
+    cfg_dict = _parse_general_section(general, config_path)
+
+    streamers, blocked = _parse_streamers_and_blocked(parser)
+    cfg_dict["streamers"] = streamers
+    cfg_dict["blocked"]   = blocked
+
+    checker_cmd, downloader_cmd = _parse_checker_and_downloader(parser)
+
+    cfg_dict.update({
+        "checker_cmd":    checker_cmd,
+        "downloader_cmd": downloader_cmd,
+        "username_idx":   _derive_username_idx(cfg_dict),
+        "config_path":    config_path,
+        "yt_dlp_path":    _resolve_yt_dlp_path(cfg_dict),
+        **_parse_twitch_section(parser),
+    })
+
+    return cfg_dict
+
+
+# ── Global config filename (always silently loaded; never shown in chooser) ───
 # ── Global config filename (always silently loaded; never shown in chooser) ───
 _GLOBAL_CONF_NAME: str = "global.conf"
 
@@ -382,15 +416,34 @@ def _write_global_conf_key(key: str, value: str) -> None:
 # Per-site state
 # ══════════════════════════════════════════════════════════════════════════════
 
-_GLOBAL_JSON_PATH: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "global.json") 
 _global_json_lock: threading.Lock = threading.Lock()
 
 
+def _global_json_path() -> str:
+    """Return the absolute path to global.json.
+
+    Resolution order:
+    - ``JJ_DLP_GLOBAL_JSON_PATH`` env var: explicit full path (used by the
+      stage-2 updater subprocess so it always writes to the real global.json,
+      not the one inside a temporary extraction folder).
+    - ``JJ_DLP_GLOBAL_DIR`` env var: directory override; ``global.json`` is
+      appended.
+    - Default: ``global.json`` next to this file (inside the package dir).
+    """
+    env_path = os.environ.get("JJ_DLP_GLOBAL_JSON_PATH")
+    if env_path:
+        return env_path
+    env_dir = os.environ.get("JJ_DLP_GLOBAL_DIR")
+    if env_dir:
+        return os.path.join(env_dir, "global.json")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "global.json")
+
+
 def _load_global_json() -> dict:
-    """Load the global.json file from the script's directory.  Returns an empty
-    dict if the file does not exist or cannot be parsed."""
+    """Load the global.json file.  Returns an empty dict if the file does not
+    exist or cannot be parsed."""
     try:
-        with open(_GLOBAL_JSON_PATH, "r", encoding="utf-8") as f:
+        with open(_global_json_path(), "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict):
             return data
@@ -400,9 +453,9 @@ def _load_global_json() -> dict:
 
 
 def _save_global_json(data: dict) -> None:
-    """Write *data* to global.json atomically.  Silently ignores errors."""
+    """Write *data* to global.json.  Silently ignores errors."""
     try:
-        with open(_GLOBAL_JSON_PATH, "w", encoding="utf-8") as f:
+        with open(_global_json_path(), "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
     except Exception:
         pass
@@ -595,27 +648,6 @@ def _get_output_mode() -> int:
 
 _configure_logger(_get_output_mode)
 
-# ── Per-tag debug filter ───────────────────────────────────────────────────────
-# Set any tag to False to silence that group in the debug log.
-# Changes here take effect immediately on the next dbg() call.
-#
-#   DRAIN    — yt-dlp stdout/stderr pipe drain threads
-#   CHECKER  — liveness-check subprocess calls
-#   SPLIT    — split-recording file-tracking logic
-#   POPEN    — yt-dlp process launch details
-#   PERF     — performance timing summaries (high-frequency; off by default)
-#   UPDATER  — update checker and periodic updater thread
-#
-MAIN_DBG_FILTERS: dict[str, bool] = {
-    "DRAIN":   True,
-    "CHECKER": True,
-    "SPLIT":   True,
-    "POPEN":   True,
-    "PERF":    False,   # high-frequency; disable unless actively profiling
-    "UPDATER": True,
-}
-_configure_dbg_filters(MAIN_DBG_FILTERS)
-
 # DEBUG_LOGS_ENABLED / DEBUG_LOG_PATH / debug_log_lock are imported from logger.
 
 # ── Keybinds ──
@@ -636,7 +668,9 @@ KEYBIND_LABELS = {
 # ══════════════════════════════════════════════════════════════════════════════
 
 def kill_proc(proc) -> None:
+    dbg(f"[KILL] Attempting to kill proc.pid={proc.pid}")
     if sys.platform == "win32":
+        dbg(f"[KILL] win32: using taskkill on pid={proc.pid}")
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
     else:
         # PyInstaller yt-dlp binaries spawn two processes: a bootloader and the
@@ -646,13 +680,17 @@ def kill_proc(proc) -> None:
         import signal as _signal
         try:
             pgid = os.getpgid(proc.pid)
+            dbg(f"[KILL] Linux: found pgid={pgid} for pid={proc.pid}, sending SIGKILL to pgid")
             os.killpg(pgid, _signal.SIGKILL)
-        except (ProcessLookupError, OSError):
+            dbg(f"[KILL] Linux: successfully sent SIGKILL to pgid={pgid}")
+        except (ProcessLookupError, OSError) as e:
             # Process already gone or pgid unavailable — fall back to direct kill
+            dbg(f"[KILL] Linux: pgid lookup or killpg failed for pid={proc.pid} ({e}), falling back to proc.kill()")
             try:
                 proc.kill()
-            except Exception:
-                pass
+                dbg(f"[KILL] Linux: successfully called proc.kill() for pid={proc.pid}")
+            except Exception as e2:
+                dbg(f"[KILL] Linux: proc.kill() failed for pid={proc.pid} ({e2})")
 
 
 def build_yt_dlp_command(yt_dlp_path: str, base_cmd: List[str], extra: List[str]) -> List[str]:
@@ -810,7 +848,7 @@ def _modify_config_streamer(config_path: str, username: str, action: str) -> str
 
 def open_log_streams(cfg: dict):
     log_out_fp = log_err_fp = None
-    if cfg.get("logging_enabled"):
+    if cfg.get("logging"):
         out_path, err_path = get_log_file_paths(cfg)
         try:
             log_out_fp = open(out_path, "a", encoding="utf-8")
@@ -896,7 +934,7 @@ def get_live_streamers(streamers: List[str], cfg: dict,
     dbg(f"[CHECKER] returncode={result.returncode} stdout_len={len(result.stdout)} stderr_len={len(result.stderr)}")
     if result.stderr:
         dbg(f"[CHECKER] stderr (first 500 chars): {result.stderr[:500]!r}")
-    if cfg["logging_enabled"]:
+    if cfg["logging"]:
         out_path, err_path = get_log_file_paths(cfg)
         try:
             if result.stdout:
@@ -930,7 +968,7 @@ def get_live_streamers(streamers: List[str], cfg: dict,
     return live
 
 
-def wait_for_streamer_file(output_dir, streamer, proc_start_time, timeout=15.0, interval=0.5):
+def wait_for_streamer_file(output_dir, streamer, proc_start_time, timeout=15.0, interval=2.0):
     start = time.time()
     dbg(f"[SPLIT][wait_for_streamer_file] START streamer={streamer!r} output_dir={output_dir!r} "
         f"proc_start_time={proc_start_time:.3f} timeout={timeout}")
@@ -938,6 +976,7 @@ def wait_for_streamer_file(output_dir, streamer, proc_start_time, timeout=15.0, 
         if os.path.isdir(output_dir):
             all_files = os.listdir(output_dir)
             candidate_files = []
+            skipped_count = 0
             for f in all_files:
                 fpath = os.path.join(output_dir, f)
                 if not os.path.isfile(fpath):
@@ -948,9 +987,7 @@ def wait_for_streamer_file(output_dir, streamer, proc_start_time, timeout=15.0, 
                 if name_match and time_match:
                     candidate_files.append(fpath)
                 elif name_match and not time_match:
-                    dbg(f"[SPLIT][wait_for_streamer_file] SKIPPED (too old) file={f!r} "
-                        f"mtime={mtime:.3f} proc_start_time={proc_start_time:.3f} "
-                        f"age_delta={proc_start_time - mtime:.3f}s")
+                    skipped_count += 1
             if candidate_files:
                 chosen = max(candidate_files, key=os.path.getmtime)
                 dbg(f"[SPLIT][wait_for_streamer_file] FOUND file={chosen!r} "
@@ -958,7 +995,8 @@ def wait_for_streamer_file(output_dir, streamer, proc_start_time, timeout=15.0, 
                 return chosen
             else:
                 dbg(f"[SPLIT][wait_for_streamer_file] no match yet "
-                    f"elapsed={time.time()-start:.2f}s total_files={len(all_files)}")
+                    f"elapsed={time.time()-start:.2f}s total_files={len(all_files)} "
+                    f"skipped_too_old={skipped_count}")
         else:
             dbg(f"[SPLIT][wait_for_streamer_file] output_dir does not exist: {output_dir!r}")
         time.sleep(interval)
@@ -968,9 +1006,13 @@ def wait_for_streamer_file(output_dir, streamer, proc_start_time, timeout=15.0, 
 
 def get_streamer_file_size(output_dir, streamer, cfg=None,
                            last_growth_time=None, stall_timeout=None,
-                           stall_check_interval=None, proc_start_time=None):
+                           stall_check_interval=None, proc_start_time=None,
+                           known_filename=None):
     try:
-        filename = wait_for_streamer_file(output_dir, streamer, proc_start_time) if os.path.isdir(output_dir) else None
+        if known_filename:
+            filename = known_filename
+        else:
+            filename = wait_for_streamer_file(output_dir, streamer, proc_start_time) if os.path.isdir(output_dir) else None
         size = os.path.getsize(filename) if filename else 0
         stall_detected = False
         if last_growth_time is not None and stall_timeout is not None:
@@ -1137,7 +1179,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                 output_dir,
                 streamer,
                 cfg=cfg,
-                proc_start_time=proc_start_time
+                proc_start_time=proc_start_time,
+                known_filename=active_file,
             )
 
             last_growth_time     = time.time()
@@ -1183,7 +1226,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                     with site.lock:
                         site.currently_recording.discard(streamer)
 
-                    time.sleep(cfg["cooldown"])
+                    time.sleep(cfg["cooldown_after_recording"])
                     return
 
                 if ffmpeg_error_event.is_set():
@@ -1441,7 +1484,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
         with site.lock:
             site.currently_recording.discard(streamer)
 
-        time.sleep(cfg["cooldown"])
+        time.sleep(cfg["cooldown_after_recording"])
 
 
 def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
@@ -1548,7 +1591,6 @@ def monitor_site(site: "SiteState") -> None:
         if not streamers:
             site.log_line("ERROR: No streamers configured.")
         else:
-            site.log_line(f"Checking {len(streamers)} streamer(s)...")
             live_now = get_live_streamers(streamers, cfg, site=site)
             cfg = load_config(site.config_path)
 
@@ -1565,13 +1607,11 @@ def monitor_site(site: "SiteState") -> None:
                         site.dash_live_since[s] = time.time()
 
             if live_now:
-                site.log_line(f"Live now: {', '.join(live_now)}")
                 start_recording_if_needed(live_now, cfg, site)
             else:
                 site.log_line("All streamers offline.")
 
         wait_secs = cfg.get("check_interval", 60)
-        site.log_line(f"Next check in {wait_secs}s")
         deadline = time.time() + wait_secs
 
         while not site._stop_event.is_set():
@@ -1617,38 +1657,6 @@ def _live_bar(seconds: float, width: int = 14, max_secs: int = 6 * 3600) -> str:
     filled = min(int(width * seconds / max(1, max_secs)), width)
     return "█" * filled + "░" * (width - filled)
 
-def draw_box(stdscr, y1, x1, y2, x2, pair):
-    h, w = stdscr.getmaxyx()
-    def safe_ch(y, x, ch):
-        if 0 <= y < h and 0 <= x < w - 1:
-            try:
-                stdscr.addch(y, x, ch, curses.color_pair(pair))
-            except curses.error:
-                pass
-    for x in range(x1 + 1, x2):
-        safe_ch(y1, x, curses.ACS_HLINE)
-        safe_ch(y2, x, curses.ACS_HLINE)
-    for y in range(y1 + 1, y2):
-        safe_ch(y, x1, curses.ACS_VLINE)
-        safe_ch(y, x2, curses.ACS_VLINE)
-    safe_ch(y1, x1, curses.ACS_ULCORNER)
-    safe_ch(y1, x2, curses.ACS_URCORNER)
-    safe_ch(y2, x1, curses.ACS_LLCORNER)
-    safe_ch(y2, x2, curses.ACS_LRCORNER)
-
-def safe_addstr(stdscr, y, x, text, attr=0):
-    h, w = stdscr.getmaxyx()
-    if y < 0 or y >= h or x < 0 or x >= w:
-        return
-    max_len = w - x - 1
-    if max_len <= 0:
-        return
-    try:
-        stdscr.addstr(y, x, str(text)[:max_len], attr)
-    except curses.error:
-        pass
-
-
 class JJDlpDashboard:
     """
     MenuWorks-style curses TUI.
@@ -1660,6 +1668,39 @@ class JJDlpDashboard:
     To change panel order, just reorder the sites list passed to __init__.
     Panel grid: sites[0]=top-left, sites[1]=top-right, sites[2]=bot-left, etc.
     """
+
+    @staticmethod
+    def draw_box(stdscr, y1, x1, y2, x2, pair):
+        h, w = stdscr.getmaxyx()
+        def safe_ch(y, x, ch):
+            if 0 <= y < h and 0 <= x < w - 1:
+                try:
+                    stdscr.addch(y, x, ch, curses.color_pair(pair))
+                except curses.error:
+                    pass
+        for x in range(x1 + 1, x2):
+            safe_ch(y1, x, curses.ACS_HLINE)
+            safe_ch(y2, x, curses.ACS_HLINE)
+        for y in range(y1 + 1, y2):
+            safe_ch(y, x1, curses.ACS_VLINE)
+            safe_ch(y, x2, curses.ACS_VLINE)
+        safe_ch(y1, x1, curses.ACS_ULCORNER)
+        safe_ch(y1, x2, curses.ACS_URCORNER)
+        safe_ch(y2, x1, curses.ACS_LLCORNER)
+        safe_ch(y2, x2, curses.ACS_LRCORNER)
+
+    @staticmethod
+    def safe_addstr(stdscr, y, x, text, attr=0):
+        h, w = stdscr.getmaxyx()
+        if y < 0 or y >= h or x < 0 or x >= w:
+            return
+        max_len = w - x - 1
+        if max_len <= 0:
+            return
+        try:
+            stdscr.addstr(y, x, str(text)[:max_len], attr)
+        except curses.error:
+            pass
 
     FLASH_CYCLE = 8
 
@@ -1799,7 +1840,7 @@ class JJDlpDashboard:
     # ── Logo ─────────────────────────────────────────────────────────────────
     def draw_logo(self, y, x):
         for i, line in enumerate(ASCII_LOGO):
-            safe_addstr(self.stdscr, y + i, x, line,
+            self.safe_addstr(self.stdscr, y + i, x, line,
                         curses.color_pair(self.C_LOGO) | curses.A_BOLD)
 
     # ── Tab bar ──────────────────────────────────────────────────────────────
@@ -1807,17 +1848,17 @@ class JJDlpDashboard:
         for i, tab in enumerate(self.TABS):
             label = f"  {tab}  "
             if i == self.selected_tab:
-                safe_addstr(self.stdscr, y, x, label,
+                self.safe_addstr(self.stdscr, y, x, label,
                             curses.color_pair(self.C_HILIGHT) | curses.A_BOLD)
             else:
-                safe_addstr(self.stdscr, y, x, label, curses.color_pair(self.C_INVHEAD))
+                self.safe_addstr(self.stdscr, y, x, label, curses.color_pair(self.C_INVHEAD))
             x += len(label) + 1
 
     # ── System status sidebar ────────────────────────────────────────────────
     def draw_system_panel(self, y1, x1, y2, x2):
         """Draws the SYSTEM info panel (from demo). Placed in the sidebar."""
-        draw_box(self.stdscr, y1, x1, y2, x2, self.C_SYSTEM)
-        safe_addstr(self.stdscr, y1, x1 + 2, " SYSTEM ",
+        self.draw_box(self.stdscr, y1, x1, y2, x2, self.C_SYSTEM)
+        self.safe_addstr(self.stdscr, y1, x1 + 2, " SYSTEM ",
                     curses.color_pair(self.C_SYSTEM) | curses.A_BOLD)
 
         # Aggregate counts across all sites
@@ -1864,8 +1905,8 @@ class JJDlpDashboard:
         # Fill logging/popups from first site's config
         try:
             cfg0 = self.sites[0].get_cached_config() if self.sites else {}
-            rows[7] = ("Logging", "ON" if cfg0.get("logging_enabled") else "OFF",
-                       self.C_LIVE if cfg0.get("logging_enabled") else self.C_DIM)
+            rows[7] = ("Logging", "ON" if cfg0.get("logging") else "OFF",
+                       self.C_LIVE if cfg0.get("logging") else self.C_DIM)
             rows[8] = ("Popups",  "ON" if cfg0.get("popup_notifications") else "OFF",
                        self.C_LIVE if cfg0.get("popup_notifications") else self.C_DIM)
         except Exception:
@@ -1885,10 +1926,10 @@ class JJDlpDashboard:
             if row_y >= y2 - 1:
                 break
             if label:
-                safe_addstr(self.stdscr, row_y, x1 + 2,
+                self.safe_addstr(self.stdscr, row_y, x1 + 2,
                             label[:label_w].ljust(label_w),
                             curses.color_pair(self.C_DIM))
-                safe_addstr(self.stdscr, row_y, x1 + 2 + label_w + 1,
+                self.safe_addstr(self.stdscr, row_y, x1 + 2 + label_w + 1,
                             str(val)[:inner_w - label_w - 1],
                             curses.color_pair(cpair) | curses.A_BOLD)
 
@@ -1945,7 +1986,7 @@ class JJDlpDashboard:
                 self._disk_cache_time    = now
 
             if disk_row_y < y2 - 1:
-                safe_addstr(self.stdscr, disk_row_y, x1 + 2, "── Disk ──",
+                self.safe_addstr(self.stdscr, disk_row_y, x1 + 2, "── Disk ──",
                             curses.color_pair(self.C_SYSTEM))
                 disk_row_y += 1
             for drive, usage in self._disk_cache_results:
@@ -1960,7 +2001,7 @@ class JJDlpDashboard:
                 drv_label = drv_label[:6]
                 disk_str  = f"{drv_label:<6} {free_gb:>4.1f}G {pct:>3.0f}%"
                 color = self.C_LIVE if pct < 80 else (self.C_WARN if pct < 95 else self.C_REC)
-                safe_addstr(self.stdscr, disk_row_y, x1 + 2,
+                self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
                             disk_str[:inner_w],
                             curses.color_pair(color))
                 disk_row_y += 1
@@ -1968,7 +2009,7 @@ class JJDlpDashboard:
             dbg(f"[DISK] outer exception in disk section: {type(_disk_outer_exc).__name__}: {_disk_outer_exc}")
 
         # Uptime at bottom
-        safe_addstr(self.stdscr, y2 - 1, x1 + 2,
+        self.safe_addstr(self.stdscr, y2 - 1, x1 + 2,
                     f"Up: {uptime_str}"[:inner_w],
                     curses.color_pair(self.C_CHROME))
 
@@ -1981,7 +2022,7 @@ class JJDlpDashboard:
         now = time.time()
         #Pick border color based on selection
         border_pair = self.C_HILIGHT if is_selected else self.C_CHROME
-        draw_box(self.stdscr, y1, x1, y2, x2, border_pair)
+        self.draw_box(self.stdscr, y1, x1, y2, x2, border_pair)
 
         # ── Panel header ──
         _panel_cfg = site.get_cached_config()
@@ -2013,23 +2054,23 @@ class JJDlpDashboard:
         header_y = y1
         # Site label on top border
         label_text = f"  {cfg_label}  "
-        safe_addstr(self.stdscr, header_y, x1 + 2, label_text,
+        self.safe_addstr(self.stdscr, header_y, x1 + 2, label_text,
                     curses.color_pair(self.C_CHROME) | curses.A_BOLD)
 
         # Status badge row
         badge_y = y1 + 1
         bx = x1 + 2
-        safe_addstr(self.stdscr, badge_y, bx,
+        self.safe_addstr(self.stdscr, badge_y, bx,
                     f"LIVE:{live_cnt}",  curses.color_pair(self.C_LIVE) | curses.A_BOLD)
         bx += 7
-        safe_addstr(self.stdscr, badge_y, bx,
+        self.safe_addstr(self.stdscr, badge_y, bx,
                     f"REC:{rec_cnt}",    curses.color_pair(self.C_REC) | curses.A_BOLD)
         bx += 6
-        safe_addstr(self.stdscr, badge_y, bx,
+        self.safe_addstr(self.stdscr, badge_y, bx,
                     f"OFF:{off_cnt}",    curses.color_pair(self.C_DIM))
         bx += 6
         if dis_cnt:
-            safe_addstr(self.stdscr, badge_y, bx,
+            self.safe_addstr(self.stdscr, badge_y, bx,
                         f"DIS:{dis_cnt}", curses.color_pair(self.C_DISABLED))
 
         # ── Streamer rows ──
@@ -2112,19 +2153,19 @@ class JJDlpDashboard:
                 dur_str     = ""
 
             col = x1 + 2
-            safe_addstr(self.stdscr, row_y, col,
+            self.safe_addstr(self.stdscr, row_y, col,
                         s[:name_w].ljust(name_w), name_attr)
             col += name_w + 1
-            safe_addstr(self.stdscr, row_y, col,
+            self.safe_addstr(self.stdscr, row_y, col,
                         status_str[:7].ljust(7), status_attr)
             col += 8
-            safe_addstr(self.stdscr, row_y, col, bar_str, bar_attr)
+            self.safe_addstr(self.stdscr, row_y, col, bar_str, bar_attr)
             col += bar_w + 1
             if dur_str:
-                safe_addstr(self.stdscr, row_y, col,
+                self.safe_addstr(self.stdscr, row_y, col,
                             dur_str[:9].ljust(9), curses.color_pair(self.C_CHROME))
             else:
-                safe_addstr(self.stdscr, row_y, col, " " * 9, 0)
+                self.safe_addstr(self.stdscr, row_y, col, " " * 9, 0)
             col += 10
             if last_live_str:
                 # Highlight in C_LIVE if streamer was live within LAST_LIVE_HIGHLIGHT days
@@ -2134,13 +2175,13 @@ class JJDlpDashboard:
                     ll_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
                 else:
                     ll_attr = curses.color_pair(self.C_DIM)
-                safe_addstr(self.stdscr, row_y, col,
+                self.safe_addstr(self.stdscr, row_y, col,
                             last_live_str[:last_live_w],
                             ll_attr)
 
         # ── Countdown ──
         nxt = max(0.0, next_in)
-        safe_addstr(self.stdscr, y2 - 1, x1 + 2,
+        self.safe_addstr(self.stdscr, y2 - 1, x1 + 2,
                     f"Next check: {nxt:>4.0f}s",
                     curses.color_pair(self.C_WARN) | curses.A_BOLD)
 
@@ -2175,7 +2216,7 @@ class JJDlpDashboard:
             with site.dash_lock:
                 num_streamers = len(site.dash_all_streamers)
             
-            if panel_resize and num_streamers > base_max_streamers:
+            if panel_resize and num_streamers >= base_max_streamers:
                 site_zones.append(2)
             else:
                 site_zones.append(1)
@@ -2238,7 +2279,7 @@ class JJDlpDashboard:
         # Site selector across the top
         sel_site = self.sites[self.selected_site_idx] if self.sites else None
         tab_x    = x1 + 1
-        safe_addstr(self.stdscr, y1, x1, "  Site: ",
+        self.safe_addstr(self.stdscr, y1, x1, "  Site: ",
                     curses.color_pair(self.C_DIM))
         tab_x += 8
         for i, site in enumerate(self.sites):
@@ -2248,9 +2289,9 @@ class JJDlpDashboard:
             attr  = (curses.color_pair(self.C_HILIGHT) | curses.A_BOLD
                      if i == self.selected_site_idx
                      else curses.color_pair(self.C_CHROME))
-            safe_addstr(self.stdscr, y1, tab_x, label, attr)
+            self.safe_addstr(self.stdscr, y1, tab_x, label, attr)
             tab_x += len(label) + 1
-        safe_addstr(self.stdscr, y1 + 1, x1 + 2, " ACTIVITY LOG ",
+        self.safe_addstr(self.stdscr, y1 + 1, x1 + 2, " ACTIVITY LOG ",
                     curses.color_pair(self.C_DIM) | curses.A_BOLD)
 
         if sel_site is None:
@@ -2280,12 +2321,12 @@ class JJDlpDashboard:
                 attr = curses.color_pair(self.C_REC)
             elif "Next check" in line:
                 attr = curses.color_pair(self.C_WARN)
-            safe_addstr(self.stdscr, y1 + 2 + i, x1 + 2, line, attr)
+            self.safe_addstr(self.stdscr, y1 + 2 + i, x1 + 2, line, attr)
 
         # Scroll indicator
         if max_scroll > 0:
             scroll_info = f" ↑{self._log_scroll}/{max_scroll} " if self._log_scroll else " (end) "
-            safe_addstr(self.stdscr, y1 + 1, x2 - len(scroll_info) - 1,
+            self.safe_addstr(self.stdscr, y1 + 1, x2 - len(scroll_info) - 1,
                         scroll_info, curses.color_pair(self.C_WARN))
 
     def _draw_pipe_tab(self, y1, x1, y2, x2, title: str, lines: List[str],
@@ -2293,7 +2334,7 @@ class JJDlpDashboard:
         """Draw a pipe-output tab. Returns the clamped scroll value."""
         sel_site = self.sites[self.selected_site_idx] if self.sites else None
         tab_x    = x1 + 1
-        safe_addstr(self.stdscr, y1, x1, "  Site: ",
+        self.safe_addstr(self.stdscr, y1, x1, "  Site: ",
                     curses.color_pair(self.C_DIM))
         tab_x += 8
         for i, site in enumerate(self.sites):
@@ -2303,11 +2344,11 @@ class JJDlpDashboard:
             attr  = (curses.color_pair(self.C_HILIGHT) | curses.A_BOLD
                      if i == self.selected_site_idx
                      else curses.color_pair(self.C_CHROME))
-            safe_addstr(self.stdscr, y1, tab_x, label, attr)
+            self.safe_addstr(self.stdscr, y1, tab_x, label, attr)
             tab_x += len(label) + 1
 
-        draw_box(self.stdscr, y1 + 1, x1, y2, x2, self.C_DIM)
-        safe_addstr(self.stdscr, y1 + 1, x1 + 2, f" {title} ",
+        self.draw_box(self.stdscr, y1 + 1, x1, y2, x2, self.C_DIM)
+        self.safe_addstr(self.stdscr, y1 + 1, x1 + 2, f" {title} ",
                     curses.color_pair(self.C_DIM) | curses.A_BOLD)
 
         if sel_site is None:
@@ -2324,13 +2365,13 @@ class JJDlpDashboard:
         view  = wrapped[start : start + visible_rows]
 
         for i, line in enumerate(view):
-            safe_addstr(self.stdscr, y1 + 2 + i, x1 + 2, line,
+            self.safe_addstr(self.stdscr, y1 + 2 + i, x1 + 2, line,
                         curses.color_pair(self.C_DIM))
 
         # Scroll indicator
         if max_scroll > 0:
             scroll_info = f" ↑{scroll}/{max_scroll} " if scroll else " (end) "
-            safe_addstr(self.stdscr, y1 + 1, x2 - len(scroll_info) - 1,
+            self.safe_addstr(self.stdscr, y1 + 1, x2 - len(scroll_info) - 1,
                         scroll_info, curses.color_pair(self.C_WARN))
 
         return scroll
@@ -2377,8 +2418,8 @@ class JJDlpDashboard:
 
     # ── EventSub tab ─────────────────────────────────────────────────────────
     def draw_eventsub_tab(self, y1, x1, y2, x2):
-        draw_box(self.stdscr, y1, x1, y2, x2, self.C_CHROME)
-        safe_addstr(self.stdscr, y1, x1 + 2, " TWITCH EVENTSUB ",
+        self.draw_box(self.stdscr, y1, x1, y2, x2, self.C_CHROME)
+        self.safe_addstr(self.stdscr, y1, x1 + 2, " TWITCH EVENTSUB ",
                     curses.color_pair(self.C_INVHEAD) | curses.A_BOLD)
 
         row_y = y1 + 2
@@ -2387,13 +2428,13 @@ class JJDlpDashboard:
                 break
             lbl = site.get_cached_config().get("site_label",
                               os.path.basename(site.config_path))
-            safe_addstr(self.stdscr, row_y, x1 + 2, f"-- {lbl} --",
+            self.safe_addstr(self.stdscr, row_y, x1 + 2, f"-- {lbl} --",
                         curses.color_pair(self.C_WARN) | curses.A_BOLD)
             row_y += 1
 
             es = site.eventsub_state
             if es is None:
-                safe_addstr(self.stdscr, row_y, x1 + 4, "EventSub not available",
+                self.safe_addstr(self.stdscr, row_y, x1 + 4, "EventSub not available",
                             curses.color_pair(self.C_DIM))
                 row_y += 2
                 continue
@@ -2421,9 +2462,9 @@ class JJDlpDashboard:
             for label, val, cpair in rows:
                 if row_y >= y2 - 1:
                     break
-                safe_addstr(self.stdscr, row_y, x1 + 4,
+                self.safe_addstr(self.stdscr, row_y, x1 + 4,
                             f"{label:<16}", curses.color_pair(self.C_INVHEAD))
-                safe_addstr(self.stdscr, row_y, x1 + 21, val, curses.color_pair(cpair))
+                self.safe_addstr(self.stdscr, row_y, x1 + 21, val, curses.color_pair(cpair))
                 row_y += 1
             row_y += 1
 
@@ -2470,7 +2511,7 @@ class JJDlpDashboard:
                          f"  [: prev site  ]: next site"
                          f"  A: add streamer R: remove streamer D: disable streamer"
                          f"  C: colors  Q: quit  ")
-        safe_addstr(self.stdscr, h - 1, 0,
+        self.safe_addstr(self.stdscr, h - 1, 0,
                     hints.ljust(w - 1)[:w - 1],
                     curses.color_pair(self.C_INVHEAD))
 
@@ -2492,38 +2533,38 @@ class JJDlpDashboard:
 
         # Fill background
         for y in range(by1, by2 + 1):
-            safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1),
+            self.safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1),
                         curses.color_pair(self.C_NORMAL))
 
-        draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_WARN)
+        self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_WARN)
         title = f" {action.upper()} STREAMER "
         site_lbl = site.get_cached_config().get("site_label",
                                os.path.basename(site.config_path))
-        safe_addstr(self.stdscr, by1, bx1 + 2, title,
+        self.safe_addstr(self.stdscr, by1, bx1 + 2, title,
                     curses.color_pair(self.C_WARN) | curses.A_BOLD)
-        safe_addstr(self.stdscr, by1 + 1, bx1 + 2,
+        self.safe_addstr(self.stdscr, by1 + 1, bx1 + 2,
                     f"Site: {site_lbl}", curses.color_pair(self.C_DIM))
 
         row = by1 + 3
         if all_s:
-            safe_addstr(self.stdscr, row, bx1 + 2, "Streamers:",
+            self.safe_addstr(self.stdscr, row, bx1 + 2, "Streamers:",
                         curses.color_pair(self.C_CHROME))
             row += 1
             for s in all_s:
                 if row >= by2 - 4:
                     break
-                safe_addstr(self.stdscr, row, bx1 + 4, f"- {s}",
+                self.safe_addstr(self.stdscr, row, bx1 + 4, f"- {s}",
                             curses.color_pair(self.C_DIM))
                 row += 1
 
         row = by2 - 4
         if self._mgmt_result:
-            safe_addstr(self.stdscr, row, bx1 + 2, self._mgmt_result[:box_w - 4],
+            self.safe_addstr(self.stdscr, row, bx1 + 2, self._mgmt_result[:box_w - 4],
                         curses.color_pair(self.C_LIVE) | curses.A_BOLD)
         row = by2 - 2
-        safe_addstr(self.stdscr, row, bx1 + 2, "Username:",
+        self.safe_addstr(self.stdscr, row, bx1 + 2, "Username:",
                     curses.color_pair(self.C_WARN) | curses.A_BOLD)
-        safe_addstr(self.stdscr, row, bx1 + 12,
+        self.safe_addstr(self.stdscr, row, bx1 + 12,
                     (self._mgmt_buf + "_")[:box_w - 14],
                     curses.color_pair(self.C_NORMAL) | curses.A_BOLD)
 
@@ -2538,7 +2579,7 @@ class JJDlpDashboard:
 
         # System time top-right
         sys_time_str = datetime.now().strftime("%Y-%m-%d  %H:%M:%S")
-        safe_addstr(self.stdscr, 1, w - len(sys_time_str) - 3, sys_time_str,
+        self.safe_addstr(self.stdscr, 1, w - len(sys_time_str) - 3, sys_time_str,
                     curses.color_pair(self.C_CHROME))
 
         # Track the next available row on the right side
@@ -2548,13 +2589,13 @@ class JJDlpDashboard:
         with update_available_lock:
             if UPDATE_AVAILABLE:
                 update_str = "Update Available"
-                safe_addstr(self.stdscr, next_right_row, w - len(update_str) - 3, update_str,
+                self.safe_addstr(self.stdscr, next_right_row, w - len(update_str) - 3, update_str,
                             curses.color_pair(self.C_WARN) | curses.A_BOLD)
                 next_right_row += 1
         
         # App version indicator (Below Update Available, or directly below time)
         version_str = f"v{__version__}"
-        safe_addstr(self.stdscr, next_right_row, w - len(version_str) - 3, version_str,
+        self.safe_addstr(self.stdscr, next_right_row, w - len(version_str) - 3, version_str,
                     curses.color_pair(self.C_DIM))
 
         # Blank line after logo (row 7), then tab bar at row 8
@@ -2562,7 +2603,7 @@ class JJDlpDashboard:
         self.draw_tabs(8, 2)
 
         # Separator
-        safe_addstr(self.stdscr, 9, 1, "-" * (w - 2), curses.color_pair(self.C_CHROME))
+        self.safe_addstr(self.stdscr, 9, 1, "-" * (w - 2), curses.color_pair(self.C_CHROME))
 
         # Content area starts at row 10
         content_y1 = 10
@@ -2819,18 +2860,18 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
 
         # Logo
         for i, line in enumerate(ASCII_LOGO):
-            safe_addstr(stdscr, 1 + i, 2, line, curses.color_pair(6) | curses.A_BOLD)
+            JJDlpDashboard.safe_addstr(stdscr, 1 + i, 2, line, curses.color_pair(6) | curses.A_BOLD)
 
         ts = time.strftime("%Y-%m-%d  %H:%M:%S")
-        safe_addstr(stdscr, 1, w - len(ts) - 3, ts, curses.color_pair(1))
-        safe_addstr(stdscr, 7, 2, "-" * (w - 4), curses.color_pair(1))
+        JJDlpDashboard.safe_addstr(stdscr, 1, w - len(ts) - 3, ts, curses.color_pair(1))
+        JJDlpDashboard.safe_addstr(stdscr, 7, 2, "-" * (w - 4), curses.color_pair(1))
 
         # Title
         title = "SELECT CONFIG FILE(S)"
-        safe_addstr(stdscr, 9, 2, title, curses.color_pair(5) | curses.A_BOLD)
+        JJDlpDashboard.safe_addstr(stdscr, 9, 2, title, curses.color_pair(5) | curses.A_BOLD)
 
         # Instructions
-        safe_addstr(stdscr, 10, 2,
+        JJDlpDashboard.safe_addstr(stdscr, 10, 2,
                     "Space = toggle [x]   Enter = confirm   Q = quit",
                     curses.color_pair(3))
 
@@ -2845,13 +2886,13 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
                 attr = curses.color_pair(4) | curses.A_BOLD
             else:
                 attr = curses.color_pair(1)
-            safe_addstr(stdscr, row, 4, f"  {checked}  {name}", attr)
+            JJDlpDashboard.safe_addstr(stdscr, row, 4, f"  {checked}  {name}", attr)
 
         # "Do not show again" checkbox
         dna_row = 12 + n + 1
         dna_box = "[x]" if do_not_show_config else "[ ]"
         dna_attr = curses.color_pair(3) | curses.A_BOLD if do_not_show_config else curses.color_pair(3)
-        safe_addstr(stdscr, dna_row, 4,
+        JJDlpDashboard.safe_addstr(stdscr, dna_row, 4,
                     f"  {dna_box}  Do not show again (press D to toggle)",
                     dna_attr)
 
@@ -2859,7 +2900,7 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
         sel_count = len(selected)
         footer = (f"  {sel_count} file(s) selected  "
                   f"↑/↓ navigate  Space toggle  Enter confirm  D do not show  ")
-        safe_addstr(stdscr, h - 1, 0,
+        JJDlpDashboard.safe_addstr(stdscr, h - 1, 0,
                     footer.ljust(w - 1)[:w - 1],
                     curses.color_pair(5) | curses.A_BOLD)
 
@@ -2941,21 +2982,21 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
 
         # Logo
         for i, line in enumerate(ASCII_LOGO):
-            safe_addstr(stdscr, 1 + i, 2, line, curses.color_pair(6) | curses.A_BOLD)
+            JJDlpDashboard.safe_addstr(stdscr, 1 + i, 2, line, curses.color_pair(6) | curses.A_BOLD)
 
         ts = time.strftime("%Y-%m-%d  %H:%M:%S")
-        safe_addstr(stdscr, 1, w - len(ts) - 3, ts, curses.color_pair(1))
-        safe_addstr(stdscr, 7, 2, "-" * (w - 4), curses.color_pair(1))
+        JJDlpDashboard.safe_addstr(stdscr, 1, w - len(ts) - 3, ts, curses.color_pair(1))
+        JJDlpDashboard.safe_addstr(stdscr, 7, 2, "-" * (w - 4), curses.color_pair(1))
 
         # Browser sub-title
         br_title_row = 9
-        safe_addstr(stdscr, br_title_row, 2,
+        JJDlpDashboard.safe_addstr(stdscr, br_title_row, 2,
                     "SELECT BROWSER",
                     curses.color_pair(5) | curses.A_BOLD)
-        safe_addstr(stdscr, br_title_row + 1, 2,
+        JJDlpDashboard.safe_addstr(stdscr, br_title_row + 1, 2,
                     "Select your browser for the yt-dlp --cookies-from-browser option.",
                     curses.color_pair(3))
-        safe_addstr(stdscr, br_title_row + 2, 2,
+        JJDlpDashboard.safe_addstr(stdscr, br_title_row + 2, 2,
                     "Note: Chrome based browsers are not supported. Firefox is recommended.",
                     curses.color_pair(3))
         applies_to_labels = [
@@ -2963,7 +3004,7 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
             for fname in chosen_files
             if file_cfgs[fname].get("downloader_cookies", True) or file_cfgs[fname].get("checker_cookies", False)
         ]
-        safe_addstr(stdscr, br_title_row + 4, 2,
+        JJDlpDashboard.safe_addstr(stdscr, br_title_row + 4, 2,
                     f"Applies to: {', '.join(applies_to_labels)}",
                     curses.color_pair(4))
 
@@ -2978,19 +3019,19 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
             else:
                 attr = curses.color_pair(1)
             label = f"  {dot}  {br}" + ("  ← remove cookies option" if br == "disabled" else "")
-            safe_addstr(stdscr, row, 4, label, attr)
+            JJDlpDashboard.safe_addstr(stdscr, row, 4, label, attr)
 
         # "Do not show again" checkbox (below the browser list)
         dna_row  = list_start_row + nb + 1
         dna_box  = "[x]" if do_not_show else "[ ]"
         dna_attr = curses.color_pair(3) | curses.A_BOLD if do_not_show else curses.color_pair(3)
-        safe_addstr(stdscr, dna_row, 4,
+        JJDlpDashboard.safe_addstr(stdscr, dna_row, 4,
                     f"  {dna_box}  Do not show again (press D to toggle)",
                     dna_attr)
 
         # Footer
         footer = "  ↑/↓ navigate  Enter = confirm  D = do not show again  Q = quit  "
-        safe_addstr(stdscr, h - 1, 0,
+        JJDlpDashboard.safe_addstr(stdscr, h - 1, 0,
                     footer.ljust(w - 1)[:w - 1],
                     curses.color_pair(5) | curses.A_BOLD)
 
@@ -3260,6 +3301,11 @@ def main() -> None:
     for cp in config_paths:
         site = SiteState(cp)
         sites.append(site)
+
+    def _dash_log(msg: str):
+        for s in sites:
+            s.log_line(msg)
+    _logger.configure(_get_output_mode, _dash_log)
 
     # Sort sites by site_order so they appear in the desired positions in the dashboard
     sites.sort(key=lambda s: s.site_order)

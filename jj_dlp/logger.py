@@ -43,15 +43,18 @@ debug_log_lock = threading.Lock()
 # ── References to output-mode state (injected by main module at startup) ──────
 # These are set by jj-dlp.py via configure() so logger doesn't import main.
 _output_mode_ref  = None   # callable() -> int  (1=curses, 2=terminal)
+_dashboard_log_ref = None  # callable(str) -> None
 
 
-def configure(output_mode_fn) -> None:
+def configure(output_mode_fn, dashboard_log_fn=None) -> None:
     """
-    Inject accessor for OUTPUT_MODE.
+    Inject accessor for OUTPUT_MODE and an optional dashboard logger.
     Call once from jj-dlp.py after the globals are defined there.
     """
-    global _output_mode_ref
+    global _output_mode_ref, _dashboard_log_ref
     _output_mode_ref = output_mode_fn
+    if dashboard_log_fn is not None:
+        _dashboard_log_ref = dashboard_log_fn
 
 
 # ── Per-tag debug filter ───────────────────────────────────────────────────────
@@ -60,7 +63,7 @@ def configure(output_mode_fn) -> None:
 # Set a tag to False to silence all dbg() calls that begin with [TAG].
 # Set to True to allow them through (subject to DEBUG_LOGS_ENABLED being on).
 #
-# Tags used in main.py:
+# Tags used in jj-dlp:
 #   DRAIN    — yt-dlp stdout/stderr pipe drain threads
 #   CHECKER  — liveness-check subprocess calls
 #   SPLIT    — split-recording file-tracking logic
@@ -68,6 +71,9 @@ def configure(output_mode_fn) -> None:
 #   PERF     — performance timing summaries (high-frequency)
 #   DISK     — disk usage display in the system panel
 #   UPDATER  — update checker and periodic updater thread
+#   TWITCH   — twitch eventsub and token operations
+#   KILL     — yt-dlp process termination
+#   CONFIG   — config editor save/backup operations
 #
 DBG_FILTERS: dict[str, bool] = {
     "DRAIN":   False,
@@ -75,22 +81,14 @@ DBG_FILTERS: dict[str, bool] = {
     "SPLIT":   False,
     "POPEN":   False,
     "PERF":    False,
-    "DISK":    True,
+    "DISK":    False,
     "UPDATER": False,
+    "TWITCH":  False,
+    "CONFIG":  True,   # config editor save/backup operations
+    "KILL":    True,
 }
 
 _dbg_filters_lock = threading.Lock()
-
-
-def configure_filters(filters: dict[str, bool]) -> None:
-    """
-    Replace the active DBG_FILTERS with *filters*.
-    Call once from main after the filter dict is defined there.
-    Filters set here override the defaults above.
-    """
-    global DBG_FILTERS
-    with _dbg_filters_lock:
-        DBG_FILTERS = dict(filters)
 
 
 # ── Startup log ───────────────────────────────────────────────────────────────
@@ -118,7 +116,10 @@ def startup_dbg_flush() -> None:
 
 # ── Runtime debug log ─────────────────────────────────────────────────────────
 
+_last_debug_err = ""
+
 def _write_debug_log(msg: str) -> None:
+    global _last_debug_err
     with debug_log_lock:
         enabled = DEBUG_LOGS_ENABLED
         path    = DEBUG_LOG_PATH
@@ -128,8 +129,12 @@ def _write_debug_log(msg: str) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:
             f.write(msg + "\n")
-    except Exception:
-        pass
+        _last_debug_err = ""
+    except Exception as e:
+        err_msg = f"DEBUG LOG ERROR: Could not write to {path}: {e}"
+        if _dashboard_log_ref and err_msg != _last_debug_err:
+            _dashboard_log_ref(err_msg)
+            _last_debug_err = err_msg
 
 
 def dbg(msg: str, site_name: str = "") -> None:
@@ -149,7 +154,7 @@ def dbg(msg: str, site_name: str = "") -> None:
         if end > 1:
             tag = msg[1:end]
             with _dbg_filters_lock:
-                allowed = DBG_FILTERS.get(tag, True)   # unknown tags pass through
+                allowed = DBG_FILTERS.get(tag, False)   # unknown tags are dropped
             if not allowed:
                 return
 

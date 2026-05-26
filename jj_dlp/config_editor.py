@@ -2,37 +2,16 @@ import os
 import shutil
 import curses
 from datetime import datetime
+from typing import NamedTuple
 
-def draw_box(stdscr, y1, x1, y2, x2, pair):
-    h, w = stdscr.getmaxyx()
-    def safe_ch(y, x, ch):
-        if 0 <= y < h and 0 <= x < w - 1:
-            try:
-                stdscr.addch(y, x, ch, curses.color_pair(pair))
-            except curses.error:
-                pass
-    for x in range(x1 + 1, x2):
-        safe_ch(y1, x, curses.ACS_HLINE)
-        safe_ch(y2, x, curses.ACS_HLINE)
-    for y in range(y1 + 1, y2):
-        safe_ch(y, x1, curses.ACS_VLINE)
-        safe_ch(y, x2, curses.ACS_VLINE)
-    safe_ch(y1, x1, curses.ACS_ULCORNER)
-    safe_ch(y1, x2, curses.ACS_URCORNER)
-    safe_ch(y2, x1, curses.ACS_LLCORNER)
-    safe_ch(y2, x2, curses.ACS_LRCORNER)
-
-def safe_addstr(stdscr, y, x, text, attr=0):
-    h, w = stdscr.getmaxyx()
-    if y < 0 or y >= h or x < 0 or x >= w:
-        return
-    max_len = w - x - 1
-    if max_len <= 0:
-        return
+try:
+    from .logger import dbg as _dbg
+except ImportError:
     try:
-        stdscr.addstr(y, x, str(text)[:max_len], attr)
-    except curses.error:
-        pass
+        from logger import dbg as _dbg
+    except ImportError:
+        def _dbg(msg: str, site_name: str = "") -> None:  # type: ignore[misc]
+            pass
 
 
 class ConfigItem:
@@ -46,33 +25,144 @@ class ConfigItem:
         self.comment = comment  # Help text parsed from the # line(s) above this key
 
 
-# ── Keys that live in global.conf (never shown in per-site editor) ────────────
-_GLOBAL_KEYS = {"DISK_DRIVES", "DEBUG_LOGS", "DEBUG_LOG_PATH", "CHECK_FOR_UPDATES", "UPDATE_INTERVAL", "ASK_FOR_BROWSER", "ASK_FOR_CONFIG","UPDATE_BRANCH"}
+# ══════════════════════════════════════════════════════════════════════════════
+# Single source of truth for all config keys
+#
+# scope    : "global"  → lives in global.conf, shown in GlobalConfigEditor
+#            "site"    → lives in per-site .conf, shown in site ConfigEditor
+# default  : value written when the key is missing / a fresh file is created
+# preserve : True  → value is carried over from the user's file during an update
+#            False → value is reset to the new template default on update
+# comment  : help text shown in the edit popup
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _KeyDef(NamedTuple):
+    name:     str
+    scope:    str   # "global" | "site"
+    default:  str
+    preserve: bool
+    comment:  str
+
+
+CONFIG_KEYS: tuple[_KeyDef, ...] = (
+    # ── Global keys (global.conf) ─────────────────────────────────────────────
+    _KeyDef("DISK_DRIVES",           "global", "",      True,
+            "Comma-separated list of drives or paths to show disk info in the system panel. "
+            "(e.g. C:\\,D:\\ or /home,/mnt/data)."),
+    _KeyDef("DEBUG_LOGS",            "global", "false", True,
+            "Enable debug logging to a file (true/false)."),
+    _KeyDef("DEBUG_LOG_PATH",        "global", "",      True,
+            "Path for the debug log file. Can be a relative or absolute path (e.g. logs/debug.log)."),
+    _KeyDef("CHECK_FOR_UPDATES",     "global", "true",  True,
+            "Whether to periodically check for app updates (true/false)."),
+    _KeyDef("UPDATE_INTERVAL",       "global", "30",    True,
+            "Number of minutes between app update checks."),
+    _KeyDef("ASK_FOR_BROWSER",       "global", "true",  True,
+            "Show the browser chooser on startup (true/false)."),
+    _KeyDef("ASK_FOR_CONFIG",        "global", "true",  True,
+            "Show the config file chooser on startup (true/false)."),
+    _KeyDef("UPDATE_BRANCH",         "global", "main",  True,
+            "Which branch of jj-dlp to update to. (main, testing, or experimental)."),
+
+    # ── Site keys (per-site .conf) ────────────────────────────────────────────
+    _KeyDef("SITE_LABEL",            "site",   "",      True,
+            "Display label for this site in the dashboard."),
+    _KeyDef("SITE_ORDER",            "site",   "999",   True,
+            "Sort position of this site in the dashboard (lower = further left)."),
+    _KeyDef("CHECK_INTERVAL",        "site",   "60",    False,
+            "Seconds between liveness checks for this site."),
+    _KeyDef("OUTPUT_DIR",            "site",   "recordings", True,
+            "Directory where recordings are saved."),
+    _KeyDef("OUTPUT_TMPL",           "site",   "%(title)s [%(id)s].%(ext)s", True,
+            "yt-dlp output filename template."),
+    _KeyDef("COOLDOWN_AFTER_RECORDING", "site", "5",   False,
+            "Seconds to wait after a recording ends before checking again."),
+    _KeyDef("SPLIT_AFTER",           "site",   "0",    True,
+            "Split recordings after this many seconds (0 = disabled)."),
+    _KeyDef("STALL_CHECK_INTERVAL",  "site",   "30",   False,
+            "Seconds between stall-detection checks."),
+    _KeyDef("STALL_TIMEOUT",         "site",   "120",  False,
+            "Seconds without output before a recording is considered stalled."),
+    _KeyDef("CONFIG_CHECK_INTERVAL", "site",   "3",    False,
+            "Seconds between config-file reload checks."),
+    _KeyDef("SITE_TMPL",             "site",   "",     False,
+            "URL template used to build the stream URL from a username."),
+    _KeyDef("PANEL_RESIZE",          "site",   "true", True,
+            "Allow the dashboard panel to be resized (true/false)."),
+    _KeyDef("LOGGING",               "site",   "false", False,
+            "Enable per-site log files (true/false)."),
+    _KeyDef("LOG_PATH",              "site",   "",     False,
+            "Path for per-site log files."),
+    _KeyDef("SPLIT_LOGS",            "site",   "false", False,
+            "Write a separate log file per recording session (true/false)."),
+    _KeyDef("POPUP_NOTIFICATIONS",   "site",   "true", True,
+            "Show popup notifications for recording events (true/false)."),
+    _KeyDef("POPUP_TIMEOUT",         "site",   "15",   True,
+            "Seconds a notification popup stays visible."),
+    _KeyDef("POPUP_COOLDOWN",        "site",   "30",   True,
+            "Minimum seconds between successive popups for the same site."),
+    _KeyDef("YT_DLP_PATH_WINDOWS",   "site",   "",     False,
+            "Path to yt-dlp executable on Windows. Leave blank to use the bundled copy."),
+    _KeyDef("YT_DLP_PATH_MAC",       "site",   "",     False,
+            "Path to yt-dlp executable on macOS. Leave blank to use the bundled copy."),
+    _KeyDef("YT_DLP_PATH_LINUX",     "site",   "",     False,
+            "Path to yt-dlp executable on Linux. Leave blank to use the bundled copy."),
+    _KeyDef("PROGRESS_BAR_MAX_HOURS","site",   "6",    True,
+            "Maximum hours shown on the recording progress bar."),
+    _KeyDef("PROGRESS_BAR_WIDTH",    "site",   "14",   True,
+            "Width (in characters) of the recording progress bar."),
+    _KeyDef("DOWNLOADER_COOKIES",    "site",   "true", False,
+            "Pass browser cookies to yt-dlp for downloading (true/false)."),
+    _KeyDef("CHECKER_COOKIES",       "site",   "false", False,
+            "Pass browser cookies to yt-dlp for liveness checks (true/false)."),
+    _KeyDef("LAST_LIVE_HIGHLIGHT",   "site",   "0",    True,
+            "Seconds to highlight a streamer after they were last seen live (0 = disabled)."),
+)
+
+# ── Derived helpers (consumed by this module and importable by others) ─────────
+
+# Keys that belong in global.conf — used to filter them out of the site editor
+_GLOBAL_KEYS: set[str] = {k.name for k in CONFIG_KEYS if k.scope == "global"}
+
+# Ordered list of global key names (preserves declaration order above)
+_GLOBAL_KEYS_ORDER: list[str] = [k.name for k in CONFIG_KEYS if k.scope == "global"]
+
+# Default values keyed by name — for both scopes
+_KEY_DEFAULTS: dict[str, str] = {k.name: k.default for k in CONFIG_KEYS}
+
+# Help comments keyed by name
+_KEY_COMMENTS: dict[str, str] = {k.name: k.comment for k in CONFIG_KEYS}
+
+# Keys that must be preserved across an update (both global and site)
+PRESERVED_KEYS: list[str] = [k.name for k in CONFIG_KEYS if k.preserve]
+
+
+def _wrap_text(text: str, width: int) -> list:
+    """Word-wrap text to fit within `width` columns, returning a list of lines."""
+    if not text or width <= 0:
+        return []
+    words = text.split()
+    lines, current = [], ""
+    for word in words:
+        if current:
+            if len(current) + 1 + len(word) <= width:
+                current += " " + word
+            else:
+                lines.append(current)
+                current = word
+        else:
+            current = word
+    if current:
+        lines.append(current)
+    return lines
 
 
 class GlobalConfigEditor:
-    """Loads and edits global.conf — the six app-wide settings."""
+    """Loads and edits global.conf — the app-wide settings."""
 
-    GLOBAL_KEYS_ORDER = [
-        "DISK_DRIVES",
-        "DEBUG_LOGS",
-        "DEBUG_LOG_PATH",
-        "CHECK_FOR_UPDATES",
-        "UPDATE_INTERVAL",
-        "ASK_FOR_BROWSER",
-        "ASK_FOR_CONFIG",
-        "UPDATE_BRANCH",
-    ]
-    GLOBAL_KEYS_COMMENTS = {
-        "DISK_DRIVES":        "Comma-separated list of drives or paths to show disk info in the system panel. (e.g. C:\\,D:\\  or  /home,/mnt/data).",
-        "DEBUG_LOGS":         "Enable debug logging to a file(true/false).",
-        "DEBUG_LOG_PATH":     "Path for the debug log file. Can be a relative or absolute path (e.g. logs/debug.log)",
-        "CHECK_FOR_UPDATES":  "Whether to periodically check for app updates (true/false).",
-        "UPDATE_INTERVAL":    "Number of minutes between app update checks.",
-        "ASK_FOR_BROWSER":    "Show the browser chooser on startup (true/false).",
-        "ASK_FOR_CONFIG":     "Show the config file chooser on startup (true/false).",
-        "UPDATE_BRANCH":      "Which branch of jj-dlp to update to. (main, testing, or experimental).",
-    }
+    # Derived from CONFIG_KEYS — no duplication needed here
+    GLOBAL_KEYS_ORDER    = _GLOBAL_KEYS_ORDER
+    GLOBAL_KEYS_COMMENTS = _KEY_COMMENTS
 
     def __init__(self, dashboard, on_save=None):
         self.dashboard = dashboard
@@ -111,31 +201,14 @@ class GlobalConfigEditor:
         self._parse()
 
     def _create_default(self):
-        """Write a minimal global.conf with all keys in the configs/ folder."""
-        lines = [
-            "[General]\n",
-            "\n",
-            "# Comma-separated disk drives/mount points to monitor.\n",
-            "DISK_DRIVES =\n",
-            "\n",
-            "# Enable debug logging (true/false).\n",
-            "DEBUG_LOGS = false\n",
-            "\n",
-            "# Path for the debug log file. Leave blank to use the default location.\n",
-            "DEBUG_LOG_PATH =\n",
-            "\n",
-            "# Check for updates on startup (true/false).\n",
-            "CHECK_FOR_UPDATES = true\n",
-            "\n",
-            "# Update check interval in minutes.\n",
-            "UPDATE_INTERVAL = 30\n",
-            "\n",
-            "# Show the browser-cookie picker on startup (true/false).\n",
-            "ASK_FOR_BROWSER = true\n",
-            "\n",
-            "# Show the config file chooser on startup (true/false).\n",
-            "ASK_FOR_CONFIG = true\n",
-        ]
+        """Write a minimal global.conf with all global keys in the configs/ folder."""
+        lines = ["[General]\n", "\n"]
+        for kdef in CONFIG_KEYS:
+            if kdef.scope != "global":
+                continue
+            lines.append(f"# {kdef.comment}\n")
+            lines.append(f"{kdef.name} = {kdef.default}\n")
+            lines.append("\n")
         try:
             with open(self.conf_path, "w", encoding="utf-8") as f:
                 f.writelines(lines)
@@ -180,16 +253,7 @@ class GlobalConfigEditor:
 
     def _append_key(self, key: str):
         """Append a missing key to the [General] section of self.lines and self.items."""
-        defaults = {
-            "DISK_DRIVES": "",
-            "DEBUG_LOGS": "false",
-            "DEBUG_LOG_PATH": "",
-            "CHECK_FOR_UPDATES": "true",
-            "UPDATE_INTERVAL": "30",
-            "ASK_FOR_BROWSER": "true",
-            "ASK_FOR_CONFIG": "true",
-        }
-        val = defaults.get(key, "")
+        val = _KEY_DEFAULTS.get(key, "")
         new_line = f"{key} = {val}\n"
         # Find end of [General] section or end of file
         insert_at = len(self.lines)
@@ -204,19 +268,28 @@ class GlobalConfigEditor:
 
     def save(self):
         """Write self.lines back to global.conf with a backup."""
-        backup_dir = "backups"
-        os.makedirs(backup_dir, exist_ok=True)
+        _dbg(f"[CONFIG] GlobalConfigEditor.save() called — conf_path={self.conf_path!r}")
+        backup_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(self.conf_path))), "backups")
+        _dbg(f"[CONFIG] backup_dir resolved to {backup_dir!r}")
+        try:
+            os.makedirs(backup_dir, exist_ok=True)
+            _dbg(f"[CONFIG] backup_dir created/confirmed OK")
+        except Exception as e:
+            _dbg(f"[CONFIG] ERROR creating backup_dir: {e}")
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         backup_path = os.path.join(backup_dir, f"global.conf.{timestamp}.bak")
+        _dbg(f"[CONFIG] backup_path={backup_path!r}, source exists={os.path.isfile(self.conf_path)}")
         try:
             shutil.copy2(self.conf_path, backup_path)
-        except Exception:
-            pass
+            _dbg(f"[CONFIG] backup written OK")
+        except Exception as e:
+            _dbg(f"[CONFIG] ERROR writing backup: {e}")
         try:
             with open(self.conf_path, "w", encoding="utf-8") as f:
                 f.writelines(self.lines)
-        except Exception:
-            pass
+            _dbg(f"[CONFIG] global.conf written OK ({len(self.lines)} lines)")
+        except Exception as e:
+            _dbg(f"[CONFIG] ERROR writing global.conf: {e}")
         # Reload so line indices stay accurate
         self._loaded = False
         self._load()
@@ -267,12 +340,12 @@ class GlobalConfigEditor:
         self._ensure_loaded()
         db = self.dashboard
 
-        draw_box(stdscr, y1, x1, y2, x2, db.C_SYSTEM)
+        self.dashboard.draw_box(stdscr, y1, x1, y2, x2, db.C_SYSTEM)
         title = " GLOBAL SETTINGS "
-        safe_addstr(stdscr, y1, x1 + 2, title, curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
+        self.dashboard.safe_addstr(stdscr, y1, x1 + 2, title, curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
         if is_active:
             mode_str = " [ GLOBAL ] "
-            safe_addstr(stdscr, y1, x2 - len(mode_str) - 1, mode_str,
+            self.dashboard.safe_addstr(stdscr, y1, x2 - len(mode_str) - 1, mode_str,
                         curses.color_pair(db.C_LIVE) | curses.A_BOLD)
 
         visible_rows = (y2 - y1) - 2
@@ -290,37 +363,19 @@ class GlobalConfigEditor:
                         if is_sel else curses.color_pair(db.C_WARN) | curses.A_BOLD)
             val_attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
                         if is_sel else curses.color_pair(db.C_LIVE))
-            safe_addstr(stdscr, row_y, x1 + 1, prefix + f"{item.key:<22}", key_attr)
-            safe_addstr(stdscr, row_y, x1 + 26, "= " + str(item.value), val_attr)
+            self.dashboard.safe_addstr(stdscr, row_y, x1 + 1, prefix + f"{item.key:<22}", key_attr)
+            self.dashboard.safe_addstr(stdscr, row_y, x1 + 26, "= " + str(item.value), val_attr)
             row_y += 1
 
         if self.popup_mode and self.editing_item:
             self._draw_popup(stdscr)
-
-    def _wrap_text(self, text: str, width: int) -> list:
-        if not text or width <= 0:
-            return []
-        words = text.split()
-        lines, current = [], ""
-        for word in words:
-            if current:
-                if len(current) + 1 + len(word) <= width:
-                    current += " " + word
-                else:
-                    lines.append(current)
-                    current = word
-            else:
-                current = word
-        if current:
-            lines.append(current)
-        return lines
 
     def _draw_popup(self, stdscr):
         db = self.dashboard
         h, w = stdscr.getmaxyx()
         box_w = min(60, w - 4)
         inner_w = box_w - 4
-        comment_lines = self._wrap_text(self.editing_item.comment, inner_w) if self.editing_item.comment else []
+        comment_lines = _wrap_text(self.editing_item.comment, inner_w) if self.editing_item.comment else []
         inner_rows = 4 + len(comment_lines) + (1 if comment_lines else 0)
         box_h = max(inner_rows + 1, 7)
         box_h = min(box_h, h - 4)
@@ -329,26 +384,26 @@ class GlobalConfigEditor:
         by2 = by1 + box_h
         bx2 = bx1 + box_w
         for y in range(by1, by2 + 1):
-            safe_addstr(stdscr, y, bx1, " " * (box_w + 1), curses.color_pair(db.C_NORMAL))
-        draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
-        safe_addstr(stdscr, by1, bx1 + 2, " EDIT GLOBAL VALUE ",
+            self.dashboard.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), curses.color_pair(db.C_NORMAL))
+        self.dashboard.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
+        self.dashboard.safe_addstr(stdscr, by1, bx1 + 2, " EDIT GLOBAL VALUE ",
                     curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
         row = by1 + 2
-        safe_addstr(stdscr, row, bx1 + 2, f"Key: {self.editing_item.key}",
+        self.dashboard.safe_addstr(stdscr, row, bx1 + 2, f"Key: {self.editing_item.key}",
                     curses.color_pair(db.C_CHROME))
         row += 1
         if comment_lines:
             for cl in comment_lines:
-                safe_addstr(stdscr, row, bx1 + 2, cl, curses.color_pair(db.C_DIM))
+                self.dashboard.safe_addstr(stdscr, row, bx1 + 2, cl, curses.color_pair(db.C_DIM))
                 row += 1
             row += 1
         else:
             row += 1
-        safe_addstr(stdscr, row, bx1 + 2, "New Value:",
+        self.dashboard.safe_addstr(stdscr, row, bx1 + 2, "New Value:",
                     curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
-        safe_addstr(stdscr, row, bx1 + 13, (self.popup_buf + "_")[:box_w - 15],
+        self.dashboard.safe_addstr(stdscr, row, bx1 + 13, (self.popup_buf + "_")[:box_w - 15],
                     curses.color_pair(db.C_NORMAL) | curses.A_BOLD)
-        safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel ",
+        self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel ",
                     curses.color_pair(db.C_INVHEAD))
 
 
@@ -422,24 +477,37 @@ class ConfigEditor:
 
     def save_file(self):
         if not self.current_site_path or not self.lines:
+            _dbg(f"[CONFIG] save_file() aborted — site_path={self.current_site_path!r}, lines={len(self.lines) if self.lines else 0}")
             return
 
+        _dbg(f"[CONFIG] ConfigEditor.save_file() called — site_path={self.current_site_path!r}")
+
         # Create backup
-        backup_dir = "backups"
-        os.makedirs(backup_dir, exist_ok=True)
+        backup_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(self.current_site_path))), "backups")
+        _dbg(f"[CONFIG] backup_dir resolved to {backup_dir!r}")
+        try:
+            os.makedirs(backup_dir, exist_ok=True)
+            _dbg(f"[CONFIG] backup_dir created/confirmed OK")
+        except Exception as e:
+            _dbg(f"[CONFIG] ERROR creating backup_dir: {e}")
         base = os.path.basename(self.current_site_path)
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         backup_path = os.path.join(backup_dir, f"{base}.{timestamp}.bak")
+        _dbg(f"[CONFIG] backup_path={backup_path!r}, source exists={os.path.isfile(self.current_site_path)}")
         try:
             shutil.copy2(self.current_site_path, backup_path)
+            _dbg(f"[CONFIG] backup written OK")
         except Exception as e:
+            _dbg(f"[CONFIG] ERROR writing backup: {e}")
             self.dashboard.sites[self.selected_site_idx].log_line(f"Failed to backup config: {e}")
 
         # Write new config
         try:
             with open(self.current_site_path, "w", encoding="utf-8") as f:
                 f.writelines(self.lines)
+            _dbg(f"[CONFIG] site config written OK ({len(self.lines)} lines)")
         except Exception as e:
+            _dbg(f"[CONFIG] ERROR writing site config: {e}")
             self.dashboard.sites[self.selected_site_idx].log_line(f"Failed to save config: {e}")
 
         # Reload
@@ -476,7 +544,7 @@ class ConfigEditor:
             focus_hint = "  Tab: switch to Global Settings ►  "
         else:
             focus_hint = "  ◄ Tab: switch to Site Config  "
-        safe_addstr(stdscr, content_y1, global_x1, focus_hint,
+        self.dashboard.safe_addstr(stdscr, content_y1, global_x1, focus_hint,
                     curses.color_pair(self.dashboard.C_DIM))
 
         # ── Draw global settings panel (right, narrower) ──────────────────────
@@ -485,7 +553,7 @@ class ConfigEditor:
 
         # ── Draw Site Selector above the site box ─────────────────────────────
         tab_x = site_x1 + 1
-        safe_addstr(stdscr, content_y1, site_x1, "  Site: ",
+        self.dashboard.safe_addstr(stdscr, content_y1, site_x1, "  Site: ",
                     curses.color_pair(self.dashboard.C_DIM))
         tab_x += 8
         for i, site in enumerate(self.sites):
@@ -494,21 +562,21 @@ class ConfigEditor:
             attr = (curses.color_pair(self.dashboard.C_HILIGHT) | curses.A_BOLD
                     if i == self.selected_site_idx
                     else curses.color_pair(self.dashboard.C_CHROME))
-            safe_addstr(stdscr, content_y1, tab_x, label, attr)
+            self.dashboard.safe_addstr(stdscr, content_y1, tab_x, label, attr)
             tab_x += len(label) + 1
 
         # ── Draw per-site editor box (left, wider) ────────────────────────────
         site_box_y1 = content_y1 + 1
-        draw_box(stdscr, site_box_y1, site_x1, y2, site_x2, self.dashboard.C_CHROME)
+        self.dashboard.draw_box(stdscr, site_box_y1, site_x1, y2, site_x2, self.dashboard.C_CHROME)
         if self._focus == "site":
             mode_str = " [ SITE CONFIG ] "
-            safe_addstr(stdscr, site_box_y1, site_x2 - len(mode_str) - 1, mode_str,
+            self.dashboard.safe_addstr(stdscr, site_box_y1, site_x2 - len(mode_str) - 1, mode_str,
                         curses.color_pair(self.dashboard.C_LIVE) | curses.A_BOLD)
-        safe_addstr(stdscr, site_box_y1, site_x1 + 2, " SITE CONFIGURATION ",
+        self.dashboard.safe_addstr(stdscr, site_box_y1, site_x1 + 2, " SITE CONFIGURATION ",
                     curses.color_pair(self.dashboard.C_INVHEAD) | curses.A_BOLD)
 
         if not self.items:
-            safe_addstr(stdscr, site_box_y1 + 2, site_x1 + 4,
+            self.dashboard.safe_addstr(stdscr, site_box_y1 + 2, site_x1 + 4,
                         "No configurable items found.",
                         curses.color_pair(self.dashboard.C_DIM))
         else:
@@ -536,15 +604,15 @@ class ConfigEditor:
                     disp_text = f"[{item.key}]"
                     sec_attr = (curses.color_pair(self.dashboard.C_HILIGHT) | curses.A_BOLD
                                 if is_selected else curses.color_pair(self.dashboard.C_WARN) | curses.A_BOLD)
-                    safe_addstr(stdscr, row_y, site_x1 + 2, prefix + disp_text, sec_attr)
+                    self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 2, prefix + disp_text, sec_attr)
                 else:
                     key_attr = (attr if is_selected
                                 else curses.color_pair(self.dashboard.C_WARN) | curses.A_BOLD)
                     val_attr = (attr if is_selected
                                 else curses.color_pair(self.dashboard.C_LIVE))
-                    safe_addstr(stdscr, row_y, site_x1 + 2, prefix + f"{item.key:<25}", key_attr)
+                    self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 2, prefix + f"{item.key:<25}", key_attr)
                     if item.has_equals:
-                        safe_addstr(stdscr, row_y, site_x1 + 29, "= " + str(item.value), val_attr)
+                        self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 29, "= " + str(item.value), val_attr)
                 row_y += 1
 
         # Draw popup (whichever sub-editor owns it)
@@ -553,25 +621,6 @@ class ConfigEditor:
         elif self._focus == "site" and self.popup_mode and self.editing_item:
             self.draw_popup(stdscr)
 
-    def _wrap_text(self, text: str, width: int) -> list:
-        """Word-wrap text to fit within `width` columns, returning a list of lines."""
-        if not text or width <= 0:
-            return []
-        words = text.split()
-        lines, current = [], ""
-        for word in words:
-            if current:
-                if len(current) + 1 + len(word) <= width:
-                    current += " " + word
-                else:
-                    lines.append(current)
-                    current = word
-            else:
-                current = word
-        if current:
-            lines.append(current)
-        return lines
-
     def draw_popup(self, stdscr):
         h, w = stdscr.getmaxyx()
         box_w = min(60, w - 4)
@@ -579,7 +628,7 @@ class ConfigEditor:
 
         comment_lines = []
         if self.editing_item and self.editing_item.comment:
-            comment_lines = self._wrap_text(self.editing_item.comment, inner_w)
+            comment_lines = _wrap_text(self.editing_item.comment, inner_w)
 
         inner_rows = 4 + len(comment_lines) + (1 if comment_lines else 0)
         box_h = inner_rows + 1
@@ -592,28 +641,28 @@ class ConfigEditor:
         bx2 = bx1 + box_w
 
         for y in range(by1, by2 + 1):
-            safe_addstr(stdscr, y, bx1, " " * (box_w + 1), curses.color_pair(self.dashboard.C_NORMAL))
+            self.dashboard.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), curses.color_pair(self.dashboard.C_NORMAL))
 
-        draw_box(stdscr, by1, bx1, by2, bx2, self.dashboard.C_WARN)
+        self.dashboard.draw_box(stdscr, by1, bx1, by2, bx2, self.dashboard.C_WARN)
         title = " EDIT CONFIG VALUE "
-        safe_addstr(stdscr, by1, bx1 + 2, title, curses.color_pair(self.dashboard.C_WARN) | curses.A_BOLD)
+        self.dashboard.safe_addstr(stdscr, by1, bx1 + 2, title, curses.color_pair(self.dashboard.C_WARN) | curses.A_BOLD)
 
         row = by1 + 2
-        safe_addstr(stdscr, row, bx1 + 2, f"Key: {self.editing_item.key}", curses.color_pair(self.dashboard.C_CHROME))
+        self.dashboard.safe_addstr(stdscr, row, bx1 + 2, f"Key: {self.editing_item.key}", curses.color_pair(self.dashboard.C_CHROME))
         row += 1
 
         if comment_lines:
             for cl in comment_lines:
-                safe_addstr(stdscr, row, bx1 + 2, cl, curses.color_pair(self.dashboard.C_DIM))
+                self.dashboard.safe_addstr(stdscr, row, bx1 + 2, cl, curses.color_pair(self.dashboard.C_DIM))
                 row += 1
             row += 1
         else:
             row += 1
 
-        safe_addstr(stdscr, row, bx1 + 2, "New Value:", curses.color_pair(self.dashboard.C_WARN) | curses.A_BOLD)
-        safe_addstr(stdscr, row, bx1 + 13, (self.popup_buf + "_")[:box_w - 15], curses.color_pair(self.dashboard.C_NORMAL) | curses.A_BOLD)
+        self.dashboard.safe_addstr(stdscr, row, bx1 + 2, "New Value:", curses.color_pair(self.dashboard.C_WARN) | curses.A_BOLD)
+        self.dashboard.safe_addstr(stdscr, row, bx1 + 13, (self.popup_buf + "_")[:box_w - 15], curses.color_pair(self.dashboard.C_NORMAL) | curses.A_BOLD)
 
-        safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel ", curses.color_pair(self.dashboard.C_INVHEAD))
+        self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel ", curses.color_pair(self.dashboard.C_INVHEAD))
 
     def handle_key(self, key) -> bool:
         """Returns True if the key was consumed by the editor."""
