@@ -396,7 +396,7 @@ class GlobalConfigEditor:
 
         self.dashboard.draw_box(stdscr, y1, x1, y2, x2, db.C_SYSTEM)
         title = " GLOBAL SETTINGS "
-        self.dashboard.safe_addstr(stdscr, y1, x1 + 2, title, curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
+        self.dashboard.safe_addstr(stdscr, y1, x1 + 2, title, curses.color_pair(db.C_LIVE) | curses.A_BOLD)
         if is_active:
             mode_str = " [ GLOBAL ] "
             self.dashboard.safe_addstr(stdscr, y1, x2 - len(mode_str) - 1, mode_str,
@@ -641,7 +641,7 @@ class ConfigEditor:
             self.dashboard.safe_addstr(stdscr, site_box_y1, site_x2 - len(mode_str) - 1, mode_str,
                         curses.color_pair(self.dashboard.C_LIVE) | curses.A_BOLD)
         self.dashboard.safe_addstr(stdscr, site_box_y1, site_x1 + 2, " SITE SETTINGS ",
-                    curses.color_pair(self.dashboard.C_INVHEAD) | curses.A_BOLD)
+                    curses.color_pair(self.dashboard.C_LIVE) | curses.A_BOLD)
 
         if not self.items:
             self.dashboard.safe_addstr(stdscr, site_box_y1 + 2, site_x1 + 4,
