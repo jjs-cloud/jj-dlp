@@ -74,6 +74,7 @@ def configure(output_mode_fn, dashboard_log_fn=None) -> None:
 #   TWITCH   — twitch eventsub and token operations
 #   KILL     — yt-dlp process termination
 #   CONFIG   — config editor save/backup operations
+#   POPUP    — live popup notification creation and suppression
 #
 DBG_FILTERS: dict[str, bool] = {
     "DRAIN":   False,
@@ -82,10 +83,11 @@ DBG_FILTERS: dict[str, bool] = {
     "POPEN":   False,
     "PERF":    False,
     "DISK":    False,
-    "UPDATER": True,
+    "UPDATER": False,
     "TWITCH":  False,
-    "CONFIG":  True,   # config editor save/backup operations
-    "KILL":    True,
+    "CONFIG":  False,
+    "KILL":    False,
+    "POPUP":   True,
 }
 
 _dbg_filters_lock = threading.Lock()

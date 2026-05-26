@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.3.5"
+__version__ = "1.3.6"
 
 import subprocess
 import time
@@ -726,9 +726,11 @@ def cmd_display_str(cmd: List[str]) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 15) -> None:
+    dbg(f"[POPUP] enqueue popup streamer={streamer!r} source={source!r} timeout={popup_timeout}")
     def _run():
         try:
             import tkinter as tk
+            dbg(f"[POPUP] tkinter imported successfully for streamer={streamer!r}")
             root = tk.Tk()
             root.withdraw()
             win = tk.Toplevel(root)
@@ -741,11 +743,12 @@ def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 1
                      font=("Segoe UI", 10), fg="gray", padx=20).pack()
             tk.Button(win, text="Dismiss", command=win.destroy, padx=12, pady=4).pack(pady=(4, 12))
             win.after(popup_timeout * 1000, win.destroy)
+            dbg(f"[POPUP] running popup mainloop for streamer={streamer!r}")
             root.mainloop()
-        except ImportError:
-            pass
-        except Exception:
-            pass
+        except ImportError as ie:
+            dbg(f"[POPUP] tkinter import failed: {ie}")
+        except Exception as e:
+            dbg(f"[POPUP] exception while creating popup for streamer={streamer!r}: {e}")
     threading.Thread(target=_run, daemon=True, name=f"popup-{streamer}").start()
 
 
@@ -1511,11 +1514,18 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                 if streamer not in site.dash_live_since:
                     site.dash_live_since[streamer] = time.time()
             if show_popup and cfg.get("popup_notifications", True):
+                dbg(f"[POPUP] popup condition check for streamer={streamer!r} show_popup={show_popup} popup_notifications={cfg.get('popup_notifications', True)}")
                 cooldown_secs = cfg.get("popup_cooldown", 30) * 60
                 last_shown    = site.popup_last_shown.get(streamer, 0)
-                if time.time() - last_shown >= cooldown_secs:
+                elapsed       = time.time() - last_shown
+                if elapsed >= cooldown_secs:
+                    dbg(f"[POPUP] popup allowed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s cooldown={cooldown_secs}s")
                     _show_live_popup(streamer, source="poll", popup_timeout=cfg.get("popup_timeout", 15))
                     site.popup_last_shown[streamer] = time.time()
+                else:
+                    dbg(f"[POPUP] popup suppressed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s required={cooldown_secs}s")
+            else:
+                dbg(f"[POPUP] popup skipped for streamer={streamer!r} show_popup={show_popup} popup_notifications={cfg.get('popup_notifications', True)}")
             t = threading.Thread(target=record_stream, args=(streamer, cfg, site), daemon=True)
             t.start()
             site.recording_threads.append(t)
@@ -1565,12 +1575,20 @@ def monitor_site(site: "SiteState") -> None:
             if broadcaster_login in current_cfg.get("streamers", []) and \
                broadcaster_login not in current_cfg.get("blocked", []):
                 if current_cfg.get("popup_notifications", True):
+                    dbg(f"[POPUP] eventsub popup condition check for broadcaster={broadcaster_login!r} popup_notifications={current_cfg.get('popup_notifications', True)}")
                     cooldown_secs = current_cfg.get("popup_cooldown", 30) * 60
                     last_shown    = site.popup_last_shown.get(broadcaster_login, 0)
-                    if time.time() - last_shown >= cooldown_secs:
+                    elapsed       = time.time() - last_shown
+                    if elapsed >= cooldown_secs:
+                        dbg(f"[POPUP] eventsub popup allowed by cooldown for broadcaster={broadcaster_login!r} elapsed={elapsed:.1f}s cooldown={cooldown_secs}s")
                         _show_live_popup(broadcaster_login, source="eventsub",
                                          popup_timeout=current_cfg.get("popup_timeout", 15))
                         site.popup_last_shown[broadcaster_login] = time.time()
+                    else:
+                        dbg(f"[POPUP] eventsub popup suppressed by cooldown for broadcaster={broadcaster_login!r} elapsed={elapsed:.1f}s required={cooldown_secs}s")
+                else:
+                    dbg(f"[POPUP] eventsub popups disabled for broadcaster={broadcaster_login!r}")
+
                 start_recording_if_needed([broadcaster_login], current_cfg, site, show_popup=False)
 
         try:
