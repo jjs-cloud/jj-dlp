@@ -137,6 +137,28 @@ _KEY_COMMENTS: dict[str, str] = {k.name: k.comment for k in CONFIG_KEYS}
 PRESERVED_KEYS: list[str] = [k.name for k in CONFIG_KEYS if k.preserve]
 
 
+def _validate_value(key: str, value: str) -> tuple[bool, str]:
+    """Validate config values based on their expected types."""
+    bool_keys = {"DEBUG_LOGS", "CHECK_FOR_UPDATES", "ASK_FOR_BROWSER", "ASK_FOR_CONFIG", 
+                 "PANEL_RESIZE", "LOGGING", "SPLIT_LOGS", "POPUP_NOTIFICATIONS", 
+                 "DOWNLOADER_COOKIES", "CHECKER_COOKIES"}
+    int_keys = {"UPDATE_INTERVAL", "SITE_ORDER", "CHECK_INTERVAL", "COOLDOWN_AFTER_RECORDING", 
+                "SPLIT_AFTER", "STALL_CHECK_INTERVAL", "STALL_TIMEOUT", "CONFIG_CHECK_INTERVAL", 
+                "POPUP_TIMEOUT", "POPUP_COOLDOWN", "PROGRESS_BAR_MAX_HOURS", "PROGRESS_BAR_WIDTH", 
+                "LAST_LIVE_HIGHLIGHT"}
+    if key in bool_keys:
+        if value.lower() not in ("true", "false", "yes", "no", "1", "0"):
+            return False, "Must be true or false"
+    if key in int_keys:
+        try:
+            val = int(value)
+            if val < 0 and key != "SITE_ORDER":
+                return False, "Must be >= 0"
+        except ValueError:
+            return False, "Must be an integer"
+    return True, ""
+
+
 def _wrap_text(text: str, width: int) -> list:
     """Word-wrap text to fit within `width` columns, returning a list of lines."""
     if not text or width <= 0:
@@ -174,6 +196,7 @@ class GlobalConfigEditor:
         self.scroll_offset = 0
         self.popup_mode = False
         self.popup_buf = ""
+        self.popup_error = ""
         self.editing_item = None
         self._loaded = False
 
@@ -306,19 +329,27 @@ class GlobalConfigEditor:
             if key == 27:
                 self.popup_mode = False
                 self.popup_buf = ""
+                self.popup_error = ""
                 self.editing_item = None
             elif key in (curses.KEY_BACKSPACE, 127, 8):
                 self.popup_buf = self.popup_buf[:-1]
+                self.popup_error = ""
             elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
                 if self.editing_item:
                     new_val = self.popup_buf.strip()
+                    is_valid, err_msg = _validate_value(self.editing_item.key, new_val)
+                    if not is_valid:
+                        self.popup_error = err_msg
+                        return True
                     self.lines[self.editing_item.line_idx] = f"{self.editing_item.key} = {new_val}\n"
                     self.save()
                 self.popup_mode = False
                 self.popup_buf = ""
+                self.popup_error = ""
                 self.editing_item = None
             elif 32 <= key < 127:
                 self.popup_buf += chr(key)
+                self.popup_error = ""
             return True
 
         if key == curses.KEY_UP:
@@ -406,8 +437,12 @@ class GlobalConfigEditor:
                     curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
         self.dashboard.safe_addstr(stdscr, row, bx1 + 13, (self.popup_buf + "_")[:box_w - 15],
                     curses.color_pair(db.C_NORMAL) | curses.A_BOLD)
-        self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel ",
-                    curses.color_pair(db.C_INVHEAD))
+        if self.popup_error:
+            self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, f" Error: {self.popup_error} ",
+                        curses.color_pair(db.C_WARN) | curses.A_BOLD)
+        else:
+            self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel ",
+                        curses.color_pair(db.C_INVHEAD))
 
 
 class ConfigEditor:
@@ -419,6 +454,7 @@ class ConfigEditor:
         self.selected_idx = 0
         self.popup_mode = False
         self.popup_buf = ""
+        self.popup_error = ""
         self.lines = []
         self.items = []
         self.current_site_path = None
@@ -665,7 +701,10 @@ class ConfigEditor:
         self.dashboard.safe_addstr(stdscr, row, bx1 + 2, "New Value:", curses.color_pair(self.dashboard.C_WARN) | curses.A_BOLD)
         self.dashboard.safe_addstr(stdscr, row, bx1 + 13, (self.popup_buf + "_")[:box_w - 15], curses.color_pair(self.dashboard.C_NORMAL) | curses.A_BOLD)
 
-        self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel ", curses.color_pair(self.dashboard.C_INVHEAD))
+        if self.popup_error:
+            self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, f" Error: {self.popup_error} ", curses.color_pair(self.dashboard.C_WARN) | curses.A_BOLD)
+        else:
+            self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel ", curses.color_pair(self.dashboard.C_INVHEAD))
 
     def handle_key(self, key) -> bool:
         """Returns True if the key was consumed by the editor."""
@@ -687,12 +726,18 @@ class ConfigEditor:
             if key == 27:
                 self.popup_mode = False
                 self.popup_buf = ""
+                self.popup_error = ""
                 self.editing_item = None
             elif key in (curses.KEY_BACKSPACE, 127, 8):
                 self.popup_buf = self.popup_buf[:-1]
+                self.popup_error = ""
             elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
                 if self.editing_item:
                     new_val = self.popup_buf.strip()
+                    is_valid, err_msg = _validate_value(self.editing_item.key, new_val)
+                    if not is_valid:
+                        self.popup_error = err_msg
+                        return True
                     if self.editing_item.has_equals:
                         self.lines[self.editing_item.line_idx] = f"{self.editing_item.key} = {new_val}\n"
                     else:
@@ -702,9 +747,11 @@ class ConfigEditor:
                     site.trigger_event.set()
                 self.popup_mode = False
                 self.popup_buf = ""
+                self.popup_error = ""
                 self.editing_item = None
             elif 32 <= key < 127:
                 self.popup_buf += chr(key)
+                self.popup_error = ""
             return True
 
         if key == 27:
