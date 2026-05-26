@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.5.6"
+__version__ = "1.5.8"
 
 import subprocess
 import time
@@ -1236,10 +1236,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                     return
 
                 _t0 = time.time()
-                current_cfg = load_config(cfg["config_path"])
+                current_cfg = site.get_cached_config()
                 _load_cfg_ms = (time.time() - _t0) * 1000
                 if _split_log_counter % 30 == 0:
-                    dbg(f"[PERF][record_stream/inner] load_config took {_load_cfg_ms:.2f}ms streamer={streamer!r}")
+                    dbg(f"[PERF][record_stream/inner] get_cached_config took {_load_cfg_ms:.2f}ms streamer={streamer!r}")
 
                 if streamer in current_cfg["blocked"]:
                     kill_proc(proc)
