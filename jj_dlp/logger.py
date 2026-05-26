@@ -82,7 +82,7 @@ DBG_FILTERS: dict[str, bool] = {
     "POPEN":   False,
     "PERF":    False,
     "DISK":    False,
-    "UPDATER": False,
+    "UPDATER": True,
     "TWITCH":  False,
     "CONFIG":  True,   # config editor save/backup operations
     "KILL":    True,

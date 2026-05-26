@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.2.13"
+__version__ = "1.3.0"
 
 import subprocess
 import time
@@ -420,22 +420,7 @@ _global_json_lock: threading.Lock = threading.Lock()
 
 
 def _global_json_path() -> str:
-    """Return the absolute path to global.json.
-
-    Resolution order:
-    - ``JJ_DLP_GLOBAL_JSON_PATH`` env var: explicit full path (used by the
-      stage-2 updater subprocess so it always writes to the real global.json,
-      not the one inside a temporary extraction folder).
-    - ``JJ_DLP_GLOBAL_DIR`` env var: directory override; ``global.json`` is
-      appended.
-    - Default: ``global.json`` next to this file (inside the package dir).
-    """
-    env_path = os.environ.get("JJ_DLP_GLOBAL_JSON_PATH")
-    if env_path:
-        return env_path
-    env_dir = os.environ.get("JJ_DLP_GLOBAL_DIR")
-    if env_dir:
-        return os.path.join(env_dir, "global.json")
+    """Return the absolute path to global.json (next to this file)."""
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "global.json")
 
 
