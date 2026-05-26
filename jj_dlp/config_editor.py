@@ -5,10 +5,13 @@ from datetime import datetime
 from typing import NamedTuple
 
 try:
-    from logger import dbg as _dbg
+    from .logger import dbg as _dbg
 except ImportError:
-    def _dbg(msg: str, site_name: str = "") -> None:  # type: ignore[misc]
-        pass
+    try:
+        from logger import dbg as _dbg
+    except ImportError:
+        def _dbg(msg: str, site_name: str = "") -> None:  # type: ignore[misc]
+            pass
 
 
 class ConfigItem:
