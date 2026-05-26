@@ -368,7 +368,10 @@ class GlobalConfigEditor:
             row_y += 1
 
         if self.popup_mode and self.editing_item:
-            self._draw_popup(stdscr)
+            self.draw_popup(stdscr)
+
+    def draw_popup(self, stdscr):
+        self._draw_popup(stdscr)
 
     def _draw_popup(self, stdscr):
         db = self.dashboard
@@ -617,7 +620,7 @@ class ConfigEditor:
 
         # Draw popup (whichever sub-editor owns it)
         if self._focus == "global" and self.global_editor.popup_mode and self.global_editor.editing_item:
-            self.global_editor._draw_popup(stdscr)
+            self.global_editor.draw_popup(stdscr)
         elif self._focus == "site" and self.popup_mode and self.editing_item:
             self.draw_popup(stdscr)
 
