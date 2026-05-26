@@ -175,6 +175,7 @@ DBG_FILTERS: dict[str, bool] = {
     "CONFIG":  True,
     "KILL":    False,
     "POPUP":   False,
+    "RUN":     True,
 }
 
 _dbg_filters_lock = threading.Lock()

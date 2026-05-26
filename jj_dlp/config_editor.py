@@ -369,6 +369,7 @@ class GlobalConfigEditor:
                 self.popup_buf = ""
                 self.popup_error = ""
                 self.editing_item = None
+                _dbg("[CONFIG] GlobalConfigEditor.handle_key() popup closed after save")
             elif 32 <= key < 127:
                 self.popup_buf += chr(key)
                 self.popup_error = ""
