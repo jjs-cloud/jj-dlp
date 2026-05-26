@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.4.3"
+__version__ = "1.4.4"
 
 import subprocess
 import time
@@ -24,8 +24,8 @@ from .logger import (
     dbg,
     log_crash,
     get_debug_log_path, get_log_path, get_log_file_paths,
-    DEBUG_LOGS_ENABLED, DEBUG_LOG_PATH, debug_log_lock,
     ENABLE_CRASH_LOG,
+    configure_debug_log as _configure_debug_log,
     configure as _configure_logger,
 )
 
@@ -3325,16 +3325,13 @@ def main() -> None:
         threading.Thread(target=_periodic_update_checker, daemon=True).start()
 
     from . import logger as _logger
-    with _logger.debug_log_lock:
-        # DEBUG_LOGS / DEBUG_LOG_PATH are now global settings.
-        any_debug = global_cfg.get("debug_logs", False)
-        _logger.DEBUG_LOGS_ENABLED = any_debug
-        if any_debug:
-            raw_path = global_cfg.get("debug_log_path", "")
-            if raw_path:
-                _logger.DEBUG_LOG_PATH = raw_path
-            else:
-                _logger.DEBUG_LOG_PATH = get_debug_log_path(load_config(config_paths[0]))
+    # DEBUG_LOGS / DEBUG_LOG_PATH are now global settings.
+    any_debug = global_cfg.get("debug_logs", False)
+    debug_path = ""
+    if any_debug:
+        raw_path = global_cfg.get("debug_log_path", "")
+        debug_path = raw_path if raw_path else get_debug_log_path(load_config(config_paths[0]))
+    _configure_debug_log(enabled=any_debug, path=debug_path)
         
     # ── Launch per-site state + threads ──────────────────────────────────────
     sites: List[SiteState] = []
