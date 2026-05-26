@@ -11,9 +11,6 @@ import json
 import traceback
 import datetime
 
-from . import logger
-from .main import load_config, _load_global_json, _save_global_json
-
 _REPO_BASE = "https://github.com/jjs-cloud/jj-dlp"
 _API_BASE   = "https://api.github.com/repos/jjs-cloud/jj-dlp"
 _VALID_BRANCHES = {"main", "testing", "experimental"}
@@ -21,7 +18,32 @@ _VALID_BRANCHES = {"main", "testing", "experimental"}
 # ── Updater version ───────────────────────────────────────────────────────────
 # Incremented independently of the main jj-dlp version so we can tell which
 # updater logic is actually running during an update.
-UPDATER_VERSION = "2.0.1"
+UPDATER_VERSION = "2.0.2"
+
+# ── Lazy package imports ──────────────────────────────────────────────────────
+# Relative imports are deferred to call time so this file is also safe to
+# execute as a standalone script (the old stage-2 subprocess path).  When run
+# as a script __name__ == "__main__" and relative imports would crash at parse
+# time if they were at module scope.
+
+def _logger():
+    from . import logger as _l
+    return _l
+
+def _load_global_json() -> dict:
+    from .main import _load_global_json as _f
+    return _f()
+
+def _save_global_json(data: dict) -> None:
+    from .main import _save_global_json as _f
+    _f(data)
+
+def _get_preserved_keys() -> list:
+    try:
+        from .config_editor import PRESERVED_KEYS as _pk
+        return _pk
+    except ImportError:
+        return []
 
 
 class UpdateError(Exception):
@@ -32,7 +54,7 @@ class UpdateError(Exception):
 def _get_update_branch() -> str:
     """Return the configured update branch (falls back to 'main' if unset or invalid)."""
     try:
-        from jj_dlp.main import load_global_config
+        from .main import load_global_config
         branch = load_global_config().get("update_branch", "main")
     except Exception:
         branch = "main"
@@ -49,9 +71,6 @@ def _api_commits_url(branch: str) -> str:
 
 PRESERVED_SECTIONS = ["Streamers", "Block"]
 
-# ── Preserved keys: imported from the single source of truth in config_editor ─
-from .config_editor import PRESERVED_KEYS
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -60,20 +79,20 @@ def check_for_updates_background():
     try:
         branch = _get_update_branch()
         api_commits_url = _api_commits_url(branch)
-        logger.dbg(f"[UPDATER] check_for_updates_background: branch={branch} url={api_commits_url}")
+        _logger().dbg(f"[UPDATER] check_for_updates_background: branch={branch} url={api_commits_url}")
         req = urllib.request.Request(api_commits_url, headers={'User-Agent': 'jj-dlp-updater'})
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode('utf-8'))
         latest_sha = data.get('sha')
-        logger.dbg(f"[UPDATER] check_for_updates_background: fetched latest_sha={latest_sha}")
+        _logger().dbg(f"[UPDATER] check_for_updates_background: fetched latest_sha={latest_sha}")
 
         if not latest_sha:
-            logger.dbg("[UPDATER] check_for_updates_background: API response missing sha")
+            _logger().dbg("[UPDATER] check_for_updates_background: API response missing sha")
             return
 
         global_data = _load_global_json()
         current_sha = global_data.get('update_info', {}).get('current_sha')
-        logger.dbg(f"[UPDATER] check_for_updates_background: current_sha={current_sha}")
+        _logger().dbg(f"[UPDATER] check_for_updates_background: current_sha={current_sha}")
 
         update_info = global_data.setdefault('update_info', {})
         if current_sha:
@@ -83,10 +102,10 @@ def check_for_updates_background():
             update_info['update_available'] = False
 
         update_info['latest_sha'] = latest_sha
-        logger.dbg(f"[UPDATER] check_for_updates_background: update_info current_sha={update_info.get('current_sha')} latest_sha={latest_sha} update_available={update_info.get('update_available')}")
+        _logger().dbg(f"[UPDATER] check_for_updates_background: update_info current_sha={update_info.get('current_sha')} latest_sha={latest_sha} update_available={update_info.get('update_available')}")
         _save_global_json(global_data)
     except Exception as e:
-        logger.dbg(f"[UPDATER] check_for_updates_background: failed during update check: {e}")
+        _logger().dbg(f"[UPDATER] check_for_updates_background: failed during update check: {e}")
 
 
 def mark_update_completed():
@@ -96,9 +115,9 @@ def mark_update_completed():
     if latest_sha:
         update_info['current_sha'] = latest_sha
     update_info['update_available'] = False
-    logger.dbg(f"[UPDATER] mark_update_completed: updating update_info to current_sha={update_info.get('current_sha')} latest_sha={update_info.get('latest_sha')} update_available={update_info.get('update_available')}")
+    _logger().dbg(f"[UPDATER] mark_update_completed: updating update_info to current_sha={update_info.get('current_sha')} latest_sha={update_info.get('latest_sha')} update_available={update_info.get('update_available')}")
     _save_global_json(global_data)
-    logger.dbg("[UPDATER] mark_update_completed: _save_global_json() returned")
+    _logger().dbg("[UPDATER] mark_update_completed: _save_global_json() returned")
 
 
 def is_update_available():
@@ -112,16 +131,16 @@ def get_base_dir():
 
 
 def perform_update():
-    logger.dbg(f"[UPDATER] perform_update: starting — updater version {UPDATER_VERSION}")
+    _logger().dbg(f"[UPDATER] perform_update: starting — updater version {UPDATER_VERSION}")
     print(f"\n--- jj-dlp Updater (v{UPDATER_VERSION}) ---")
 
     branch = _get_update_branch()
     repo_zip_url = _repo_zip_url(branch)
-    logger.dbg(f"[UPDATER] perform_update: branch={branch} url={repo_zip_url}")
+    _logger().dbg(f"[UPDATER] perform_update: branch={branch} url={repo_zip_url}")
 
     base_dir = get_base_dir()
     temp_dir = tempfile.mkdtemp(prefix="jj_dlp_update_")
-    logger.dbg(f"[UPDATER] perform_update: base_dir={base_dir} temp_dir={temp_dir}")
+    _logger().dbg(f"[UPDATER] perform_update: base_dir={base_dir} temp_dir={temp_dir}")
     print(f"Temporary files will be saved to: {temp_dir}")
 
     # ── Step 1: Download ──────────────────────────────────────────────────────
@@ -132,9 +151,9 @@ def perform_update():
         with urllib.request.urlopen(req, timeout=30) as response:
             with open(zip_path, 'wb') as out_file:
                 shutil.copyfileobj(response, out_file)
-        logger.dbg(f"[UPDATER] perform_update: downloaded zip to {zip_path}")
+        _logger().dbg(f"[UPDATER] perform_update: downloaded zip to {zip_path}")
     except Exception as e:
-        logger.dbg(f"[UPDATER] perform_update: download failed: {e}")
+        _logger().dbg(f"[UPDATER] perform_update: download failed: {e}")
         print(f"Error downloading update: {e}")
         shutil.rmtree(temp_dir, ignore_errors=True)
         return
@@ -146,9 +165,9 @@ def perform_update():
     try:
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             zip_ref.extractall(extract_dir)
-        logger.dbg(f"[UPDATER] perform_update: extracted zip to {extract_dir}")
+        _logger().dbg(f"[UPDATER] perform_update: extracted zip to {extract_dir}")
     except Exception as e:
-        logger.dbg(f"[UPDATER] perform_update: extraction failed: {e}")
+        _logger().dbg(f"[UPDATER] perform_update: extraction failed: {e}")
         print(f"Error extracting update: {e}")
         shutil.rmtree(temp_dir, ignore_errors=True)
         return
@@ -159,7 +178,7 @@ def perform_update():
         source_dir = os.path.join(extract_dir, extracted_items[0])
     else:
         source_dir = extract_dir
-    logger.dbg(f"[UPDATER] perform_update: source_dir resolved to {source_dir}")
+    _logger().dbg(f"[UPDATER] perform_update: source_dir resolved to {source_dir}")
 
     try:
         # ── Step 3: Merge configs ─────────────────────────────────────────────
@@ -167,7 +186,7 @@ def perform_update():
         if os.path.exists(actual_diff_dir):
             shutil.rmtree(actual_diff_dir, ignore_errors=True)
         os.makedirs(actual_diff_dir, exist_ok=True)
-        logger.dbg(f"[UPDATER] perform_update: diff dir cleared and recreated at {actual_diff_dir}")
+        _logger().dbg(f"[UPDATER] perform_update: diff dir cleared and recreated at {actual_diff_dir}")
         print(f"Diffs will be saved to: {actual_diff_dir}")
 
         # Collect user config files (root + configs/)
@@ -197,9 +216,9 @@ def perform_update():
         if duplicates:
             print(f"\nWARNING: Found duplicate config files in root and configs/ directory: {', '.join(duplicates)}")
             print("The updater may overwrite or merge them unpredictably. Please consolidate them later.\n")
-            logger.dbg(f"[UPDATER] perform_update: duplicate configs found: {duplicates}")
+            _logger().dbg(f"[UPDATER] perform_update: duplicate configs found: {duplicates}")
 
-        logger.dbg(f"[UPDATER] perform_update: found {len(config_files)} user config file(s) to merge")
+        _logger().dbg(f"[UPDATER] perform_update: found {len(config_files)} user config file(s) to merge")
 
         # Collect new configs from source_dir
         new_configs = []
@@ -213,15 +232,15 @@ def perform_update():
             new_configs.append(os.path.join(source_dir, "jj-dlp.conf"))
 
         new_config_map = {os.path.basename(p): p for p in new_configs}
-        logger.dbg(f"[UPDATER] perform_update: new_config_map keys={list(new_config_map.keys())}")
+        _logger().dbg(f"[UPDATER] perform_update: new_config_map keys={list(new_config_map.keys())}")
 
         for user_cfg in config_files:
             fname = os.path.basename(user_cfg)
             if fname not in new_config_map:
-                logger.dbg(f"[UPDATER] perform_update: no matching new config for {fname}, skipping merge")
+                _logger().dbg(f"[UPDATER] perform_update: no matching new config for {fname}, skipping merge")
                 continue
             new_cfg_path = new_config_map[fname]
-            logger.dbg(f"[UPDATER] perform_update: merging config {user_cfg} -> {new_cfg_path}")
+            _logger().dbg(f"[UPDATER] perform_update: merging config {user_cfg} -> {new_cfg_path}")
 
             with open(user_cfg, 'r', encoding='utf-8') as f:
                 old_content = f.read()
@@ -230,7 +249,7 @@ def perform_update():
 
             streamers = get_old_config_section(user_cfg, "Streamers")
             blocked   = get_old_config_section(user_cfg, "Block")
-            logger.dbg(f"[UPDATER] perform_update: preserved sections for {fname}: streamers={bool(streamers)} block={bool(blocked)}")
+            _logger().dbg(f"[UPDATER] perform_update: preserved sections for {fname}: streamers={bool(streamers)} block={bool(blocked)}")
 
             merged_content = inject_preserved_keys(new_content, user_cfg)
             merged_content = replace_section(merged_content, "Streamers", streamers)
@@ -240,11 +259,11 @@ def perform_update():
 
             with open(new_cfg_path, 'w', encoding='utf-8') as f:
                 f.write(merged_content)
-            logger.dbg(f"[UPDATER] perform_update: merged config written to {new_cfg_path}")
+            _logger().dbg(f"[UPDATER] perform_update: merged config written to {new_cfg_path}")
 
         # ── Step 4: Copy files source_dir → base_dir ─────────────────────────
         print("Installing new files...")
-        logger.dbg(f"[UPDATER] perform_update: copying files {source_dir} -> {base_dir}")
+        _logger().dbg(f"[UPDATER] perform_update: copying files {source_dir} -> {base_dir}")
 
         def copy_and_diff(src, dst):
             if os.path.isdir(src):
@@ -257,7 +276,7 @@ def perform_update():
                 if os.path.basename(dst).endswith(".pyc"):
                     return
                 if os.path.basename(dst) == "global.json":
-                    logger.dbg(f"[UPDATER] perform_update: skipping global.json at {dst}")
+                    _logger().dbg(f"[UPDATER] perform_update: skipping global.json at {dst}")
                     return
                 if os.path.exists(dst):
                     with open(dst, 'r', encoding='utf-8', errors='ignore') as f:
@@ -267,10 +286,10 @@ def perform_update():
                     if old_content != new_content and not dst.endswith(".conf"):
                         create_diff(old_content, new_content, dst, actual_diff_dir)
                         if os.path.basename(dst) == "updater.py":
-                            logger.dbg(f"[UPDATER] perform_update: updater.py changed, copying {src} -> {dst}")
+                            _logger().dbg(f"[UPDATER] perform_update: updater.py changed, copying {src} -> {dst}")
                 else:
                     if os.path.basename(dst) == "updater.py":
-                        logger.dbg(f"[UPDATER] perform_update: installing new updater.py {src} -> {dst}")
+                        _logger().dbg(f"[UPDATER] perform_update: installing new updater.py {src} -> {dst}")
                 try:
                     shutil.copy2(src, dst)
                 except OSError as e:
@@ -283,16 +302,16 @@ def perform_update():
                     raise
 
         copy_and_diff(source_dir, base_dir)
-        logger.dbg("[UPDATER] perform_update: all files copied from source to base")
+        _logger().dbg("[UPDATER] perform_update: all files copied from source to base")
 
         # ── Step 5: Set executable bits on bin/ ───────────────────────────────
         print("Setting executable permissions on bin/ files...")
         _mark_bin_executable(base_dir)
-        logger.dbg("[UPDATER] perform_update: bin/ permissions set")
+        _logger().dbg("[UPDATER] perform_update: bin/ permissions set")
 
         # ── Step 6: Mark update completed in global.json ──────────────────────
         mark_update_completed()
-        logger.dbg("[UPDATER] perform_update: marked update completed")
+        _logger().dbg("[UPDATER] perform_update: marked update completed")
 
         print("\n" + "="*60)
         print("✅ Update completed successfully!")
@@ -301,15 +320,15 @@ def perform_update():
         print("\nℹ️  Please restart jj-dlp for the new version to take effect.")
 
     except UpdateError as e:
-        logger.dbg(f"[UPDATER] perform_update: clean abort: {e}")
+        _logger().dbg(f"[UPDATER] perform_update: clean abort: {e}")
     except Exception as e:
-        logger.dbg(f"[UPDATER] perform_update: exception during update: {e}")
+        _logger().dbg(f"[UPDATER] perform_update: exception during update: {e}")
         print(f"Error during update: {e}")
         traceback.print_exc()
     finally:
         print(f"Cleaning up temporary directory: {temp_dir}")
         shutil.rmtree(temp_dir, ignore_errors=True)
-        logger.dbg(f"[UPDATER] perform_update: temp_dir cleaned up")
+        _logger().dbg(f"[UPDATER] perform_update: temp_dir cleaned up")
 
 
 def get_old_config_section(config_path, section_name):
@@ -330,7 +349,7 @@ def inject_preserved_keys(new_text, old_config_path):
     except Exception:
         return new_text
 
-    for key in PRESERVED_KEYS:
+    for key in _get_preserved_keys():
         old_val = None
         for sec in parser.sections():
             if parser.has_option(sec, key):
