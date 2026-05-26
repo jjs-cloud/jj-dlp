@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.3.4"
+__version__ = "1.3.5"
 
 import subprocess
 import time
@@ -3232,24 +3232,21 @@ def main() -> None:
                 else:
                     # Multi-select chooser
                     chosen = curses.wrapper(_curses_choose_config, found)
-                    
-            # ASK_FOR_BROWSER logic
-            _global_cfg = load_global_config()
-            ask_for_browser = _global_cfg.get("ask_for_browser", None)
-            if ask_for_browser is None:
-                # Fall back to per-site values for backwards compatibility
-                ask_for_browser = any(
-                    load_config(os.path.join(cwd, f)).get("ask_for_browser", True) 
-                    for f in chosen
-                )
-            
-            if ask_for_browser:
-                chosen = curses.wrapper(_curses_choose_browser, chosen)
 
             config_paths = [os.path.join(cwd, f) for f in chosen]
 
-    # ── Global config / debug setup ───────────────────────────────────────────
-    initial_cfg = load_config(config_paths[0])
+    # ASK_FOR_BROWSER logic
+    _global_cfg = load_global_config()
+    ask_for_browser = _global_cfg.get("ask_for_browser", None)
+    if ask_for_browser is None:
+        # Fall back to per-site values for backwards compatibility
+        ask_for_browser = any(
+            load_config(p).get("ask_for_browser", True)
+            for p in config_paths
+        )
+
+    if ask_for_browser:
+        curses.wrapper(_curses_choose_browser, config_paths)
 
     # Load global.conf — app-wide settings, independent of any site config.
     global_cfg = load_global_config()
