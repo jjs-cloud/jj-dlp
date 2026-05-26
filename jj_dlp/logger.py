@@ -73,6 +73,7 @@ def configure(output_mode_fn, dashboard_log_fn=None) -> None:
 #   UPDATER  — update checker and periodic updater thread
 #   TWITCH   — twitch eventsub and token operations
 #   KILL     — yt-dlp process termination
+#   CONFIG   — config editor save/backup operations
 #
 DBG_FILTERS: dict[str, bool] = {
     "DRAIN":   False,
@@ -83,6 +84,7 @@ DBG_FILTERS: dict[str, bool] = {
     "DISK":    False,
     "UPDATER": False,
     "TWITCH":  False,
+    "CONFIG":  True,   # config editor save/backup operations
     "KILL":    True,
 }
 

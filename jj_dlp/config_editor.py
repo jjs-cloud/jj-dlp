@@ -4,6 +4,12 @@ import curses
 from datetime import datetime
 from typing import NamedTuple
 
+try:
+    from logger import dbg as _dbg
+except ImportError:
+    def _dbg(msg: str, site_name: str = "") -> None:  # type: ignore[misc]
+        pass
+
 
 class ConfigItem:
     def __init__(self, line_idx: int, is_section: bool, key: str, value: str, has_equals: bool, raw_line: str, comment: str = ""):
@@ -259,19 +265,28 @@ class GlobalConfigEditor:
 
     def save(self):
         """Write self.lines back to global.conf with a backup."""
+        _dbg(f"[CONFIG] GlobalConfigEditor.save() called — conf_path={self.conf_path!r}")
         backup_dir = os.path.join(os.path.dirname(os.path.abspath(self.conf_path)), "backups")
-        os.makedirs(backup_dir, exist_ok=True)
+        _dbg(f"[CONFIG] backup_dir resolved to {backup_dir!r}")
+        try:
+            os.makedirs(backup_dir, exist_ok=True)
+            _dbg(f"[CONFIG] backup_dir created/confirmed OK")
+        except Exception as e:
+            _dbg(f"[CONFIG] ERROR creating backup_dir: {e}")
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         backup_path = os.path.join(backup_dir, f"global.conf.{timestamp}.bak")
+        _dbg(f"[CONFIG] backup_path={backup_path!r}, source exists={os.path.isfile(self.conf_path)}")
         try:
             shutil.copy2(self.conf_path, backup_path)
-        except Exception:
-            pass
+            _dbg(f"[CONFIG] backup written OK")
+        except Exception as e:
+            _dbg(f"[CONFIG] ERROR writing backup: {e}")
         try:
             with open(self.conf_path, "w", encoding="utf-8") as f:
                 f.writelines(self.lines)
-        except Exception:
-            pass
+            _dbg(f"[CONFIG] global.conf written OK ({len(self.lines)} lines)")
+        except Exception as e:
+            _dbg(f"[CONFIG] ERROR writing global.conf: {e}")
         # Reload so line indices stay accurate
         self._loaded = False
         self._load()
@@ -459,24 +474,37 @@ class ConfigEditor:
 
     def save_file(self):
         if not self.current_site_path or not self.lines:
+            _dbg(f"[CONFIG] save_file() aborted — site_path={self.current_site_path!r}, lines={len(self.lines) if self.lines else 0}")
             return
+
+        _dbg(f"[CONFIG] ConfigEditor.save_file() called — site_path={self.current_site_path!r}")
 
         # Create backup
         backup_dir = os.path.join(os.path.dirname(os.path.abspath(self.current_site_path)), "backups")
-        os.makedirs(backup_dir, exist_ok=True)
+        _dbg(f"[CONFIG] backup_dir resolved to {backup_dir!r}")
+        try:
+            os.makedirs(backup_dir, exist_ok=True)
+            _dbg(f"[CONFIG] backup_dir created/confirmed OK")
+        except Exception as e:
+            _dbg(f"[CONFIG] ERROR creating backup_dir: {e}")
         base = os.path.basename(self.current_site_path)
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         backup_path = os.path.join(backup_dir, f"{base}.{timestamp}.bak")
+        _dbg(f"[CONFIG] backup_path={backup_path!r}, source exists={os.path.isfile(self.current_site_path)}")
         try:
             shutil.copy2(self.current_site_path, backup_path)
+            _dbg(f"[CONFIG] backup written OK")
         except Exception as e:
+            _dbg(f"[CONFIG] ERROR writing backup: {e}")
             self.dashboard.sites[self.selected_site_idx].log_line(f"Failed to backup config: {e}")
 
         # Write new config
         try:
             with open(self.current_site_path, "w", encoding="utf-8") as f:
                 f.writelines(self.lines)
+            _dbg(f"[CONFIG] site config written OK ({len(self.lines)} lines)")
         except Exception as e:
+            _dbg(f"[CONFIG] ERROR writing site config: {e}")
             self.dashboard.sites[self.selected_site_idx].log_line(f"Failed to save config: {e}")
 
         # Reload
