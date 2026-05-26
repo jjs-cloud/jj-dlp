@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.5.4"
+__version__ = "1.5.5"
 
 import subprocess
 import time
@@ -2666,13 +2666,6 @@ class JJDlpDashboard:
         # Get the name of the currently selected tab
         current_tab_name = self.TABS[self.selected_tab]
 
-        if current_tab_name == "Config" and self.tick % 20 == 0:
-            dbg(
-                f"[CONFIG] refresh_screen() tick={self.tick} focus={self.config_editor._focus!r} "
-                f"global_popup={self.config_editor.global_editor.popup_mode} "
-                f"site_popup={self.config_editor.popup_mode}"
-            )
-
         _t0 = time.time()
         if current_tab_name == "Dashboard":
             self.draw_dashboard_tab(content_y1, 1, content_y2, content_x2)
@@ -2858,17 +2851,9 @@ class JJDlpDashboard:
             self.refresh_screen()
             _t_after_refresh = time.time()
 
-            if self.TABS[self.selected_tab] == "Config" and self.tick % 10 == 0:
-                dbg(
-                    f"[RUN] frame tick={self.tick} refresh_ms={( _t_after_refresh - _t_frame_start )*1000:.1f} "
-                    f"current_tab=Config"
-                )
-
             key = self.stdscr.getch()
             if key != -1:
-                dbg(f"[RUN] frame tick={self.tick} got key={key}")
                 if not self.handle_key(key):
-                    dbg(f"[RUN] frame tick={self.tick} handle_key returned False, exiting")
                     break
             self.tick += 1
             curses.napms(50)
