@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 
 import subprocess
 import time
@@ -545,7 +545,7 @@ class SiteState:
     def unregister_proc(self, streamer: str) -> None:
         """Remove a subprocess from the registry (after it exits)."""
         with self._procs_lock:
-            removed = self._active_procs.pop(streamer, None)
+            self._active_procs.pop(streamer, None)
 
     def kill_all_procs(self) -> None:
         """Kill every registered yt-dlp process. Called on quit."""
