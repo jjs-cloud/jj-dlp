@@ -23,7 +23,6 @@ configure_debug_log(enabled, path) Atomically update the debug-log config.
 get_debug_log_path(cfg)           Resolve the debug log path from a config dict.
 get_log_path(cfg)                 Resolve the activity log path from a config dict.
 get_log_file_paths(cfg)           Return (stdout_path, stderr_path) for yt-dlp logging.
-configure_filters(d)              Replace DBG_FILTERS with a new tag→bool dict.
 """
 
 import os
