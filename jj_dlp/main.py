@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.5.3"
+__version__ = "1.5.4"
 
 import subprocess
 import time
@@ -2817,20 +2817,29 @@ class JJDlpDashboard:
         new_enabled = new_cfg.get("DEBUG_LOGS", "false").strip().lower() == "true"
         new_path    = new_cfg.get("DEBUG_LOG_PATH", "").strip().strip('"\'')
 
-        with _logger.debug_log_lock:
-            _logger.DEBUG_LOGS_ENABLED = new_enabled
-            if new_enabled:
-                if new_path:
-                    _logger.DEBUG_LOG_PATH = new_path
-                elif not _logger.DEBUG_LOG_PATH:
-                    # Fall back to the first site's resolved path
-                    _logger.DEBUG_LOG_PATH = get_debug_log_path(
-                        load_config(self.sites[0].config_path)
-                    )
-            # If disabling, leave DEBUG_LOG_PATH as-is so re-enabling reuses it
+        _logger.dbg(
+            f"[CONFIG] apply_global_cfg start: DEBUG_LOGS={new_enabled} DEBUG_LOG_PATH={new_path!r}"
+        )
+
+        if new_enabled:
+            if new_path:
+                _logger.configure_debug_log(True, new_path)
+            elif not _logger.DEBUG_LOG_PATH:
+                _logger.dbg("[CONFIG] apply_global_cfg fallback to first site debug log path")
+                try:
+                    resolved_path = get_debug_log_path(load_config(self.sites[0].config_path))
+                    _logger.configure_debug_log(True, resolved_path)
+                    _logger.dbg(f"[CONFIG] apply_global_cfg resolved fallback DEBUG_LOG_PATH={resolved_path!r}")
+                except Exception as e:
+                    _logger.dbg(f"[CONFIG] apply_global_cfg failed to resolve fallback debug log path: {e}")
+                    _logger.DEBUG_LOGS_ENABLED = False
+            else:
+                _logger.DEBUG_LOGS_ENABLED = True
+        else:
+            _logger.DEBUG_LOGS_ENABLED = False
 
         _logger.dbg(
-            f"[CONFIG] apply_global_cfg: DEBUG_LOGS={new_enabled} "
+            f"[CONFIG] apply_global_cfg completed: DEBUG_LOGS={_logger.DEBUG_LOGS_ENABLED} "
             f"DEBUG_LOG_PATH={_logger.DEBUG_LOG_PATH!r}"
         )
 
