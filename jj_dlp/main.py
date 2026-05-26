@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.5.1"
+__version__ = "1.5.2"
 
 import subprocess
 import time
@@ -2706,8 +2706,11 @@ class JJDlpDashboard:
         if current_tab_name == "Config":
             # Pass keys to ConfigEditor first. But still handle global site switching:
             if key not in (ord(']'), curses.KEY_NPAGE, ord('['), curses.KEY_PPAGE):
+                _dbg(f"[CONFIG] main.handle_key() dispatch key={key} tab={current_tab_name!r}")
                 if self.config_editor.handle_key(key):
+                    _dbg(f"[CONFIG] main.handle_key() config_editor consumed key={key}")
                     return True
+                _dbg(f"[CONFIG] main.handle_key() config_editor did not consume key={key}")
 
         if key in (ord('q'), ord('Q'), 27):
             return False

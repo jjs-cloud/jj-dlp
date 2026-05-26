@@ -317,6 +317,7 @@ class GlobalConfigEditor:
         self._loaded = False
         try:
             self._load()
+            _dbg(f"[CONFIG] GlobalConfigEditor.save() reload completed items={len(self.items)}")
         except Exception as e:
             _dbg(f"[CONFIG] GlobalConfigEditor.save() reload failed: {e}")
 
@@ -325,6 +326,7 @@ class GlobalConfigEditor:
             new_cfg = {item.key: item.value for item in self.items}
             try:
                 self._on_save(new_cfg)
+                _dbg("[CONFIG] GlobalConfigEditor.save() on_save applied")
             except Exception as e:
                 _dbg(f"[CONFIG] GlobalConfigEditor.save() on_save failed: {e}")
 
@@ -332,6 +334,7 @@ class GlobalConfigEditor:
         """Handle a keypress in the global editor section. Returns True if consumed."""
         self._ensure_loaded()
         if self.popup_mode:
+            _dbg(f"[CONFIG] GlobalConfigEditor.handle_key() popup key={key} popup_buf={self.popup_buf!r} editing_item={self.editing_item.key if self.editing_item else None}")
             if key == 27:
                 self.popup_mode = False
                 self.popup_buf = ""
@@ -343,9 +346,11 @@ class GlobalConfigEditor:
             elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
                 if self.editing_item:
                     new_val = self.popup_buf.strip()
+                    _dbg(f"[CONFIG] GlobalConfigEditor.handle_key() Enter pressed for {self.editing_item.key!r} new_val={new_val!r}")
                     is_valid, err_msg = _validate_value(self.editing_item.key, new_val)
                     if not is_valid:
                         self.popup_error = err_msg
+                        _dbg(f"[CONFIG] GlobalConfigEditor.handle_key() validation failed: {err_msg}")
                         return True
                     if 0 <= self.editing_item.line_idx < len(self.lines):
                         self.lines[self.editing_item.line_idx] = f"{self.editing_item.key} = {new_val}\n"
@@ -359,6 +364,7 @@ class GlobalConfigEditor:
                         self.popup_error = f"Save failed: {e}"
                         _dbg(f"[CONFIG] GlobalConfigEditor.handle_key() save failed: {e}")
                         return True
+                    _dbg(f"[CONFIG] GlobalConfigEditor.handle_key() save completed for {self.editing_item.key!r}")
                 self.popup_mode = False
                 self.popup_buf = ""
                 self.popup_error = ""
@@ -568,6 +574,7 @@ class ConfigEditor:
         # Reload
         try:
             self.load_config(self.current_site_path)
+            _dbg(f"[CONFIG] ConfigEditor.save_file() reload completed items={len(self.items)}")
         except Exception as e:
             _dbg(f"[CONFIG] ConfigEditor.save_file() reload failed: {e}")
             if self.current_site_path and self.current_site_path in {site.config_path for site in self.dashboard.sites}:
@@ -740,10 +747,13 @@ class ConfigEditor:
             if key == 27 and not self.global_editor.popup_mode:
                 self.dashboard.selected_tab = 0
                 return True
+            _dbg(f"[CONFIG] ConfigEditor.handle_key() delegating to global editor key={key}")
             return self.global_editor.handle_key(key)
 
         # ── Site panel focus ──────────────────────────────────────────────────
         if self.popup_mode:
+            _dbg(f"[CONFIG] ConfigEditor.handle_key() site popup key={key} popup_buf={self.popup_buf!r} editing_item={self.editing_item.key if self.editing_item else None}")
+            _dbg(f"[CONFIG] ConfigEditor.handle_key() popup key={key} popup_buf={self.popup_buf!r} editing_item={self.editing_item.key if self.editing_item else None}")
             if key == 27:
                 self.popup_mode = False
                 self.popup_buf = ""
@@ -755,9 +765,11 @@ class ConfigEditor:
             elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
                 if self.editing_item:
                     new_val = self.popup_buf.strip()
+                    _dbg(f"[CONFIG] ConfigEditor.handle_key() Enter pressed for {self.editing_item.key!r} new_val={new_val!r}")
                     is_valid, err_msg = _validate_value(self.editing_item.key, new_val)
                     if not is_valid:
                         self.popup_error = err_msg
+                        _dbg(f"[CONFIG] ConfigEditor.handle_key() validation failed: {err_msg}")
                         return True
                     if 0 <= self.editing_item.line_idx < len(self.lines):
                         if self.editing_item.has_equals:
@@ -774,6 +786,7 @@ class ConfigEditor:
                         self.popup_error = f"Save failed: {e}"
                         _dbg(f"[CONFIG] ConfigEditor.handle_key() save_file failed: {e}")
                         return True
+                    _dbg(f"[CONFIG] ConfigEditor.handle_key() save_file completed for {self.editing_item.key!r}")
                     site = self.sites[self.selected_site_idx]
                     site.trigger_event.set()
                 self.popup_mode = False
@@ -804,6 +817,7 @@ class ConfigEditor:
                 else:
                     self.popup_buf = self.editing_item.key
                 self.popup_mode = True
+                _dbg(f"[CONFIG] ConfigEditor.handle_key() opening site popup for {self.editing_item.key!r} line_idx={self.editing_item.line_idx} has_equals={self.editing_item.has_equals}")
             return True
 
         return False
