@@ -18,13 +18,15 @@ _VALID_BRANCHES = {"main", "testing", "experimental"}
 # ── Updater version ───────────────────────────────────────────────────────────
 # Incremented independently of the main jj-dlp version so we can tell which
 # updater logic is actually running during an update.
-UPDATER_VERSION = "2.0.3"
+UPDATER_VERSION = "2.0.4"
 
 # ── Lazy package imports ──────────────────────────────────────────────────────
 # Relative imports are deferred to call time so this file is also safe to
 # execute as a standalone script (the old stage-2 subprocess path).  When run
 # as a script __name__ == "__main__" and relative imports would crash at parse
 # time if they were at module scope.
+
+# All compatability code (stage-2, lazy imports) is set to be removed in version 3.0.0
 
 def _logger():
     from . import logger as _l
