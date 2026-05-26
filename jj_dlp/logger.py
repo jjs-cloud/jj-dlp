@@ -124,17 +124,7 @@ class _LoggerModule(_types.ModuleType):
             super().__setattr__(name, value)
 
 
-# Replace this module's entry in sys.modules with the proxy subclass so that
-# attribute access on the module object goes through __getattr__/__setattr__.
-_current = _sys.modules[__name__]
-_wrapper = _LoggerModule(__name__, __doc__)
-_wrapper.__dict__.update({
-    k: v for k, v in _current.__dict__.items()
-    if k not in ("DEBUG_LOGS_ENABLED", "DEBUG_LOG_PATH", "debug_log_lock")
-})
-_sys.modules[__name__] = _wrapper
-
-# Make the lock importable as a module attribute directly (read-only via proxy).
+# Make the lock importable as a module attribute directly (read-only via proxy.
 debug_log_lock = _debug_cfg_lock
 
 # ── References to output-mode state (injected by main module at startup) ──────
@@ -318,3 +308,14 @@ def get_log_file_paths(cfg: dict) -> tuple:
     if cfg.get("split_logs"):
         return f"{base}.stdout.log", f"{base}.stderr.log"
     return base, base
+
+
+# Replace this module's entry in sys.modules with the proxy subclass so that
+# attribute access on the module object goes through __getattr__/__setattr__.
+_current = _sys.modules[__name__]
+_wrapper = _LoggerModule(__name__, __doc__)
+_wrapper.__dict__.update({
+    k: v for k, v in _current.__dict__.items()
+    if k not in ("DEBUG_LOGS_ENABLED", "DEBUG_LOG_PATH", "debug_log_lock")
+})
+_sys.modules[__name__] = _wrapper
