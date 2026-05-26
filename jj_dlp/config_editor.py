@@ -637,10 +637,10 @@ class ConfigEditor:
         site_box_y1 = content_y1 + 1
         self.dashboard.draw_box(stdscr, site_box_y1, site_x1, y2, site_x2, self.dashboard.C_CHROME)
         if self._focus == "site":
-            mode_str = " [ SITE CONFIG ] "
+            mode_str = " [ SITE ] "
             self.dashboard.safe_addstr(stdscr, site_box_y1, site_x2 - len(mode_str) - 1, mode_str,
                         curses.color_pair(self.dashboard.C_LIVE) | curses.A_BOLD)
-        self.dashboard.safe_addstr(stdscr, site_box_y1, site_x1 + 2, " SITE CONFIGURATION ",
+        self.dashboard.safe_addstr(stdscr, site_box_y1, site_x1 + 2, " SITE SETTINGS ",
                     curses.color_pair(self.dashboard.C_INVHEAD) | curses.A_BOLD)
 
         if not self.items:
