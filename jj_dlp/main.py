@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.3.6"
+__version__ = "1.3.7"
 
 import subprocess
 import time
@@ -728,6 +728,21 @@ def cmd_display_str(cmd: List[str]) -> str:
 def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 15) -> None:
     dbg(f"[POPUP] enqueue popup streamer={streamer!r} source={source!r} timeout={popup_timeout}")
     def _run():
+        if sys.platform.startswith("linux"):
+            notify_cmd = shutil.which("notify-send")
+            if notify_cmd:
+                title = "jj-dlp — Stream Live"
+                body = (f"🔴  {streamer} is now LIVE "
+                        f"via {'EventSub' if source == 'eventsub' else 'poll check'}")
+                try:
+                    subprocess.run([notify_cmd, "-t", str(popup_timeout * 1000), title, body],
+                                   check=False)
+                    dbg(f"[POPUP] notify-send invoked for streamer={streamer!r}")
+                    return
+                except Exception as e:
+                    dbg(f"[POPUP] notify-send failed for streamer={streamer!r}: {e}")
+            else:
+                dbg(f"[POPUP] notify-send not found; falling back to tkinter for streamer={streamer!r}")
         try:
             import tkinter as tk
             dbg(f"[POPUP] tkinter imported successfully for streamer={streamer!r}")
