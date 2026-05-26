@@ -18,7 +18,7 @@ _VALID_BRANCHES = {"main", "testing", "experimental"}
 # ── Updater version ───────────────────────────────────────────────────────────
 # Incremented independently of the main jj-dlp version so we can tell which
 # updater logic is actually running during an update.
-UPDATER_VERSION = "2.0.6"
+UPDATER_VERSION = "2.0.7"
 
 # ── Lazy package imports ──────────────────────────────────────────────────────
 # Relative imports are deferred to call time so this file is also safe to
@@ -346,6 +346,11 @@ def get_old_config_section(config_path, section_name):
             "The updater will continue, but this section may not be preserved."
         )
         print(message)
+        print("Press Enter to continue or Ctrl+C to abort.")
+        try:
+            input()
+        except KeyboardInterrupt:
+            raise
         _logger().dbg(f"[UPDATER] get_old_config_section: {message} exception={e}")
     return ""
 
