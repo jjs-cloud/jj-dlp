@@ -315,12 +315,18 @@ class GlobalConfigEditor:
             _dbg(f"[CONFIG] ERROR writing global.conf: {e}")
         # Reload so line indices stay accurate
         self._loaded = False
-        self._load()
+        try:
+            self._load()
+        except Exception as e:
+            _dbg(f"[CONFIG] GlobalConfigEditor.save() reload failed: {e}")
 
         # Apply changes to live globals immediately (e.g. DEBUG_LOGS)
         if self._on_save:
             new_cfg = {item.key: item.value for item in self.items}
-            self._on_save(new_cfg)
+            try:
+                self._on_save(new_cfg)
+            except Exception as e:
+                _dbg(f"[CONFIG] GlobalConfigEditor.save() on_save failed: {e}")
 
     def handle_key(self, key) -> bool:
         """Handle a keypress in the global editor section. Returns True if consumed."""
@@ -341,8 +347,18 @@ class GlobalConfigEditor:
                     if not is_valid:
                         self.popup_error = err_msg
                         return True
-                    self.lines[self.editing_item.line_idx] = f"{self.editing_item.key} = {new_val}\n"
-                    self.save()
+                    if 0 <= self.editing_item.line_idx < len(self.lines):
+                        self.lines[self.editing_item.line_idx] = f"{self.editing_item.key} = {new_val}\n"
+                    else:
+                        self.popup_error = "Internal error: invalid config line"
+                        _dbg(f"[CONFIG] GlobalConfigEditor.handle_key() bad line_idx={self.editing_item.line_idx} len(lines)={len(self.lines)}")
+                        return True
+                    try:
+                        self.save()
+                    except Exception as e:
+                        self.popup_error = f"Save failed: {e}"
+                        _dbg(f"[CONFIG] GlobalConfigEditor.handle_key() save failed: {e}")
+                        return True
                 self.popup_mode = False
                 self.popup_buf = ""
                 self.popup_error = ""
@@ -550,7 +566,12 @@ class ConfigEditor:
             self.dashboard.sites[self.selected_site_idx].log_line(f"Failed to save config: {e}")
 
         # Reload
-        self.load_config(self.current_site_path)
+        try:
+            self.load_config(self.current_site_path)
+        except Exception as e:
+            _dbg(f"[CONFIG] ConfigEditor.save_file() reload failed: {e}")
+            if self.current_site_path and self.current_site_path in {site.config_path for site in self.dashboard.sites}:
+                self.dashboard.sites[self.selected_site_idx].log_line(f"Failed to reload config after save: {e}")
 
     def draw_tab(self, stdscr, y1, x1, y2, x2):
         # Sync selected site
@@ -738,11 +759,21 @@ class ConfigEditor:
                     if not is_valid:
                         self.popup_error = err_msg
                         return True
-                    if self.editing_item.has_equals:
-                        self.lines[self.editing_item.line_idx] = f"{self.editing_item.key} = {new_val}\n"
+                    if 0 <= self.editing_item.line_idx < len(self.lines):
+                        if self.editing_item.has_equals:
+                            self.lines[self.editing_item.line_idx] = f"{self.editing_item.key} = {new_val}\n"
+                        else:
+                            self.lines[self.editing_item.line_idx] = f"{new_val}\n"
                     else:
-                        self.lines[self.editing_item.line_idx] = f"{new_val}\n"
-                    self.save_file()
+                        self.popup_error = "Internal error: invalid config line"
+                        _dbg(f"[CONFIG] ConfigEditor.handle_key() bad line_idx={self.editing_item.line_idx} len(lines)={len(self.lines)}")
+                        return True
+                    try:
+                        self.save_file()
+                    except Exception as e:
+                        self.popup_error = f"Save failed: {e}"
+                        _dbg(f"[CONFIG] ConfigEditor.handle_key() save_file failed: {e}")
+                        return True
                     site = self.sites[self.selected_site_idx]
                     site.trigger_event.set()
                 self.popup_mode = False

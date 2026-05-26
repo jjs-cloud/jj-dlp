@@ -172,9 +172,9 @@ DBG_FILTERS: dict[str, bool] = {
     "DISK":    False,
     "UPDATER": False,
     "TWITCH":  False,
-    "CONFIG":  False,
+    "CONFIG":  True,
     "KILL":    False,
-    "POPUP":   True,
+    "POPUP":   False,
 }
 
 _dbg_filters_lock = threading.Lock()
