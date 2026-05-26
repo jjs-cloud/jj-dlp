@@ -492,6 +492,22 @@ class ConfigEditor:
             on_save=getattr(parent_dashboard, "apply_global_cfg", None),
         )
 
+    def notify_site_changed(self, new_idx: int) -> None:
+        """Called by the dashboard whenever selected_site_idx changes.
+
+        This replaces the polling comparison that previously lived in
+        draw_tab() — state is updated immediately on the event rather than
+        discovered one frame later.
+        """
+        if new_idx == self.selected_site_idx and self.current_site_path is not None:
+            return
+        self.selected_site_idx = new_idx
+        self.selected_idx = 0
+        self.scroll_offset = 0
+        if self.sites:
+            site = self.sites[new_idx]
+            self.load_config(site.config_path)
+
     def load_config(self, config_path):
         self.current_site_path = config_path
         try:
@@ -582,14 +598,10 @@ class ConfigEditor:
                 self.dashboard.sites[self.selected_site_idx].log_line(f"Failed to reload config after save: {e}")
 
     def draw_tab(self, stdscr, y1, x1, y2, x2):
-        # Sync selected site
-        if self.selected_site_idx != self.dashboard.selected_site_idx:
-            self.selected_site_idx = self.dashboard.selected_site_idx
-            self.selected_idx = 0
-            self.scroll_offset = 0
-            site = self.sites[self.selected_site_idx]
-            self.load_config(site.config_path)
-        elif self.current_site_path is None and self.sites:
+        # Ensure an initial load if the editor has never loaded a config yet
+        # (first time the Config tab is opened). Site-change events are
+        # delivered via notify_site_changed(), so no per-frame polling needed.
+        if self.current_site_path is None and self.sites:
             site = self.sites[self.selected_site_idx]
             self.load_config(site.config_path)
 

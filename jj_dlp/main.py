@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.5.8"
+__version__ = "1.5.9"
 
 import subprocess
 import time
@@ -2720,10 +2720,12 @@ class JJDlpDashboard:
             self.selected_site_idx = (self.selected_site_idx + 1) % max(1, len(self.sites))
             # Reset scroll when switching sites
             self._log_scroll = self._stdout_scroll = self._stderr_scroll = 0
+            self.config_editor.notify_site_changed(self.selected_site_idx)
         elif key in (ord('['), curses.KEY_PPAGE):   # prev site
             self.selected_site_idx = (self.selected_site_idx - 1) % max(1, len(self.sites))
             # Reset scroll when switching sites
             self._log_scroll = self._stdout_scroll = self._stderr_scroll = 0
+            self.config_editor.notify_site_changed(self.selected_site_idx)
         elif key in (curses.KEY_UP, ord('k')):
             tab = self.TABS[self.selected_tab]
             if tab == "Log":
