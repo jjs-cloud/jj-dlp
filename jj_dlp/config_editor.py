@@ -269,7 +269,7 @@ class GlobalConfigEditor:
     def save(self):
         """Write self.lines back to global.conf with a backup."""
         _dbg(f"[CONFIG] GlobalConfigEditor.save() called — conf_path={self.conf_path!r}")
-        backup_dir = os.path.join(os.path.dirname(os.path.abspath(self.conf_path)), "backups")
+        backup_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(self.conf_path))), "backups")
         _dbg(f"[CONFIG] backup_dir resolved to {backup_dir!r}")
         try:
             os.makedirs(backup_dir, exist_ok=True)
@@ -483,7 +483,7 @@ class ConfigEditor:
         _dbg(f"[CONFIG] ConfigEditor.save_file() called — site_path={self.current_site_path!r}")
 
         # Create backup
-        backup_dir = os.path.join(os.path.dirname(os.path.abspath(self.current_site_path)), "backups")
+        backup_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(self.current_site_path))), "backups")
         _dbg(f"[CONFIG] backup_dir resolved to {backup_dir!r}")
         try:
             os.makedirs(backup_dir, exist_ok=True)
