@@ -653,6 +653,31 @@ KEYBIND_LABELS = {
 # ══════════════════════════════════════════════════════════════════════════════
 
 def kill_proc(proc) -> None:
+    # Scan all running yt-dlp processes before attempting the kill so we can
+    # compare the system-visible PIDs against the proc.pid we intend to kill.
+    # This is Linux-only (/proc-based); skipped silently on other platforms.
+    if sys.platform != "win32":
+        try:
+            ytdlp_pids = []
+            for entry in os.scandir("/proc"):
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    cmdline_path = f"/proc/{entry.name}/cmdline"
+                    with open(cmdline_path, "r", encoding="utf-8", errors="replace") as _f:
+                        cmdline = _f.read().replace("\x00", " ").strip()
+                    if "yt_dlp" in cmdline or "yt-dlp" in cmdline:
+                        ytdlp_pids.append((int(entry.name), cmdline[:120]))
+                except (FileNotFoundError, ProcessLookupError, PermissionError):
+                    pass
+            if ytdlp_pids:
+                pid_summary = "; ".join(f"pid={p} cmd={c!r}" for p, c in ytdlp_pids)
+                dbg(f"[KILL][scan_procs] yt-dlp processes on system (count={len(ytdlp_pids)}): {pid_summary}")
+            else:
+                dbg("[KILL][scan_procs] no yt-dlp processes found on system")
+        except Exception as _scan_err:
+            dbg(f"[KILL][scan_procs] /proc scan failed: {_scan_err}")
+
     dbg(f"[KILL] Attempting to kill proc.pid={proc.pid}")
     if sys.platform == "win32":
         dbg(f"[KILL] win32: using taskkill on pid={proc.pid}")
