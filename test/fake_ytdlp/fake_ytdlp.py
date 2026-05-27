@@ -28,6 +28,12 @@ _CFG_PATH = os.environ.get("FAKE_YTDLP_CONF", "")
 if not _CFG_PATH or not os.path.isfile(_CFG_PATH):
     _CFG_PATH = os.path.join(_HERE, "fake_ytdlp.conf")
 
+# ENV_OVERRIDE_PATCH
+_env_conf = os.environ.get("FAKE_YTDLP_CONF", "")
+if _env_conf and os.path.isfile(_env_conf):
+    _CFG_PATH = _env_conf
+
+
 # Default log file path
 _LOG_PATH = os.path.join(_HERE, "fake_ytdlp.log")
 
