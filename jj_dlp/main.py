@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.5.10"
+__version__ = "1.5.11"
 
 import subprocess
 import time
@@ -633,7 +633,7 @@ def _get_output_mode() -> int:
 
 _configure_logger(_get_output_mode)
 
-# DEBUG_LOGS_ENABLED / DEBUG_LOG_PATH / debug_log_lock are imported from logger.
+
 
 # ── Keybinds ──
 KEYBIND_OUTPUT    = "o"
@@ -2816,24 +2816,34 @@ class JJDlpDashboard:
 
         if new_enabled:
             if new_path:
+                # Explicit path provided — use it directly.
                 _logger.configure_debug_log(True, new_path)
-            elif not _logger.DEBUG_LOG_PATH:
-                _logger.dbg("[CONFIG] apply_global_cfg fallback to first site debug log path")
-                try:
-                    resolved_path = get_debug_log_path(load_config(self.sites[0].config_path))
-                    _logger.configure_debug_log(True, resolved_path)
-                    _logger.dbg(f"[CONFIG] apply_global_cfg resolved fallback DEBUG_LOG_PATH={resolved_path!r}")
-                except Exception as e:
-                    _logger.dbg(f"[CONFIG] apply_global_cfg failed to resolve fallback debug log path: {e}")
-                    _logger.DEBUG_LOGS_ENABLED = False
             else:
-                _logger.DEBUG_LOGS_ENABLED = True
+                # No explicit path — check if a path is already configured.
+                with _logger._debug_cfg_lock:
+                    current_path = _logger._debug_cfg.path
+                if current_path:
+                    # Keep the existing path; just (re-)enable logging.
+                    _logger.configure_debug_log(True, current_path)
+                else:
+                    # Fall back to the first site's default debug log path.
+                    _logger.dbg("[CONFIG] apply_global_cfg fallback to first site debug log path")
+                    try:
+                        resolved_path = get_debug_log_path(load_config(self.sites[0].config_path))
+                        _logger.configure_debug_log(True, resolved_path)
+                        _logger.dbg(f"[CONFIG] apply_global_cfg resolved fallback DEBUG_LOG_PATH={resolved_path!r}")
+                    except Exception as e:
+                        _logger.dbg(f"[CONFIG] apply_global_cfg failed to resolve fallback debug log path: {e}")
+                        _logger.configure_debug_log(False, "")
         else:
-            _logger.DEBUG_LOGS_ENABLED = False
+            _logger.configure_debug_log(False, "")
 
+        with _logger._debug_cfg_lock:
+            final_enabled = _logger._debug_cfg.enabled
+            final_path    = _logger._debug_cfg.path
         _logger.dbg(
-            f"[CONFIG] apply_global_cfg completed: DEBUG_LOGS={_logger.DEBUG_LOGS_ENABLED} "
-            f"DEBUG_LOG_PATH={_logger.DEBUG_LOG_PATH!r}"
+            f"[CONFIG] apply_global_cfg completed: DEBUG_LOGS={final_enabled} "
+            f"DEBUG_LOG_PATH={final_path!r}"
         )
 
     # ── Run loop ──────────────────────────────────────────────────────────────

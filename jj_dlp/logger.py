@@ -6,23 +6,22 @@ Globals (set once at startup from config, then read-only):
     ENABLE_CRASH_LOG     bool  — write jj-dlp-crash.log on unhandled exception
 
 Runtime debug-log state is held in a single ``DebugLogConfig`` instance
-(_debug_cfg) that is swapped atomically under its own lock.  Callers that
-previously imported ``DEBUG_LOGS_ENABLED``, ``DEBUG_LOG_PATH``, or
-``debug_log_lock`` directly can continue to do so — module-level properties
-forward to the object — but the preferred API is:
-
-    configure_debug_log(enabled=True, path="/some/debug.log")
+(_debug_cfg) that is updated atomically under _debug_cfg_lock via
+configure_debug_log().  All other modules interact with this state only
+through that function; the old bare globals (DEBUG_LOGS_ENABLED,
+DEBUG_LOG_PATH, debug_log_lock) no longer exist.
 
 Public API
 ----------
-startup_dbg(msg)                  Write a line to the startup log (if enabled).
-startup_dbg_flush()               Write the opening banner (argv, cwd, python path).
-dbg(msg)                          Write to debug log (filtered by DBG_FILTERS).
-log_crash(e)                      Write an unhandled exception to jj-dlp-crash.log.
+startup_dbg(msg)                   Write a line to the startup log (if enabled).
+startup_dbg_flush()                Write the opening banner (argv, cwd, python path).
+dbg(msg)                           Write to debug log (filtered by DBG_FILTERS).
+log_crash(e)                       Write an unhandled exception to jj-dlp-crash.log.
 configure_debug_log(enabled, path) Atomically update the debug-log config.
-get_debug_log_path(cfg)           Resolve the debug log path from a config dict.
-get_log_path(cfg)                 Resolve the activity log path from a config dict.
-get_log_file_paths(cfg)           Return (stdout_path, stderr_path) for yt-dlp logging.
+configure(output_mode_fn, ...)     Inject output-mode accessor and dashboard logger.
+get_debug_log_path(cfg)            Resolve the debug log path from a config dict.
+get_log_path(cfg)                  Resolve the activity log path from a config dict.
+get_log_file_paths(cfg)            Return (stdout_path, stderr_path) for yt-dlp logging.
 """
 
 import os
@@ -41,15 +40,15 @@ _ROOT_DIR: str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _STARTUP_LOG: str = os.path.join(_ROOT_DIR, "jj-dlp-startup-debug.log")
 _CRASH_LOG:   str = os.path.join(_ROOT_DIR, "jj-dlp-crash.log")
 
-# ── Runtime debug log config (replaces bare module-level mutable globals) ─────
+# ── Runtime debug log config ──────────────────────────────────────────────────
 
 @dataclass
 class DebugLogConfig:
     """Holds the mutable runtime state for the debug log.
 
-    A single module-level instance (_debug_cfg) is swapped atomically under
-    _debug_cfg_lock via configure_debug_log().  This confines all mutation to
-    one place and makes the shared state explicit and thread-safe.
+    A single module-level instance (_debug_cfg) is updated atomically under
+    _debug_cfg_lock via configure_debug_log().  No other code should mutate
+    these fields directly.
     """
     enabled: bool = False
     path:    str  = ""
@@ -61,70 +60,12 @@ _debug_cfg_lock: threading.Lock = threading.Lock()
 def configure_debug_log(enabled: bool, path: str = "") -> None:
     """Atomically update the debug-log enabled flag and file path.
 
-    Replaces the previous pattern of setting ``logger.DEBUG_LOGS_ENABLED``
-    and ``logger.DEBUG_LOG_PATH`` under ``logger.debug_log_lock`` directly.
+    This is the sole write path for debug-log configuration.  Call once
+    from main() after the global config has been loaded.
     """
     with _debug_cfg_lock:
         _debug_cfg.enabled = enabled
         _debug_cfg.path    = path
-
-
-# ── Backward-compatible shims ─────────────────────────────────────────────────
-# Code that imported DEBUG_LOGS_ENABLED / DEBUG_LOG_PATH / debug_log_lock
-# from this module continues to work unchanged.  Direct mutation via these
-# names (e.g. ``_logger.DEBUG_LOGS_ENABLED = True``) is still supported but
-# deprecated; prefer configure_debug_log().
-
-class _DebugLogProxy:
-    """Module-level descriptor proxy so attribute access forwards to _debug_cfg."""
-
-    # Expose the underlying lock for callers that acquired it directly.
-    @property
-    def debug_log_lock(self) -> threading.Lock:          # noqa: D401
-        return _debug_cfg_lock
-
-    @property
-    def DEBUG_LOGS_ENABLED(self) -> bool:
-        return _debug_cfg.enabled
-
-    @DEBUG_LOGS_ENABLED.setter
-    def DEBUG_LOGS_ENABLED(self, value: bool) -> None:
-        with _debug_cfg_lock:
-            _debug_cfg.enabled = value
-
-    @property
-    def DEBUG_LOG_PATH(self) -> str:
-        return _debug_cfg.path
-
-    @DEBUG_LOG_PATH.setter
-    def DEBUG_LOG_PATH(self, value: str) -> None:
-        with _debug_cfg_lock:
-            _debug_cfg.path = value
-
-
-import sys as _sys
-import types as _types
-
-class _LoggerModule(_types.ModuleType):
-    """Wraps this module to expose DEBUG_LOGS_ENABLED / DEBUG_LOG_PATH as
-    module-level properties that forward to the DebugLogConfig instance."""
-
-    _proxy = _DebugLogProxy()
-
-    def __getattr__(self, name: str):
-        if name in ("DEBUG_LOGS_ENABLED", "DEBUG_LOG_PATH", "debug_log_lock"):
-            return getattr(self._proxy, name)
-        raise AttributeError(name)
-
-    def __setattr__(self, name: str, value) -> None:
-        if name in ("DEBUG_LOGS_ENABLED", "DEBUG_LOG_PATH"):
-            setattr(self._proxy, name, value)
-        else:
-            super().__setattr__(name, value)
-
-
-# Make the lock importable as a module attribute directly (read-only via proxy.
-debug_log_lock = _debug_cfg_lock
 
 # ── References to output-mode state (injected by main module at startup) ──────
 # These are set by jj-dlp.py via configure() so logger doesn't import main.
@@ -309,12 +250,4 @@ def get_log_file_paths(cfg: dict) -> tuple:
     return base, base
 
 
-# Replace this module's entry in sys.modules with the proxy subclass so that
-# attribute access on the module object goes through __getattr__/__setattr__.
-_current = _sys.modules[__name__]
-_wrapper = _LoggerModule(__name__, __doc__)
-_wrapper.__dict__.update({
-    k: v for k, v in _current.__dict__.items()
-    if k not in ("DEBUG_LOGS_ENABLED", "DEBUG_LOG_PATH", "debug_log_lock")
-})
-_sys.modules[__name__] = _wrapper
+
