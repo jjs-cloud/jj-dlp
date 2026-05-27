@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.6.0"
+__version__ = "1.6.1"
 
 import subprocess
 import time
@@ -535,6 +535,10 @@ class SiteState:
         # Written by _drain_pipe threads under dash_lock; read by the dashboard renderer.
         self.ffmpeg_error_counts: Dict[str, int] = {}
 
+        # stall tracking — streamer -> epoch when file growth was last seen to stop
+        # Set when size stops growing; cleared when growth resumes or recording ends.
+        self.stall_since: Dict[str, float] = {}
+
         # Cached config for the dashboard renderer — refreshed at most every 2s
         # so we avoid 7+ file reads per frame in draw_system_panel.
         self._cfg_cache:          Optional[dict] = None
@@ -563,6 +567,16 @@ class SiteState:
         """Reset the ffmpeg error count for *streamer* (called at recording start/reset)."""
         with self.dash_lock:
             self.ffmpeg_error_counts.pop(streamer, None)
+
+    def set_stall_since(self, streamer: str, epoch: float) -> None:
+        """Record that *streamer*'s file stopped growing at *epoch*."""
+        with self.dash_lock:
+            self.stall_since.setdefault(streamer, epoch)
+
+    def clear_stall_since(self, streamer: str) -> None:
+        """Clear stall tracking for *streamer* (growth resumed or recording ended)."""
+        with self.dash_lock:
+            self.stall_since.pop(streamer, None)
 
     def kill_all_procs(self) -> None:
         """Kill every registered yt-dlp process. Called on quit."""
@@ -1184,6 +1198,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                 ffmpeg_error_counter = [0]
                 ffmpeg_error_event   = threading.Event()
                 site.clear_ffmpeg_error_count(streamer)
+                site.clear_stall_since(streamer)
 
                 threading.Thread(
                     target=_drain_pipe,
@@ -1435,6 +1450,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                                 ffmpeg_error_counter = [0]
                                 ffmpeg_error_event   = threading.Event()
                                 site.clear_ffmpeg_error_count(streamer)
+                                site.clear_stall_since(streamer)
 
                                 last_size = 0
                                 last_growth_time = time.time()
@@ -1487,6 +1503,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
                         kill_proc(proc)
                         site.unregister_proc(streamer)
+                        site.clear_stall_since(streamer)
 
                         try:
                             close_logs()
@@ -1499,9 +1516,13 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                     if current_size > last_size:
                         last_size = current_size
                         last_growth_time = time.time()
+                        site.clear_stall_since(streamer)
+                    else:
+                        site.set_stall_since(streamer, last_growth_time)
 
             else:
                 site.unregister_proc(streamer)
+                site.clear_stall_since(streamer)
 
                 try:
                     close_logs()
@@ -2031,6 +2052,40 @@ class JJDlpDashboard:
                 disk_row_y = ffmpeg_row_y + 1
         except Exception as _ffmpeg_err_exc:
             dbg(f"[SYSTEM] ffmpeg error section exception: {_ffmpeg_err_exc!r}")
+
+        # Stall duration — one row per streamer stalled >= 5s, hidden otherwise
+        try:
+            _now = time.time()
+            all_stalls: List[Tuple[str, float]] = []
+            for _site in self.sites:
+                with _site.dash_lock:
+                    site_stalls = dict(_site.stall_since)
+                for _streamer, _since in sorted(site_stalls.items()):
+                    _secs = _now - _since
+                    if _secs >= 5.0:
+                        all_stalls.append((_streamer, _secs))
+
+            if all_stalls:
+                if disk_row_y < y2 - 1:
+                    self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
+                                "── stalled ──"[:inner_w],
+                                curses.color_pair(self.C_REC))
+                    disk_row_y += 1
+                for _streamer, _secs in all_stalls:
+                    if disk_row_y >= y2 - 1:
+                        break
+                    _label = _streamer[:label_w].ljust(label_w)
+                    _val   = _fmt_duration(int(_secs))
+                    self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
+                                _label,
+                                curses.color_pair(self.C_REC))
+                    self.safe_addstr(self.stdscr, disk_row_y, x1 + 2 + label_w + 1,
+                                _val[:inner_w - label_w - 1],
+                                curses.color_pair(self.C_REC))
+                    disk_row_y += 1
+                disk_row_y += 1
+        except Exception as _stall_exc:
+            dbg(f"[SYSTEM] stall section exception: {_stall_exc!r}")
 
         # Disk space rows — drives from global.conf take precedence; fall back to per-site
         try:
