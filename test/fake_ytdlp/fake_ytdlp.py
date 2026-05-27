@@ -20,12 +20,27 @@ import json
 import random
 import configparser
 import threading
+import traceback
 
-# ── Locate our own config ─────────────────────────────────────────────────────
+# ── Locate our own config and log file ────────────────────────────────────────
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _CFG_PATH = os.environ.get("FAKE_YTDLP_CONF", "")
 if not _CFG_PATH or not os.path.isfile(_CFG_PATH):
     _CFG_PATH = os.path.join(_HERE, "fake_ytdlp.conf")
+
+# Default log file path
+_LOG_PATH = os.path.join(_HERE, "fake_ytdlp.log")
+
+
+def _log_to_file(msg: str) -> None:
+    """Appends a timestamped message to the default log file."""
+    try:
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] {msg}\n")
+    except Exception:
+        # Fallback to stderr if writing to the log file fails
+        print(f"--- LOGGING ERROR: Could not write to {_LOG_PATH} ---", file=sys.stderr)
 
 
 def _load_cfg() -> dict:
@@ -179,6 +194,7 @@ def _run_checker(cfg: dict, argv: list) -> int:
     urls = _extract_urls(argv)
     if not urls:
         # Nothing to check — exit clean
+        _log_to_file("[Checker] No URLs found to check.")
         return 0
 
     live_set = set(cfg["checker_streamers_live"])
@@ -199,6 +215,7 @@ def _run_checker(cfg: dict, argv: list) -> int:
             "uploader":    streamer,
         }
         _stdout(json.dumps(info))
+        _log_to_file(f"[Checker] Evaluated URL: {url} -> is_live={is_live}")
 
     return 0
 
@@ -282,6 +299,7 @@ def _run_downloader(cfg: dict, argv: list) -> int:
     # ── Slow start ────────────────────────────────────────────────────────────
     if cfg["slow_start_enabled"]:
         _stderr(f"fake_ytdlp: [SlowStart] waiting {cfg['slow_start_delay']}s before creating file…")
+        _log_to_file(f"[Downloader] Slow-start enabled. Sleeping {cfg['slow_start_delay']}s")
         time.sleep(cfg["slow_start_delay"])
 
     start_time = time.time()
@@ -312,6 +330,7 @@ def _run_downloader(cfg: dict, argv: list) -> int:
     progress_t.start()
 
     _stderr(f"fake_ytdlp: opening output → {output_path}")
+    _log_to_file(f"[Downloader] Target output file: {output_path}")
 
     exit_code = cfg["dl_exit_code"]
 
@@ -329,18 +348,21 @@ def _run_downloader(cfg: dict, argv: list) -> int:
                 # ── Crash test ──────────────────────────────────────────────
                 if cfg["crash_enabled"] and elapsed >= cfg["crash_after"]:
                     _stderr(f"fake_ytdlp: [CrashTest] crashing after {elapsed:.1f}s")
+                    _log_to_file(f"[Downloader] Crash test triggered after {elapsed:.1f}s with code {cfg['crash_exit_code']}.")
                     stop_evt.set()
                     return cfg["crash_exit_code"]
 
                 # ── Duration expired ─────────────────────────────────────────
                 if elapsed >= cfg["dl_duration"]:
                     _stderr(f"fake_ytdlp: stream ended normally after {elapsed:.1f}s")
+                    _log_to_file(f"[Downloader] Stream finished naturally after {elapsed:.1f}s.")
                     break
 
                 # ── Stall trigger ─────────────────────────────────────────────
                 if cfg["stall_enabled"] and elapsed >= cfg["stall_after"]:
                     if not stall_logged:
                         _stderr(f"fake_ytdlp: [Stall] stalling after {elapsed:.1f}s — no more writes")
+                        _log_to_file(f"[Downloader] Stall simulation active. Halting file writes at {elapsed:.1f}s.")
                         stall_logged = True
                     writing = False
 
@@ -354,6 +376,7 @@ def _run_downloader(cfg: dict, argv: list) -> int:
 
     except KeyboardInterrupt:
         _stderr("fake_ytdlp: interrupted")
+        _log_to_file("[Downloader] Interrupted via KeyboardInterrupt.")
         exit_code = 1
     finally:
         stop_evt.set()
@@ -369,25 +392,38 @@ def _run_downloader(cfg: dict, argv: list) -> int:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
-    cfg  = _load_cfg()
-    argv = sys.argv[1:]          # everything after the script name
+    argv = sys.argv[1:]
+    _log_to_file(f"--- SCRIPT CALLED --- Arguments received: {argv}")
 
-    mode = cfg["mode"].lower()
+    try:
+        cfg  = _load_cfg()
+        mode = cfg["mode"].lower()
 
-    if "--dump-json" in argv:
-        mode = "checker"
-    elif any(arg in argv for arg in ("-o", "--output")):
-        mode = "downloader"
+        if "--dump-json" in argv:
+            mode = "checker"
+        elif any(arg in argv for arg in ("-o", "--output")):
+            mode = "downloader"
 
-    if mode == "checker":
-        code = _run_checker(cfg, argv)
-    elif mode == "downloader":
-        code = _run_downloader(cfg, argv)
-    else:
-        _stderr(f"fake_ytdlp: unknown mode {mode!r} in fake_ytdlp.conf — doing nothing")
-        code = 0
+        _log_to_file(f"Selected Mode: {mode}")
 
-    sys.exit(code)
+        if mode == "checker":
+            code = _run_checker(cfg, argv)
+        elif mode == "downloader":
+            code = _run_downloader(cfg, argv)
+        else:
+            _stderr(f"fake_ytdlp: unknown mode {mode!r} in fake_ytdlp.conf — doing nothing")
+            _log_to_file(f"Unknown mode specified: '{mode}'. Script doing nothing.")
+            code = 0
+
+        _log_to_file(f"Script exiting normally with exit code: {code}")
+        sys.exit(code)
+
+    except Exception as e:
+        # Capture unexpected errors or crashes inside main
+        error_msg = f"CRITICAL CRASH: Unexpected exception occurred!\n{traceback.format_exc()}"
+        _log_to_file(error_msg)
+        _stderr(f"fake_ytdlp internal error: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
