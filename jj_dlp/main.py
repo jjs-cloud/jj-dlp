@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.5.12"
+__version__ = "1.5.13"
 
 import subprocess
 import time
@@ -2820,8 +2820,7 @@ class JJDlpDashboard:
                 _logger.configure_debug_log(True, new_path)
             else:
                 # No explicit path — check if a path is already configured.
-                with _logger._debug_cfg_lock:
-                    current_path = _logger._debug_cfg.path
+                _, current_path = _logger.get_debug_log_config()
                 if current_path:
                     # Keep the existing path; just (re-)enable logging.
                     _logger.configure_debug_log(True, current_path)
@@ -2838,9 +2837,7 @@ class JJDlpDashboard:
         else:
             _logger.configure_debug_log(False, "")
 
-        with _logger._debug_cfg_lock:
-            final_enabled = _logger._debug_cfg.enabled
-            final_path    = _logger._debug_cfg.path
+        final_enabled, final_path = _logger.get_debug_log_config()
         _logger.dbg(
             f"[CONFIG] apply_global_cfg completed: DEBUG_LOGS={final_enabled} "
             f"DEBUG_LOG_PATH={final_path!r}"

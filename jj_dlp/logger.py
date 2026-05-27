@@ -18,6 +18,7 @@ startup_dbg_flush()                Write the opening banner (argv, cwd, python p
 dbg(msg)                           Write to debug log (filtered by DBG_FILTERS).
 log_crash(e)                       Write an unhandled exception to jj-dlp-crash.log.
 configure_debug_log(enabled, path) Atomically update the debug-log config.
+get_debug_log_config()             Return current (enabled, path) debug-log state.
 configure(output_mode_fn, ...)     Inject output-mode accessor and dashboard logger.
 get_debug_log_path(cfg)            Resolve the debug log path from a config dict.
 get_log_path(cfg)                  Resolve the activity log path from a config dict.
@@ -66,6 +67,16 @@ def configure_debug_log(enabled: bool, path: str = "") -> None:
     with _debug_cfg_lock:
         _debug_cfg.enabled = enabled
         _debug_cfg.path    = path
+
+
+def get_debug_log_config() -> tuple[bool, str]:
+    """Return the current ``(enabled, path)`` debug-log state.
+
+    Use this instead of reaching into the private ``_debug_cfg`` /
+    ``_debug_cfg_lock`` internals from outside this module.
+    """
+    with _debug_cfg_lock:
+        return _debug_cfg.enabled, _debug_cfg.path
 
 # ── References to output-mode state (injected by main module at startup) ──────
 # These are set by jj-dlp.py via configure() so logger doesn't import main.
