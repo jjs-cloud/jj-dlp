@@ -23,7 +23,9 @@ import threading
 
 # ── Locate our own config ─────────────────────────────────────────────────────
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_CFG_PATH = os.path.join(_HERE, "fake_ytdlp.conf")
+_CFG_PATH = os.environ.get("FAKE_YTDLP_CONF", "")
+if not _CFG_PATH or not os.path.isfile(_CFG_PATH):
+    _CFG_PATH = os.path.join(_HERE, "fake_ytdlp.conf")
 
 
 def _load_cfg() -> dict:
@@ -371,6 +373,11 @@ def main() -> None:
     argv = sys.argv[1:]          # everything after the script name
 
     mode = cfg["mode"].lower()
+
+    if "--dump-json" in argv:
+        mode = "checker"
+    elif any(arg in argv for arg in ("-o", "--output")):
+        mode = "downloader"
 
     if mode == "checker":
         code = _run_checker(cfg, argv)

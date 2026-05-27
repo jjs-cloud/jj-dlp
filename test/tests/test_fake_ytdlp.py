@@ -31,8 +31,10 @@ import unittest
 
 # ── Locate fake_ytdlp ─────────────────────────────────────────────────────────
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_REPO_ROOT = os.path.dirname(_HERE)
-_FAKE_YTDLP_DIR = os.path.join(_REPO_ROOT, "fake_ytdlp")
+_TEST_DIR = os.path.dirname(_HERE)
+_REPO_ROOT = os.path.dirname(_TEST_DIR)
+sys.path.insert(0, _REPO_ROOT)
+_FAKE_YTDLP_DIR = os.path.join(_TEST_DIR, "fake_ytdlp")
 _FAKE_YTDLP_PY  = os.path.join(_FAKE_YTDLP_DIR, "fake_ytdlp.py")
 _FAKE_YTDLP_CONF_ORIG = os.path.join(_FAKE_YTDLP_DIR, "fake_ytdlp.conf")
 
@@ -509,10 +511,21 @@ class TestFfmpegErrors(unittest.TestCase):
         ) as fx:
             proc = fx.popen(extra_args=["-o", fx.output_path,
                                          "https://example.com/alice"])
+            stderr_chunks = []
+            def drain_stderr():
+                try:
+                    for chunk in iter(lambda: proc.stderr.read(4096), b""):
+                        stderr_chunks.append(chunk)
+                except Exception:
+                    pass
+            drain_thread = threading.Thread(target=drain_stderr, daemon=True)
+            drain_thread.start()
             # Give it time to emit THRESHOLD lines: 500 * 0.02 = 10 s + slack
-            time.sleep(14)
+            time.sleep(20)
             proc.kill()
-            _, stderr_bytes = proc.communicate(timeout=5)
+            proc.wait(timeout=5)
+            drain_thread.join(timeout=2)
+            stderr_bytes = b"".join(stderr_chunks)
             count = self._count_pattern_in_stderr(
                 stderr_bytes.decode(errors="replace"), "timestamp discontinuity"
             )
@@ -696,7 +709,7 @@ class TestLoggerModule(unittest.TestCase):
     def test_get_log_path_default(self):
         from jj_dlp.logger import get_log_path
         cfg = {"output_dir": "/tmp/recordings", "log_path": ""}
-        self.assertEqual(get_log_path(cfg), "/tmp/recordings/jj-dlp.log")
+        self.assertEqual(get_log_path(cfg).replace("\\", "/"), "/tmp/recordings/jj-dlp.log")
 
     def test_get_log_path_custom(self):
         from jj_dlp.logger import get_log_path
