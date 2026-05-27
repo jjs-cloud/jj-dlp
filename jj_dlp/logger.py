@@ -112,8 +112,8 @@ DBG_FILTERS: dict[str, bool] = {
     "DISK":    False,
     "UPDATER": False,
     "TWITCH":  False,
-    "CONFIG":  True,
-    "KILL":    False,
+    "CONFIG":  False,
+    "KILL":    True,
     "POPUP":   False,
 }
 
@@ -155,7 +155,9 @@ def _write_debug_log(msg: str) -> None:
     if not enabled or not path:
         return
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        dir_part = os.path.dirname(path)
+        if dir_part:
+            os.makedirs(dir_part, exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:
             f.write(msg + "\n")
         _last_debug_err = ""
