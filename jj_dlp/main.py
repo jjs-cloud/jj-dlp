@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.5.14"
+__version__ = "1.6.0"
 
 import subprocess
 import time
@@ -531,6 +531,10 @@ class SiteState:
         self._procs_lock          = threading.Lock()
         self._active_procs:       Dict[str, object] = {}
 
+        # ffmpeg error counts — streamer -> cumulative error count for current session
+        # Written by _drain_pipe threads under dash_lock; read by the dashboard renderer.
+        self.ffmpeg_error_counts: Dict[str, int] = {}
+
         # Cached config for the dashboard renderer — refreshed at most every 2s
         # so we avoid 7+ file reads per frame in draw_system_panel.
         self._cfg_cache:          Optional[dict] = None
@@ -546,6 +550,19 @@ class SiteState:
         """Remove a subprocess from the registry (after it exits)."""
         with self._procs_lock:
             self._active_procs.pop(streamer, None)
+
+    def set_ffmpeg_error_count(self, streamer: str, count: int) -> None:
+        """Update the ffmpeg error count for *streamer* (called from _drain_pipe)."""
+        with self.dash_lock:
+            if count > 0:
+                self.ffmpeg_error_counts[streamer] = count
+            else:
+                self.ffmpeg_error_counts.pop(streamer, None)
+
+    def clear_ffmpeg_error_count(self, streamer: str) -> None:
+        """Reset the ffmpeg error count for *streamer* (called at recording start/reset)."""
+        with self.dash_lock:
+            self.ffmpeg_error_counts.pop(streamer, None)
 
     def kill_all_procs(self) -> None:
         """Kill every registered yt-dlp process. Called on quit."""
@@ -624,7 +641,7 @@ FFMPEG_ERROR_PATTERNS: List[str] = [
 # and draw_stderr_tab can filter them in/out without separate buffers.
 _CHECKER_STDOUT_PREFIX: str = "\x00checker\x00"
 _CHECKER_STDERR_PREFIX: str = "\x00checker_err\x00"
-FFMPEG_ERROR_RESTART_THRESHOLD: int = 500
+FFMPEG_ERROR_RESTART_THRESHOLD: int = 200
 
 # Wire logger.dbg to this module's OUTPUT_MODE
 def _get_output_mode() -> int:
@@ -931,6 +948,8 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
                 for pattern in FFMPEG_ERROR_PATTERNS:
                     if pattern.lower() in line_lower:
                         ffmpeg_error_counter[0] += 1
+                        if site is not None and streamer:
+                            site.set_ffmpeg_error_count(streamer, ffmpeg_error_counter[0])
                         if ffmpeg_error_counter[0] >= FFMPEG_ERROR_RESTART_THRESHOLD:
                             ffmpeg_error_event.set()
                         break
@@ -1164,6 +1183,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
                 ffmpeg_error_counter = [0]
                 ffmpeg_error_event   = threading.Event()
+                site.clear_ffmpeg_error_count(streamer)
 
                 threading.Thread(
                     target=_drain_pipe,
@@ -1414,6 +1434,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
                                 ffmpeg_error_counter = [0]
                                 ffmpeg_error_event   = threading.Event()
+                                site.clear_ffmpeg_error_count(streamer)
 
                                 last_size = 0
                                 last_growth_time = time.time()
@@ -1976,6 +1997,42 @@ class JJDlpDashboard:
 
         # Disk space rows — drives from global.conf take precedence; fall back to per-site
         disk_row_y = y1 + 2 + len(rows) + 1
+
+        # ffmpeg error counts — one row per streamer that has errors, hidden when none
+        ffmpeg_row_y = y1 + 2 + len(rows) + 1
+        try:
+            # Gather per-streamer counts across all sites
+            all_ffmpeg_errors: List[Tuple[str, int]] = []
+            for _site in self.sites:
+                with _site.dash_lock:
+                    site_counts = dict(_site.ffmpeg_error_counts)
+                for _streamer, _count in sorted(site_counts.items()):
+                    if _count > 0:
+                        all_ffmpeg_errors.append((_streamer, _count))
+
+            if all_ffmpeg_errors:
+                if ffmpeg_row_y < y2 - 1:
+                    self.safe_addstr(self.stdscr, ffmpeg_row_y, x1 + 2,
+                                "── ffmpeg errors ──"[:inner_w],
+                                curses.color_pair(self.C_REC))
+                    ffmpeg_row_y += 1
+                for _streamer, _count in all_ffmpeg_errors:
+                    if ffmpeg_row_y >= y2 - 1:
+                        break
+                    _label = _streamer[:label_w].ljust(label_w)
+                    _val   = str(_count)
+                    self.safe_addstr(self.stdscr, ffmpeg_row_y, x1 + 2,
+                                _label,
+                                curses.color_pair(self.C_REC))
+                    self.safe_addstr(self.stdscr, ffmpeg_row_y, x1 + 2 + label_w + 1,
+                                _val[:inner_w - label_w - 1],
+                                curses.color_pair(self.C_REC))
+                    ffmpeg_row_y += 1
+                disk_row_y = ffmpeg_row_y + 1
+        except Exception as _ffmpeg_err_exc:
+            dbg(f"[SYSTEM] ffmpeg error section exception: {_ffmpeg_err_exc!r}")
+
+        # Disk space rows — drives from global.conf take precedence; fall back to per-site
         try:
             now = time.monotonic()
             if now - self._disk_cache_time >= 10.0:
