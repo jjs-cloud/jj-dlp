@@ -395,10 +395,8 @@ def plain_ffmpeg_check() -> bool:
         print()
         print(f"{GRN}{BOLD}✔  ffmpeg found:{RESET}")
         print(f"   {ffmpeg_path}")
-        print(f"{YEL}Continuing in 1 second…{RESET}")
-        deadline = time.time() + 1.0
-        while time.time() < deadline:
-            time.sleep(0.05)
+        print(f"{YEL}Continuing in 0.3 seconds…{RESET}")
+        time.sleep(0.3)
         return True
 
     # ── Phase 2: Missing — prompt ─────────────────────────────────────────────

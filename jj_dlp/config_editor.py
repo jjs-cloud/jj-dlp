@@ -137,6 +137,28 @@ _KEY_COMMENTS: dict[str, str] = {k.name: k.comment for k in CONFIG_KEYS}
 PRESERVED_KEYS: list[str] = [k.name for k in CONFIG_KEYS if k.preserve]
 
 
+def _validate_value(key: str, value: str) -> tuple[bool, str]:
+    """Validate config values based on their expected types."""
+    bool_keys = {"DEBUG_LOGS", "CHECK_FOR_UPDATES", "ASK_FOR_BROWSER", "ASK_FOR_CONFIG", 
+                 "PANEL_RESIZE", "LOGGING", "SPLIT_LOGS", "POPUP_NOTIFICATIONS", 
+                 "DOWNLOADER_COOKIES", "CHECKER_COOKIES"}
+    int_keys = {"UPDATE_INTERVAL", "SITE_ORDER", "CHECK_INTERVAL", "COOLDOWN_AFTER_RECORDING", 
+                "SPLIT_AFTER", "STALL_CHECK_INTERVAL", "STALL_TIMEOUT", "CONFIG_CHECK_INTERVAL", 
+                "POPUP_TIMEOUT", "POPUP_COOLDOWN", "PROGRESS_BAR_MAX_HOURS", "PROGRESS_BAR_WIDTH", 
+                "LAST_LIVE_HIGHLIGHT"}
+    if key in bool_keys:
+        if value.lower() not in ("true", "false", "yes", "no", "1", "0"):
+            return False, "Must be true or false"
+    if key in int_keys:
+        try:
+            val = int(value)
+            if val < 0 and key != "SITE_ORDER":
+                return False, "Must be >= 0"
+        except ValueError:
+            return False, "Must be an integer"
+    return True, ""
+
+
 def _wrap_text(text: str, width: int) -> list:
     """Word-wrap text to fit within `width` columns, returning a list of lines."""
     if not text or width <= 0:
@@ -174,6 +196,7 @@ class GlobalConfigEditor:
         self.scroll_offset = 0
         self.popup_mode = False
         self.popup_buf = ""
+        self.popup_error = ""
         self.editing_item = None
         self._loaded = False
 
@@ -292,33 +315,64 @@ class GlobalConfigEditor:
             _dbg(f"[CONFIG] ERROR writing global.conf: {e}")
         # Reload so line indices stay accurate
         self._loaded = False
-        self._load()
+        try:
+            self._load()
+            _dbg(f"[CONFIG] GlobalConfigEditor.save() reload completed items={len(self.items)}")
+        except Exception as e:
+            _dbg(f"[CONFIG] GlobalConfigEditor.save() reload failed: {e}")
 
         # Apply changes to live globals immediately (e.g. DEBUG_LOGS)
         if self._on_save:
             new_cfg = {item.key: item.value for item in self.items}
-            self._on_save(new_cfg)
+            try:
+                self._on_save(new_cfg)
+                _dbg("[CONFIG] GlobalConfigEditor.save() on_save applied")
+            except Exception as e:
+                _dbg(f"[CONFIG] GlobalConfigEditor.save() on_save failed: {e}")
 
     def handle_key(self, key) -> bool:
         """Handle a keypress in the global editor section. Returns True if consumed."""
         self._ensure_loaded()
         if self.popup_mode:
+            _dbg(f"[CONFIG] GlobalConfigEditor.handle_key() popup key={key} popup_buf={self.popup_buf!r} editing_item={self.editing_item.key if self.editing_item else None}")
             if key == 27:
                 self.popup_mode = False
                 self.popup_buf = ""
+                self.popup_error = ""
                 self.editing_item = None
             elif key in (curses.KEY_BACKSPACE, 127, 8):
                 self.popup_buf = self.popup_buf[:-1]
+                self.popup_error = ""
             elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
                 if self.editing_item:
                     new_val = self.popup_buf.strip()
-                    self.lines[self.editing_item.line_idx] = f"{self.editing_item.key} = {new_val}\n"
-                    self.save()
+                    _dbg(f"[CONFIG] GlobalConfigEditor.handle_key() Enter pressed for {self.editing_item.key!r} new_val={new_val!r}")
+                    is_valid, err_msg = _validate_value(self.editing_item.key, new_val)
+                    if not is_valid:
+                        self.popup_error = err_msg
+                        _dbg(f"[CONFIG] GlobalConfigEditor.handle_key() validation failed: {err_msg}")
+                        return True
+                    if 0 <= self.editing_item.line_idx < len(self.lines):
+                        self.lines[self.editing_item.line_idx] = f"{self.editing_item.key} = {new_val}\n"
+                    else:
+                        self.popup_error = "Internal error: invalid config line"
+                        _dbg(f"[CONFIG] GlobalConfigEditor.handle_key() bad line_idx={self.editing_item.line_idx} len(lines)={len(self.lines)}")
+                        return True
+                    try:
+                        self.save()
+                    except Exception as e:
+                        self.popup_error = f"Save failed: {e}"
+                        _dbg(f"[CONFIG] GlobalConfigEditor.handle_key() save failed: {e}")
+                        return True
+                    _dbg(f"[CONFIG] GlobalConfigEditor.handle_key() save completed for {self.editing_item.key!r}")
                 self.popup_mode = False
                 self.popup_buf = ""
+                self.popup_error = ""
                 self.editing_item = None
+                _dbg("[CONFIG] GlobalConfigEditor.handle_key() popup closed after save")
             elif 32 <= key < 127:
                 self.popup_buf += chr(key)
+                self.popup_error = ""
             return True
 
         if key == curses.KEY_UP:
@@ -342,7 +396,7 @@ class GlobalConfigEditor:
 
         self.dashboard.draw_box(stdscr, y1, x1, y2, x2, db.C_SYSTEM)
         title = " GLOBAL SETTINGS "
-        self.dashboard.safe_addstr(stdscr, y1, x1 + 2, title, curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
+        self.dashboard.safe_addstr(stdscr, y1, x1 + 2, title, curses.color_pair(db.C_LIVE) | curses.A_BOLD)
         if is_active:
             mode_str = " [ GLOBAL ] "
             self.dashboard.safe_addstr(stdscr, y1, x2 - len(mode_str) - 1, mode_str,
@@ -368,7 +422,10 @@ class GlobalConfigEditor:
             row_y += 1
 
         if self.popup_mode and self.editing_item:
-            self._draw_popup(stdscr)
+            self.draw_popup(stdscr)
+
+    def draw_popup(self, stdscr):
+        self._draw_popup(stdscr)
 
     def _draw_popup(self, stdscr):
         db = self.dashboard
@@ -403,8 +460,12 @@ class GlobalConfigEditor:
                     curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
         self.dashboard.safe_addstr(stdscr, row, bx1 + 13, (self.popup_buf + "_")[:box_w - 15],
                     curses.color_pair(db.C_NORMAL) | curses.A_BOLD)
-        self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel ",
-                    curses.color_pair(db.C_INVHEAD))
+        if self.popup_error:
+            self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, f" Error: {self.popup_error} ",
+                        curses.color_pair(db.C_WARN) | curses.A_BOLD)
+        else:
+            self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel ",
+                        curses.color_pair(db.C_INVHEAD))
 
 
 class ConfigEditor:
@@ -416,6 +477,7 @@ class ConfigEditor:
         self.selected_idx = 0
         self.popup_mode = False
         self.popup_buf = ""
+        self.popup_error = ""
         self.lines = []
         self.items = []
         self.current_site_path = None
@@ -429,6 +491,22 @@ class ConfigEditor:
             parent_dashboard,
             on_save=getattr(parent_dashboard, "apply_global_cfg", None),
         )
+
+    def notify_site_changed(self, new_idx: int) -> None:
+        """Called by the dashboard whenever selected_site_idx changes.
+
+        This replaces the polling comparison that previously lived in
+        draw_tab() — state is updated immediately on the event rather than
+        discovered one frame later.
+        """
+        if new_idx == self.selected_site_idx and self.current_site_path is not None:
+            return
+        self.selected_site_idx = new_idx
+        self.selected_idx = 0
+        self.scroll_offset = 0
+        if self.sites:
+            site = self.sites[new_idx]
+            self.load_config(site.config_path)
 
     def load_config(self, config_path):
         self.current_site_path = config_path
@@ -511,17 +589,19 @@ class ConfigEditor:
             self.dashboard.sites[self.selected_site_idx].log_line(f"Failed to save config: {e}")
 
         # Reload
-        self.load_config(self.current_site_path)
+        try:
+            self.load_config(self.current_site_path)
+            _dbg(f"[CONFIG] ConfigEditor.save_file() reload completed items={len(self.items)}")
+        except Exception as e:
+            _dbg(f"[CONFIG] ConfigEditor.save_file() reload failed: {e}")
+            if self.current_site_path and self.current_site_path in {site.config_path for site in self.dashboard.sites}:
+                self.dashboard.sites[self.selected_site_idx].log_line(f"Failed to reload config after save: {e}")
 
     def draw_tab(self, stdscr, y1, x1, y2, x2):
-        # Sync selected site
-        if self.selected_site_idx != self.dashboard.selected_site_idx:
-            self.selected_site_idx = self.dashboard.selected_site_idx
-            self.selected_idx = 0
-            self.scroll_offset = 0
-            site = self.sites[self.selected_site_idx]
-            self.load_config(site.config_path)
-        elif self.current_site_path is None and self.sites:
+        # Ensure an initial load if the editor has never loaded a config yet
+        # (first time the Config tab is opened). Site-change events are
+        # delivered via notify_site_changed(), so no per-frame polling needed.
+        if self.current_site_path is None and self.sites:
             site = self.sites[self.selected_site_idx]
             self.load_config(site.config_path)
 
@@ -569,11 +649,11 @@ class ConfigEditor:
         site_box_y1 = content_y1 + 1
         self.dashboard.draw_box(stdscr, site_box_y1, site_x1, y2, site_x2, self.dashboard.C_CHROME)
         if self._focus == "site":
-            mode_str = " [ SITE CONFIG ] "
+            mode_str = " [ SITE ] "
             self.dashboard.safe_addstr(stdscr, site_box_y1, site_x2 - len(mode_str) - 1, mode_str,
                         curses.color_pair(self.dashboard.C_LIVE) | curses.A_BOLD)
-        self.dashboard.safe_addstr(stdscr, site_box_y1, site_x1 + 2, " SITE CONFIGURATION ",
-                    curses.color_pair(self.dashboard.C_INVHEAD) | curses.A_BOLD)
+        self.dashboard.safe_addstr(stdscr, site_box_y1, site_x1 + 2, " SITE SETTINGS ",
+                    curses.color_pair(self.dashboard.C_LIVE) | curses.A_BOLD)
 
         if not self.items:
             self.dashboard.safe_addstr(stdscr, site_box_y1 + 2, site_x1 + 4,
@@ -617,7 +697,7 @@ class ConfigEditor:
 
         # Draw popup (whichever sub-editor owns it)
         if self._focus == "global" and self.global_editor.popup_mode and self.global_editor.editing_item:
-            self.global_editor._draw_popup(stdscr)
+            self.global_editor.draw_popup(stdscr)
         elif self._focus == "site" and self.popup_mode and self.editing_item:
             self.draw_popup(stdscr)
 
@@ -662,7 +742,10 @@ class ConfigEditor:
         self.dashboard.safe_addstr(stdscr, row, bx1 + 2, "New Value:", curses.color_pair(self.dashboard.C_WARN) | curses.A_BOLD)
         self.dashboard.safe_addstr(stdscr, row, bx1 + 13, (self.popup_buf + "_")[:box_w - 15], curses.color_pair(self.dashboard.C_NORMAL) | curses.A_BOLD)
 
-        self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel ", curses.color_pair(self.dashboard.C_INVHEAD))
+        if self.popup_error:
+            self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, f" Error: {self.popup_error} ", curses.color_pair(self.dashboard.C_WARN) | curses.A_BOLD)
+        else:
+            self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel ", curses.color_pair(self.dashboard.C_INVHEAD))
 
     def handle_key(self, key) -> bool:
         """Returns True if the key was consumed by the editor."""
@@ -684,24 +767,40 @@ class ConfigEditor:
             if key == 27:
                 self.popup_mode = False
                 self.popup_buf = ""
+                self.popup_error = ""
                 self.editing_item = None
             elif key in (curses.KEY_BACKSPACE, 127, 8):
                 self.popup_buf = self.popup_buf[:-1]
+                self.popup_error = ""
             elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
                 if self.editing_item:
                     new_val = self.popup_buf.strip()
-                    if self.editing_item.has_equals:
-                        self.lines[self.editing_item.line_idx] = f"{self.editing_item.key} = {new_val}\n"
+                    is_valid, err_msg = _validate_value(self.editing_item.key, new_val)
+                    if not is_valid:
+                        self.popup_error = err_msg
+                        return True
+                    if 0 <= self.editing_item.line_idx < len(self.lines):
+                        if self.editing_item.has_equals:
+                            self.lines[self.editing_item.line_idx] = f"{self.editing_item.key} = {new_val}\n"
+                        else:
+                            self.lines[self.editing_item.line_idx] = f"{new_val}\n"
                     else:
-                        self.lines[self.editing_item.line_idx] = f"{new_val}\n"
-                    self.save_file()
+                        self.popup_error = "Internal error: invalid config line"
+                        return True
+                    try:
+                        self.save_file()
+                    except Exception as e:
+                        self.popup_error = f"Save failed: {e}"
+                        return True
                     site = self.sites[self.selected_site_idx]
                     site.trigger_event.set()
                 self.popup_mode = False
                 self.popup_buf = ""
+                self.popup_error = ""
                 self.editing_item = None
             elif 32 <= key < 127:
                 self.popup_buf += chr(key)
+                self.popup_error = ""
             return True
 
         if key == 27:

@@ -4,25 +4,31 @@ logger.py  —  logging & debug helpers for jj-dlp
 Globals (set once at startup from config, then read-only):
     ENABLE_STARTUP_LOG   bool  — write jj-dlp-startup-debug.log
     ENABLE_CRASH_LOG     bool  — write jj-dlp-crash.log on unhandled exception
-    DEBUG_LOGS_ENABLED   bool  — write per-session debug.log
-    DEBUG_LOG_PATH       str   — path for debug.log
-    debug_log_lock       Lock  — guards the two DEBUG_* vars above
+
+Runtime debug-log state is held in a single ``DebugLogConfig`` instance
+(_debug_cfg) that is updated atomically under _debug_cfg_lock via
+configure_debug_log().  All other modules interact with this state only
+through that function; the old bare globals (DEBUG_LOGS_ENABLED,
+DEBUG_LOG_PATH, debug_log_lock) no longer exist.
 
 Public API
 ----------
-startup_dbg(msg)          Write a line to the startup log (if enabled).
-startup_dbg_flush()       Write the opening banner (argv, cwd, python path).
-dbg(msg)                  Write to debug log (filtered by DBG_FILTERS).
-log_crash(e)              Write an unhandled exception to jj-dlp-crash.log.
-get_debug_log_path(cfg)   Resolve the debug log path from a config dict.
-get_log_path(cfg)         Resolve the activity log path from a config dict.
-get_log_file_paths(cfg)   Return (stdout_path, stderr_path) for yt-dlp logging.
-configure_filters(d)      Replace DBG_FILTERS with a new tag→bool dict.
+startup_dbg(msg)                   Write a line to the startup log (if enabled).
+startup_dbg_flush()                Write the opening banner (argv, cwd, python path).
+dbg(msg)                           Write to debug log (filtered by DBG_FILTERS).
+log_crash(e)                       Write an unhandled exception to jj-dlp-crash.log.
+configure_debug_log(enabled, path) Atomically update the debug-log config.
+get_debug_log_config()             Return current (enabled, path) debug-log state.
+configure(output_mode_fn, ...)     Inject output-mode accessor and dashboard logger.
+get_debug_log_path(cfg)            Resolve the debug log path from a config dict.
+get_log_path(cfg)                  Resolve the activity log path from a config dict.
+get_log_file_paths(cfg)            Return (stdout_path, stderr_path) for yt-dlp logging.
 """
 
 import os
 import sys
 import threading
+from dataclasses import dataclass
 from datetime import datetime
 
 
@@ -35,10 +41,42 @@ _ROOT_DIR: str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _STARTUP_LOG: str = os.path.join(_ROOT_DIR, "jj-dlp-startup-debug.log")
 _CRASH_LOG:   str = os.path.join(_ROOT_DIR, "jj-dlp-crash.log")
 
-# ── Runtime debug log (path resolved from config after startup) ───────────────
-DEBUG_LOGS_ENABLED: bool = False
-DEBUG_LOG_PATH:     str  = ""
-debug_log_lock = threading.Lock()
+# ── Runtime debug log config ──────────────────────────────────────────────────
+
+@dataclass
+class DebugLogConfig:
+    """Holds the mutable runtime state for the debug log.
+
+    A single module-level instance (_debug_cfg) is updated atomically under
+    _debug_cfg_lock via configure_debug_log().  No other code should mutate
+    these fields directly.
+    """
+    enabled: bool = False
+    path:    str  = ""
+
+_debug_cfg:      DebugLogConfig = DebugLogConfig()
+_debug_cfg_lock: threading.Lock = threading.Lock()
+
+
+def configure_debug_log(enabled: bool, path: str = "") -> None:
+    """Atomically update the debug-log enabled flag and file path.
+
+    This is the sole write path for debug-log configuration.  Call once
+    from main() after the global config has been loaded.
+    """
+    with _debug_cfg_lock:
+        _debug_cfg.enabled = enabled
+        _debug_cfg.path    = path
+
+
+def get_debug_log_config() -> tuple[bool, str]:
+    """Return the current ``(enabled, path)`` debug-log state.
+
+    Use this instead of reaching into the private ``_debug_cfg`` /
+    ``_debug_cfg_lock`` internals from outside this module.
+    """
+    with _debug_cfg_lock:
+        return _debug_cfg.enabled, _debug_cfg.path
 
 # ── References to output-mode state (injected by main module at startup) ──────
 # These are set by jj-dlp.py via configure() so logger doesn't import main.
@@ -74,6 +112,7 @@ def configure(output_mode_fn, dashboard_log_fn=None) -> None:
 #   TWITCH   — twitch eventsub and token operations
 #   KILL     — yt-dlp process termination
 #   CONFIG   — config editor save/backup operations
+#   POPUP    — live popup notification creation and suppression
 #
 DBG_FILTERS: dict[str, bool] = {
     "DRAIN":   False,
@@ -84,8 +123,9 @@ DBG_FILTERS: dict[str, bool] = {
     "DISK":    False,
     "UPDATER": False,
     "TWITCH":  False,
-    "CONFIG":  True,   # config editor save/backup operations
+    "CONFIG":  False,
     "KILL":    True,
+    "POPUP":   False,
 }
 
 _dbg_filters_lock = threading.Lock()
@@ -120,21 +160,26 @@ _last_debug_err = ""
 
 def _write_debug_log(msg: str) -> None:
     global _last_debug_err
-    with debug_log_lock:
-        enabled = DEBUG_LOGS_ENABLED
-        path    = DEBUG_LOG_PATH
+    with _debug_cfg_lock:
+        enabled  = _debug_cfg.enabled
+        path     = _debug_cfg.path
+        last_err = _last_debug_err
     if not enabled or not path:
         return
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        dir_part = os.path.dirname(path)
+        if dir_part:
+            os.makedirs(dir_part, exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:
             f.write(msg + "\n")
-        _last_debug_err = ""
+        with _debug_cfg_lock:
+            _last_debug_err = ""
     except Exception as e:
         err_msg = f"DEBUG LOG ERROR: Could not write to {path}: {e}"
-        if _dashboard_log_ref and err_msg != _last_debug_err:
+        if _dashboard_log_ref and err_msg != last_err:
             _dashboard_log_ref(err_msg)
-            _last_debug_err = err_msg
+            with _debug_cfg_lock:
+                _last_debug_err = err_msg
 
 
 def dbg(msg: str, site_name: str = "") -> None:
@@ -219,3 +264,6 @@ def get_log_file_paths(cfg: dict) -> tuple:
     if cfg.get("split_logs"):
         return f"{base}.stdout.log", f"{base}.stderr.log"
     return base, base
+
+
+

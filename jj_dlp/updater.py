@@ -5,31 +5,47 @@ import urllib.request
 import zipfile
 import shutil
 import difflib
-import subprocess
 import configparser
 import re
 import json
 import traceback
 import datetime
 
-# When run directly as a script (e.g. stage-2 update), ensure the project root
-# is on sys.path so that jj_dlp is importable as a proper package.
-_pkg_dir = os.path.dirname(os.path.abspath(__file__))   # …/jj_dlp
-_project_root = os.path.dirname(_pkg_dir)               # …/jj-dlp
-if _project_root not in sys.path:
-    sys.path.insert(0, _project_root)
-
-# Adjust imports to work whether run as module or script.
-try:
-    from . import logger
-    from .main import load_config, _load_global_json, _save_global_json
-except ImportError:
-    from jj_dlp import logger
-    from jj_dlp.main import load_config, _load_global_json, _save_global_json
-
 _REPO_BASE = "https://github.com/jjs-cloud/jj-dlp"
 _API_BASE   = "https://api.github.com/repos/jjs-cloud/jj-dlp"
 _VALID_BRANCHES = {"main", "testing", "experimental"}
+
+# ── Updater version ───────────────────────────────────────────────────────────
+# Incremented independently of the main jj-dlp version so we can tell which
+# updater logic is actually running during an update.
+UPDATER_VERSION = "2.0.7"
+
+# ── Lazy package imports ──────────────────────────────────────────────────────
+# Relative imports are deferred to call time so this file is also safe to
+# execute as a standalone script (the old stage-2 subprocess path).  When run
+# as a script __name__ == "__main__" and relative imports would crash at parse
+# time if they were at module scope.
+
+# All compatability code (stage-2, lazy imports) is set to be removed in version 3.0.0
+
+def _logger():
+    from . import logger as _l
+    return _l
+
+def _load_global_json() -> dict:
+    from .main import _load_global_json as _f
+    return _f()
+
+def _save_global_json(data: dict) -> None:
+    from .main import _save_global_json as _f
+    _f(data)
+
+def _get_preserved_keys() -> list:
+    try:
+        from .config_editor import PRESERVED_KEYS as _pk
+        return _pk
+    except ImportError:
+        return []
 
 
 class UpdateError(Exception):
@@ -40,7 +56,7 @@ class UpdateError(Exception):
 def _get_update_branch() -> str:
     """Return the configured update branch (falls back to 'main' if unset or invalid)."""
     try:
-        from jj_dlp.main import load_global_config
+        from .main import load_global_config
         branch = load_global_config().get("update_branch", "main")
     except Exception:
         branch = "main"
@@ -57,72 +73,6 @@ def _api_commits_url(branch: str) -> str:
 
 PRESERVED_SECTIONS = ["Streamers", "Block"]
 
-# ── Preserved keys: imported from the single source of truth in config_editor ─
-# The authoritative definition lives in config_editor.CONFIG_KEYS (preserve=True).
-# Importing here avoids maintaining a separate list in this file.
-try:
-    from .config_editor import PRESERVED_KEYS
-except ImportError:
-    from jj_dlp.config_editor import PRESERVED_KEYS
-
-# ── Per-tag debug filter ───────────────────────────────────────────────────────
-# Controls which [TAG] groups appear in updater's debug.log.
-# updater.py has its own copy because it can run as a standalone stage-2 script
-# (no access to logger.py's DBG_FILTERS).  Tags used here:
-#
-#   UPDATE_CHECK — check_for_updates_background, is_update_available
-#   MARK_DONE    — mark_update_completed
-#   PERFORM      — perform_update download / extract / stage2 launch
-#   STAGE2       — _stage2 copy and install logic
-#
-UPDATER_DBG_FILTERS: dict[str, bool] = {
-    "UPDATE_CHECK": True,
-    "MARK_DONE":    True,
-    "PERFORM":      True,
-    "STAGE2":       True,
-}
-
-
-def dbg(msg: str, exc: Exception | None = None) -> None:
-    """Append a timestamped debug message to debug.log next to this package.
-
-    The message is dropped if its leading [TAG] appears in UPDATER_DBG_FILTERS
-    with a value of False.  Messages with no recognised [TAG] always pass through.
-
-    Designed to be safe to call when updater.py is executed as a standalone
-    stage-2 script.  Dumps optional exception tracebacks and keeps a simple
-    append-only log for post-mortem inspection.
-    """
-    # ── Tag-based filter ──────────────────────────────────────────────────────
-    if msg.startswith("["):
-        end = msg.find("]")
-        if end > 1:
-            tag = msg[1:end]
-            if not UPDATER_DBG_FILTERS.get(tag, True):
-                return
-
-    try:
-        # Allow tests or stage2 to redirect logs to a specific directory.
-        forced_dir = os.environ.get('JJ_DLP_DEBUG_LOG_DIR')
-        if forced_dir:
-            try:
-                os.makedirs(forced_dir, exist_ok=True)
-            except Exception:
-                pass
-            log_path = os.path.join(forced_dir, "debug.log")
-        else:
-            log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug.log")
-        ts = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-        with open(log_path, "a", encoding="utf-8") as lf:
-            lf.write(f"[{ts}] {msg}\n")
-            if exc is not None:
-                lf.write("""Exception traceback:\n""")
-                lf.write(''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
-                lf.write("\n")
-    except Exception:
-        # Never raise from the debugger helper
-        pass
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -131,20 +81,20 @@ def check_for_updates_background():
     try:
         branch = _get_update_branch()
         api_commits_url = _api_commits_url(branch)
-        dbg(f"[UPDATER][UPDATE_CHECK] check_for_updates_background: branch={branch} url={api_commits_url}")
+        _logger().dbg(f"[UPDATER] check_for_updates_background: branch={branch} url={api_commits_url}")
         req = urllib.request.Request(api_commits_url, headers={'User-Agent': 'jj-dlp-updater'})
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode('utf-8'))
         latest_sha = data.get('sha')
-        dbg(f"[UPDATER][UPDATE_CHECK] check_for_updates_background: fetched latest_sha={latest_sha}")
+        _logger().dbg(f"[UPDATER] check_for_updates_background: fetched latest_sha={latest_sha}")
 
         if not latest_sha:
-            dbg("[UPDATER][UPDATE_CHECK] check_for_updates_background: API response missing sha")
+            _logger().dbg("[UPDATER] check_for_updates_background: API response missing sha")
             return
 
         global_data = _load_global_json()
         current_sha = global_data.get('update_info', {}).get('current_sha')
-        dbg(f"[UPDATER][UPDATE_CHECK] check_for_updates_background: current_sha={current_sha}")
+        _logger().dbg(f"[UPDATER] check_for_updates_background: current_sha={current_sha}")
 
         update_info = global_data.setdefault('update_info', {})
         if current_sha:
@@ -154,10 +104,10 @@ def check_for_updates_background():
             update_info['update_available'] = False
 
         update_info['latest_sha'] = latest_sha
-        dbg(f"[UPDATER][UPDATE_CHECK] check_for_updates_background: update_info current_sha={update_info.get('current_sha')} latest_sha={latest_sha} update_available={update_info.get('update_available')}")
+        _logger().dbg(f"[UPDATER] check_for_updates_background: update_info current_sha={update_info.get('current_sha')} latest_sha={latest_sha} update_available={update_info.get('update_available')}")
         _save_global_json(global_data)
     except Exception as e:
-        dbg("[UPDATER][UPDATE_CHECK] check_for_updates_background: failed during update check", e)
+        _logger().dbg(f"[UPDATER] check_for_updates_background: failed during update check: {e}")
 
 
 def mark_update_completed():
@@ -167,9 +117,9 @@ def mark_update_completed():
     if latest_sha:
         update_info['current_sha'] = latest_sha
     update_info['update_available'] = False
-    dbg(f"[UPDATER][MARK_DONE] mark_update_completed: updating update_info to current_sha={update_info.get('current_sha')} latest_sha={update_info.get('latest_sha')} update_available={update_info.get('update_available')}")
+    _logger().dbg(f"[UPDATER] mark_update_completed: updating update_info to current_sha={update_info.get('current_sha')} latest_sha={update_info.get('latest_sha')} update_available={update_info.get('update_available')}")
     _save_global_json(global_data)
-    dbg("[UPDATER][MARK_DONE] mark_update_completed: _save_global_json() returned (see debug.log for details)")
+    _logger().dbg("[UPDATER] mark_update_completed: _save_global_json() returned")
 
 
 def is_update_available():
@@ -183,16 +133,19 @@ def get_base_dir():
 
 
 def perform_update():
-    dbg("[UPDATER][PERFORM] perform_update: starting update")
-    print("\n--- jj-dlp Updater ---")
-    
+    _logger().dbg(f"[UPDATER] perform_update: starting — updater version {UPDATER_VERSION}")
+    print(f"\n--- jj-dlp Updater (v{UPDATER_VERSION}) ---")
+
     branch = _get_update_branch()
     repo_zip_url = _repo_zip_url(branch)
-    dbg(f"[UPDATER][PERFORM] perform_update: branch={branch} url={repo_zip_url}")
+    _logger().dbg(f"[UPDATER] perform_update: branch={branch} url={repo_zip_url}")
 
+    base_dir = get_base_dir()
     temp_dir = tempfile.mkdtemp(prefix="jj_dlp_update_")
+    _logger().dbg(f"[UPDATER] perform_update: base_dir={base_dir} temp_dir={temp_dir}")
     print(f"Temporary files will be saved to: {temp_dir}")
-    
+
+    # ── Step 1: Download ──────────────────────────────────────────────────────
     print(f"Downloading latest version from GitHub (branch: {branch})...")
     zip_path = os.path.join(temp_dir, "main.zip")
     try:
@@ -200,22 +153,23 @@ def perform_update():
         with urllib.request.urlopen(req, timeout=30) as response:
             with open(zip_path, 'wb') as out_file:
                 shutil.copyfileobj(response, out_file)
-        dbg(f"[UPDATER][PERFORM] perform_update: downloaded zip to {zip_path}")
+        _logger().dbg(f"[UPDATER] perform_update: downloaded zip to {zip_path}")
     except Exception as e:
-        dbg("[UPDATER][PERFORM] perform_update: download failed", e)
+        _logger().dbg(f"[UPDATER] perform_update: download failed: {e}")
         print(f"Error downloading update: {e}")
         shutil.rmtree(temp_dir, ignore_errors=True)
         return
 
+    # ── Step 2: Extract ───────────────────────────────────────────────────────
     print("Extracting files...")
     extract_dir = os.path.join(temp_dir, "extracted")
     os.makedirs(extract_dir, exist_ok=True)
     try:
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             zip_ref.extractall(extract_dir)
-        dbg(f"[UPDATER][PERFORM] perform_update: extracted zip to {extract_dir}")
+        _logger().dbg(f"[UPDATER] perform_update: extracted zip to {extract_dir}")
     except Exception as e:
-        dbg("[UPDATER][PERFORM] perform_update: extraction failed", e)
+        _logger().dbg(f"[UPDATER] perform_update: extraction failed: {e}")
         print(f"Error extracting update: {e}")
         shutil.rmtree(temp_dir, ignore_errors=True)
         return
@@ -226,42 +180,157 @@ def perform_update():
         source_dir = os.path.join(extract_dir, extracted_items[0])
     else:
         source_dir = extract_dir
+    _logger().dbg(f"[UPDATER] perform_update: source_dir resolved to {source_dir}")
 
-    base_dir = get_base_dir()
-
-    new_updater_path = os.path.join(source_dir, "jj_dlp", "updater.py")
-    curr_updater_path = os.path.join(base_dir, "jj_dlp", "updater.py")
-    stage2_script = new_updater_path if os.path.exists(new_updater_path) else curr_updater_path
-
-    print("Launching stage 2 of the updater...")
-    stage2_env = os.environ.copy()
-    stage2_env["PYTHONIOENCODING"] = "utf-8"
-    dbg(f"[UPDATER][PERFORM] perform_update: launching stage2 script: {stage2_script} source_dir={source_dir} base_dir={base_dir} temp_dir={temp_dir}")
     try:
-        # Use the downloaded updater.py (which has the latest logic from the repo).
-        # This ensures it can cleanly overwrite the base_dir updater.py without
-        # running into the catch-22 of copying the old version back over itself.
-        real_pkg_dir = os.path.dirname(os.path.abspath(__file__))
-        stage2_env['JJ_DLP_DEBUG_LOG_DIR'] = real_pkg_dir
-        stage2_env['JJ_DLP_GLOBAL_JSON_PATH'] = os.path.join(real_pkg_dir, 'global.json')
-        stage2_env['JJ_DLP_GLOBAL_DIR'] = real_pkg_dir
-        dbg(f"[UPDATER][PERFORM] perform_update: set JJ_DLP_DEBUG_LOG_DIR={stage2_env['JJ_DLP_DEBUG_LOG_DIR']} JJ_DLP_GLOBAL_JSON_PATH={stage2_env['JJ_DLP_GLOBAL_JSON_PATH']}")
+        # ── Step 3: Merge configs ─────────────────────────────────────────────
+        actual_diff_dir = os.path.join(base_dir, "diff")
+        if os.path.exists(actual_diff_dir):
+            shutil.rmtree(actual_diff_dir, ignore_errors=True)
+        os.makedirs(actual_diff_dir, exist_ok=True)
+        _logger().dbg(f"[UPDATER] perform_update: diff dir cleared and recreated at {actual_diff_dir}")
+        print(f"Diffs will be saved to: {actual_diff_dir}")
+
+        # Collect user config files (root + configs/)
+        config_files = []
+        configs_dir = os.path.join(base_dir, "configs")
+        root_configs = [
+            f for f in os.listdir(base_dir)
+            if f.endswith(".conf") and os.path.isfile(os.path.join(base_dir, f))
+        ] if os.path.exists(base_dir) else []
+        sub_configs = [
+            f for f in os.listdir(configs_dir)
+            if f.endswith(".conf") and os.path.isfile(os.path.join(configs_dir, f))
+        ] if os.path.exists(configs_dir) else []
+
+        all_config_names: set = set()
+        duplicates: set = set()
+        for f in root_configs:
+            all_config_names.add(f)
+            config_files.append(os.path.join(base_dir, f))
+        for f in sub_configs:
+            if f in all_config_names:
+                duplicates.add(f)
+            else:
+                all_config_names.add(f)
+            config_files.append(os.path.join(configs_dir, f))
+
+        if duplicates:
+            print(f"\nWARNING: Found duplicate config files in root and configs/ directory: {', '.join(duplicates)}")
+            print("The updater may overwrite or merge them unpredictably. Please consolidate them later.\n")
+            _logger().dbg(f"[UPDATER] perform_update: duplicate configs found: {duplicates}")
+
+        _logger().dbg(f"[UPDATER] perform_update: found {len(config_files)} user config file(s) to merge")
+
+        # Collect new configs from source_dir
+        new_configs = []
+        src_configs_dir = os.path.join(source_dir, "configs")
+        if os.path.exists(src_configs_dir):
+            new_configs.extend([
+                os.path.join(src_configs_dir, f)
+                for f in os.listdir(src_configs_dir) if f.endswith(".conf")
+            ])
+        if os.path.exists(os.path.join(source_dir, "jj-dlp.conf")):
+            new_configs.append(os.path.join(source_dir, "jj-dlp.conf"))
+
+        new_config_map = {os.path.basename(p): p for p in new_configs}
+        _logger().dbg(f"[UPDATER] perform_update: new_config_map keys={list(new_config_map.keys())}")
+
+        for user_cfg in config_files:
+            fname = os.path.basename(user_cfg)
+            if fname not in new_config_map:
+                _logger().dbg(f"[UPDATER] perform_update: no matching new config for {fname}, skipping merge")
+                continue
+            new_cfg_path = new_config_map[fname]
+            _logger().dbg(f"[UPDATER] perform_update: merging config {user_cfg} -> {new_cfg_path}")
+
+            with open(user_cfg, 'r', encoding='utf-8') as f:
+                old_content = f.read()
+            with open(new_cfg_path, 'r', encoding='utf-8') as f:
+                new_content = f.read()
+
+            streamers = get_old_config_section(user_cfg, "Streamers")
+            blocked   = get_old_config_section(user_cfg, "Block")
+            _logger().dbg(f"[UPDATER] perform_update: preserved sections for {fname}: streamers={bool(streamers)} block={bool(blocked)}")
+
+            merged_content = inject_preserved_keys(new_content, user_cfg)
+            merged_content = replace_section(merged_content, "Streamers", streamers)
+            merged_content = replace_section(merged_content, "Block", blocked)
+
+            create_diff(old_content, merged_content, user_cfg, actual_diff_dir)
+
+            with open(new_cfg_path, 'w', encoding='utf-8') as f:
+                f.write(merged_content)
+            _logger().dbg(f"[UPDATER] perform_update: merged config written to {new_cfg_path}")
+
+        # ── Step 4: Copy files source_dir → base_dir ─────────────────────────
+        print("Installing new files...")
+        _logger().dbg(f"[UPDATER] perform_update: copying files {source_dir} -> {base_dir}")
+
+        def copy_and_diff(src, dst):
+            if os.path.isdir(src):
+                if os.path.basename(src) == "__pycache__":
+                    return
+                os.makedirs(dst, exist_ok=True)
+                for item in os.listdir(src):
+                    copy_and_diff(os.path.join(src, item), os.path.join(dst, item))
+            else:
+                if os.path.basename(dst).endswith(".pyc"):
+                    return
+                if os.path.basename(dst) == "global.json":
+                    _logger().dbg(f"[UPDATER] perform_update: skipping global.json at {dst}")
+                    return
+                if os.path.exists(dst):
+                    with open(dst, 'r', encoding='utf-8', errors='ignore') as f:
+                        old_content = f.read()
+                    with open(src, 'r', encoding='utf-8', errors='ignore') as f:
+                        new_content = f.read()
+                    if old_content != new_content and not dst.endswith(".conf"):
+                        create_diff(old_content, new_content, dst, actual_diff_dir)
+                        if os.path.basename(dst) == "updater.py":
+                            _logger().dbg(f"[UPDATER] perform_update: updater.py changed, copying {src} -> {dst}")
+                else:
+                    if os.path.basename(dst) == "updater.py":
+                        _logger().dbg(f"[UPDATER] perform_update: installing new updater.py {src} -> {dst}")
+                try:
+                    shutil.copy2(src, dst)
+                except OSError as e:
+                    import errno
+                    if getattr(e, 'errno', None) == errno.ETXTBSY:
+                        print(f"\nERROR: The file '{dst}' is currently in use (Text file busy).")
+                        print("Please ensure that jj-dlp, yt-dlp, and ffmpeg are fully closed and not running in the background.")
+                        print("You may need to manually kill any stuck 'yt-dlp' or 'ffmpeg' processes and try again.\n")
+                        raise UpdateError(f"The file '{dst}' is currently in use (Text file busy).")
+                    raise
+
+        copy_and_diff(source_dir, base_dir)
+        _logger().dbg("[UPDATER] perform_update: all files copied from source to base")
+
+        # ── Step 5: Set executable bits on bin/ ───────────────────────────────
+        print("Setting executable permissions on bin/ files...")
+        _mark_bin_executable(base_dir)
+        _logger().dbg("[UPDATER] perform_update: bin/ permissions set")
+
+        # ── Step 6: Mark update completed in global.json ──────────────────────
+        mark_update_completed()
+        _logger().dbg("[UPDATER] perform_update: marked update completed")
+
+        print("\n" + "="*60)
+        print("✅ Update completed successfully!")
+        print(f"   Diff files are available in the 'diff' directory.")
+        print("="*60)
+        print("\nℹ️  Please restart jj-dlp for the new version to take effect.")
+
+    except UpdateError as e:
+        _logger().dbg(f"[UPDATER] perform_update: clean abort: {e}")
     except Exception as e:
-        dbg("[UPDATER][PERFORM] perform_update: unexpected error while preparing stage2 updater", e)
-    try:
-        subprocess.run(
-            [sys.executable, stage2_script, "--stage2", source_dir, base_dir, temp_dir],
-            check=True,
-            env=stage2_env,
-        )
-        dbg("[UPDATER][PERFORM] perform_update: stage2 subprocess completed")
-    except subprocess.CalledProcessError as e:
-        dbg("[UPDATER][PERFORM] perform_update: stage2 subprocess failed", e)
-        print(f"Update failed during stage 2: {e}")
-    except Exception as e:
-        dbg("[UPDATER][PERFORM] perform_update: failed launching stage2", e)
-        print(f"Error launching stage 2: {e}")
-    # temp_dir cleanup should happen in stage2
+        _logger().dbg(f"[UPDATER] perform_update: exception during update: {e}")
+        print(f"Error during update: {e}")
+        traceback.print_exc()
+    finally:
+        print(f"Cleaning up temporary directory: {temp_dir}")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        _logger().dbg(f"[UPDATER] perform_update: temp_dir cleaned up")
 
 
 def get_old_config_section(config_path, section_name):
@@ -270,8 +339,19 @@ def get_old_config_section(config_path, section_name):
         parser.read(config_path, encoding='utf-8')
         if parser.has_section(section_name):
             return "\n".join([f"{k}" for k, v in parser.items(section_name)])
-    except Exception:
-        pass
+    except Exception as e:
+        message = (
+            f"WARNING: Failed to preserve [{section_name}] from '{config_path}'. "
+            "The config file may be corrupted or invalid. "
+            "The updater will continue, but this section may not be preserved."
+        )
+        print(message)
+        print("Press Enter to continue or Ctrl+C to abort.")
+        try:
+            input()
+        except KeyboardInterrupt:
+            raise
+        _logger().dbg(f"[UPDATER] get_old_config_section: {message} exception={e}")
     return ""
 
 
@@ -281,17 +361,14 @@ def inject_preserved_keys(new_text, old_config_path):
         parser.read(old_config_path, encoding='utf-8')
     except Exception:
         return new_text
-        
-    for key in PRESERVED_KEYS:
+
+    for key in _get_preserved_keys():
         old_val = None
         for sec in parser.sections():
             if parser.has_option(sec, key):
                 old_val = parser.get(sec, key)
                 break
         if old_val is not None:
-            # Find the key in the new text and replace its value.
-            # Use a callable replacement so literal backslashes in old_val
-            # are not interpreted as regex replacement escapes.
             pattern = re.compile(rf"^([ \t]*{key}[ \t]*=).*$", re.IGNORECASE | re.MULTILINE)
             if pattern.search(new_text):
                 new_text = pattern.sub(lambda m, val=old_val: f"{m.group(1)} {val}", new_text)
@@ -316,16 +393,16 @@ def replace_section(text, sec_name, new_content):
                 continue
             else:
                 in_sec = False
-        
+
         if not in_sec:
             out.append(line)
-            
+
     if not replaced:
         out.append(f"\n[{sec_name}]")
         if new_content and new_content.strip():
             out.append(new_content.strip())
         out.append("")
-        
+
     return "\n".join(out)
 
 
@@ -350,13 +427,13 @@ def _mark_bin_executable(base_dir):
 def create_diff(old_content, new_content, file_path, diff_dir):
     old_lines = old_content.splitlines(keepends=True)
     new_lines = new_content.splitlines(keepends=True)
-    
+
     diff = list(difflib.unified_diff(
         old_lines, new_lines,
         fromfile=f"old/{os.path.basename(file_path)}",
         tofile=f"new/{os.path.basename(file_path)}"
     ))
-    
+
     if diff:
         rel_path = os.path.basename(file_path)
         diff_file = os.path.join(diff_dir, f"{rel_path}.diff")
@@ -364,146 +441,203 @@ def create_diff(old_content, new_content, file_path, diff_dir):
             f.writelines(diff)
 
 
-def _stage2(source_dir, base_dir, temp_dir):
-    dbg(f"[UPDATER][STAGE2] _stage2: starting stage2 source_dir={source_dir} base_dir={base_dir} temp_dir={temp_dir}")
-    try:
-        print("Running Stage 2 of update...")
-        
-        actual_diff_dir = os.path.join(base_dir, "diff")
-        
-        # Clear diff dir
-        if os.path.exists(actual_diff_dir):
-            shutil.rmtree(actual_diff_dir, ignore_errors=True)
-        os.makedirs(actual_diff_dir, exist_ok=True)
-        print(f"Diffs will be saved to: {actual_diff_dir}")
-        
-        # Check for duplicate configs
-        config_files = []
-        configs_dir = os.path.join(base_dir, "configs")
-        root_configs = [f for f in os.listdir(base_dir) if f.endswith(".conf") and os.path.isfile(os.path.join(base_dir, f))] if os.path.exists(base_dir) else []
-        sub_configs = [f for f in os.listdir(configs_dir) if f.endswith(".conf") and os.path.isfile(os.path.join(configs_dir, f))] if os.path.exists(configs_dir) else []
-        
-        all_config_names = set()
-        duplicates = set()
-        
-        for f in root_configs:
-            all_config_names.add(f)
-            config_files.append(os.path.join(base_dir, f))
-            
-        for f in sub_configs:
-            if f in all_config_names:
-                duplicates.add(f)
-            else:
-                all_config_names.add(f)
-            config_files.append(os.path.join(configs_dir, f))
-            
-        if duplicates:
-            print(f"\nWARNING: Found duplicate config files in root and configs/ directory: {', '.join(duplicates)}")
-            print("The updater may overwrite or merge them unpredictably. Please consolidate them later.\n")
-            
-        # Process configs from source_dir
-        new_configs = []
-        src_configs_dir = os.path.join(source_dir, "configs")
-        if os.path.exists(src_configs_dir):
-            new_configs.extend([os.path.join(src_configs_dir, f) for f in os.listdir(src_configs_dir) if f.endswith(".conf")])
-        if os.path.exists(os.path.join(source_dir, "jj-dlp.conf")):
-            new_configs.append(os.path.join(source_dir, "jj-dlp.conf"))
-            
-        new_config_map = {os.path.basename(p): p for p in new_configs}
-        
-        for user_cfg in config_files:
-            fname = os.path.basename(user_cfg)
-            if fname in new_config_map:
-                new_cfg_path = new_config_map[fname]
-                
-                with open(user_cfg, 'r', encoding='utf-8') as f:
-                    old_content = f.read()
-                    
-                with open(new_cfg_path, 'r', encoding='utf-8') as f:
-                    new_content = f.read()
-                    
-                streamers = get_old_config_section(user_cfg, "Streamers")
-                blocked = get_old_config_section(user_cfg, "Block")
-                
-                merged_content = inject_preserved_keys(new_content, user_cfg)
-                merged_content = replace_section(merged_content, "Streamers", streamers)
-                merged_content = replace_section(merged_content, "Block", blocked)
-                
-                create_diff(old_content, merged_content, user_cfg, actual_diff_dir)
-                
-                with open(new_cfg_path, 'w', encoding='utf-8') as f:
-                    f.write(merged_content)
-                    
-        # Now copy all files from source_dir to base_dir.
-        # global.json is excluded: it holds runtime state (update SHAs, last-live
-        # timestamps, etc.) that must never be overwritten by a repo copy.
-        print("Installing new files...")
-        
-        def copy_and_diff(src, dst):
-            if os.path.isdir(src):
-                if os.path.basename(src) == "__pycache__":
-                    return
-                os.makedirs(dst, exist_ok=True)
-                for item in os.listdir(src):
-                    copy_and_diff(os.path.join(src, item), os.path.join(dst, item))
-            else:
-                if os.path.basename(dst).endswith(".pyc"):
-                    return
-                if os.path.basename(dst) == "global.json":
-                    return
-                if os.path.exists(dst):
-                    with open(dst, 'r', encoding='utf-8', errors='ignore') as f:
-                        old_content = f.read()
-                    with open(src, 'r', encoding='utf-8', errors='ignore') as f:
-                        new_content = f.read()
-                    if old_content != new_content and not dst.endswith(".conf"):
-                        create_diff(old_content, new_content, dst, actual_diff_dir)
-                        if os.path.basename(dst) == "updater.py":
-                            dbg(f"[UPDATER][STAGE2] _stage2.copy_and_diff: updater.py changed, copying {src} -> {dst}")
-                else:
-                    if os.path.basename(dst) == "updater.py":
-                        dbg(f"[UPDATER][STAGE2] _stage2.copy_and_diff: copying new updater.py {src} -> {dst}")
-                try:
-                    shutil.copy2(src, dst)
-                except OSError as e:
-                    import errno
-                    if getattr(e, 'errno', None) == errno.ETXTBSY:
-                        print(f"\nERROR: The file '{dst}' is currently in use (Text file busy).")
-                        print("Please ensure that jj-dlp, yt-dlp, and ffmpeg are fully closed and not running in the background.")
-                        print("You may need to manually kill any stuck 'yt-dlp' or 'ffmpeg' processes and try again.\n")
-                        raise UpdateError(f"The file '{dst}' is currently in use (Text file busy).")
-                    raise
-                
-        copy_and_diff(source_dir, base_dir)
-
-        dbg("[UPDATER][STAGE2] _stage2: files copied from source to base")
-
-        # Ensure bin/ scripts are executable on Linux/macOS
-        print("Setting executable permissions on bin/ files...")
-        _mark_bin_executable(base_dir)
-        
-        mark_update_completed()
-        dbg("[UPDATER][STAGE2] _stage2: marked update completed")
-        
-        print("\n" + "="*60)
-        print("✅ Update completed successfully!")
-        print(f"   Diff files are available in the 'diff' directory.")
-        print("="*60)
-
-    except UpdateError as e:
-        dbg(f"[UPDATER][STAGE2] _stage2: clean abort: {e}")
-    except Exception as e:
-        dbg("[UPDATER][STAGE2] _stage2: exception during stage2", e)
-        print(f"Error during stage 2: {e}")
-        import traceback
-        traceback.print_exc()
-        input("\nPress Enter to exit...")
-    finally:
-        print(f"Cleaning up temporary directory: {temp_dir}")
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        input("\nPress Enter to exit...")
-
-
+# ── Standalone stage-2 entry point (transitional compatibility shim) ──────────
+#
+# The OLD installed updater.py (pre-v2) downloads this file and runs it as:
+#
+#   python /tmp/.../jj_dlp/updater.py --stage2 <source_dir> <base_dir> <temp_dir>
+#
+# Because it is executed as a plain script (not a package), relative imports
+# fail.  This block catches that invocation and performs the copy/install work
+# using only stdlib + the helper functions defined above (which are already in
+# module scope by the time __main__ runs).
+#
+# Once this version is installed, the old subprocess launch code is gone and
+# this block will never be reached again.  It is dead code from v3 onward.
+#
 if __name__ == "__main__":
-    if len(sys.argv) > 4 and sys.argv[1] == "--stage2":
-        _stage2(sys.argv[2], sys.argv[3], sys.argv[4])
+    import errno as _errno
+
+    if len(sys.argv) == 5 and sys.argv[1] == "--stage2":
+        _source_dir = sys.argv[2]
+        _base_dir   = sys.argv[3]
+        _temp_dir   = sys.argv[4]
+
+        # ── Minimal standalone logger: write to the same debug.log the old
+        #    stage-2 would have used (JJ_DLP_DEBUG_LOG_DIR env var, or next
+        #    to this file as a fallback).
+        def _sdbg(msg: str) -> None:
+            try:
+                _forced_dir = os.environ.get("JJ_DLP_DEBUG_LOG_DIR")
+                _log_dir = _forced_dir if _forced_dir else os.path.dirname(os.path.abspath(__file__))
+                os.makedirs(_log_dir, exist_ok=True)
+                _ts = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+                with open(os.path.join(_log_dir, "debug.log"), "a", encoding="utf-8") as _lf:
+                    _lf.write(f"[{_ts}] [UPDATER][STAGE2-COMPAT] {msg}\n")
+            except Exception:
+                pass
+
+        # ── Standalone global.json helpers (env var path from old launcher) ──
+        def _json_path() -> str:
+            p = os.environ.get("JJ_DLP_GLOBAL_JSON_PATH")
+            if p:
+                return p
+            d = os.environ.get("JJ_DLP_GLOBAL_DIR")
+            if d:
+                return os.path.join(d, "global.json")
+            return os.path.join(os.path.dirname(os.path.abspath(__file__)), "global.json")
+
+        def _load_json() -> dict:
+            try:
+                with open(_json_path(), "r", encoding="utf-8") as _f:
+                    _d = json.load(_f)
+                return _d if isinstance(_d, dict) else {}
+            except Exception:
+                return {}
+
+        def _save_json(data: dict) -> None:
+            try:
+                with open(_json_path(), "w", encoding="utf-8") as _f:
+                    json.dump(data, _f, indent=2)
+            except Exception:
+                pass
+
+        def _mark_done() -> None:
+            _gd = _load_json()
+            _ui = _gd.setdefault("update_info", {})
+            _ls = _ui.get("latest_sha")
+            if _ls:
+                _ui["current_sha"] = _ls
+            _ui["update_available"] = False
+            _sdbg(f"mark_done: current_sha={_ui.get('current_sha')} update_available=False")
+            _save_json(_gd)
+
+        # ── PRESERVED_KEYS: read from config_editor if importable, else [] ───
+        try:
+            _pkg_dir = os.path.dirname(os.path.abspath(__file__))
+            _proj_root = os.path.dirname(_pkg_dir)
+            if _proj_root not in sys.path:
+                sys.path.insert(0, _proj_root)
+            from jj_dlp.config_editor import PRESERVED_KEYS as _PKEYS
+        except Exception:
+            _PKEYS = []
+
+        _sdbg(f"stage2-compat starting: source={_source_dir} base={_base_dir} temp={_temp_dir}")
+        print("Running stage 2 of update (compat mode)...")
+
+        try:
+            _diff_dir = os.path.join(_base_dir, "diff")
+            if os.path.exists(_diff_dir):
+                shutil.rmtree(_diff_dir, ignore_errors=True)
+            os.makedirs(_diff_dir, exist_ok=True)
+            print(f"Diffs will be saved to: {_diff_dir}")
+
+            # ── Collect user configs ──────────────────────────────────────────
+            _cfg_files = []
+            _cfgs_dir = os.path.join(_base_dir, "configs")
+            for _root_f in (os.listdir(_base_dir) if os.path.exists(_base_dir) else []):
+                if _root_f.endswith(".conf") and os.path.isfile(os.path.join(_base_dir, _root_f)):
+                    _cfg_files.append(os.path.join(_base_dir, _root_f))
+            for _sub_f in (os.listdir(_cfgs_dir) if os.path.exists(_cfgs_dir) else []):
+                if _sub_f.endswith(".conf") and os.path.isfile(os.path.join(_cfgs_dir, _sub_f)):
+                    _cfg_files.append(os.path.join(_cfgs_dir, _sub_f))
+
+            # ── Collect new configs from source ───────────────────────────────
+            _new_cfgs = []
+            _src_cfgs = os.path.join(_source_dir, "configs")
+            if os.path.exists(_src_cfgs):
+                _new_cfgs += [os.path.join(_src_cfgs, f) for f in os.listdir(_src_cfgs) if f.endswith(".conf")]
+            if os.path.exists(os.path.join(_source_dir, "jj-dlp.conf")):
+                _new_cfgs.append(os.path.join(_source_dir, "jj-dlp.conf"))
+            _new_cfg_map = {os.path.basename(p): p for p in _new_cfgs}
+
+            # ── Merge each user config ────────────────────────────────────────
+            for _ucfg in _cfg_files:
+                _fn = os.path.basename(_ucfg)
+                if _fn not in _new_cfg_map:
+                    continue
+                _ncfg = _new_cfg_map[_fn]
+                with open(_ucfg, "r", encoding="utf-8") as _f:
+                    _old_txt = _f.read()
+                with open(_ncfg, "r", encoding="utf-8") as _f:
+                    _new_txt = _f.read()
+                _streamers = get_old_config_section(_ucfg, "Streamers")
+                _blocked   = get_old_config_section(_ucfg, "Block")
+
+                # inline inject_preserved_keys using _PKEYS
+                _parser = configparser.ConfigParser(allow_no_value=True, interpolation=None)
+                try:
+                    _parser.read(_ucfg, encoding="utf-8")
+                except Exception:
+                    pass
+                for _key in _PKEYS:
+                    _oval = None
+                    for _sec in _parser.sections():
+                        if _parser.has_option(_sec, _key):
+                            _oval = _parser.get(_sec, _key)
+                            break
+                    if _oval is not None:
+                        _pat = re.compile(rf"^([ \t]*{_key}[ \t]*=).*$", re.IGNORECASE | re.MULTILINE)
+                        if _pat.search(_new_txt):
+                            _new_txt = _pat.sub(lambda m, v=_oval: f"{m.group(1)} {v}", _new_txt)
+
+                _new_txt = replace_section(_new_txt, "Streamers", _streamers)
+                _new_txt = replace_section(_new_txt, "Block", _blocked)
+                create_diff(_old_txt, _new_txt, _ucfg, _diff_dir)
+                with open(_ncfg, "w", encoding="utf-8") as _f:
+                    _f.write(_new_txt)
+                _sdbg(f"merged config {_fn}")
+
+            # ── Copy files source → base ──────────────────────────────────────
+            print("Installing new files...")
+
+            def _copy(src, dst):
+                if os.path.isdir(src):
+                    if os.path.basename(src) == "__pycache__":
+                        return
+                    os.makedirs(dst, exist_ok=True)
+                    for _item in os.listdir(src):
+                        _copy(os.path.join(src, _item), os.path.join(dst, _item))
+                else:
+                    if dst.endswith(".pyc") or os.path.basename(dst) == "global.json":
+                        return
+                    if os.path.exists(dst):
+                        with open(dst, "r", encoding="utf-8", errors="ignore") as _f:
+                            _oc = _f.read()
+                        with open(src, "r", encoding="utf-8", errors="ignore") as _f:
+                            _nc = _f.read()
+                        if _oc != _nc and not dst.endswith(".conf"):
+                            create_diff(_oc, _nc, dst, _diff_dir)
+                    try:
+                        shutil.copy2(src, dst)
+                    except OSError as _e:
+                        if getattr(_e, "errno", None) == _errno.ETXTBSY:
+                            print(f"\nERROR: '{dst}' is in use (Text file busy). Close yt-dlp/ffmpeg and retry.\n")
+                            raise UpdateError(f"'{dst}' is in use.")
+                        raise
+
+            _copy(_source_dir, _base_dir)
+            _sdbg("files copied")
+
+            print("Setting executable permissions on bin/ files...")
+            _mark_bin_executable(_base_dir)
+
+            _mark_done()
+            _sdbg("update marked complete")
+
+            print("\n" + "=" * 60)
+            print("✅ Update completed successfully!")
+            print("   Diff files are available in the 'diff' directory.")
+            print("=" * 60)
+            print("\nℹ️  Please restart jj-dlp for the new version to take effect.")
+
+        except UpdateError:
+            pass
+        except Exception as _e:
+            _sdbg(f"exception: {_e}")
+            print(f"Error during stage 2: {_e}")
+            traceback.print_exc()
+        finally:
+            print(f"Cleaning up temporary directory: {_temp_dir}")
+            shutil.rmtree(_temp_dir, ignore_errors=True)
+            input("\nPress Enter to exit...")

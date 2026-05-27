@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.2.13"
+__version__ = "1.5.14"
 
 import subprocess
 import time
@@ -24,8 +24,8 @@ from .logger import (
     dbg,
     log_crash,
     get_debug_log_path, get_log_path, get_log_file_paths,
-    DEBUG_LOGS_ENABLED, DEBUG_LOG_PATH, debug_log_lock,
     ENABLE_CRASH_LOG,
+    configure_debug_log as _configure_debug_log,
     configure as _configure_logger,
 )
 
@@ -420,22 +420,7 @@ _global_json_lock: threading.Lock = threading.Lock()
 
 
 def _global_json_path() -> str:
-    """Return the absolute path to global.json.
-
-    Resolution order:
-    - ``JJ_DLP_GLOBAL_JSON_PATH`` env var: explicit full path (used by the
-      stage-2 updater subprocess so it always writes to the real global.json,
-      not the one inside a temporary extraction folder).
-    - ``JJ_DLP_GLOBAL_DIR`` env var: directory override; ``global.json`` is
-      appended.
-    - Default: ``global.json`` next to this file (inside the package dir).
-    """
-    env_path = os.environ.get("JJ_DLP_GLOBAL_JSON_PATH")
-    if env_path:
-        return env_path
-    env_dir = os.environ.get("JJ_DLP_GLOBAL_DIR")
-    if env_dir:
-        return os.path.join(env_dir, "global.json")
+    """Return the absolute path to global.json (next to this file)."""
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "global.json")
 
 
@@ -560,7 +545,7 @@ class SiteState:
     def unregister_proc(self, streamer: str) -> None:
         """Remove a subprocess from the registry (after it exits)."""
         with self._procs_lock:
-            removed = self._active_procs.pop(streamer, None)
+            self._active_procs.pop(streamer, None)
 
     def kill_all_procs(self) -> None:
         """Kill every registered yt-dlp process. Called on quit."""
@@ -648,7 +633,7 @@ def _get_output_mode() -> int:
 
 _configure_logger(_get_output_mode)
 
-# DEBUG_LOGS_ENABLED / DEBUG_LOG_PATH / debug_log_lock are imported from logger.
+
 
 # ── Keybinds ──
 KEYBIND_OUTPUT    = "o"
@@ -668,6 +653,31 @@ KEYBIND_LABELS = {
 # ══════════════════════════════════════════════════════════════════════════════
 
 def kill_proc(proc) -> None:
+    # Scan all running yt-dlp processes before attempting the kill so we can
+    # compare the system-visible PIDs against the proc.pid we intend to kill.
+    # This is Linux-only (/proc-based); skipped silently on other platforms.
+    if sys.platform != "win32":
+        try:
+            ytdlp_pids = []
+            for entry in os.scandir("/proc"):
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    cmdline_path = f"/proc/{entry.name}/cmdline"
+                    with open(cmdline_path, "r", encoding="utf-8", errors="replace") as _f:
+                        cmdline = _f.read().replace("\x00", " ").strip()
+                    if "yt_dlp" in cmdline or "yt-dlp" in cmdline:
+                        ytdlp_pids.append((int(entry.name), cmdline[:120]))
+                except (FileNotFoundError, ProcessLookupError, PermissionError):
+                    pass
+            if ytdlp_pids:
+                pid_summary = "; ".join(f"pid={p} cmd={c!r}" for p, c in ytdlp_pids)
+                dbg(f"[KILL][scan_procs] yt-dlp processes on system (count={len(ytdlp_pids)}): {pid_summary}")
+            else:
+                dbg("[KILL][scan_procs] no yt-dlp processes found on system")
+        except Exception as _scan_err:
+            dbg(f"[KILL][scan_procs] /proc scan failed: {_scan_err}")
+
     dbg(f"[KILL] Attempting to kill proc.pid={proc.pid}")
     if sys.platform == "win32":
         dbg(f"[KILL] win32: using taskkill on pid={proc.pid}")
@@ -716,9 +726,26 @@ def cmd_display_str(cmd: List[str]) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 15) -> None:
+    dbg(f"[POPUP] enqueue popup streamer={streamer!r} source={source!r} timeout={popup_timeout}")
     def _run():
+        if sys.platform.startswith("linux"):
+            notify_cmd = shutil.which("notify-send")
+            if notify_cmd:
+                title = "jj-dlp — Stream Live"
+                body = (f"🔴  {streamer} is now LIVE "
+                        f"via {'EventSub' if source == 'eventsub' else 'poll check'}")
+                try:
+                    subprocess.run([notify_cmd, "-t", str(popup_timeout * 1000), title, body],
+                                   check=False)
+                    dbg(f"[POPUP] notify-send invoked for streamer={streamer!r}")
+                    return
+                except Exception as e:
+                    dbg(f"[POPUP] notify-send failed for streamer={streamer!r}: {e}")
+            else:
+                dbg(f"[POPUP] notify-send not found; falling back to tkinter for streamer={streamer!r}")
         try:
             import tkinter as tk
+            dbg(f"[POPUP] tkinter imported successfully for streamer={streamer!r}")
             root = tk.Tk()
             root.withdraw()
             win = tk.Toplevel(root)
@@ -731,11 +758,12 @@ def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 1
                      font=("Segoe UI", 10), fg="gray", padx=20).pack()
             tk.Button(win, text="Dismiss", command=win.destroy, padx=12, pady=4).pack(pady=(4, 12))
             win.after(popup_timeout * 1000, win.destroy)
+            dbg(f"[POPUP] running popup mainloop for streamer={streamer!r}")
             root.mainloop()
-        except ImportError:
-            pass
-        except Exception:
-            pass
+        except ImportError as ie:
+            dbg(f"[POPUP] tkinter import failed: {ie}")
+        except Exception as e:
+            dbg(f"[POPUP] exception while creating popup for streamer={streamer!r}: {e}")
     threading.Thread(target=_run, daemon=True, name=f"popup-{streamer}").start()
 
 
@@ -1208,10 +1236,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                     return
 
                 _t0 = time.time()
-                current_cfg = load_config(cfg["config_path"])
+                current_cfg = site.get_cached_config()
                 _load_cfg_ms = (time.time() - _t0) * 1000
                 if _split_log_counter % 30 == 0:
-                    dbg(f"[PERF][record_stream/inner] load_config took {_load_cfg_ms:.2f}ms streamer={streamer!r}")
+                    dbg(f"[PERF][record_stream/inner] get_cached_config took {_load_cfg_ms:.2f}ms streamer={streamer!r}")
 
                 if streamer in current_cfg["blocked"]:
                     kill_proc(proc)
@@ -1501,11 +1529,18 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                 if streamer not in site.dash_live_since:
                     site.dash_live_since[streamer] = time.time()
             if show_popup and cfg.get("popup_notifications", True):
+                dbg(f"[POPUP] popup condition check for streamer={streamer!r} show_popup={show_popup} popup_notifications={cfg.get('popup_notifications', True)}")
                 cooldown_secs = cfg.get("popup_cooldown", 30) * 60
                 last_shown    = site.popup_last_shown.get(streamer, 0)
-                if time.time() - last_shown >= cooldown_secs:
+                elapsed       = time.time() - last_shown
+                if elapsed >= cooldown_secs:
+                    dbg(f"[POPUP] popup allowed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s cooldown={cooldown_secs}s")
                     _show_live_popup(streamer, source="poll", popup_timeout=cfg.get("popup_timeout", 15))
                     site.popup_last_shown[streamer] = time.time()
+                else:
+                    dbg(f"[POPUP] popup suppressed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s required={cooldown_secs}s")
+            else:
+                dbg(f"[POPUP] popup skipped for streamer={streamer!r} show_popup={show_popup} popup_notifications={cfg.get('popup_notifications', True)}")
             t = threading.Thread(target=record_stream, args=(streamer, cfg, site), daemon=True)
             t.start()
             site.recording_threads.append(t)
@@ -1555,12 +1590,20 @@ def monitor_site(site: "SiteState") -> None:
             if broadcaster_login in current_cfg.get("streamers", []) and \
                broadcaster_login not in current_cfg.get("blocked", []):
                 if current_cfg.get("popup_notifications", True):
+                    dbg(f"[POPUP] eventsub popup condition check for broadcaster={broadcaster_login!r} popup_notifications={current_cfg.get('popup_notifications', True)}")
                     cooldown_secs = current_cfg.get("popup_cooldown", 30) * 60
                     last_shown    = site.popup_last_shown.get(broadcaster_login, 0)
-                    if time.time() - last_shown >= cooldown_secs:
+                    elapsed       = time.time() - last_shown
+                    if elapsed >= cooldown_secs:
+                        dbg(f"[POPUP] eventsub popup allowed by cooldown for broadcaster={broadcaster_login!r} elapsed={elapsed:.1f}s cooldown={cooldown_secs}s")
                         _show_live_popup(broadcaster_login, source="eventsub",
                                          popup_timeout=current_cfg.get("popup_timeout", 15))
                         site.popup_last_shown[broadcaster_login] = time.time()
+                    else:
+                        dbg(f"[POPUP] eventsub popup suppressed by cooldown for broadcaster={broadcaster_login!r} elapsed={elapsed:.1f}s required={cooldown_secs}s")
+                else:
+                    dbg(f"[POPUP] eventsub popups disabled for broadcaster={broadcaster_login!r}")
+
                 start_recording_if_needed([broadcaster_login], current_cfg, site, show_popup=False)
 
         try:
@@ -1608,8 +1651,6 @@ def monitor_site(site: "SiteState") -> None:
 
             if live_now:
                 start_recording_if_needed(live_now, cfg, site)
-            else:
-                site.log_line("All streamers offline.")
 
         wait_secs = cfg.get("check_interval", 60)
         deadline = time.time() + wait_secs
@@ -2663,8 +2704,11 @@ class JJDlpDashboard:
         if current_tab_name == "Config":
             # Pass keys to ConfigEditor first. But still handle global site switching:
             if key not in (ord(']'), curses.KEY_NPAGE, ord('['), curses.KEY_PPAGE):
+                dbg(f"[CONFIG] main.handle_key() dispatch key={key} tab={current_tab_name!r}")
                 if self.config_editor.handle_key(key):
+                    dbg(f"[CONFIG] main.handle_key() config_editor consumed key={key}")
                     return True
+                dbg(f"[CONFIG] main.handle_key() config_editor did not consume key={key}")
 
         if key in (ord('q'), ord('Q'), 27):
             return False
@@ -2676,10 +2720,12 @@ class JJDlpDashboard:
             self.selected_site_idx = (self.selected_site_idx + 1) % max(1, len(self.sites))
             # Reset scroll when switching sites
             self._log_scroll = self._stdout_scroll = self._stderr_scroll = 0
+            self.config_editor.notify_site_changed(self.selected_site_idx)
         elif key in (ord('['), curses.KEY_PPAGE):   # prev site
             self.selected_site_idx = (self.selected_site_idx - 1) % max(1, len(self.sites))
             # Reset scroll when switching sites
             self._log_scroll = self._stdout_scroll = self._stderr_scroll = 0
+            self.config_editor.notify_site_changed(self.selected_site_idx)
         elif key in (curses.KEY_UP, ord('k')):
             tab = self.TABS[self.selected_tab]
             if tab == "Log":
@@ -2764,21 +2810,37 @@ class JJDlpDashboard:
         new_enabled = new_cfg.get("DEBUG_LOGS", "false").strip().lower() == "true"
         new_path    = new_cfg.get("DEBUG_LOG_PATH", "").strip().strip('"\'')
 
-        with _logger.debug_log_lock:
-            _logger.DEBUG_LOGS_ENABLED = new_enabled
-            if new_enabled:
-                if new_path:
-                    _logger.DEBUG_LOG_PATH = new_path
-                elif not _logger.DEBUG_LOG_PATH:
-                    # Fall back to the first site's resolved path
-                    _logger.DEBUG_LOG_PATH = get_debug_log_path(
-                        load_config(self.sites[0].config_path)
-                    )
-            # If disabling, leave DEBUG_LOG_PATH as-is so re-enabling reuses it
-
         _logger.dbg(
-            f"[CONFIG] apply_global_cfg: DEBUG_LOGS={new_enabled} "
-            f"DEBUG_LOG_PATH={_logger.DEBUG_LOG_PATH!r}"
+            f"[CONFIG] apply_global_cfg start: DEBUG_LOGS={new_enabled} DEBUG_LOG_PATH={new_path!r}"
+        )
+
+        if new_enabled:
+            if new_path:
+                # Explicit path provided — use it directly.
+                _logger.configure_debug_log(True, new_path)
+            else:
+                # No explicit path — check if a path is already configured.
+                _, current_path = _logger.get_debug_log_config()
+                if current_path:
+                    # Keep the existing path; just (re-)enable logging.
+                    _logger.configure_debug_log(True, current_path)
+                else:
+                    # Fall back to the first site's default debug log path.
+                    _logger.dbg("[CONFIG] apply_global_cfg fallback to first site debug log path")
+                    try:
+                        resolved_path = get_debug_log_path(load_config(self.sites[0].config_path))
+                        _logger.configure_debug_log(True, resolved_path)
+                        _logger.dbg(f"[CONFIG] apply_global_cfg resolved fallback DEBUG_LOG_PATH={resolved_path!r}")
+                    except Exception as e:
+                        _logger.dbg(f"[CONFIG] apply_global_cfg failed to resolve fallback debug log path: {e}")
+                        _logger.configure_debug_log(False, "")
+        else:
+            _logger.configure_debug_log(False, "")
+
+        final_enabled, final_path = _logger.get_debug_log_config()
+        _logger.dbg(
+            f"[CONFIG] apply_global_cfg completed: DEBUG_LOGS={final_enabled} "
+            f"DEBUG_LOG_PATH={final_path!r}"
         )
 
     # ── Run loop ──────────────────────────────────────────────────────────────
@@ -3222,24 +3284,21 @@ def main() -> None:
                 else:
                     # Multi-select chooser
                     chosen = curses.wrapper(_curses_choose_config, found)
-                    
-            # ASK_FOR_BROWSER logic
-            _global_cfg = load_global_config()
-            ask_for_browser = _global_cfg.get("ask_for_browser", None)
-            if ask_for_browser is None:
-                # Fall back to per-site values for backwards compatibility
-                ask_for_browser = any(
-                    load_config(os.path.join(cwd, f)).get("ask_for_browser", True) 
-                    for f in chosen
-                )
-            
-            if ask_for_browser:
-                chosen = curses.wrapper(_curses_choose_browser, chosen)
 
             config_paths = [os.path.join(cwd, f) for f in chosen]
 
-    # ── Global config / debug setup ───────────────────────────────────────────
-    initial_cfg = load_config(config_paths[0])
+    # ASK_FOR_BROWSER logic
+    _global_cfg = load_global_config()
+    ask_for_browser = _global_cfg.get("ask_for_browser", None)
+    if ask_for_browser is None:
+        # Fall back to per-site values for backwards compatibility
+        ask_for_browser = any(
+            load_config(p).get("ask_for_browser", True)
+            for p in config_paths
+        )
+
+    if ask_for_browser:
+        curses.wrapper(_curses_choose_browser, config_paths)
 
     # Load global.conf — app-wide settings, independent of any site config.
     global_cfg = load_global_config()
@@ -3285,16 +3344,13 @@ def main() -> None:
         threading.Thread(target=_periodic_update_checker, daemon=True).start()
 
     from . import logger as _logger
-    with _logger.debug_log_lock:
-        # DEBUG_LOGS / DEBUG_LOG_PATH are now global settings.
-        any_debug = global_cfg.get("debug_logs", False)
-        _logger.DEBUG_LOGS_ENABLED = any_debug
-        if any_debug:
-            raw_path = global_cfg.get("debug_log_path", "")
-            if raw_path:
-                _logger.DEBUG_LOG_PATH = raw_path
-            else:
-                _logger.DEBUG_LOG_PATH = get_debug_log_path(load_config(config_paths[0]))
+    # DEBUG_LOGS / DEBUG_LOG_PATH are now global settings.
+    any_debug = global_cfg.get("debug_logs", False)
+    debug_path = ""
+    if any_debug:
+        raw_path = global_cfg.get("debug_log_path", "")
+        debug_path = raw_path if raw_path else get_debug_log_path(load_config(config_paths[0]))
+    _configure_debug_log(enabled=any_debug, path=debug_path)
         
     # ── Launch per-site state + threads ──────────────────────────────────────
     sites: List[SiteState] = []
