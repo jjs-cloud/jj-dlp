@@ -161,8 +161,9 @@ _last_debug_err = ""
 def _write_debug_log(msg: str) -> None:
     global _last_debug_err
     with _debug_cfg_lock:
-        enabled = _debug_cfg.enabled
-        path    = _debug_cfg.path
+        enabled  = _debug_cfg.enabled
+        path     = _debug_cfg.path
+        last_err = _last_debug_err
     if not enabled or not path:
         return
     try:
@@ -171,12 +172,14 @@ def _write_debug_log(msg: str) -> None:
             os.makedirs(dir_part, exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:
             f.write(msg + "\n")
-        _last_debug_err = ""
+        with _debug_cfg_lock:
+            _last_debug_err = ""
     except Exception as e:
         err_msg = f"DEBUG LOG ERROR: Could not write to {path}: {e}"
-        if _dashboard_log_ref and err_msg != _last_debug_err:
+        if _dashboard_log_ref and err_msg != last_err:
             _dashboard_log_ref(err_msg)
-            _last_debug_err = err_msg
+            with _debug_cfg_lock:
+                _last_debug_err = err_msg
 
 
 def dbg(msg: str, site_name: str = "") -> None:
