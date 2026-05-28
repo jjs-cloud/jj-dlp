@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.6.3"
+__version__ = "1.6.4"
 
 import subprocess
 import time
@@ -1049,6 +1049,14 @@ def wait_for_streamer_file(output_dir, streamer, proc_start_time, timeout=15.0, 
                     candidate_files.append(fpath)
                 elif name_match and not time_match:
                     skipped_count += 1
+                    dbg(f"[STALL] wait_for_streamer_file SKIP (mtime too old): "
+                        f"file={f!r} mtime={mtime:.3f} proc_start_time={proc_start_time:.3f} "
+                        f"delta={mtime - proc_start_time:.3f}s",
+                        site_name=streamer)
+                elif not name_match:
+                    dbg(f"[STALL] wait_for_streamer_file SKIP (name no match): "
+                        f"file={f!r} streamer={streamer.lower()!r}",
+                        site_name=streamer)
             if candidate_files:
                 chosen = max(candidate_files, key=os.path.getmtime)
                 dbg(f"[SPLIT][wait_for_streamer_file] FOUND file={chosen!r} "
