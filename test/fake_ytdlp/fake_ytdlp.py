@@ -284,21 +284,24 @@ def _run_downloader(cfg: dict, argv: list) -> int:
         _stderr("fake_ytdlp: no -o path found — writing to fake_output.ts in cwd")
         output_tmpl = os.path.join(os.getcwd(), "fake_output.ts")
 
-    # Resolve %(title)s etc. with a fixed fake value so the file is creatable
-    # immediately without a real info-dict expansion.
+    # Resolve %(title)s etc. using the streamer name from the URL and the
+    # current time, so the filename matches what jj-dlp expects to find.
+    urls = _extract_urls(argv)
+    # URL is typically  https://www.twitch.tv/alice  — take the last path segment
+    streamer_name = urls[0].rstrip("/").split("/")[-1].capitalize() if urls else "FakeStream"
+    now_dt  = time.strftime("%Y-%m-%d %H_%M")
+    fake_id = str(random.randint(10**11, 10**12 - 1))
+    replacements = {
+        "title":       f"{streamer_name} (live) {now_dt} [{fake_id}]",
+        "id":          fake_id,
+        "ext":         "mp4",
+        "uploader":    streamer_name,
+        "upload_date": time.strftime("%Y%m%d"),
+        "timestamp":   str(int(time.time())),
+    }
     output_path = output_tmpl
-    for placeholder in ("%(title)s", "%(id)s", "%(ext)s", "%(uploader)s",
-                         "%(upload_date)s", "%(timestamp)s"):
-        key = placeholder.strip("%()")
-        replacements = {
-            "title":       "FakeStream",
-            "id":          "fakeid123",
-            "ext":         "ts",
-            "uploader":    "fakeuser",
-            "upload_date": "20250101",
-            "timestamp":   str(int(time.time())),
-        }
-        output_path = output_path.replace(placeholder, replacements.get(key, "fake"))
+    for placeholder, value in replacements.items():
+        output_path = output_path.replace(f"%({placeholder})s", value)
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
