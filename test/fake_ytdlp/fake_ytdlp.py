@@ -286,13 +286,15 @@ def _run_downloader(cfg: dict, argv: list) -> int:
 
     # Resolve %(title)s etc. using the streamer name from the URL and the
     # current time, so the filename matches what jj-dlp expects to find.
-    urls = _extract_urls(argv)
-    # URL is typically  https://www.twitch.tv/alice  — take the last path segment
+    # URL is typically  https://www.twitch.tv/alice  — take the last path segment.
+    # Filter to http(s) URLs only so we don't accidentally pick up flag values.
+    urls = [a for a in argv if a.startswith("http://") or a.startswith("https://")]
     streamer_name = urls[0].rstrip("/").split("/")[-1].capitalize() if urls else "FakeStream"
     now_dt  = time.strftime("%Y-%m-%d %H_%M")
     fake_id = str(random.randint(10**11, 10**12 - 1))
+    # %(title)s must NOT include the ID — the template already appends [%(id)s]
     replacements = {
-        "title":       f"{streamer_name} (live) {now_dt} [{fake_id}]",
+        "title":       f"{streamer_name} (live) {now_dt}",
         "id":          fake_id,
         "ext":         "mp4",
         "uploader":    streamer_name,
