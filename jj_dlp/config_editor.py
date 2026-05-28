@@ -1,6 +1,9 @@
 import os
 import shutil
 import curses
+import hashlib
+import json
+import threading
 from datetime import datetime
 from typing import NamedTuple
 
@@ -135,6 +138,307 @@ _KEY_COMMENTS: dict[str, str] = {k.name: k.comment for k in CONFIG_KEYS}
 
 # Keys that must be preserved across an update (both global and site)
 PRESERVED_KEYS: list[str] = [k.name for k in CONFIG_KEYS if k.preserve]
+
+# ── Priority panel ─────────────────────────────────────────────────────────────
+# Width of the PRIORITY panel box (x2 − x1 span), matching the SYSTEM sidebar.
+PRIORITY_PANEL_W: int = 27
+
+_prio_json_lock = threading.Lock()
+
+
+def _ce_global_json_path() -> str:
+    """Return the absolute path to global.json (same directory as this file)."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "global.json")
+
+
+def _ce_load_global_json() -> dict:
+    """Load global.json and return its parsed contents (empty dict on error)."""
+    try:
+        with open(_ce_global_json_path(), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _ce_save_global_json(data: dict) -> None:
+    """Write *data* to global.json.  Silently ignores errors."""
+    try:
+        with open(_ce_global_json_path(), "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+
+def _compute_config_id(config_paths: "list[str]") -> str:
+    """Compute a stable short ID for a combination of loaded config file paths."""
+    h = hashlib.sha256()
+    for p in sorted(config_paths):
+        h.update(p.encode("utf-8"))
+    return h.hexdigest()[:16]
+
+
+def _compute_config_sha(config_path: str) -> str:
+    """Compute a short SHA of a config file's raw content (for change detection)."""
+    try:
+        with open(config_path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()[:16]
+    except Exception:
+        return ""
+
+
+class PriorityEntry(NamedTuple):
+    """Represents one streamer entry in the PRIORITY panel."""
+    streamer:    str   # lowercase username
+    site:        str   # SITE_LABEL from the config that owns this streamer
+    config_path: str   # absolute path to the .conf file
+    config_sha:  str   # short SHA of that .conf file at last load
+    bypass:      bool  # True → always-record (displayed in green, sorted to top)
+
+
+class PriorityEditor:
+    """Manages the PRIORITY panel: display, reordering, bypass toggle, persistence."""
+
+    # Key bindings (configurable here)
+    KEY_MOVE_UP   = (ord('u'), ord('U'))
+    KEY_MOVE_DOWN = (ord('d'), ord('D'))
+    KEY_BYPASS    = (ord('b'), ord('B'))
+
+    def __init__(self, dashboard):
+        self.dashboard      = dashboard
+        self._entries:  "list[PriorityEntry]" = []
+        self._selected_idx:  int = 0
+        self._scroll_offset: int = 0
+        self._loaded:        bool = False
+        self._config_id:     str  = ""
+
+    # ── Public interface ───────────────────────────────────────────────────────
+
+    def force_reload(self) -> None:
+        """Mark data as stale so the next draw() call refreshes from disk."""
+        self._loaded = False
+
+    def ensure_loaded(self) -> None:
+        if not self._loaded:
+            self._refresh()
+            self._loaded = True
+
+    # ── Data management ────────────────────────────────────────────────────────
+
+    def _refresh(self) -> None:
+        """Rebuild the entry list from current sites + saved global.json data."""
+        sites = self.dashboard.sites
+        if not sites:
+            self._entries = []
+            self._config_id = ""
+            return
+
+        # Collect (streamer, site_label, config_path, config_sha) from every site.
+        raw: "list[tuple[str,str,str,str]]" = []
+        for site in sites:
+            cfg        = site.get_cached_config()
+            site_label = cfg.get("site_label", os.path.basename(site.config_path))
+            streamers  = cfg.get("streamers", [])
+            sha        = _compute_config_sha(site.config_path)
+            for s in streamers:
+                raw.append((s.lower(), site_label, site.config_path, sha))
+
+        # Compute the config_id for this exact combination of loaded files.
+        config_paths   = [site.config_path for site in sites]
+        self._config_id = _compute_config_id(config_paths)
+
+        # Load saved priority data for this config_id.
+        with _prio_json_lock:
+            global_data = _ce_load_global_json()
+        saved_block   = global_data.get("priorities", {}).get(self._config_id, {})
+        saved_entries = saved_block.get("entries", [])
+
+        # Build a lookup: (streamer, site, config_sha) → saved dict
+        saved_map: "dict[tuple,dict]" = {}
+        for i, e in enumerate(saved_entries):
+            key = (e.get("streamer", ""), e.get("site", ""), e.get("config_sha", ""))
+            saved_map[key] = {
+                "bypass":   e.get("bypass", False),
+                "priority": i,
+            }
+
+        # Build enriched list with saved priority / bypass values.
+        enriched = []
+        for (streamer, site_label, config_path, config_sha) in raw:
+            key      = (streamer, site_label, config_sha)
+            saved    = saved_map.get(key, {"bypass": False, "priority": 999999})
+            enriched.append({
+                "streamer":    streamer,
+                "site":        site_label,
+                "config_path": config_path,
+                "config_sha":  config_sha,
+                "bypass":      saved["bypass"],
+                "priority":    saved["priority"],
+            })
+
+        # Sort: bypass entries first (by saved order), then normal entries (by saved order).
+        bypass_part = sorted([e for e in enriched if     e["bypass"]], key=lambda x: x["priority"])
+        normal_part = sorted([e for e in enriched if not e["bypass"]], key=lambda x: x["priority"])
+
+        self._entries = [
+            PriorityEntry(
+                streamer    = e["streamer"],
+                site        = e["site"],
+                config_path = e["config_path"],
+                config_sha  = e["config_sha"],
+                bypass      = e["bypass"],
+            )
+            for e in (bypass_part + normal_part)
+        ]
+
+        # Clamp selection.
+        if self._entries:
+            self._selected_idx = min(self._selected_idx, len(self._entries) - 1)
+        else:
+            self._selected_idx = 0
+
+    def _save(self) -> None:
+        """Persist current entry ordering and bypass flags to global.json."""
+        if not self._config_id:
+            return
+        config_paths = [site.config_path for site in self.dashboard.sites]
+        entries_data = [
+            {
+                "streamer":   e.streamer,
+                "site":       e.site,
+                "config_sha": e.config_sha,
+                "priority":   i,
+                "bypass":     e.bypass,
+            }
+            for i, e in enumerate(self._entries)
+        ]
+        with _prio_json_lock:
+            global_data = _ce_load_global_json()
+            if "priorities" not in global_data or not isinstance(global_data["priorities"], dict):
+                global_data["priorities"] = {}
+            global_data["priorities"][self._config_id] = {
+                "config_files": config_paths,
+                "entries":      entries_data,
+            }
+            _ce_save_global_json(global_data)
+
+    # ── Movement helpers ───────────────────────────────────────────────────────
+
+    def _move(self, idx: int, direction: int) -> None:
+        """Swap entry at *idx* with its neighbour in *direction* (+1 down / -1 up).
+        Movement is constrained to within the same group (bypass / normal).
+        """
+        n = len(self._entries)
+        if not n or not (0 <= idx < n):
+            return
+        new_idx = idx + direction
+        if not (0 <= new_idx < n):
+            return
+        # Do not cross the bypass ↔ normal boundary.
+        if self._entries[idx].bypass != self._entries[new_idx].bypass:
+            return
+        lst = list(self._entries)
+        lst[idx], lst[new_idx] = lst[new_idx], lst[idx]
+        self._entries    = lst
+        self._selected_idx = new_idx
+        self._save()
+
+    def _toggle_bypass(self, idx: int) -> None:
+        """Toggle the bypass flag on entry *idx*, relocating it within the list."""
+        if not (0 <= idx < len(self._entries)):
+            return
+        e       = self._entries[idx]
+        new_e   = PriorityEntry(e.streamer, e.site, e.config_path, e.config_sha, not e.bypass)
+        lst     = list(self._entries)
+        lst.pop(idx)
+        # Insert at the boundary between bypass and normal sections.
+        boundary = sum(1 for x in lst if x.bypass)
+        if new_e.bypass:
+            # Newly bypassed → place at the END of the bypass block (just before normals).
+            lst.insert(boundary, new_e)
+            self._selected_idx = boundary
+        else:
+            # Newly un-bypassed → place at the START of the normal block.
+            lst.insert(boundary, new_e)
+            self._selected_idx = boundary
+        self._entries = lst
+        self._save()
+
+    # ── Key handling ───────────────────────────────────────────────────────────
+
+    def handle_key(self, key) -> bool:
+        """Process a keypress while this panel has focus.  Returns True if consumed."""
+        self.ensure_loaded()
+        if key == curses.KEY_UP:
+            self._selected_idx = max(0, self._selected_idx - 1)
+            return True
+        elif key == curses.KEY_DOWN:
+            self._selected_idx = min(len(self._entries) - 1, self._selected_idx + 1)
+            return True
+        elif key in self.KEY_MOVE_UP:
+            self._move(self._selected_idx, -1)
+            return True
+        elif key in self.KEY_MOVE_DOWN:
+            self._move(self._selected_idx, +1)
+            return True
+        elif key in self.KEY_BYPASS:
+            self._toggle_bypass(self._selected_idx)
+            return True
+        return False
+
+    # ── Drawing ────────────────────────────────────────────────────────────────
+
+    def draw(self, stdscr, y1: int, x1: int, y2: int, x2: int, is_active: bool) -> None:
+        """Draw the PRIORITY panel inside the box (y1,x1)–(y2,x2)."""
+        self.ensure_loaded()
+        db = self.dashboard
+
+        # Box border
+        db.draw_box(stdscr, y1, x1, y2, x2, db.C_SYSTEM)
+        db.safe_addstr(stdscr, y1, x1 + 2, " PRIORITY ",
+                       curses.color_pair(db.C_LIVE) | curses.A_BOLD)
+        if is_active:
+            mode_str = " [ PRI ] "
+            db.safe_addstr(stdscr, y1, x2 - len(mode_str) - 1, mode_str,
+                           curses.color_pair(db.C_LIVE) | curses.A_BOLD)
+
+        if not self._entries:
+            db.safe_addstr(stdscr, y1 + 2, x1 + 2, "No streamers.",
+                           curses.color_pair(db.C_DIM))
+            return
+
+        visible_rows = (y2 - y1) - 2
+        # Scroll to keep selection visible.
+        if self._selected_idx < self._scroll_offset:
+            self._scroll_offset = self._selected_idx
+        elif self._selected_idx >= self._scroll_offset + visible_rows:
+            self._scroll_offset = self._selected_idx - visible_rows + 1
+
+        panel_inner_w = (x2 - x1) - 3   # usable character columns inside box
+
+        row_y = y1 + 1
+        for i in range(self._scroll_offset,
+                       min(len(self._entries), self._scroll_offset + visible_rows)):
+            entry  = self._entries[i]
+            is_sel = is_active and (i == self._selected_idx)
+
+            label = f"{entry.streamer}:{entry.site}"
+            if len(label) > panel_inner_w - 2:
+                label = label[:panel_inner_w - 5] + "..."
+
+            prefix = "> " if is_sel else "  "
+
+            if entry.bypass:
+                # Always-record streamers rendered in green (C_LIVE).
+                attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
+                        if is_sel
+                        else curses.color_pair(db.C_LIVE) | curses.A_BOLD)
+            else:
+                attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
+                        if is_sel
+                        else curses.color_pair(db.C_NORMAL))
+
+            db.safe_addstr(stdscr, row_y, x1 + 1, prefix + label, attr)
+            row_y += 1
 
 
 def _validate_value(key: str, value: str) -> tuple[bool, str]:
@@ -483,7 +787,7 @@ class ConfigEditor:
         self.current_site_path = None
         self.editing_item = None
 
-        # Which panel has keyboard focus: "global" or "site"
+        # Which panel has keyboard focus: "global", "site", or "priority"
         self._focus = "site"
 
         # Sub-editor for global.conf
@@ -491,6 +795,9 @@ class ConfigEditor:
             parent_dashboard,
             on_save=getattr(parent_dashboard, "apply_global_cfg", None),
         )
+
+        # Sub-editor for the PRIORITY panel
+        self.priority_editor = PriorityEditor(parent_dashboard)
 
     def notify_site_changed(self, new_idx: int) -> None:
         """Called by the dashboard whenever selected_site_idx changes.
@@ -507,6 +814,8 @@ class ConfigEditor:
         if self.sites:
             site = self.sites[new_idx]
             self.load_config(site.config_path)
+        # Streamer list may have changed — force a priority panel refresh.
+        self.priority_editor.force_reload()
 
     def load_config(self, config_path):
         self.current_site_path = config_path
@@ -605,33 +914,51 @@ class ConfigEditor:
             site = self.sites[self.selected_site_idx]
             self.load_config(site.config_path)
 
-        # ── Layout: side-by-side columns
-        #   Site Config (left, wider) | Global Settings (right, narrower)
-        total_w = x2 - x1
-        # Global panel gets ~38% of width, site gets the rest
-        global_w = max(30, int(total_w * 0.38))
-        site_w   = total_w - global_w - 1   # -1 for the column gap
+        # ── Layout: three side-by-side columns ────────────────────────────────
+        #
+        #   [SITE SETTINGS (wide)]  [GLOBAL SETTINGS]  [PRIORITY (=system width)]
+        #
+        # PRIORITY_PANEL_W is the box span (x2−x1), matching the SYSTEM sidebar.
+        total_w  = x2 - x1
+        prio_w   = PRIORITY_PANEL_W                       # 27 → same as system sidebar
+        # Global panel gets ~35% of remaining space (after reserving prio column + 2 gaps).
+        global_w = max(28, int((total_w - prio_w - 2) * 0.35))
+        site_w   = total_w - global_w - prio_w - 2        # 2 gaps between columns
 
         site_x1   = x1
         site_x2   = x1 + site_w
         global_x1 = site_x2 + 1
-        global_x2 = x2
+        global_x2 = global_x1 + global_w
+        prio_x1   = global_x2 + 1
+        prio_x2   = x2                                    # == prio_x1 + prio_w
 
         content_y1 = y1
 
-        # ── Tab hint row above the global panel ───────────────────────────────
+        # ── Hint row (content_y1) — above boxes ──────────────────────────────
+        # Tab-focus navigation hint above GLOBAL panel
         if self._focus == "site":
-            focus_hint = "  Tab: switch to Global Settings ►  "
+            focus_hint = "  Tab: Global Settings \u25ba  "
+        elif self._focus == "global":
+            focus_hint = "  \u25c4 Site  Tab: Priority \u25ba  "
         else:
-            focus_hint = "  ◄ Tab: switch to Site Config  "
+            focus_hint = "  \u25c4 Tab: Global Settings  "
         self.dashboard.safe_addstr(stdscr, content_y1, global_x1, focus_hint,
                     curses.color_pair(self.dashboard.C_DIM))
 
-        # ── Draw global settings panel (right, narrower) ──────────────────────
+        # Keybind legend above PRIORITY panel (always visible)
+        prio_hint = "\u2191\u2193:nav  U:up D:dn  B:bypass"
+        self.dashboard.safe_addstr(stdscr, content_y1, prio_x1, prio_hint,
+                    curses.color_pair(self.dashboard.C_DIM))
+
+        # ── Draw GLOBAL SETTINGS panel (middle column) ────────────────────────
         self.global_editor.draw(stdscr, content_y1 + 1, global_x1, y2, global_x2,
                                 is_active=(self._focus == "global"))
 
-        # ── Draw Site Selector above the site box ─────────────────────────────
+        # ── Draw PRIORITY panel (right column) ───────────────────────────────
+        self.priority_editor.draw(stdscr, content_y1 + 1, prio_x1, y2, prio_x2,
+                                  is_active=(self._focus == "priority"))
+
+        # ── Site selector tabs above the site box ─────────────────────────────
         tab_x = site_x1 + 1
         self.dashboard.safe_addstr(stdscr, content_y1, site_x1, "  Site: ",
                     curses.color_pair(self.dashboard.C_DIM))
@@ -645,7 +972,7 @@ class ConfigEditor:
             self.dashboard.safe_addstr(stdscr, content_y1, tab_x, label, attr)
             tab_x += len(label) + 1
 
-        # ── Draw per-site editor box (left, wider) ────────────────────────────
+        # ── Draw SITE SETTINGS box (left column) ──────────────────────────────
         site_box_y1 = content_y1 + 1
         self.dashboard.draw_box(stdscr, site_box_y1, site_x1, y2, site_x2, self.dashboard.C_CHROME)
         if self._focus == "site":
@@ -750,10 +1077,20 @@ class ConfigEditor:
     def handle_key(self, key) -> bool:
         """Returns True if the key was consumed by the editor."""
 
-        # Tab key switches focus between global and site panels
-        if key == ord('\t') and not self.global_editor.popup_mode and not self.popup_mode:
-            self._focus = "site" if self._focus == "global" else "global"
+        # Tab key cycles focus: site → global → priority → site → …
+        # (only when no popup is open in any sub-editor)
+        any_popup = self.global_editor.popup_mode or self.popup_mode
+        if key == ord('\t') and not any_popup:
+            _cycle = ["site", "global", "priority"]
+            self._focus = _cycle[(_cycle.index(self._focus) + 1) % len(_cycle)]
             return True
+
+        # ── Priority panel focus ──────────────────────────────────────────────
+        if self._focus == "priority":
+            if key == 27:
+                self.dashboard.selected_tab = 0
+                return True
+            return self.priority_editor.handle_key(key)
 
         if self._focus == "global":
             # Escape in global panel without popup → exit Config tab
@@ -794,6 +1131,8 @@ class ConfigEditor:
                         return True
                     site = self.sites[self.selected_site_idx]
                     site.trigger_event.set()
+                    # Streamer list may have changed — refresh priority panel.
+                    self.priority_editor.force_reload()
                 self.popup_mode = False
                 self.popup_buf = ""
                 self.popup_error = ""
