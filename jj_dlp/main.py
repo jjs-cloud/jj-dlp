@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.6.1"
+__version__ = "1.6.2"
 
 import subprocess
 import time
@@ -1280,6 +1280,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                     kill_proc(proc)
                     site.log_line(f"Recording STOPPED (blocked) -> {streamer}")
                     site.unregister_proc(streamer)
+                    site.clear_ffmpeg_error_count(streamer)
+                    site.clear_stall_since(streamer)
 
                     try:
                         close_logs()
@@ -1523,6 +1525,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
             else:
                 site.unregister_proc(streamer)
                 site.clear_stall_since(streamer)
+                site.clear_ffmpeg_error_count(streamer)
 
                 try:
                     close_logs()
