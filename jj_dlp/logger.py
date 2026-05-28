@@ -125,6 +125,7 @@ DBG_FILTERS: dict[str, bool] = {
     "TWITCH":  False,
     "CONFIG":  False,
     "KILL":    True,
+    "STALL":   True,
     "POPUP":   False,
 }
 

@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.6.2"
+__version__ = "1.6.3"
 
 import subprocess
 import time
@@ -1077,11 +1077,22 @@ def get_streamer_file_size(output_dir, streamer, cfg=None,
         size = os.path.getsize(filename) if filename else 0
         stall_detected = False
         if last_growth_time is not None and stall_timeout is not None:
-            stalled = max(0.0, time.time() - last_growth_time - stall_check_interval)
+            time_now = time.time()
+            time_since_growth = time_now - last_growth_time
+            stalled = max(0.0, time_since_growth - stall_check_interval)
+            dbg(f"[STALL] size={size} time_since_growth={time_since_growth:.2f}s "
+                f"stall_check_interval={stall_check_interval}s "
+                f"stalled={stalled:.2f}s threshold={stall_timeout}s "
+                f"file={filename!r}",
+                site_name=streamer)
             if stalled >= stall_timeout:
                 stall_detected = True
+                dbg(f"[STALL] TRIGGERED: stalled={stalled:.2f}s >= threshold={stall_timeout}s",
+                    site_name=streamer)
         return size, stall_detected, filename or ""
-    except Exception:
+    except Exception as e:
+        dbg(f"[STALL] exception in get_streamer_file_size: {type(e).__name__}: {e}",
+            site_name=streamer)
         return 0, False, ""
 
 def add_segment_suffix_to_tmpl(output_tmpl: str, segment_num: int) -> str:
@@ -1252,6 +1263,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
             stall_timeout        = cfg["stall_timeout"]
             seconds_since_check  = 0
             _split_log_counter   = 0  # throttle periodic split-timer dbg lines
+            dbg(f"[STALL] init: stall_timeout={stall_timeout}s "
+                f"stall_check_interval={stall_check_interval}s "
+                f"last_size={last_size} last_growth_time={last_growth_time:.2f}",
+                site_name=streamer)
 
             dbg(f"[SPLIT][record_stream] inner loop starting: streamer={streamer!r} "
                 f"segment_num={segment_num} pid={proc.pid} "
@@ -1489,7 +1504,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
                 if seconds_since_check >= stall_check_interval:
                     seconds_since_check = 0
-
+                    dbg(f"[STALL] check cycle: elapsed_since_growth="
+                        f"{time.time() - last_growth_time:.2f}s",
+                        site_name=streamer)
                     current_size, stall_detected, _ = get_streamer_file_size(
                         output_dir,
                         streamer,
@@ -1516,10 +1533,16 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                         break
 
                     if current_size > last_size:
+                        dbg(f"[STALL] grew: {last_size} -> {current_size} "
+                            f"(+{current_size - last_size} bytes), resetting timer",
+                            site_name=streamer)
                         last_size = current_size
                         last_growth_time = time.time()
                         site.clear_stall_since(streamer)
                     else:
+                        dbg(f"[STALL] NO GROWTH: size={current_size} "
+                            f"stall_since={time.time() - last_growth_time:.2f}s",
+                            site_name=streamer)
                         site.set_stall_since(streamer, last_growth_time)
 
             else:
