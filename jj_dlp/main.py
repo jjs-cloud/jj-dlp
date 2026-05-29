@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.8.4"
+__version__ = "1.8.5"
 
 import subprocess
 import time
@@ -1738,8 +1738,6 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                         dbg(f"[CONCURRENCY] max_concurrent ({max_concurrent}) reached. "
                             f"Streamer {streamer} (prio: {streamer_prio}) cannot evict "
                             f"any active stream.")
-                        site.log_line(
-                            f"Warning: Skipping {streamer}. (MAX_CONCURRENT_REC = {max_concurrent})")
                         continue
                     # else: bypass with no eviction candidate → fall through and
                     # start anyway (intentionally exceeds the limit).
