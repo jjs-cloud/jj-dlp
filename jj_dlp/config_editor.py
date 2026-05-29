@@ -403,6 +403,9 @@ class PriorityEditor:
             db.safe_addstr(stdscr, y1, x2 - len(mode_str) - 1, mode_str,
                            curses.color_pair(db.C_LIVE) | curses.A_BOLD)
 
+        db.safe_addstr(stdscr, y2 - 2, x1 + 2, " bypass=always record ", 
+                       curses.color_pair(db.C_DIM))
+
         if not self._entries:
             db.safe_addstr(stdscr, y1 + 2, x1 + 2, "No streamers.",
                            curses.color_pair(db.C_DIM))
