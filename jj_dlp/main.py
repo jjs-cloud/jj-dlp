@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.8.1"
+__version__ = "1.8.2"
 
 import subprocess
 import time
@@ -1743,6 +1743,8 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                         dbg(f"[CONCURRENCY] max_concurrent ({max_concurrent}) reached. "
                             f"Streamer {streamer} (prio: {streamer_prio}) cannot evict "
                             f"any active stream.")
+                        site.log_line(
+                            f"Warning: Skipping {streamer}. (MAX_CONCURRENT_REC = {max_concurrent})")
                         continue
                     # else: bypass with no eviction candidate → fall through and
                     # start anyway (intentionally exceeds the limit).
@@ -2656,7 +2658,7 @@ class JJDlpDashboard:
                 attr = curses.color_pair(self.C_LIVE)
             elif "ERROR" in line or "Stall" in line or "STOPPED" in line:
                 attr = curses.color_pair(self.C_REC)
-            elif "Next check" in line:
+            elif "Warning" in line:
                 attr = curses.color_pair(self.C_WARN)
             self.safe_addstr(self.stdscr, y1 + 2 + i, x1 + 2, line, attr)
 
