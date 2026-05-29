@@ -331,7 +331,7 @@ def perform_update():
         print(f"Cleaning up temporary directory: {temp_dir}")
         shutil.rmtree(temp_dir, ignore_errors=True)
         _logger().dbg(f"[UPDATER] perform_update: temp_dir cleaned up")
-        input("")
+        input("Press any key to exit...")
 
 
 def get_old_config_section(config_path, section_name):
