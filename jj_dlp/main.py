@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.8.0"
+__version__ = "1.8.1"
 
 import subprocess
 import time
@@ -1754,12 +1754,18 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                     if streamer not in site.dash_live_since:
                         site.dash_live_since[streamer] = time.time()
             if show_popup and cfg.get("popup_notifications", True):
+                dbg(f"[POPUP] popup condition check for streamer={streamer!r} show_popup={show_popup} popup_notifications={cfg.get('popup_notifications', True)}")
                 cooldown_secs = cfg.get("popup_cooldown", 30) * 60
                 last_shown    = site.popup_last_shown.get(streamer, 0)
                 elapsed       = time.time() - last_shown
                 if elapsed >= cooldown_secs:
+                    dbg(f"[POPUP] popup allowed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s cooldown={cooldown_secs}s")
                     _show_live_popup(streamer, source="poll", popup_timeout=cfg.get("popup_timeout", 15))
                     site.popup_last_shown[streamer] = time.time()
+                else:
+                    dbg(f"[POPUP] popup suppressed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s required={cooldown_secs}s")
+            else:
+                dbg(f"[POPUP] popup skipped for streamer={streamer!r} show_popup={show_popup} popup_notifications={cfg.get('popup_notifications', True)}")
             t = threading.Thread(target=record_stream, args=(streamer, cfg, site), daemon=True)
             t.start()
             site.recording_threads.append(t)
