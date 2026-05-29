@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.8.2"
+__version__ = "1.8.3"
 
 import subprocess
 import time
@@ -1723,12 +1723,7 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                             f"(prio: {streamer_prio}, bypass={is_bypass})")
                         # User-visible eviction log (Fix #8)
                         target_site.log_line(
-                            f"⚠ Evicted {target_streamer} (lower priority) — "
-                            f"making room for {streamer}"
-                        )
-                        site.log_line(
-                            f"▶ Recording {streamer} — evicted {target_streamer} "
-                            f"from {target_site.label}"
+                            f"Warning: Evicted {target_streamer} (lower priority) — making room for {streamer}"
                         )
                         with target_site.lock:
                             target_site.evicted_streamers.add(target_streamer)
