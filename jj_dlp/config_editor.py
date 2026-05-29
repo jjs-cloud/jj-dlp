@@ -254,10 +254,10 @@ class PriorityEditor:
         saved_block   = global_data.get("priorities", {}).get(self._config_id, {})
         saved_entries = saved_block.get("entries", [])
 
-        # Build a lookup: (streamer, site, config_sha) → saved dict
+        # Build a lookup: (streamer, site) → saved dict
         saved_map: "dict[tuple,dict]" = {}
         for i, e in enumerate(saved_entries):
-            key = (e.get("streamer", ""), e.get("site", ""), e.get("config_sha", ""))
+            key = (e.get("streamer", ""), e.get("site", ""))
             saved_map[key] = {
                 "bypass":   e.get("bypass", False),
                 "priority": i,
@@ -266,7 +266,7 @@ class PriorityEditor:
         # Build enriched list with saved priority / bypass values.
         enriched = []
         for (streamer, site_label, config_path, config_sha) in raw:
-            key      = (streamer, site_label, config_sha)
+            key      = (streamer, site_label)
             saved    = saved_map.get(key, {"bypass": False, "priority": 999999})
             enriched.append({
                 "streamer":    streamer,
