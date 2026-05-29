@@ -18,7 +18,7 @@ _VALID_BRANCHES = {"main", "testing", "experimental"}
 # ── Updater version ───────────────────────────────────────────────────────────
 # Incremented independently of the main jj-dlp version so we can tell which
 # updater logic is actually running during an update.
-UPDATER_VERSION = "2.0.7"
+UPDATER_VERSION = "2.0.8"
 
 # ── Lazy package imports ──────────────────────────────────────────────────────
 # Relative imports are deferred to call time so this file is also safe to
@@ -331,6 +331,7 @@ def perform_update():
         print(f"Cleaning up temporary directory: {temp_dir}")
         shutil.rmtree(temp_dir, ignore_errors=True)
         _logger().dbg(f"[UPDATER] perform_update: temp_dir cleaned up")
+        input("Press any key to exit...")
 
 
 def get_old_config_section(config_path, section_name):
