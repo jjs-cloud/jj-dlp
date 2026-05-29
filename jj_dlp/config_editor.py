@@ -66,6 +66,8 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
             "Show the config file chooser on startup (true/false)."),
     _KeyDef("UPDATE_BRANCH",         "global", "main",  True,
             "Which branch of jj-dlp to update to. (main, testing, or experimental)."),
+    _KeyDef("MAX_CONCURRENT_REC",    "global", "0",     True,
+            "Maximum number of streamers to record simultaneously (0 = unlimited)."),
 
     # ── Site keys (per-site .conf) ────────────────────────────────────────────
     _KeyDef("SITE_LABEL",            "site",   "",      True,

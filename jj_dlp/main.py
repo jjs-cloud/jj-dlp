@@ -43,6 +43,18 @@ import curses  # noqa: E402
 # ── Script start time (for uptime display) ───────────────────────────────────
 _SCRIPT_START_TIME: float = time.time()
 
+# ── Global structures for concurrency control ────────────────────────────────
+_global_sites: List["SiteState"] = []
+_recording_start_lock = threading.Lock()
+
+def _get_config_id() -> str:
+    import hashlib
+    h = hashlib.sha256()
+    config_paths = [site.config_path for site in _global_sites]
+    for p in sorted(config_paths):
+        h.update(p.encode("utf-8"))
+    return h.hexdigest()[:16]
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Config loading
@@ -360,6 +372,7 @@ def load_global_config() -> dict:
         "update_branch":      update_branch,
         "ask_for_browser":    _bool("ASK_FOR_BROWSER", True),
         "ask_for_config":     _bool("ASK_FOR_CONFIG", True),
+        "max_concurrent_rec": _int("MAX_CONCURRENT_REC", 0),
     }
 
 def _write_global_conf_key(key: str, value: str) -> None:
@@ -494,6 +507,7 @@ class SiteState:
         
         self.lock                 = threading.Lock()
         self.currently_recording: Set[str] = set()
+        self.evicted_streamers:   Set[str] = set()
         self.recording_threads:   List[threading.Thread] = []
         self.known_streamers:     Set[str] = set()
         self.trigger_event        = threading.Event()
@@ -554,6 +568,15 @@ class SiteState:
         """Remove a subprocess from the registry (after it exits)."""
         with self._procs_lock:
             self._active_procs.pop(streamer, None)
+
+    def kill_proc_for_streamer(self, streamer: str) -> None:
+        with self._procs_lock:
+            proc = self._active_procs.get(streamer)
+        if proc:
+            try:
+                kill_proc(proc)
+            except Exception:
+                pass
 
     def set_ffmpeg_error_count(self, streamer: str, count: int) -> None:
         """Update the ffmpeg error count for *streamer* (called from _drain_pipe)."""
@@ -1178,6 +1201,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
     try:
         while True:
+            if site._stop_event.is_set() or streamer in site.evicted_streamers:
+                break
             current_output_tmpl = cfg["output_tmpl"]
             if split_after_seconds > 0:
                 current_output_tmpl = add_segment_suffix_to_tmpl(
@@ -1283,7 +1308,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
             while proc.poll() is None:
 
-                if site._stop_event.is_set():
+                if site._stop_event.is_set() or streamer in site.evicted_streamers:
                     kill_proc(proc)
                     proc.wait()
                     site.unregister_proc(streamer)
@@ -1599,27 +1624,89 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
         if not to_start:
             site.recording_threads[:] = [t for t in site.recording_threads if t.is_alive()]
             return
+
+    global_cfg = load_global_config()
+    max_concurrent = global_cfg.get("max_concurrent_rec", 0)
+
+    with _global_json_lock:
+        global_data = _load_global_json()
+
+    config_id = _get_config_id()
+    saved_entries = global_data.get("priorities", {}).get(config_id, {}).get("entries", [])
+    
+    priority_map = {}
+    for e in saved_entries:
+        s_name = e.get("streamer", "")
+        s_site = e.get("site", "")
+        priority_map[(s_name, s_site)] = {
+            "priority": e.get("priority", 999999),
+            "bypass": e.get("bypass", False)
+        }
+
+    site_label = cfg.get("site_label", os.path.basename(site.config_path))
+
+    with _recording_start_lock:
+        # Re-check what still needs to start
+        with site.lock:
+            to_start = [s for s in to_start if s not in site.currently_recording]
+            if not to_start:
+                return
+
         for streamer in to_start:
-            site.currently_recording.add(streamer)
-            with site.dash_lock:
-                if streamer not in site.dash_live_since:
-                    site.dash_live_since[streamer] = time.time()
+            streamer_info = priority_map.get((streamer, site_label), {"priority": 999999, "bypass": False})
+            is_bypass = streamer_info["bypass"]
+            streamer_prio = streamer_info["priority"]
+
+            if max_concurrent > 0 and not is_bypass:
+                active_recordings = []
+                for s in _global_sites:
+                    s_cfg = s.get_cached_config()
+                    s_label = s_cfg.get("site_label", os.path.basename(s.config_path))
+                    with s.lock:
+                        for act_str in s.currently_recording:
+                            if act_str in s.evicted_streamers:
+                                continue
+                            act_info = priority_map.get((act_str, s_label), {"priority": 999999, "bypass": False})
+                            active_recordings.append({
+                                "streamer": act_str,
+                                "site": s,
+                                "priority": act_info["priority"],
+                                "bypass": act_info["bypass"]
+                            })
+
+                if len(active_recordings) >= max_concurrent:
+                    eviction_candidates = [r for r in active_recordings if not r["bypass"] and r["priority"] > streamer_prio]
+                    
+                    if not eviction_candidates:
+                        dbg(f"[CONCURRENCY] max_concurrent ({max_concurrent}) reached. Streamer {streamer} (prio: {streamer_prio}) cannot evict any active stream.")
+                        continue
+                        
+                    evict_target = max(eviction_candidates, key=lambda x: x["priority"])
+                    dbg(f"[CONCURRENCY] Evicting {evict_target['streamer']} (prio: {evict_target['priority']}) for {streamer} (prio: {streamer_prio})")
+                    
+                    target_site = evict_target["site"]
+                    target_streamer = evict_target["streamer"]
+                    with target_site.lock:
+                        target_site.evicted_streamers.add(target_streamer)
+                    target_site.kill_proc_for_streamer(target_streamer)
+
+            with site.lock:
+                site.currently_recording.add(streamer)
+                site.evicted_streamers.discard(streamer)
+                with site.dash_lock:
+                    if streamer not in site.dash_live_since:
+                        site.dash_live_since[streamer] = time.time()
             if show_popup and cfg.get("popup_notifications", True):
-                dbg(f"[POPUP] popup condition check for streamer={streamer!r} show_popup={show_popup} popup_notifications={cfg.get('popup_notifications', True)}")
                 cooldown_secs = cfg.get("popup_cooldown", 30) * 60
                 last_shown    = site.popup_last_shown.get(streamer, 0)
                 elapsed       = time.time() - last_shown
                 if elapsed >= cooldown_secs:
-                    dbg(f"[POPUP] popup allowed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s cooldown={cooldown_secs}s")
                     _show_live_popup(streamer, source="poll", popup_timeout=cfg.get("popup_timeout", 15))
                     site.popup_last_shown[streamer] = time.time()
-                else:
-                    dbg(f"[POPUP] popup suppressed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s required={cooldown_secs}s")
-            else:
-                dbg(f"[POPUP] popup skipped for streamer={streamer!r} show_popup={show_popup} popup_notifications={cfg.get('popup_notifications', True)}")
             t = threading.Thread(target=record_stream, args=(streamer, cfg, site), daemon=True)
             t.start()
             site.recording_threads.append(t)
+            
         site.recording_threads[:] = [t for t in site.recording_threads if t.is_alive()]
 
 
@@ -3499,7 +3586,9 @@ def main() -> None:
     _configure_debug_log(enabled=any_debug, path=debug_path)
         
     # ── Launch per-site state + threads ──────────────────────────────────────
+    global _global_sites
     sites: List[SiteState] = []
+    _global_sites = sites
     for cp in config_paths:
         site = SiteState(cp)
         sites.append(site)
