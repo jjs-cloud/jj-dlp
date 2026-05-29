@@ -35,7 +35,7 @@ from .browser_config import (
     _write_browser_to_config,
     _write_ask_for_browser_to_config,
 )
-from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS
+from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS, _compute_config_id
 
 import curses  # noqa: E402
 
@@ -47,13 +47,19 @@ _SCRIPT_START_TIME: float = time.time()
 _global_sites: List["SiteState"] = []
 _recording_start_lock = threading.Lock()
 
+
 def _get_config_id() -> str:
-    import hashlib
-    h = hashlib.sha256()
-    config_paths = [site.config_path for site in _global_sites]
-    for p in sorted(config_paths):
-        h.update(p.encode("utf-8"))
-    return h.hexdigest()[:16]
+    """Return a stable short ID for the current set of loaded config file paths.
+
+    Delegates to config_editor._compute_config_id so there is a single
+    implementation of this hashing logic.
+
+    Lock ordering note: callers that also acquire _recording_start_lock or
+    site.lock must do so *after* _get_config_id() returns; this function
+    reads _global_sites without a lock, which is safe because _global_sites
+    is written once at startup and is effectively read-only thereafter.
+    """
+    return _compute_config_id([site.config_path for site in _global_sites])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -352,7 +358,9 @@ def load_global_config() -> dict:
         raw = general.get(key, "").strip()
         try:
             value = int(raw)
-            return value if value > 0 else default
+            # Allow 0 explicitly (e.g. MAX_CONCURRENT_REC = 0 means "unlimited").
+            # Only fall back to the default when the raw string is absent/empty.
+            return value if value >= 0 else default
         except Exception:
             return default
 
@@ -1612,6 +1620,12 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
     finally:
         with site.lock:
             site.currently_recording.discard(streamer)
+            # Always clean up evicted_streamers here so the set doesn't grow
+            # unboundedly over the lifetime of the process.  The eviction flag
+            # is only meaningful while the recording thread is alive; once we
+            # reach this finally block the thread is done regardless of why it
+            # stopped (normal end, eviction, or crash).
+            site.evicted_streamers.discard(streamer)
 
         time.sleep(cfg["cooldown_after_recording"])
 
@@ -1657,7 +1671,19 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
             is_bypass = streamer_info["bypass"]
             streamer_prio = streamer_info["priority"]
 
-            if max_concurrent > 0 and not is_bypass:
+            # ── Concurrency enforcement ───────────────────────────────────────
+            # Lock ordering inside this block:
+            #   _recording_start_lock  (already held by the outer `with`)
+            #   → site.lock / s.lock   (acquired below, released before kill)
+            #   → kill_proc_for_streamer (no locks held during the blocking call)
+            #
+            # Stale-count window: after kill_proc_for_streamer() returns, the
+            # evicted record_stream thread is still alive until its finally block
+            # removes the streamer from currently_recording.  Both the evicted
+            # and the new streamer are briefly in currently_recording.  Because
+            # _recording_start_lock serialises all starts, this window cannot
+            # trigger a second eviction cascade.
+            if max_concurrent > 0:
                 active_recordings = []
                 for s in _global_sites:
                     s_cfg = s.get_cached_config()
@@ -1675,20 +1701,51 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                             })
 
                 if len(active_recordings) >= max_concurrent:
-                    eviction_candidates = [r for r in active_recordings if not r["bypass"] and r["priority"] > streamer_prio]
-                    
-                    if not eviction_candidates:
-                        dbg(f"[CONCURRENCY] max_concurrent ({max_concurrent}) reached. Streamer {streamer} (prio: {streamer_prio}) cannot evict any active stream.")
+                    # Candidate pool: non-bypass active streamers are always
+                    # eligible for eviction.  For a non-bypass newcomer we also
+                    # require that the candidate has a strictly lower priority
+                    # (higher numeric value); a bypass newcomer evicts the
+                    # *lowest*-priority non-bypass streamer unconditionally so
+                    # it can try to stay within the limit — but always proceeds
+                    # even if no candidate exists.
+                    if is_bypass:
+                        eviction_candidates = [r for r in active_recordings if not r["bypass"]]
+                    else:
+                        eviction_candidates = [r for r in active_recordings
+                                               if not r["bypass"] and r["priority"] > streamer_prio]
+
+                    if eviction_candidates:
+                        evict_target = max(eviction_candidates, key=lambda x: x["priority"])
+                        target_site     = evict_target["site"]
+                        target_streamer = evict_target["streamer"]
+                        dbg(f"[CONCURRENCY] Evicting {target_streamer} "
+                            f"(prio: {evict_target['priority']}) for {streamer} "
+                            f"(prio: {streamer_prio}, bypass={is_bypass})")
+                        # User-visible eviction log (Fix #8)
+                        target_site.log_line(
+                            f"⚠ Evicted {target_streamer} (lower priority) — "
+                            f"making room for {streamer}"
+                        )
+                        site.log_line(
+                            f"▶ Recording {streamer} — evicted {target_streamer} "
+                            f"from {target_site.label}"
+                        )
+                        with target_site.lock:
+                            target_site.evicted_streamers.add(target_streamer)
+                        # kill_proc_for_streamer is called *without* holding
+                        # any site.lock so it cannot deadlock against the
+                        # finally block in record_stream.
+                        target_site.kill_proc_for_streamer(target_streamer)
+
+                    elif not is_bypass:
+                        # No eviction candidate and streamer is not bypass →
+                        # cannot start; skip this streamer entirely.
+                        dbg(f"[CONCURRENCY] max_concurrent ({max_concurrent}) reached. "
+                            f"Streamer {streamer} (prio: {streamer_prio}) cannot evict "
+                            f"any active stream.")
                         continue
-                        
-                    evict_target = max(eviction_candidates, key=lambda x: x["priority"])
-                    dbg(f"[CONCURRENCY] Evicting {evict_target['streamer']} (prio: {evict_target['priority']}) for {streamer} (prio: {streamer_prio})")
-                    
-                    target_site = evict_target["site"]
-                    target_streamer = evict_target["streamer"]
-                    with target_site.lock:
-                        target_site.evicted_streamers.add(target_streamer)
-                    target_site.kill_proc_for_streamer(target_streamer)
+                    # else: bypass with no eviction candidate → fall through and
+                    # start anyway (intentionally exceeds the limit).
 
             with site.lock:
                 site.currently_recording.add(streamer)

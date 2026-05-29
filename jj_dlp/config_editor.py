@@ -451,7 +451,7 @@ def _validate_value(key: str, value: str) -> tuple[bool, str]:
     int_keys = {"UPDATE_INTERVAL", "SITE_ORDER", "CHECK_INTERVAL", "COOLDOWN_AFTER_RECORDING", 
                 "SPLIT_AFTER", "STALL_CHECK_INTERVAL", "STALL_TIMEOUT", "CONFIG_CHECK_INTERVAL", 
                 "POPUP_TIMEOUT", "POPUP_COOLDOWN", "PROGRESS_BAR_MAX_HOURS", "PROGRESS_BAR_WIDTH", 
-                "LAST_LIVE_HIGHLIGHT"}
+                "LAST_LIVE_HIGHLIGHT", "MAX_CONCURRENT_REC"}
     if key in bool_keys:
         if value.lower() not in ("true", "false", "yes", "no", "1", "0"):
             return False, "Must be true or false"
