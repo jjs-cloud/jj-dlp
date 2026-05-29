@@ -3079,6 +3079,11 @@ class JJDlpDashboard:
                 site    = self.sites[site_idx]
                 result  = _modify_config_streamer(site.config_path,
                                                   self._mgmt_buf.strip(), action)
+                # Invalidate the read cache and force UI panels to reload
+                site.invalidate_config_cache()
+                self.config_editor.load_config(site.config_path)
+                self.config_editor.priority_editor.force_reload()
+                
                 site.trigger_event.set()
                 self._mgmt_result = result
                 self._mgmt_buf    = ""
