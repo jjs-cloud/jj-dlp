@@ -304,7 +304,6 @@ def load_config(config_path: str) -> dict:
 
 
 # ── Global config filename (always silently loaded; never shown in chooser) ───
-# ── Global config filename (always silently loaded; never shown in chooser) ───
 _GLOBAL_CONF_NAME: str = "global.conf"
 
 
@@ -1011,8 +1010,6 @@ def get_live_streamers(streamers: List[str], cfg: dict,
     # if a blocked/disabled streamer is live so the dashboard can flash
     # [●Live] ↔ [DIS]. Recording is suppressed downstream in
     # start_recording_if_needed(), not here.
-    if not streamers:
-        return []
     urls = [cfg["site_tmpl"].format(username=s) for s in streamers]
     cmd = build_yt_dlp_command(cfg["yt_dlp_path"], cfg["checker_cmd"], urls)
     dbg(f"[CHECKER] yt_dlp_path={cfg['yt_dlp_path']!r}")
@@ -1030,7 +1027,8 @@ def get_live_streamers(streamers: List[str], cfg: dict,
         out_path, err_path = get_log_file_paths(cfg)
         try:
             if result.stdout:
-                open(out_path, "a", encoding="utf-8").write(result.stdout)
+                with open(out_path, "a", encoding="utf-8") as _lf:
+                    _lf.write(result.stdout)
         except Exception:
             pass
     # Feed checker stdout/stderr into the site's pipe buffers (tagged so the
@@ -1598,7 +1596,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
                 with site.dash_lock:
                     site.dash_last_live[streamer] = time.time()
-                    _save_last_live_cache(site.config_path, site.dash_last_live)
+                    _last_live_snapshot = dict(site.dash_last_live)
+                _save_last_live_cache(site.config_path, _last_live_snapshot)
 
                 site.log_line(f"Recording finished: {streamer}")
                 break
@@ -1966,8 +1965,7 @@ class JJDlpDashboard:
 
     FLASH_CYCLE = 8
 
-    # ── Tab definitions — add/remove tabs here ──────────────────────────────
-    TABS = ["Dashboard", "Log", "EventSub", "Config"]
+    # ── Tab definitions — configured dynamically in __init__ based on enabled features ──
 
     def __init__(self, stdscr, sites: List["SiteState"], global_cfg: dict = None):
         self.stdscr       = stdscr
@@ -2136,6 +2134,7 @@ class JJDlpDashboard:
                 all_s      = list(site.dash_all_streamers)
                 live_since = dict(site.dash_live_since)
                 blocked    = set(site.dash_blocked)
+            with site.lock:
                 recording  = set(site.currently_recording)
             try:
                 cfg = site.get_cached_config()
@@ -2366,6 +2365,7 @@ class JJDlpDashboard:
             last_live    = dict(site.dash_last_live)
             blocked      = set(site.dash_blocked)
             next_in      = site.dash_next_check_in
+        with site.lock:
             recording    = set(site.currently_recording)
 
         try:
