@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.8.7"
+__version__ = "1.8.8"
 
 import subprocess
 import time
@@ -2513,8 +2513,19 @@ class JJDlpDashboard:
 
         # ── Countdown ──
         nxt = max(0.0, next_in)
+        if nxt <= 0:
+            # Bouncing-dot ellipsis while waiting for the next check to kick off.
+            # Cycles through three frames at the same rate as the Live/REC flash:
+            #   frame 0 → ".    "  (left dot)
+            #   frame 1 → "  .  "  (middle dot)
+            #   frame 2 → "    ."  (right dot)
+            _ell_frame = (self.tick // (self.FLASH_CYCLE // 2)) % 3
+            _ell_frames = (".    ", "  .  ", "    .")
+            _nxt_str = _ell_frames[_ell_frame]
+        else:
+            _nxt_str = f"{nxt:>4.0f}s"
         self.safe_addstr(self.stdscr, y2 - 1, x1 + 2,
-                    f"Next check: {nxt:>4.0f}s",
+                    f"Next check: {_nxt_str}",
                     curses.color_pair(self.C_WARN) | curses.A_BOLD)
 
     # ── Dashboard tab ────────────────────────────────────────────────────────
