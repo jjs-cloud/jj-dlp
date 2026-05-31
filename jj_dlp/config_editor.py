@@ -2,7 +2,6 @@ import os
 import shutil
 import curses
 import hashlib
-import json
 import threading
 from datetime import datetime
 from typing import NamedTuple
@@ -145,30 +144,7 @@ PRESERVED_KEYS: list[str] = [k.name for k in CONFIG_KEYS if k.preserve]
 # Width of the PRIORITY panel box (x2 − x1 span), matching the SYSTEM sidebar.
 PRIORITY_PANEL_W: int = 27
 
-_prio_json_lock = threading.Lock()
 
-
-def _ce_global_json_path() -> str:
-    """Return the absolute path to global.json (same directory as this file)."""
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "global.json")
-
-
-def _ce_load_global_json() -> dict:
-    """Load global.json and return its parsed contents (empty dict on error)."""
-    try:
-        with open(_ce_global_json_path(), "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def _ce_save_global_json(data: dict) -> None:
-    """Write *data* to global.json.  Silently ignores errors."""
-    try:
-        with open(_ce_global_json_path(), "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except Exception:
-        pass
 
 
 def _compute_config_id(config_paths: "list[str]") -> str:
@@ -249,8 +225,12 @@ class PriorityEditor:
         self._config_id = _compute_config_id(config_paths)
 
         # Load saved priority data for this config_id.
-        with _prio_json_lock:
-            global_data = _ce_load_global_json()
+        # Deferred import avoids a circular dependency (main imports config_editor
+        # at module scope); by the time _refresh() is ever called both modules are
+        # fully initialised.
+        from .main import _global_json_lock, _load_global_json
+        with _global_json_lock:
+            global_data = _load_global_json()
         saved_block   = global_data.get("priorities", {}).get(self._config_id, {})
         saved_entries = saved_block.get("entries", [])
 
@@ -313,15 +293,16 @@ class PriorityEditor:
             }
             for i, e in enumerate(self._entries)
         ]
-        with _prio_json_lock:
-            global_data = _ce_load_global_json()
+        from .main import _global_json_lock, _load_global_json, _save_global_json
+        with _global_json_lock:
+            global_data = _load_global_json()
             if "priorities" not in global_data or not isinstance(global_data["priorities"], dict):
                 global_data["priorities"] = {}
             global_data["priorities"][self._config_id] = {
                 "config_files": config_paths,
                 "entries":      entries_data,
             }
-            _ce_save_global_json(global_data)
+            _save_global_json(global_data)
 
     # ── Movement helpers ───────────────────────────────────────────────────────
 
