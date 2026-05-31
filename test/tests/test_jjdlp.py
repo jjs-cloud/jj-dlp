@@ -1433,9 +1433,9 @@ class TestPriorityEditorPanel(unittest.TestCase):
         db = self._make_dashboard(sites)
         editor = PriorityEditor(db)
 
-        from jj_dlp import config_editor as ce
-        with patch.object(ce, "_ce_load_global_json", return_value=global_json):
-            with patch.object(ce, "_ce_save_global_json"):
+        from jj_dlp import main as m
+        with patch.object(m, "_load_global_json", return_value=global_json):
+            with patch.object(m, "_save_global_json"):
                 editor.ensure_loaded()
 
         return editor
@@ -1477,9 +1477,9 @@ class TestPriorityEditorPanel(unittest.TestCase):
         site = self._make_mock_site("s.conf", "mysite",
                                     ["alice", "bob", "carol"])
         editor = self._make_editor([site], saved_entries=[
-            self._entry("alice", "mysite", 2, True),   # bypass, worst
-            self._entry("bob",   "mysite", 0, True),   # bypass, best
-            self._entry("carol", "mysite", 1, True),   # bypass, middle
+            self._entry("bob",   "mysite", 0, True),   # bypass, best  → position 0
+            self._entry("carol", "mysite", 1, True),   # bypass, middle → position 1
+            self._entry("alice", "mysite", 2, True),   # bypass, worst  → position 2
         ])
 
         bypass_names = [e.streamer for e in editor._entries if e.bypass]
@@ -1491,9 +1491,9 @@ class TestPriorityEditorPanel(unittest.TestCase):
         site = self._make_mock_site("s.conf", "mysite",
                                     ["alice", "bob", "carol"])
         editor = self._make_editor([site], saved_entries=[
-            self._entry("alice", "mysite", 5, False),
-            self._entry("bob",   "mysite", 1, False),
-            self._entry("carol", "mysite", 9, False),
+            self._entry("bob",   "mysite", 1, False),   # best priority  → position 0
+            self._entry("alice", "mysite", 5, False),   # mid priority   → position 1
+            self._entry("carol", "mysite", 9, False),   # worst priority → position 2
         ])
 
         normal_names = [e.streamer for e in editor._entries if not e.bypass]
@@ -1548,8 +1548,9 @@ class TestPriorityEditorPanel(unittest.TestCase):
         ])
 
         from jj_dlp import config_editor as ce
-        with patch.object(ce, "_ce_load_global_json", return_value={}):
-            with patch.object(ce, "_ce_save_global_json"):
+        from jj_dlp import main as m
+        with patch.object(m, "_load_global_json", return_value={}):
+            with patch.object(m, "_save_global_json"):
                 # carol is at index 2; move up → should swap with bob at index 1
                 carol_idx = [e.streamer for e in editor._entries].index("carol")
                 editor._selected_idx = carol_idx
@@ -1570,8 +1571,9 @@ class TestPriorityEditorPanel(unittest.TestCase):
         ])
 
         from jj_dlp import config_editor as ce
-        with patch.object(ce, "_ce_load_global_json", return_value={}):
-            with patch.object(ce, "_ce_save_global_json"):
+        from jj_dlp import main as m
+        with patch.object(m, "_load_global_json", return_value={}):
+            with patch.object(m, "_save_global_json"):
                 alice_idx = [e.streamer for e in editor._entries].index("alice")
                 editor._move(alice_idx, +1)
 
@@ -1591,8 +1593,9 @@ class TestPriorityEditorPanel(unittest.TestCase):
         ])
 
         from jj_dlp import config_editor as ce
-        with patch.object(ce, "_ce_load_global_json", return_value={}):
-            with patch.object(ce, "_ce_save_global_json"):
+        from jj_dlp import main as m
+        with patch.object(m, "_load_global_json", return_value={}):
+            with patch.object(m, "_save_global_json"):
                 bp2_idx = [e.streamer for e in editor._entries].index("bp2")
                 editor._move(bp2_idx, -1)
 
@@ -1615,8 +1618,9 @@ class TestPriorityEditorPanel(unittest.TestCase):
         names_before = [e.streamer for e in editor._entries]
 
         from jj_dlp import config_editor as ce
-        with patch.object(ce, "_ce_load_global_json", return_value={}):
-            with patch.object(ce, "_ce_save_global_json"):
+        from jj_dlp import main as m
+        with patch.object(m, "_load_global_json", return_value={}):
+            with patch.object(m, "_save_global_json"):
                 bp_idx = names_before.index("bp")
                 editor._move(bp_idx, +1)   # attempt to move bypass down into normal
 
@@ -1636,8 +1640,9 @@ class TestPriorityEditorPanel(unittest.TestCase):
         names_before = [e.streamer for e in editor._entries]
 
         from jj_dlp import config_editor as ce
-        with patch.object(ce, "_ce_load_global_json", return_value={}):
-            with patch.object(ce, "_ce_save_global_json"):
+        from jj_dlp import main as m
+        with patch.object(m, "_load_global_json", return_value={}):
+            with patch.object(m, "_save_global_json"):
                 normal_idx = names_before.index("normal")
                 editor._move(normal_idx, -1)
 
@@ -1657,8 +1662,9 @@ class TestPriorityEditorPanel(unittest.TestCase):
         names_before = [e.streamer for e in editor._entries]
 
         from jj_dlp import config_editor as ce
-        with patch.object(ce, "_ce_load_global_json", return_value={}):
-            with patch.object(ce, "_ce_save_global_json"):
+        from jj_dlp import main as m
+        with patch.object(m, "_load_global_json", return_value={}):
+            with patch.object(m, "_save_global_json"):
                 editor._move(0, -1)  # already at top
 
         names_after = [e.streamer for e in editor._entries]
@@ -1676,8 +1682,9 @@ class TestPriorityEditorPanel(unittest.TestCase):
         names_before = [e.streamer for e in editor._entries]
 
         from jj_dlp import config_editor as ce
-        with patch.object(ce, "_ce_load_global_json", return_value={}):
-            with patch.object(ce, "_ce_save_global_json"):
+        from jj_dlp import main as m
+        with patch.object(m, "_load_global_json", return_value={}):
+            with patch.object(m, "_save_global_json"):
                 editor._move(len(editor._entries) - 1, +1)
 
         names_after = [e.streamer for e in editor._entries]
@@ -1699,8 +1706,9 @@ class TestPriorityEditorPanel(unittest.TestCase):
         ])
 
         from jj_dlp import config_editor as ce
-        with patch.object(ce, "_ce_load_global_json", return_value={}):
-            with patch.object(ce, "_ce_save_global_json"):
+        from jj_dlp import main as m
+        with patch.object(m, "_load_global_json", return_value={}):
+            with patch.object(m, "_save_global_json"):
                 alice_idx = [e.streamer for e in editor._entries].index("alice")
                 editor._toggle_bypass(alice_idx)
 
@@ -1730,8 +1738,9 @@ class TestPriorityEditorPanel(unittest.TestCase):
         ])
 
         from jj_dlp import config_editor as ce
-        with patch.object(ce, "_ce_load_global_json", return_value={}):
-            with patch.object(ce, "_ce_save_global_json"):
+        from jj_dlp import main as m
+        with patch.object(m, "_load_global_json", return_value={}):
+            with patch.object(m, "_save_global_json"):
                 bp2_idx = [e.streamer for e in editor._entries].index("bp2")
                 editor._toggle_bypass(bp2_idx)
 
@@ -1758,8 +1767,9 @@ class TestPriorityEditorPanel(unittest.TestCase):
         ])
 
         from jj_dlp import config_editor as ce
-        with patch.object(ce, "_ce_load_global_json", return_value={}):
-            with patch.object(ce, "_ce_save_global_json"):
+        from jj_dlp import main as m
+        with patch.object(m, "_load_global_json", return_value={}):
+            with patch.object(m, "_save_global_json"):
                 carol_idx = [e.streamer for e in editor._entries].index("carol")
                 editor._toggle_bypass(carol_idx)
 
@@ -1814,9 +1824,9 @@ class TestPriorityEditorPanel(unittest.TestCase):
             get_cached_config=lambda: site.get_cached_config(),
         )])
         editor = PriorityEditor(db)
-        with patch("jj_dlp.config_editor._ce_load_global_json",
+        with patch("jj_dlp.main._load_global_json",
                    return_value=global_json):
-            with patch("jj_dlp.config_editor._ce_save_global_json"):
+            with patch("jj_dlp.main._save_global_json"):
                 editor.ensure_loaded()
 
         panel_names = [e.streamer for e in editor._entries]
@@ -1899,14 +1909,15 @@ class TestPriorityEditorPanel(unittest.TestCase):
         ])
 
         from jj_dlp import config_editor as ce
+        from jj_dlp import main as m
         save_calls = []
-        with patch.object(ce, "_ce_load_global_json", return_value={}):
-            with patch.object(ce, "_ce_save_global_json",
+        with patch.object(m, "_load_global_json", return_value={}):
+            with patch.object(m, "_save_global_json",
                               side_effect=lambda d: save_calls.append(d)):
                 editor._move(1, -1)
 
         self.assertGreater(len(save_calls), 0,
-                           "_ce_save_global_json must be called after a move")
+                           "_save_global_json must be called after a move")
 
     def test_save_is_called_after_toggle_bypass(self):
         """_save() must be called after a bypass toggle."""
@@ -1916,14 +1927,15 @@ class TestPriorityEditorPanel(unittest.TestCase):
         ])
 
         from jj_dlp import config_editor as ce
+        from jj_dlp import main as m
         save_calls = []
-        with patch.object(ce, "_ce_load_global_json", return_value={}):
-            with patch.object(ce, "_ce_save_global_json",
+        with patch.object(m, "_load_global_json", return_value={}):
+            with patch.object(m, "_save_global_json",
                               side_effect=lambda d: save_calls.append(d)):
                 editor._toggle_bypass(0)
 
         self.assertGreater(len(save_calls), 0,
-                           "_ce_save_global_json must be called after a bypass toggle")
+                           "_save_global_json must be called after a bypass toggle")
 
     def test_force_reload_triggers_refresh_on_next_draw(self):
         """
