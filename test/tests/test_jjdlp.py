@@ -1972,6 +1972,109 @@ class TestPriorityEditorPanel(unittest.TestCase):
             self.assertIn(name, panel_names,
                           f"{name} must appear in the panel")
 
+    def test_duplicate_streamers_across_different_sites(self):
+        """
+        Gaps Covered: Multi-site namespace collision.
+        Ensures that when the same streamer handle exists across different sites,
+        the PriorityEditor treats them as distinct site-specific entries.
+        """
+        site1 = self._make_mock_site("s1.conf", "twitch", ["alice"])
+        site2 = self._make_mock_site("s2.conf", "youtube", ["alice"])
+
+        editor = self._make_editor([site1, site2], saved_entries=[
+            self._entry("alice", "twitch", 0, False),
+            self._entry("alice", "youtube", 1, False),
+        ])
+
+        panel_entries = [(e.streamer, e.site_name) for e in editor._entries]
+        self.assertIn(("alice", "twitch"), panel_entries)
+        self.assertIn(("alice", "youtube"), panel_entries)
+        self.assertEqual(len(panel_entries), 2, "Should preserve duplicate names across unique sites.")
+
+    def test_empty_site_configs_gracefully_handled(self):
+        """
+        Gaps Covered: Edge-case empty/blank site profiles.
+        Ensures that sites configured with no streamers do not cause runtime
+        crashes during priority panel reloading or calculation.
+        """
+        site_empty = self._make_mock_site("empty.conf", "empty_site", [])
+        editor = self._make_editor([site_empty], saved_entries=[])
+        
+        try:
+            editor.ensure_loaded()
+        except Exception as e:
+            self.fail(f"PriorityEditor crashed while processing an empty site configuration: {e}")
+        
+        self.assertEqual(len(editor._entries), 0, "Entries list should remain empty without throwing exceptions.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Config Tab - (ConfigEditor) Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestConfigEditorLowLevel(unittest.TestCase):
+    """TestSuite targeting core configuration parsing invariants and integrity checks."""
+
+    def test_config_item_properties_and_parsing(self):
+        """Verifies that ConfigItem handles keys, values, and sections properly."""
+        from jj_dlp.config_editor import ConfigItem
+
+        # Standard Key-Value Entry
+        kv_item = ConfigItem(
+            line_idx=5, is_section=False, key="quality", value="1080p", 
+            has_equals=True, raw_line="quality = 1080p", comment="Target quality"
+        )
+        self.assertFalse(kv_item.is_section)
+        self.assertTrue(kv_item.has_equals)
+        self.assertEqual(kv_item.key, "quality")
+        self.assertEqual(kv_item.value, "1080p")
+
+        # Section Header Entry
+        sec_item = ConfigItem(
+            line_idx=0, is_section=True, key="twitch", value="", 
+            has_equals=False, raw_line="[twitch]"
+        )
+        self.assertTrue(sec_item.is_section)
+        self.assertFalse(sec_item.has_equals)
+
+    def test_compute_config_id_uniqueness(self):
+        """
+        Verifies configuration ID computation updates uniquely depending on paths
+        and remains stable regardless of path order due to internal sorting.
+        """
+        from jj_dlp.config_editor import _compute_config_id
+
+        paths_a = ["configs/twitch.conf", "configs/youtube.conf"]
+        paths_b = ["configs/twitch.conf", "configs/kick.conf"]
+        paths_c = ["configs/youtube.conf", "configs/twitch.conf"]  # Order-inverted duplicate of paths_a
+
+        id_a = _compute_config_id(paths_a)
+        id_b = _compute_config_id(paths_b)
+        id_c = _compute_config_id(paths_c)
+
+        self.assertNotEqual(id_a, id_b, "Different path combinations must produce distinct IDs.")
+        self.assertEqual(id_a, id_c, "The same path combination must produce the identical ID regardless of input order.")
+
+    def test_compute_config_sha_uniqueness(self):
+        """Verifies configuration content SHA changes when file contents mutate."""
+        from jj_dlp.config_editor import _compute_config_sha
+        import tempfile
+
+        # Using TemporaryDirectory completely avoids Windows file-sharing lock conflicts
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = os.path.join(tmpdir, "site.conf")
+
+            # Write initial config content
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write("[global]\nres = 1080p\n")
+            sha_1 = _compute_config_sha(file_path)
+
+            # Mutate config content
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write("[global]\nres = 720p\n")
+            sha_2 = _compute_config_sha(file_path)
+
+            self.assertNotEqual(sha_1, sha_2, "Different config contents must produce distinct SHAs.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Entry point
