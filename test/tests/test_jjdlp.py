@@ -1986,7 +1986,7 @@ class TestPriorityEditorPanel(unittest.TestCase):
             self._entry("alice", "youtube", 1, False),
         ])
 
-        panel_entries = [(e.streamer, e.site_name) for e in editor._entries]
+        panel_entries = [(e.streamer, e.site) for e in editor._entries]
         self.assertIn(("alice", "twitch"), panel_entries)
         self.assertIn(("alice", "youtube"), panel_entries)
         self.assertEqual(len(panel_entries), 2, "Should preserve duplicate names across unique sites.")
