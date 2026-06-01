@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.8.9"
+__version__ = "1.8.10"
 
 import subprocess
 import time
@@ -1226,8 +1226,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
             out_target, err_target, close_logs, log_out_fp, log_err_fp = open_log_streams(cfg)
 
-            site.log_line(f"cmd: {cmd_display_str(cmd)}")
-
             try:
                 _popen_kwargs: dict = dict(stdout=out_target, stderr=err_target)
                 if sys.platform == "win32":
@@ -1236,7 +1234,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                     # Put the child in its own process group so we can kill both
                     # the PyInstaller bootloader and the real yt-dlp process at once.
                     _popen_kwargs["start_new_session"] = True
-                dbg(f"[POPEN] streamer={streamer!r} cmd={cmd!r}")
+                dbg(f"[POPEN] streamer={streamer!r} cmd={cmd_display_str(cmd)!r}")
                 dbg(f"[POPEN] Windows CREATE_NO_WINDOW={'yes' if sys.platform == 'win32' else 'n/a'}")
                 dbg(f"[POPEN] PYTHONPATH={os.environ.get('PYTHONPATH', '<not set>')!r}")
                 proc = subprocess.Popen(cmd, **_popen_kwargs)
@@ -1397,8 +1395,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
                         next_out_target, next_err_target, next_close_logs, next_log_out_fp, next_log_err_fp = open_log_streams(cfg)
 
-                        site.log_line(f"yt-dlp cmd: {cmd_display_str(next_cmd)}")
-
                         try:
                             _next_popen_kwargs: dict = dict(
                                 stdout=next_out_target,
@@ -1407,6 +1403,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                             if sys.platform != "win32":
                                 # Same process-group isolation as the primary Popen above.
                                 _next_popen_kwargs["start_new_session"] = True
+                            dbg(f"[POPEN] streamer={streamer!r} split cmd={cmd_display_str(next_cmd)!r}")
                             next_proc = subprocess.Popen(next_cmd, **_next_popen_kwargs)
 
                             next_proc_start_time = time.time()
