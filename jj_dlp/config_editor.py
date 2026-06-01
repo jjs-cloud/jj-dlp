@@ -489,6 +489,14 @@ class GlobalConfigEditor:
         self.popup_error = ""
         self.editing_item = None
         self._loaded = False
+        # ── Debug-tags popup state ─────────────────────────────────────────────
+        # Activated instead of the plain text popup when DEBUG_LOGS is selected.
+        self.debug_tags_mode:    bool            = False
+        self.debug_tags_sel:     int             = 0       # 0=bool row, 1+=tag rows
+        self._debug_tags_scroll: int             = 0
+        self._debug_tags_bool:   str             = "false" # working copy of the bool
+        self._debug_tags_keys:   list            = []      # ordered tag names
+        self._debug_tags_state:  dict[str, bool] = {}      # working copy of tag states
 
     @staticmethod
     def _find_global_conf() -> str:
@@ -579,6 +587,182 @@ class GlobalConfigEditor:
         comment = self.GLOBAL_KEYS_COMMENTS.get(key, "")
         self.items.append(ConfigItem(insert_at, False, key, val, True, new_line, comment))
 
+    # ── Debug-tags popup ──────────────────────────────────────────────────────
+
+    def _open_debug_tags_popup(self) -> None:
+        """Switch to the debug-tags editor for the DEBUG_LOGS key."""
+        try:
+            from . import logger as _logger
+        except ImportError:
+            import logger as _logger  # type: ignore[no-redef]
+
+        # Start from the live logger state …
+        state = _logger.get_dbg_filters()
+
+        # … then overlay with any overrides previously persisted to global.json.
+        try:
+            from .main import _global_json_lock, _load_global_json
+            with _global_json_lock:
+                gdata = _load_global_json()
+            for tag, val in gdata.get("debug_log_tags", {}).items():
+                if tag in state:
+                    state[tag] = bool(val)
+        except Exception:
+            pass
+
+        self._debug_tags_bool   = self.editing_item.value.strip().lower()
+        self._debug_tags_state  = state
+        self._debug_tags_keys   = list(state.keys())
+        self.debug_tags_sel     = 0
+        self._debug_tags_scroll = 0
+        self.debug_tags_mode    = True
+
+    def _handle_debug_tags_key(self, key) -> bool:
+        """Handle keypresses while the debug-tags popup is open."""
+        n_rows = 1 + len(self._debug_tags_keys)   # row 0 = bool, 1+ = tags
+
+        if key == 27:                               # Esc → discard
+            self.debug_tags_mode = False
+            self.editing_item    = None
+            return True
+
+        elif key == curses.KEY_UP:
+            self.debug_tags_sel = max(0, self.debug_tags_sel - 1)
+            return True
+
+        elif key == curses.KEY_DOWN:
+            self.debug_tags_sel = min(n_rows - 1, self.debug_tags_sel + 1)
+            return True
+
+        elif key == ord(' '):                       # Space → toggle selected row
+            if self.debug_tags_sel == 0:
+                cur = self._debug_tags_bool.lower()
+                self._debug_tags_bool = "false" if cur == "true" else "true"
+            else:
+                tag = self._debug_tags_keys[self.debug_tags_sel - 1]
+                self._debug_tags_state[tag] = not self._debug_tags_state.get(tag, False)
+            return True
+
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):   # Enter → save + close
+            self._save_debug_tags()
+            self.debug_tags_mode = False
+            self.editing_item    = None
+            return True
+
+        return True   # consume all other keys so they don't leak to the list
+
+    def _save_debug_tags(self) -> None:
+        """Persist the debug-log bool and tag states, and apply them live."""
+        # 1. Write the bool back to global.conf through the standard save path.
+        if self.editing_item and 0 <= self.editing_item.line_idx < len(self.lines):
+            self.lines[self.editing_item.line_idx] = (
+                f"{self.editing_item.key} = {self._debug_tags_bool}\n"
+            )
+        self.save()   # writes global.conf and fires on_save
+
+        # 2. Persist tag overrides to global.json.
+        try:
+            from .main import _global_json_lock, _load_global_json, _save_global_json
+            with _global_json_lock:
+                gdata = _load_global_json()
+                gdata["debug_log_tags"] = self._debug_tags_state
+                _save_global_json(gdata)
+        except Exception as e:
+            _dbg(f"[CONFIG] _save_debug_tags: failed to write global.json: {e}")
+
+        # 3. Apply tag states to the live logger immediately.
+        try:
+            from . import logger as _logger
+        except ImportError:
+            import logger as _logger  # type: ignore[no-redef]
+        _logger.load_dbg_filters(self._debug_tags_state)
+
+    def _draw_debug_tags_popup(self, stdscr) -> None:
+        """Draw the combined bool-toggle + per-tag-toggle popup for DEBUG_LOGS."""
+        db   = self.dashboard
+        h, w = stdscr.getmaxyx()
+
+        box_w   = min(44, w - 4)
+        n_tags  = len(self._debug_tags_keys)
+
+        # Allocate rows: 2 borders + 1 title gap + 1 bool row + 1 blank +
+        # 1 "Tag Filters:" header + n_tags tag rows + 1 blank + 1 legend
+        min_h   = n_tags + 8
+        box_h   = min(min_h, h - 4)
+        by1     = (h - box_h) // 2
+        bx1     = (w - box_w) // 2
+        by2     = by1 + box_h
+        bx2     = bx1 + box_w
+
+        # Clear background
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1),
+                           curses.color_pair(db.C_NORMAL))
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
+        db.safe_addstr(stdscr, by1, bx1 + 2, " DEBUG LOGGING ",
+                       curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
+
+        row = by1 + 2
+
+        # ── Bool row (selection index 0) ──────────────────────────────────────
+        is_sel    = (self.debug_tags_sel == 0)
+        prefix    = "> " if is_sel else "  "
+        bool_val  = self._debug_tags_bool.lower()
+        bool_disp = "[ ON]" if bool_val == "true" else "[OFF]"
+        row_attr  = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
+                     if is_sel else curses.color_pair(db.C_NORMAL))
+        val_attr  = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
+                     if is_sel
+                     else (curses.color_pair(db.C_LIVE)
+                           if bool_val == "true"
+                           else curses.color_pair(db.C_WARN)))
+        db.safe_addstr(stdscr, row, bx1 + 2,
+                       prefix + f"{'Enable Logging:':<18}", row_attr)
+        db.safe_addstr(stdscr, row, bx1 + 22, bool_disp,
+                       val_attr | curses.A_BOLD)
+        row += 2
+
+        # ── "Tag Filters:" section header ─────────────────────────────────────
+        db.safe_addstr(stdscr, row, bx1 + 2, "Tag Filters:",
+                       curses.color_pair(db.C_DIM))
+        row += 1
+
+        # ── Scrollable tag rows (selection indices 1 … n_tags) ───────────────
+        avail_rows = (by2 - row) - 2   # reserve 2 lines for legend at bottom
+
+        # Adjust scroll so the selected tag stays visible.
+        tag_sel = self.debug_tags_sel - 1   # relative index into _debug_tags_keys
+        if tag_sel >= 0:
+            if tag_sel < self._debug_tags_scroll:
+                self._debug_tags_scroll = tag_sel
+            elif tag_sel >= self._debug_tags_scroll + avail_rows:
+                self._debug_tags_scroll = tag_sel - avail_rows + 1
+
+        scroll = self._debug_tags_scroll
+        for i in range(scroll, min(n_tags, scroll + avail_rows)):
+            tag     = self._debug_tags_keys[i]
+            enabled = self._debug_tags_state.get(tag, False)
+            is_sel  = (self.debug_tags_sel == i + 1)
+            prefix  = "> " if is_sel else "  "
+            val_str = "[ ON]" if enabled else "[OFF]"
+            row_attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
+                        if is_sel else curses.color_pair(db.C_NORMAL))
+            val_attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
+                        if is_sel
+                        else (curses.color_pair(db.C_LIVE)
+                              if enabled
+                              else curses.color_pair(db.C_DIM)))
+            db.safe_addstr(stdscr, row, bx1 + 2,
+                           prefix + f"{tag:<10}", row_attr)
+            db.safe_addstr(stdscr, row, bx1 + 14, val_str,
+                           val_attr | curses.A_BOLD)
+            row += 1
+
+        # ── Legend ────────────────────────────────────────────────────────────
+        db.safe_addstr(stdscr, by2, bx1 + 2,
+                       " Space:Toggle  Enter:Save  Esc:Cancel ",
+                       curses.color_pair(db.C_INVHEAD))
+
     def save(self):
         """Write self.lines back to global.conf with a backup."""
         _dbg(f"[CONFIG] GlobalConfigEditor.save() called — conf_path={self.conf_path!r}")
@@ -623,6 +807,11 @@ class GlobalConfigEditor:
     def handle_key(self, key) -> bool:
         """Handle a keypress in the global editor section. Returns True if consumed."""
         self._ensure_loaded()
+
+        # Debug-tags popup has highest priority — it consumes all keys.
+        if self.debug_tags_mode:
+            return self._handle_debug_tags_key(key)
+
         if self.popup_mode:
             _dbg(f"[CONFIG] GlobalConfigEditor.handle_key() popup key={key} popup_buf={self.popup_buf!r} editing_item={self.editing_item.key if self.editing_item else None}")
             if key == 27:
@@ -674,8 +863,11 @@ class GlobalConfigEditor:
         elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
             if self.items:
                 self.editing_item = self.items[self.selected_idx]
-                self.popup_buf = self.editing_item.value
-                self.popup_mode = True
+                if self.editing_item.key == "DEBUG_LOGS":
+                    self._open_debug_tags_popup()
+                else:
+                    self.popup_buf = self.editing_item.value
+                    self.popup_mode = True
             return True
         return False
 
@@ -713,9 +905,14 @@ class GlobalConfigEditor:
 
         if self.popup_mode and self.editing_item:
             self.draw_popup(stdscr)
+        elif self.debug_tags_mode:
+            self.draw_popup(stdscr)
 
     def draw_popup(self, stdscr):
-        self._draw_popup(stdscr)
+        if self.debug_tags_mode:
+            self._draw_debug_tags_popup(stdscr)
+        else:
+            self._draw_popup(stdscr)
 
     def _draw_popup(self, stdscr):
         db = self.dashboard
@@ -1009,7 +1206,10 @@ class ConfigEditor:
                 row_y += 1
 
         # Draw popup (whichever sub-editor owns it)
-        if self._focus == "global" and self.global_editor.popup_mode and self.global_editor.editing_item:
+        if self._focus == "global" and (
+            (self.global_editor.popup_mode and self.global_editor.editing_item)
+            or self.global_editor.debug_tags_mode
+        ):
             self.global_editor.draw_popup(stdscr)
         elif self._focus == "site" and self.popup_mode and self.editing_item:
             self.draw_popup(stdscr)
@@ -1065,7 +1265,7 @@ class ConfigEditor:
 
         # Tab key cycles focus: site → global → priority → site → …
         # (only when no popup is open in any sub-editor)
-        any_popup = self.global_editor.popup_mode or self.popup_mode
+        any_popup = self.global_editor.popup_mode or self.global_editor.debug_tags_mode or self.popup_mode
         if key == ord('\t') and not any_popup:
             _cycle = ["site", "global", "priority"]
             self._focus = _cycle[(_cycle.index(self._focus) + 1) % len(_cycle)]
