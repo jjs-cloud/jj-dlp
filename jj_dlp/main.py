@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.8.5"
+__version__ = "1.9.0"
 
 import subprocess
 import time
@@ -303,7 +303,6 @@ def load_config(config_path: str) -> dict:
     return cfg_dict
 
 
-# ── Global config filename (always silently loaded; never shown in chooser) ───
 # ── Global config filename (always silently loaded; never shown in chooser) ───
 _GLOBAL_CONF_NAME: str = "global.conf"
 
@@ -1011,8 +1010,6 @@ def get_live_streamers(streamers: List[str], cfg: dict,
     # if a blocked/disabled streamer is live so the dashboard can flash
     # [●Live] ↔ [DIS]. Recording is suppressed downstream in
     # start_recording_if_needed(), not here.
-    if not streamers:
-        return []
     urls = [cfg["site_tmpl"].format(username=s) for s in streamers]
     cmd = build_yt_dlp_command(cfg["yt_dlp_path"], cfg["checker_cmd"], urls)
     dbg(f"[CHECKER] yt_dlp_path={cfg['yt_dlp_path']!r}")
@@ -1030,7 +1027,8 @@ def get_live_streamers(streamers: List[str], cfg: dict,
         out_path, err_path = get_log_file_paths(cfg)
         try:
             if result.stdout:
-                open(out_path, "a", encoding="utf-8").write(result.stdout)
+                with open(out_path, "a", encoding="utf-8") as _lf:
+                    _lf.write(result.stdout)
         except Exception:
             pass
     # Feed checker stdout/stderr into the site's pipe buffers (tagged so the
@@ -1228,8 +1226,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
             out_target, err_target, close_logs, log_out_fp, log_err_fp = open_log_streams(cfg)
 
-            site.log_line(f"cmd: {cmd_display_str(cmd)}")
-
             try:
                 _popen_kwargs: dict = dict(stdout=out_target, stderr=err_target)
                 if sys.platform == "win32":
@@ -1238,7 +1234,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                     # Put the child in its own process group so we can kill both
                     # the PyInstaller bootloader and the real yt-dlp process at once.
                     _popen_kwargs["start_new_session"] = True
-                dbg(f"[POPEN] streamer={streamer!r} cmd={cmd!r}")
+                dbg(f"[POPEN] streamer={streamer!r} cmd={cmd_display_str(cmd)!r}")
                 dbg(f"[POPEN] Windows CREATE_NO_WINDOW={'yes' if sys.platform == 'win32' else 'n/a'}")
                 dbg(f"[POPEN] PYTHONPATH={os.environ.get('PYTHONPATH', '<not set>')!r}")
                 proc = subprocess.Popen(cmd, **_popen_kwargs)
@@ -1399,8 +1395,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
                         next_out_target, next_err_target, next_close_logs, next_log_out_fp, next_log_err_fp = open_log_streams(cfg)
 
-                        site.log_line(f"yt-dlp cmd: {cmd_display_str(next_cmd)}")
-
                         try:
                             _next_popen_kwargs: dict = dict(
                                 stdout=next_out_target,
@@ -1409,6 +1403,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                             if sys.platform != "win32":
                                 # Same process-group isolation as the primary Popen above.
                                 _next_popen_kwargs["start_new_session"] = True
+                            dbg(f"[POPEN] streamer={streamer!r} split cmd={cmd_display_str(next_cmd)!r}")
                             next_proc = subprocess.Popen(next_cmd, **_next_popen_kwargs)
 
                             next_proc_start_time = time.time()
@@ -1598,7 +1593,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
                 with site.dash_lock:
                     site.dash_last_live[streamer] = time.time()
-                    _save_last_live_cache(site.config_path, site.dash_last_live)
+                    _last_live_snapshot = dict(site.dash_last_live)
+                _save_last_live_cache(site.config_path, _last_live_snapshot)
 
                 site.log_line(f"Recording finished: {streamer}")
                 break
@@ -1966,8 +1962,7 @@ class JJDlpDashboard:
 
     FLASH_CYCLE = 8
 
-    # ── Tab definitions — add/remove tabs here ──────────────────────────────
-    TABS = ["Dashboard", "Log", "EventSub", "Config"]
+    # ── Tab definitions — configured dynamically in __init__ based on enabled features ──
 
     def __init__(self, stdscr, sites: List["SiteState"], global_cfg: dict = None):
         self.stdscr       = stdscr
@@ -2136,6 +2131,7 @@ class JJDlpDashboard:
                 all_s      = list(site.dash_all_streamers)
                 live_since = dict(site.dash_live_since)
                 blocked    = set(site.dash_blocked)
+            with site.lock:
                 recording  = set(site.currently_recording)
             try:
                 cfg = site.get_cached_config()
@@ -2178,7 +2174,7 @@ class JJDlpDashboard:
         with update_available_lock:
             if UPDATE_AVAILABLE:
                 rows.append(("",               "",                 0))
-                rows.append(("Update",         "Available!",       self.C_WARN))
+                rows.append(("Update",         "Restart required",       self.C_WARN))
 
         inner_w = x2 - x1 - 2
         label_w = min(10, inner_w // 2)
@@ -2366,6 +2362,7 @@ class JJDlpDashboard:
             last_live    = dict(site.dash_last_live)
             blocked      = set(site.dash_blocked)
             next_in      = site.dash_next_check_in
+        with site.lock:
             recording    = set(site.currently_recording)
 
         try:
@@ -2513,8 +2510,19 @@ class JJDlpDashboard:
 
         # ── Countdown ──
         nxt = max(0.0, next_in)
+        if nxt <= 0:
+            # Bouncing-dot ellipsis while waiting for the next check to kick off.
+            # Cycles through three frames at the same rate as the Live/REC flash:
+            #   frame 0 → ".    "  (left dot)
+            #   frame 1 → "  .  "  (middle dot)
+            #   frame 2 → "    ."  (right dot)
+            _ell_frame = (self.tick // (self.FLASH_CYCLE // 2)) % 3
+            _ell_frames = (".    ", "  .  ", "    .")
+            _nxt_str = _ell_frames[_ell_frame]
+        else:
+            _nxt_str = f"{nxt:>4.0f}s"
         self.safe_addstr(self.stdscr, y2 - 1, x1 + 2,
-                    f"Next check: {nxt:>4.0f}s",
+                    f"Next check: {_nxt_str}",
                     curses.color_pair(self.C_WARN) | curses.A_BOLD)
 
     # ── Dashboard tab ────────────────────────────────────────────────────────

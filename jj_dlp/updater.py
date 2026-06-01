@@ -26,7 +26,7 @@ UPDATER_VERSION = "2.0.8"
 # as a script __name__ == "__main__" and relative imports would crash at parse
 # time if they were at module scope.
 
-# All compatability code (stage-2, lazy imports) is set to be removed in version 3.0.0
+# All compatibility code (stage-2, lazy imports) is set to be removed in version 3.0.0
 
 def _logger():
     from . import logger as _l
