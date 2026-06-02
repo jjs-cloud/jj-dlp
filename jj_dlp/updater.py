@@ -18,7 +18,7 @@ _VALID_BRANCHES = {"main", "testing", "experimental"}
 # ── Updater version ───────────────────────────────────────────────────────────
 # Incremented independently of the main jj-dlp version so we can tell which
 # updater logic is actually running during an update.
-UPDATER_VERSION = "2.0.8"
+UPDATER_VERSION = "2.1.0"
 
 # ── Lazy package imports ──────────────────────────────────────────────────────
 # Relative imports are deferred to call time so this file is also safe to
@@ -71,6 +71,26 @@ def _api_commits_url(branch: str) -> str:
     return f"{_API_BASE}/commits/{branch}"
 
 
+def _fetch_latest_sha(branch: str) -> str | None:
+    """Fetch the current HEAD SHA for *branch* from the GitHub API.
+
+    Returns the SHA string, or ``None`` if the request fails.
+    """
+    try:
+        req = urllib.request.Request(
+            _api_commits_url(branch),
+            headers={'User-Agent': 'jj-dlp-updater'},
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode('utf-8'))
+        sha = data.get('sha')
+        _logger().dbg(f"[UPDATER] _fetch_latest_sha: branch={branch} sha={sha}")
+        return sha or None
+    except Exception as e:
+        _logger().dbg(f"[UPDATER] _fetch_latest_sha: failed: {e}")
+        return None
+
+
 PRESERVED_SECTIONS = ["Streamers", "Block"]
 
 
@@ -110,14 +130,18 @@ def check_for_updates_background():
         _logger().dbg(f"[UPDATER] check_for_updates_background: failed during update check: {e}")
 
 
-def mark_update_completed():
+def mark_update_completed(installed_sha: str | None = None):
     global_data = _load_global_json()
     update_info = global_data.setdefault('update_info', {})
-    latest_sha = update_info.get('latest_sha')
-    if latest_sha:
-        update_info['current_sha'] = latest_sha
+    # Prefer the freshly-fetched SHA passed in by perform_update() so that
+    # rapid back-to-back commits don't leave current_sha pointing at a stale
+    # value and cause a spurious "Update Available" on the next launch.
+    sha_to_record = installed_sha or update_info.get('latest_sha')
+    if sha_to_record:
+        update_info['current_sha'] = sha_to_record
+        update_info['latest_sha'] = sha_to_record
     update_info['update_available'] = False
-    _logger().dbg(f"[UPDATER] mark_update_completed: updating update_info to current_sha={update_info.get('current_sha')} latest_sha={update_info.get('latest_sha')} update_available={update_info.get('update_available')}")
+    _logger().dbg(f"[UPDATER] mark_update_completed: current_sha={update_info.get('current_sha')} latest_sha={update_info.get('latest_sha')} update_available=False")
     _save_global_json(global_data)
     _logger().dbg("[UPDATER] mark_update_completed: _save_global_json() returned")
 
@@ -312,7 +336,13 @@ def perform_update():
         _logger().dbg("[UPDATER] perform_update: bin/ permissions set")
 
         # ── Step 6: Mark update completed in global.json ──────────────────────
-        mark_update_completed()
+        # Re-fetch the latest SHA now that the install is done.  If additional
+        # commits landed on the branch between when we started the download and
+        # now, this ensures current_sha always matches whatever HEAD is at this
+        # moment, preventing a spurious "Update Available" on the next launch.
+        post_install_sha = _fetch_latest_sha(branch)
+        _logger().dbg(f"[UPDATER] perform_update: post-install SHA fetch: {post_install_sha}")
+        mark_update_completed(installed_sha=post_install_sha)
         _logger().dbg("[UPDATER] perform_update: marked update completed")
 
         print("\n" + "="*60)
