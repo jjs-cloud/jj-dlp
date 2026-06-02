@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.11.0"
+__version__ = "1.11.1"
 
 import subprocess
 import time
@@ -630,7 +630,17 @@ class SiteState:
         now = time.time()
         with self._cfg_cache_lock:
             if self._cfg_cache is None or (now - self._cfg_cache_time) >= self._CFG_CACHE_TTL:
-                self._cfg_cache      = load_config(self.config_path)
+                try:
+                    mtime = os.path.getmtime(self.config_path)
+                except Exception:
+                    mtime = 0.0
+                
+                if self._cfg_cache is None or getattr(self, '_cfg_last_mtime', 0.0) != mtime:
+                    t0 = time.time()
+                    self._cfg_cache      = load_config(self.config_path)
+                    self._cfg_last_mtime = mtime
+                    dbg(f"[PERF][get_cached_config] load_config({self.config_path}) took {(time.time() - t0)*1000:.2f}ms")
+                
                 self._cfg_cache_time = now
             return self._cfg_cache
 
@@ -2301,20 +2311,28 @@ class JJDlpDashboard:
                 drives = seen_drives if seen_drives else ([fallback_dir] if fallback_dir else ["/"])
                 dbg(f"[DISK] refreshing cache — drives={drives!r}")
 
-                # Query disk usage for each drive and cache the results
-                results = []
-                for drive in drives:
-                    try:
-                        usage = shutil.disk_usage(drive)
-                        results.append((drive, usage))
-                        dbg(f"[DISK] {drive!r} → free={usage.free/(1024**3):.1f}G")
-                    except Exception as _disk_exc:
-                        results.append((drive, None))
-                        dbg(f"[DISK] shutil.disk_usage({drive!r}) FAILED: {type(_disk_exc).__name__}: {_disk_exc}")
+                self._disk_cache_time = now  # update immediately to prevent multiple threads
+                
+                # Query disk usage for each drive in a background thread
+                def _update_disk_usage(drives_to_check):
+                    import threading
+                    t0 = time.time()
+                    results = []
+                    for drive in drives_to_check:
+                        try:
+                            usage = shutil.disk_usage(drive)
+                            results.append((drive, usage))
+                            dbg(f"[DISK] {drive!r} → free={usage.free/(1024**3):.1f}G")
+                        except Exception as _disk_exc:
+                            results.append((drive, None))
+                            dbg(f"[DISK] shutil.disk_usage({drive!r}) FAILED: {type(_disk_exc).__name__}: {_disk_exc}")
+                    
+                    self._disk_cache_results = results
+                    self._disk_cache_drives  = drives_to_check
+                    dbg(f"[PERF][disk_usage] background check for {drives_to_check} took {(time.time() - t0)*1000:.2f}ms")
 
-                self._disk_cache_drives  = drives
-                self._disk_cache_results = results
-                self._disk_cache_time    = now
+                import threading
+                threading.Thread(target=_update_disk_usage, args=(drives,), daemon=True).start()
 
             if disk_row_y < y2 - 1:
                 self.safe_addstr(self.stdscr, disk_row_y, x1 + 2, "── Disk ──",
