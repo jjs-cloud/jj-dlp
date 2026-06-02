@@ -22,7 +22,8 @@ get_debug_log_config()             Return current (enabled, path) debug-log stat
 get_dbg_filters()                  Return a snapshot copy of DBG_FILTERS {tag: bool}.
 set_dbg_filter(tag, enabled)       Atomically update one tag in DBG_FILTERS.
 load_dbg_filters(overrides)        Batch-apply saved tag states (startup restore).
-configure(output_mode_fn, ...)     Inject output-mode accessor and dashboard logger.
+configure(output_mode_fn, ...)     Inject output-mode accessor, dashboard logger, and
+                                   optional per-line debug callback for the Log tab.
 get_debug_log_path(cfg)            Resolve the debug log path from a config dict.
 get_log_path(cfg)                  Resolve the activity log path from a config dict.
 get_log_file_paths(cfg)            Return (stdout_path, stderr_path) for yt-dlp logging.
@@ -117,19 +118,27 @@ def load_dbg_filters(overrides: dict) -> None:
 
 # ── References to output-mode state (injected by main module at startup) ──────
 # These are set by jj-dlp.py via configure() so logger doesn't import main.
-_output_mode_ref  = None   # callable() -> int  (1=curses, 2=terminal)
-_dashboard_log_ref = None  # callable(str) -> None
+_output_mode_ref   = None   # callable() -> int  (1=curses, 2=terminal)
+_dashboard_log_ref = None   # callable(str) -> None  (debug-log write errors)
+_dashboard_dbg_ref = None   # callable(str) -> None  (every dbg() line that passes filters)
 
 
-def configure(output_mode_fn, dashboard_log_fn=None) -> None:
+def configure(output_mode_fn, dashboard_log_fn=None, dashboard_dbg_fn=None) -> None:
     """
-    Inject accessor for OUTPUT_MODE and an optional dashboard logger.
+    Inject accessor for OUTPUT_MODE and optional dashboard callbacks.
+
+    dashboard_log_fn  – called with a string when a debug-log write error
+                        occurs (existing behaviour).
+    dashboard_dbg_fn  – called with every dbg() line that passes the tag
+                        filter, so the Log tab can optionally display it.
     Call once from jj-dlp.py after the globals are defined there.
     """
-    global _output_mode_ref, _dashboard_log_ref
+    global _output_mode_ref, _dashboard_log_ref, _dashboard_dbg_ref
     _output_mode_ref = output_mode_fn
     if dashboard_log_fn is not None:
         _dashboard_log_ref = dashboard_log_fn
+    if dashboard_dbg_fn is not None:
+        _dashboard_dbg_ref = dashboard_dbg_fn
 
 
 # ── Per-tag debug filter ───────────────────────────────────────────────────────
@@ -248,6 +257,15 @@ def dbg(msg: str, site_name: str = "") -> None:
     full = f"[{ts}] {prefix}{msg}"
     
     _write_debug_log(full)
+
+    # Route to the dashboard Log tab (filtered lines only; caller opted in via
+    # configure(dashboard_dbg_fn=...)).  Runs regardless of whether file
+    # logging is enabled so the Log tab toggle works even without a debug file.
+    if _dashboard_dbg_ref is not None:
+        try:
+            _dashboard_dbg_ref(full)
+        except Exception:
+            pass
 
 
 # ── Crash log ─────────────────────────────────────────────────────────────────

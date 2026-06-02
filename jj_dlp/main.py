@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.10.4"
+__version__ = "1.11.0"
 
 import subprocess
 import time
@@ -544,6 +544,9 @@ class SiteState:
         self.show_checker_stdout: bool = False
         self.show_checker_stderr: bool = False
 
+        # Log tab: whether to show debug messages inline (off by default — can be very verbose)
+        self.show_debug_log: bool = False
+
         # Popup cooldown: streamer -> epoch of last popup shown
         self.popup_last_shown:    Dict[str, float] = {}
 
@@ -685,6 +688,9 @@ FFMPEG_ERROR_PATTERNS: List[str] = [
 # and draw_stderr_tab can filter them in/out without separate buffers.
 _CHECKER_STDOUT_PREFIX: str = "\x00checker\x00"
 _CHECKER_STDERR_PREFIX: str = "\x00checker_err\x00"
+# Debug messages routed to the Log tab are stored with this prefix so they can
+# be toggled independently of regular activity messages.
+_DEBUG_LOG_PREFIX: str = "\x00debug\x00"
 FFMPEG_ERROR_RESTART_THRESHOLD: int = 200
 
 # Wire logger.dbg to this module's OUTPUT_MODE
@@ -2631,7 +2637,14 @@ class JJDlpDashboard:
                      else curses.color_pair(self.C_CHROME))
             self.safe_addstr(self.stdscr, y1, tab_x, label, attr)
             tab_x += len(label) + 1
-        self.safe_addstr(self.stdscr, y1 + 1, x1 + 2, " ACTIVITY LOG ",
+
+        show_debug = sel_site.show_debug_log if sel_site is not None else False
+        title = (" ACTIVITY LOG — Show Debug: ON  (Press A to toggle) "
+                 if show_debug
+                 else " ACTIVITY LOG — Show Debug: OFF (Press A to toggle) ")
+
+        self.draw_box(self.stdscr, y1 + 1, x1, y2, x2, self.C_DIM)
+        self.safe_addstr(self.stdscr, y1 + 1, x1 + 2, title,
                     curses.color_pair(self.C_DIM) | curses.A_BOLD)
 
         if sel_site is None:
@@ -2643,7 +2656,16 @@ class JJDlpDashboard:
         with sel_site.dash_lock:
             raw_lines = list(sel_site.dash_log_lines)
 
-        wrapped = self._wrap_lines(raw_lines, line_width)
+        # Filter or strip debug lines depending on the toggle
+        if show_debug:
+            display_lines = [
+                (ln[len(_DEBUG_LOG_PREFIX):] if ln.startswith(_DEBUG_LOG_PREFIX) else ln)
+                for ln in raw_lines
+            ]
+        else:
+            display_lines = [ln for ln in raw_lines if not ln.startswith(_DEBUG_LOG_PREFIX)]
+
+        wrapped = self._wrap_lines(display_lines, line_width)
 
         # Clamp scroll so it never exceeds available history
         max_scroll = max(0, len(wrapped) - visible_rows)
@@ -2653,12 +2675,11 @@ class JJDlpDashboard:
         start = max(0, len(wrapped) - visible_rows - self._log_scroll)
         view  = wrapped[start : start + visible_rows]
 
-        # Hightlight log entries based on keywords
         for i, line in enumerate(view):
             attr = curses.color_pair(self.C_DIM)
             if "Live now" in line or "Recording started" in line:
                 attr = curses.color_pair(self.C_LIVE)
-            elif "ERROR" in line or "error" in line or "Stall" in line or "STOPPED" in line:
+            elif "ERROR" in line or "Stall" in line or "STOPPED" in line:
                 attr = curses.color_pair(self.C_REC)
             elif "Warning" in line:
                 attr = curses.color_pair(self.C_WARN)
@@ -3058,7 +3079,11 @@ class JJDlpDashboard:
             elif tab == "Stderr":
                 self._stderr_scroll = max(0, self._stderr_scroll - 1)
         elif key in (ord('a'), ord('A')):
-            if current_tab_name == "Stdout" and self.sites:
+            if current_tab_name == "Log" and self.sites:
+                sel = self.sites[self.selected_site_idx]
+                sel.show_debug_log = not sel.show_debug_log
+                self._log_scroll = 0
+            elif current_tab_name == "Stdout" and self.sites:
                 sel = self.sites[self.selected_site_idx]
                 sel.show_checker_stdout = not sel.show_checker_stdout
                 self._stdout_scroll = 0
@@ -3686,7 +3711,17 @@ def main() -> None:
     def _dash_log(msg: str):
         for s in sites:
             s.log_line(msg)
-    _logger.configure(_get_output_mode, _dash_log)
+
+    def _dash_dbg(msg: str):
+        """Route a dbg() line to every site's log buffer with the debug prefix."""
+        for s in sites:
+            prefixed = _DEBUG_LOG_PREFIX + msg
+            with s.dash_lock:
+                s.dash_log_lines.append(prefixed)
+                if len(s.dash_log_lines) > 200:
+                    s.dash_log_lines = s.dash_log_lines[-200:]
+
+    _logger.configure(_get_output_mode, _dash_log, _dash_dbg)
 
     # Sort sites by site_order so they appear in the desired positions in the dashboard
     sites.sort(key=lambda s: s.site_order)
