@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.10.2"
+__version__ = "1.10.3"
 
 import subprocess
 import time
@@ -2172,12 +2172,6 @@ class JJDlpDashboard:
                        self.C_LIVE if cfg0.get("popup_notifications") else self.C_DIM)
         except Exception:
             pass
-
-        # Add Update Available row if applicable
-        with update_available_lock:
-            if UPDATE_AVAILABLE:
-                rows.append(("",               "",                 0))
-                rows.append(("Update",         "Restart required",       self.C_WARN))
 
         inner_w = x2 - x1 - 2
         label_w = min(10, inner_w // 2)
