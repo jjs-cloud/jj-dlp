@@ -148,14 +148,14 @@ PRIORITY_PANEL_W: int = 27
 SORT_OPTIONS: "list[tuple[str, str]]" = [
     ("alpha_asc",      "Alphabetical (Asc)"),
     ("alpha_desc",     "Alphabetical (Desc)"),
-    ("added_first",    "Added first"),
-    ("added_last",     "Added last"),
+    ("added_first",    "Added (Asc)"),
+    ("added_last",     "Added (Desc)"),
     ("last_live_asc",  "Last live (Asc)"),
     ("last_live_desc", "Last live (Desc)"),
     ("priority_asc",   "Priority (Asc)"),
     ("priority_desc",  "Priority (Desc)"),
-    ("live_first",     "Live first"),
-    ("live_last",      "Live last"),
+    ("live_first",     "Currently Live (Asc)"),
+    ("live_last",      "Currently Live (Desc)"),
 ]
 _SORT_KEYS:   list = [k       for k, _   in SORT_OPTIONS]
 _SORT_LABELS: dict = {k: lbl  for k, lbl in SORT_OPTIONS}
