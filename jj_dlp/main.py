@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.10.3"
+__version__ = "1.10.4"
 
 import subprocess
 import time
@@ -2653,11 +2653,12 @@ class JJDlpDashboard:
         start = max(0, len(wrapped) - visible_rows - self._log_scroll)
         view  = wrapped[start : start + visible_rows]
 
+        # Hightlight log entries based on keywords
         for i, line in enumerate(view):
             attr = curses.color_pair(self.C_DIM)
             if "Live now" in line or "Recording started" in line:
                 attr = curses.color_pair(self.C_LIVE)
-            elif "ERROR" in line or "Stall" in line or "STOPPED" in line:
+            elif "ERROR" in line or "error" in line or "Stall" in line or "STOPPED" in line:
                 attr = curses.color_pair(self.C_REC)
             elif "Warning" in line:
                 attr = curses.color_pair(self.C_WARN)
