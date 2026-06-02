@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.9.0"
+__version__ = "1.10.0"
 
 import subprocess
 import time
@@ -35,7 +35,7 @@ from .browser_config import (
     _write_browser_to_config,
     _write_ask_for_browser_to_config,
 )
-from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS, _compute_config_id
+from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS, _compute_config_id, SiteSortManager, SORT_OPTIONS, _SORT_LABELS
 
 import curses  # noqa: E402
 
@@ -2008,6 +2008,9 @@ class JJDlpDashboard:
         from .config_editor import ConfigEditor
         self.config_editor = ConfigEditor(self)
 
+        # Sort manager — controls streamer ordering in site panels
+        self.sort_manager = SiteSortManager(self)
+
     # ── Color palette ────────────────────────────────────────────────────────
     # Pair numbers and their meanings — easy to change here
     C_CHROME    = 1   # borders, labels
@@ -2364,6 +2367,9 @@ class JJDlpDashboard:
             next_in      = site.dash_next_check_in
         with site.lock:
             recording    = set(site.currently_recording)
+
+        # Apply the active sort order to the streamer list.
+        all_s = self.sort_manager.get_sorted_streamers(site, all_s, live_since, last_live)
 
         try:
             _bar_max_secs = _panel_cfg.get("progress_bar_max_hours", 6) * 3600
@@ -2846,6 +2852,13 @@ class JJDlpDashboard:
                          f"  UP: scroll up  DOWN: scroll down"
                          f"  A: Show All [{show_label}]"
                          f"  C: colors  Q: quit  ")
+            elif current_tab == "Dashboard":
+                sort_lbl = self.sort_manager.current_sort_label
+                hints = (f"  LEFT/RIGHT: switch tabs"
+                         f"  [: prev site  ]: next site"
+                         f"  A: add streamer R: remove streamer D: disable streamer"
+                         f"  S: Sort [{sort_lbl}]"
+                         f"  C: colors  Q: quit  ")
             else:
                 hints = (f"  LEFT/RIGHT: switch tabs"
                          f"  [: prev site  ]: next site"
@@ -2983,6 +2996,10 @@ class JJDlpDashboard:
         if self._mgmt_mode:
             self.draw_mgmt_overlay()
 
+        # Sort popup — drawn on top of everything else.
+        if self.sort_manager.popup_open:
+            self.sort_manager.draw_popup(self.stdscr)
+
         self.stdscr.refresh()
 
         # Log timing every 100 frames (~5 seconds at 20fps)
@@ -2998,7 +3015,11 @@ class JJDlpDashboard:
         """Returns False to quit."""
         if self._mgmt_mode:
             return self._handle_mgmt_key(key)
-            
+
+        # Sort popup intercepts all keys while open.
+        if self.sort_manager.popup_open:
+            return self.sort_manager.handle_key(key)
+
         current_tab_name = self.TABS[self.selected_tab]
         if current_tab_name == "Config":
             # Pass keys to ConfigEditor first. But still handle global site switching:
@@ -3058,6 +3079,9 @@ class JJDlpDashboard:
             self._start_mgmt("disable")
         elif key in (ord('c'), ord('C')):
             self.randomize_colors()
+        elif key in (ord('s'), ord('S')):
+            if current_tab_name == "Dashboard":
+                self.sort_manager.open_popup()
         elif key == ord('\x0f'):  # Ctrl+O — switch to terminal mode
             with output_mode_lock:
                 global OUTPUT_MODE

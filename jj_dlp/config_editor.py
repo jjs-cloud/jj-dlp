@@ -144,6 +144,23 @@ PRESERVED_KEYS: list[str] = [k.name for k in CONFIG_KEYS if k.preserve]
 # Width of the PRIORITY panel box (x2 − x1 span), matching the SYSTEM sidebar.
 PRIORITY_PANEL_W: int = 27
 
+# ── Sort options for site panels (Dashboard tab) ───────────────────────────────
+SORT_OPTIONS: "list[tuple[str, str]]" = [
+    ("alpha_asc",      "Alphabetical (Asc)"),
+    ("alpha_desc",     "Alphabetical (Desc)"),
+    ("added_first",    "Added first"),
+    ("added_last",     "Added last"),
+    ("last_live_asc",  "Last live (Asc)"),
+    ("last_live_desc", "Last live (Desc)"),
+    ("priority_asc",   "Priority (Asc)"),
+    ("priority_desc",  "Priority (Desc)"),
+    ("live_first",     "Live first"),
+    ("live_last",      "Live last"),
+]
+_SORT_KEYS:   list = [k       for k, _   in SORT_OPTIONS]
+_SORT_LABELS: dict = {k: lbl  for k, lbl in SORT_OPTIONS}
+SORT_DEFAULT: str  = "added_first"
+
 
 
 
@@ -304,6 +321,14 @@ class PriorityEditor:
             }
             _save_global_json(global_data)
 
+        # Invalidate the sort manager's priority cache so the panel re-sorts immediately.
+        try:
+            sort_mgr = getattr(self.dashboard, "sort_manager", None)
+            if sort_mgr is not None:
+                sort_mgr._prio_cache_ts = 0.0
+        except Exception:
+            pass
+
     # ── Movement helpers ───────────────────────────────────────────────────────
 
     def _move(self, idx: int, direction: int) -> None:
@@ -425,6 +450,260 @@ class PriorityEditor:
 
             db.safe_addstr(stdscr, row_y, x1 + 1, prefix + label, attr)
             row_y += 1
+
+
+def apply_sort_to_streamers(
+    streamers:    "list[str]",
+    sort_key:     str,
+    live_since:   "dict[str, float]",
+    last_live:    "dict[str, float]",
+    priority_map: "dict[tuple, dict]",
+    site_label:   str,
+) -> "list[str]":
+    """Return *streamers* reordered according to *sort_key*.
+
+    ``live_since``   – streamer → epoch when they went live (absent if offline)
+    ``last_live``    – streamer → epoch when last recording ended
+    ``priority_map`` – (streamer, site_label) → {"priority": int, "bypass": bool}
+    """
+    if not streamers:
+        return list(streamers)
+
+    if sort_key == "added_first":
+        return list(streamers)
+
+    if sort_key == "added_last":
+        return list(reversed(streamers))
+
+    if sort_key == "alpha_asc":
+        return sorted(streamers)
+
+    if sort_key == "alpha_desc":
+        return sorted(streamers, reverse=True)
+
+    if sort_key == "last_live_asc":
+        # Streamers never seen live sort to the end.
+        def _key_ll_asc(s: str):
+            ts = last_live.get(s)
+            return (0, ts) if ts is not None else (1, 0.0)
+        return sorted(streamers, key=_key_ll_asc)
+
+    if sort_key == "last_live_desc":
+        # Most recently live first; never-seen go last.
+        def _key_ll_desc(s: str):
+            ts = last_live.get(s)
+            return (0, -(ts or 0.0)) if ts is not None else (1, 0.0)
+        return sorted(streamers, key=_key_ll_desc)
+
+    if sort_key == "priority_asc":
+        def _key_pri_asc(s: str):
+            return priority_map.get((s, site_label), {}).get("priority", 999999)
+        return sorted(streamers, key=_key_pri_asc)
+
+    if sort_key == "priority_desc":
+        def _key_pri_desc(s: str):
+            return priority_map.get((s, site_label), {}).get("priority", 999999)
+        return sorted(streamers, key=_key_pri_desc, reverse=True)
+
+    if sort_key == "live_first":
+        live_set = set(live_since.keys())
+        return [s for s in streamers if s in live_set] + \
+               [s for s in streamers if s not in live_set]
+
+    if sort_key == "live_last":
+        live_set = set(live_since.keys())
+        return [s for s in streamers if s not in live_set] + \
+               [s for s in streamers if s in live_set]
+
+    return list(streamers)
+
+
+class SiteSortManager:
+    """Manages the sort order for site panels in the Dashboard tab.
+
+    Owns the sort-option popup, persists the chosen sort to global.conf,
+    and exposes ``get_sorted_streamers()`` for use in ``draw_site_panel``.
+    """
+
+    _POPUP_TITLE = " SORT STREAMERS "
+
+    def __init__(self, dashboard):
+        self.dashboard       = dashboard
+        self._current_sort:  str   = self._load_sort()
+        self.popup_open:     bool  = False
+        self._popup_sel:     int   = self._sort_idx(self._current_sort)
+        self._popup_scroll:  int   = 0
+        # Priority map cache (refreshed at most every 2 s)
+        self._prio_cache:    dict  = {}
+        self._prio_cache_ts: float = 0.0
+
+    # ── Public API ─────────────────────────────────────────────────────────────
+
+    @property
+    def current_sort(self) -> str:
+        return self._current_sort
+
+    @property
+    def current_sort_label(self) -> str:
+        return _SORT_LABELS.get(self._current_sort, self._current_sort)
+
+    def open_popup(self) -> None:
+        self._popup_sel    = self._sort_idx(self._current_sort)
+        self._popup_scroll = 0
+        self.popup_open    = True
+
+    def close_popup(self) -> None:
+        self.popup_open = False
+
+    def get_sorted_streamers(
+        self,
+        site,
+        streamers:  "list[str]",
+        live_since: "dict[str, float]",
+        last_live:  "dict[str, float]",
+    ) -> "list[str]":
+        """Return *streamers* ordered by the active sort option."""
+        need_prio = self._current_sort in ("priority_asc", "priority_desc")
+        priority_map = self._get_priority_map() if need_prio else {}
+        cfg        = site.get_cached_config()
+        site_label = cfg.get("site_label", os.path.basename(site.config_path))
+        return apply_sort_to_streamers(
+            streamers, self._current_sort, live_since, last_live,
+            priority_map, site_label,
+        )
+
+    # ── Key handling ────────────────────────────────────────────────────────────
+
+    def handle_key(self, key) -> bool:
+        """Handle keys while the sort popup is open. Always returns True."""
+        if not self.popup_open:
+            return False
+        n = len(SORT_OPTIONS)
+        if key == 27:                                   # Esc → cancel
+            self.close_popup()
+        elif key == curses.KEY_UP:
+            self._popup_sel = max(0, self._popup_sel - 1)
+        elif key == curses.KEY_DOWN:
+            self._popup_sel = min(n - 1, self._popup_sel + 1)
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, ord(' ')):
+            new_key = _SORT_KEYS[self._popup_sel]
+            if new_key != self._current_sort:
+                self._current_sort = new_key
+                self._save_sort(new_key)
+            self.close_popup()
+        # All other keys are consumed so nothing leaks to the dashboard.
+        return True
+
+    # ── Drawing ─────────────────────────────────────────────────────────────────
+
+    def draw_popup(self, stdscr) -> None:
+        """Draw the sort-option popup centred on the screen."""
+        db   = self.dashboard
+        h, w = stdscr.getmaxyx()
+        n    = len(SORT_OPTIONS)
+
+        box_w = min(36, w - 4)
+        box_h = min(n + 4, h - 4)
+        by1   = (h - box_h) // 2
+        bx1   = (w - box_w) // 2
+        by2   = by1 + box_h
+        bx2   = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1),
+                           curses.color_pair(db.C_NORMAL))
+
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_CHROME)
+        db.safe_addstr(stdscr, by1, bx1 + 2, self._POPUP_TITLE,
+                       curses.color_pair(db.C_CHROME) | curses.A_BOLD)
+        db.safe_addstr(stdscr, by2, bx1 + 2,
+                       " Enter: Select  Esc: Cancel ",
+                       curses.color_pair(db.C_INVHEAD))
+
+        visible = box_h - 3   # rows between border+title and legend row
+
+        # Scroll to keep selection visible.
+        if self._popup_sel < self._popup_scroll:
+            self._popup_scroll = self._popup_sel
+        elif self._popup_sel >= self._popup_scroll + visible:
+            self._popup_scroll = self._popup_sel - visible + 1
+
+        for i in range(self._popup_scroll, min(n, self._popup_scroll + visible)):
+            sort_key, label = SORT_OPTIONS[i]
+            row_y  = by1 + 1 + (i - self._popup_scroll)
+            is_sel = (i == self._popup_sel)
+            is_cur = (sort_key == self._current_sort)
+            prefix = "> " if is_sel else ("* " if is_cur else "  ")
+            if is_sel:
+                attr = curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
+            elif is_cur:
+                attr = curses.color_pair(db.C_LIVE) | curses.A_BOLD
+            else:
+                attr = curses.color_pair(db.C_NORMAL)
+            db.safe_addstr(stdscr, row_y, bx1 + 2,
+                           (prefix + label)[:box_w - 4], attr)
+
+    # ── Persistence ─────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _load_sort() -> str:
+        """Read SITE_SORT from global.conf; returns SORT_DEFAULT on any error."""
+        try:
+            import configparser as _cp
+            from .main import get_global_conf_path
+            path   = get_global_conf_path()
+            parser = _cp.ConfigParser(allow_no_value=True, interpolation=None)
+            parser.read(path, encoding="utf-8")
+            general = parser["General"] if parser.has_section("General") else {}
+            val     = general.get("SITE_SORT", SORT_DEFAULT).strip().lower()
+            return val if val in _SORT_KEYS else SORT_DEFAULT
+        except Exception:
+            return SORT_DEFAULT
+
+    def _save_sort(self, key: str) -> None:
+        """Persist SITE_SORT to global.conf."""
+        try:
+            from .main import _write_global_conf_key
+            _write_global_conf_key("SITE_SORT", key)
+        except Exception:
+            pass
+
+    # ── Helpers ─────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _sort_idx(sort_key: str) -> int:
+        try:
+            return _SORT_KEYS.index(sort_key)
+        except ValueError:
+            return 0
+
+    def _get_priority_map(self) -> dict:
+        """Return the priority map, refreshing from global.json at most every 2 s."""
+        import time as _time
+        now = _time.time()
+        if now - self._prio_cache_ts < 2.0:
+            return self._prio_cache
+        try:
+            from .main import _global_json_lock, _load_global_json
+            sites     = self.dashboard.sites
+            config_id = _compute_config_id([s.config_path for s in sites])
+            with _global_json_lock:
+                global_data = _load_global_json()
+            entries = (global_data.get("priorities", {})
+                                  .get(config_id, {})
+                                  .get("entries", []))
+            pmap = {}
+            for e in entries:
+                k = (e.get("streamer", ""), e.get("site", ""))
+                pmap[k] = {
+                    "priority": e.get("priority", 999999),
+                    "bypass":   e.get("bypass", False),
+                }
+            self._prio_cache    = pmap
+            self._prio_cache_ts = now
+        except Exception:
+            pass
+        return self._prio_cache
 
 
 def _validate_value(key: str, value: str) -> tuple[bool, str]:
