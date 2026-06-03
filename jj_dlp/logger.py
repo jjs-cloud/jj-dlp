@@ -161,18 +161,18 @@ def configure(output_mode_fn, dashboard_log_fn=None, dashboard_dbg_fn=None) -> N
 #   POPUP    — live popup notification creation and suppression
 #
 DBG_FILTERS: dict[str, bool] = {
-    "DRAIN":   False,
-    "CHECKER": False,
-    "SPLIT":   False,
-    "POPEN":   False,
+    "DRAIN":   True,
+    "CHECKER": True,
+    "SPLIT":   True,
+    "POPEN":   True,
     "PERF":    False,
     "DISK":    False,
-    "UPDATER": False,
+    "UPDATER": True,
     "TWITCH":  False,
-    "CONFIG":  False,
+    "CONFIG":  True,
     "KILL":    True,
-    "STALL":   True,
-    "POPUP":   False,
+    "STALL":   False,
+    "POPUP":   True,
 }
 
 _dbg_filters_lock = threading.Lock()
