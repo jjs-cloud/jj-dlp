@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.9.0"
+__version__ = "1.11.1"
 
 import subprocess
 import time
@@ -35,12 +35,12 @@ from .browser_config import (
     _write_browser_to_config,
     _write_ask_for_browser_to_config,
 )
-from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS, _compute_config_id
+from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS, _compute_config_id, SiteSortManager, SORT_OPTIONS, _SORT_LABELS
 
 import curses  # noqa: E402
 
 
-# ── Script start time (for uptime display) ───────────────────────────────────
+# ── Script start time (for uptime display)) ───────────────────────────────────
 _SCRIPT_START_TIME: float = time.time()
 
 # ── Global structures for concurrency control ────────────────────────────────
@@ -544,6 +544,9 @@ class SiteState:
         self.show_checker_stdout: bool = False
         self.show_checker_stderr: bool = False
 
+        # Log tab: whether to show debug messages inline (off by default — can be very verbose)
+        self.show_debug_log: bool = False
+
         # Popup cooldown: streamer -> epoch of last popup shown
         self.popup_last_shown:    Dict[str, float] = {}
 
@@ -627,7 +630,17 @@ class SiteState:
         now = time.time()
         with self._cfg_cache_lock:
             if self._cfg_cache is None or (now - self._cfg_cache_time) >= self._CFG_CACHE_TTL:
-                self._cfg_cache      = load_config(self.config_path)
+                try:
+                    mtime = os.path.getmtime(self.config_path)
+                except Exception:
+                    mtime = 0.0
+                
+                if self._cfg_cache is None or getattr(self, '_cfg_last_mtime', 0.0) != mtime:
+                    t0 = time.time()
+                    self._cfg_cache      = load_config(self.config_path)
+                    self._cfg_last_mtime = mtime
+                    dbg(f"[PERF][get_cached_config] load_config({self.config_path}) took {(time.time() - t0)*1000:.2f}ms")
+                
                 self._cfg_cache_time = now
             return self._cfg_cache
 
@@ -685,6 +698,9 @@ FFMPEG_ERROR_PATTERNS: List[str] = [
 # and draw_stderr_tab can filter them in/out without separate buffers.
 _CHECKER_STDOUT_PREFIX: str = "\x00checker\x00"
 _CHECKER_STDERR_PREFIX: str = "\x00checker_err\x00"
+# Debug messages routed to the Log tab are stored with this prefix so they can
+# be toggled independently of regular activity messages.
+_DEBUG_LOG_PREFIX: str = "\x00debug\x00"
 FFMPEG_ERROR_RESTART_THRESHOLD: int = 200
 
 # Wire logger.dbg to this module's OUTPUT_MODE
@@ -2008,6 +2024,9 @@ class JJDlpDashboard:
         from .config_editor import ConfigEditor
         self.config_editor = ConfigEditor(self)
 
+        # Sort manager — controls streamer ordering in site panels
+        self.sort_manager = SiteSortManager(self)
+
     # ── Color palette ────────────────────────────────────────────────────────
     # Pair numbers and their meanings — easy to change here
     C_CHROME    = 1   # borders, labels
@@ -2170,12 +2189,6 @@ class JJDlpDashboard:
         except Exception:
             pass
 
-        # Add Update Available row if applicable
-        with update_available_lock:
-            if UPDATE_AVAILABLE:
-                rows.append(("",               "",                 0))
-                rows.append(("Update",         "Restart required",       self.C_WARN))
-
         inner_w = x2 - x1 - 2
         label_w = min(10, inner_w // 2)
 
@@ -2298,20 +2311,28 @@ class JJDlpDashboard:
                 drives = seen_drives if seen_drives else ([fallback_dir] if fallback_dir else ["/"])
                 dbg(f"[DISK] refreshing cache — drives={drives!r}")
 
-                # Query disk usage for each drive and cache the results
-                results = []
-                for drive in drives:
-                    try:
-                        usage = shutil.disk_usage(drive)
-                        results.append((drive, usage))
-                        dbg(f"[DISK] {drive!r} → free={usage.free/(1024**3):.1f}G")
-                    except Exception as _disk_exc:
-                        results.append((drive, None))
-                        dbg(f"[DISK] shutil.disk_usage({drive!r}) FAILED: {type(_disk_exc).__name__}: {_disk_exc}")
+                self._disk_cache_time = now  # update immediately to prevent multiple threads
+                
+                # Query disk usage for each drive in a background thread
+                def _update_disk_usage(drives_to_check):
+                    import threading
+                    t0 = time.time()
+                    results = []
+                    for drive in drives_to_check:
+                        try:
+                            usage = shutil.disk_usage(drive)
+                            results.append((drive, usage))
+                            dbg(f"[DISK] {drive!r} → free={usage.free/(1024**3):.1f}G")
+                        except Exception as _disk_exc:
+                            results.append((drive, None))
+                            dbg(f"[DISK] shutil.disk_usage({drive!r}) FAILED: {type(_disk_exc).__name__}: {_disk_exc}")
+                    
+                    self._disk_cache_results = results
+                    self._disk_cache_drives  = drives_to_check
+                    dbg(f"[PERF][disk_usage] background check for {drives_to_check} took {(time.time() - t0)*1000:.2f}ms")
 
-                self._disk_cache_drives  = drives
-                self._disk_cache_results = results
-                self._disk_cache_time    = now
+                import threading
+                threading.Thread(target=_update_disk_usage, args=(drives,), daemon=True).start()
 
             if disk_row_y < y2 - 1:
                 self.safe_addstr(self.stdscr, disk_row_y, x1 + 2, "── Disk ──",
@@ -2364,6 +2385,9 @@ class JJDlpDashboard:
             next_in      = site.dash_next_check_in
         with site.lock:
             recording    = set(site.currently_recording)
+
+        # Apply the active sort order to the streamer list.
+        all_s = self.sort_manager.get_sorted_streamers(site, all_s, live_since, last_live)
 
         try:
             _bar_max_secs = _panel_cfg.get("progress_bar_max_hours", 6) * 3600
@@ -2631,7 +2655,14 @@ class JJDlpDashboard:
                      else curses.color_pair(self.C_CHROME))
             self.safe_addstr(self.stdscr, y1, tab_x, label, attr)
             tab_x += len(label) + 1
-        self.safe_addstr(self.stdscr, y1 + 1, x1 + 2, " ACTIVITY LOG ",
+
+        show_debug = sel_site.show_debug_log if sel_site is not None else False
+        title = (" ACTIVITY LOG — Show Debug: ON  (Press A to toggle) "
+                 if show_debug
+                 else " ACTIVITY LOG — Show Debug: OFF (Press A to toggle) ")
+
+        self.draw_box(self.stdscr, y1 + 1, x1, y2, x2, self.C_DIM)
+        self.safe_addstr(self.stdscr, y1 + 1, x1 + 2, title,
                     curses.color_pair(self.C_DIM) | curses.A_BOLD)
 
         if sel_site is None:
@@ -2643,7 +2674,16 @@ class JJDlpDashboard:
         with sel_site.dash_lock:
             raw_lines = list(sel_site.dash_log_lines)
 
-        wrapped = self._wrap_lines(raw_lines, line_width)
+        # Filter or strip debug lines depending on the toggle
+        if show_debug:
+            display_lines = [
+                (ln[len(_DEBUG_LOG_PREFIX):] if ln.startswith(_DEBUG_LOG_PREFIX) else ln)
+                for ln in raw_lines
+            ]
+        else:
+            display_lines = [ln for ln in raw_lines if not ln.startswith(_DEBUG_LOG_PREFIX)]
+
+        wrapped = self._wrap_lines(display_lines, line_width)
 
         # Clamp scroll so it never exceeds available history
         max_scroll = max(0, len(wrapped) - visible_rows)
@@ -2846,6 +2886,13 @@ class JJDlpDashboard:
                          f"  UP: scroll up  DOWN: scroll down"
                          f"  A: Show All [{show_label}]"
                          f"  C: colors  Q: quit  ")
+            elif current_tab == "Dashboard":
+                sort_lbl = self.sort_manager.current_sort_label
+                hints = (f"  LEFT/RIGHT: switch tabs"
+                         f"  [: prev site  ]: next site"
+                         f"  A: add streamer R: remove streamer D: disable streamer"
+                         f"  S: Sort"
+                         f"  C: colors  Q: quit  ")
             else:
                 hints = (f"  LEFT/RIGHT: switch tabs"
                          f"  [: prev site  ]: next site"
@@ -2983,6 +3030,10 @@ class JJDlpDashboard:
         if self._mgmt_mode:
             self.draw_mgmt_overlay()
 
+        # Sort popup — drawn on top of everything else.
+        if self.sort_manager.popup_open:
+            self.sort_manager.draw_popup(self.stdscr)
+
         self.stdscr.refresh()
 
         # Log timing every 100 frames (~5 seconds at 20fps)
@@ -2998,7 +3049,11 @@ class JJDlpDashboard:
         """Returns False to quit."""
         if self._mgmt_mode:
             return self._handle_mgmt_key(key)
-            
+
+        # Sort popup intercepts all keys while open.
+        if self.sort_manager.popup_open:
+            return self.sort_manager.handle_key(key)
+
         current_tab_name = self.TABS[self.selected_tab]
         if current_tab_name == "Config":
             # Pass keys to ConfigEditor first. But still handle global site switching:
@@ -3042,7 +3097,11 @@ class JJDlpDashboard:
             elif tab == "Stderr":
                 self._stderr_scroll = max(0, self._stderr_scroll - 1)
         elif key in (ord('a'), ord('A')):
-            if current_tab_name == "Stdout" and self.sites:
+            if current_tab_name == "Log" and self.sites:
+                sel = self.sites[self.selected_site_idx]
+                sel.show_debug_log = not sel.show_debug_log
+                self._log_scroll = 0
+            elif current_tab_name == "Stdout" and self.sites:
                 sel = self.sites[self.selected_site_idx]
                 sel.show_checker_stdout = not sel.show_checker_stdout
                 self._stdout_scroll = 0
@@ -3058,6 +3117,9 @@ class JJDlpDashboard:
             self._start_mgmt("disable")
         elif key in (ord('c'), ord('C')):
             self.randomize_colors()
+        elif key in (ord('s'), ord('S')):
+            if current_tab_name == "Dashboard":
+                self.sort_manager.open_popup()
         elif key == ord('\x0f'):  # Ctrl+O — switch to terminal mode
             with output_mode_lock:
                 global OUTPUT_MODE
@@ -3667,7 +3729,17 @@ def main() -> None:
     def _dash_log(msg: str):
         for s in sites:
             s.log_line(msg)
-    _logger.configure(_get_output_mode, _dash_log)
+
+    def _dash_dbg(msg: str):
+        """Route a dbg() line to every site's log buffer with the debug prefix."""
+        for s in sites:
+            prefixed = _DEBUG_LOG_PREFIX + msg
+            with s.dash_lock:
+                s.dash_log_lines.append(prefixed)
+                if len(s.dash_log_lines) > 200:
+                    s.dash_log_lines = s.dash_log_lines[-200:]
+
+    _logger.configure(_get_output_mode, _dash_log, _dash_dbg)
 
     # Sort sites by site_order so they appear in the desired positions in the dashboard
     sites.sort(key=lambda s: s.site_order)
