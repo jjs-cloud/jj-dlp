@@ -77,7 +77,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
             "Seconds between liveness checks for this site."),
     _KeyDef("OUTPUT_DIR",            "site",   "recordings", True,
             "Directory where recordings are saved."),
-    _KeyDef("OUTPUT_TMPL",           "site",   "%(title)s [%(id)s].%(ext)s", True,
+    _KeyDef("OUTPUT_TMPL",           "site",   "%(title)s [%(id)s].%(ext)s", False,
             "yt-dlp output filename template."),
     _KeyDef("COOLDOWN_AFTER_RECORDING", "site", "5",   False,
             "Seconds to wait after a recording ends before checking again."),

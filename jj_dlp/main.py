@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.11.1"
+__version__ = "1.12.2"
 
 import subprocess
 import time
@@ -975,9 +975,22 @@ def open_log_streams(cfg: dict):
     return subprocess.PIPE, subprocess.PIPE, _close, log_out_fp, log_err_fp
 
 
+_YTDLP_DESTINATION_PREFIX: str = "[download] Destination: "
+
+
 def _drain_pipe(pipe, log_fp, pipe_type: str,
                 ffmpeg_error_counter=None, ffmpeg_error_event=None,
-                streamer: str = "", site: Optional[SiteState] = None) -> None:
+                streamer: str = "", site: Optional[SiteState] = None,
+                filename_holder: Optional[List[str]] = None,
+                filename_event: Optional[threading.Event] = None) -> None:
+    """Drain one pipe (stdout or stderr) from a yt-dlp subprocess.
+
+    If *filename_holder* and *filename_event* are provided, the first
+    ``[download] Destination: <path>`` line seen on either pipe is stored in
+    ``filename_holder[0]`` and *filename_event* is set, allowing
+    ``record_stream`` to learn the exact output path without scanning the
+    directory.
+    """
     dbg(f"[DRAIN] thread started pipe_type={pipe_type!r} streamer={streamer!r} pipe={pipe!r}")
     line_count = 0
     try:
@@ -986,6 +999,19 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
             line_count += 1
             if line_count <= 3:
                 dbg(f"[DRAIN] pipe_type={pipe_type!r} streamer={streamer!r} line#{line_count}: {line[:200]!r}")
+
+            # ── Parse yt-dlp destination filename ────────────────────────────
+            if (filename_holder is not None and filename_event is not None
+                    and not filename_event.is_set()):
+                stripped = line.strip()
+                if stripped.startswith(_YTDLP_DESTINATION_PREFIX):
+                    dest = stripped[len(_YTDLP_DESTINATION_PREFIX):].strip()
+                    if dest:
+                        filename_holder.append(dest)
+                        filename_event.set()
+                        dbg(f"[DRAIN] parsed destination filename={dest!r} "
+                            f"pipe_type={pipe_type!r} streamer={streamer!r}")
+
             if log_fp is not None:
                 try:
                     log_fp.write(line + "\n")
@@ -1226,7 +1252,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
             if site._stop_event.is_set() or streamer in site.evicted_streamers:
                 break
             current_output_tmpl = cfg["output_tmpl"]
-            if split_after_seconds > 0:
+            # For segment 1 we intentionally omit the _part1 suffix — it will be
+            # retroactively added (via rename) only if a second part is ever created.
+            if split_after_seconds > 0 and segment_num > 1:
                 current_output_tmpl = add_segment_suffix_to_tmpl(
                     current_output_tmpl,
                     segment_num
@@ -1264,6 +1292,11 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                 site.clear_ffmpeg_error_count(streamer)
                 site.clear_stall_since(streamer)
 
+                # Shared container for the filename parsed from yt-dlp output.
+                # Both drain threads write here; the event is set on first hit.
+                filename_holder: List[str] = []
+                filename_event  = threading.Event()
+
                 threading.Thread(
                     target=_drain_pipe,
                     args=(proc.stdout, log_out_fp, "stdout"),
@@ -1271,7 +1304,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                         "ffmpeg_error_counter": ffmpeg_error_counter,
                         "ffmpeg_error_event": ffmpeg_error_event,
                         "streamer": streamer,
-                        "site": site
+                        "site": site,
+                        "filename_holder": filename_holder,
+                        "filename_event": filename_event,
                     },
                     daemon=True
                 ).start()
@@ -1283,7 +1318,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                         "ffmpeg_error_counter": ffmpeg_error_counter,
                         "ffmpeg_error_event": ffmpeg_error_event,
                         "streamer": streamer,
-                        "site": site
+                        "site": site,
+                        "filename_holder": filename_holder,
+                        "filename_event": filename_event,
                     },
                     daemon=True
                 ).start()
@@ -1296,11 +1333,32 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                     pass
                 break
 
-            active_file = wait_for_streamer_file(
-                output_dir,
-                streamer,
-                proc_start_time
-            )
+            # ── Resolve active output file ────────────────────────────────
+            # Prefer the filename parsed directly from yt-dlp's
+            # "[download] Destination: <path>" line; fall back to the
+            # directory-scan heuristic when the line doesn't appear within
+            # the wait window (e.g. the process exits immediately on error).
+            _FILENAME_WAIT_TIMEOUT = 15.0
+            filename_found = filename_event.wait(timeout=_FILENAME_WAIT_TIMEOUT)
+            if filename_found and filename_holder:
+                raw_dest = filename_holder[0]
+                # yt-dlp may emit a bare filename or a full path depending on
+                # how -o was specified.  Normalise to an absolute path.
+                if not os.path.isabs(raw_dest):
+                    active_file = os.path.join(output_dir, raw_dest)
+                else:
+                    active_file = raw_dest
+                dbg(f"[STALL] resolved active_file from yt-dlp output: {active_file!r}",
+                    site_name=streamer)
+            else:
+                dbg(f"[STALL] no Destination line within {_FILENAME_WAIT_TIMEOUT}s — "
+                    f"falling back to directory scan for streamer={streamer!r}",
+                    site_name=streamer)
+                active_file = wait_for_streamer_file(
+                    output_dir,
+                    streamer,
+                    proc_start_time,
+                )
 
             last_size, _, _ = get_streamer_file_size(
                 output_dir,
@@ -1497,6 +1555,22 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                                 except Exception as wait_err:
                                     dbg(f"[SPLIT][record_stream] old proc pid={proc.pid} wait() error: {wait_err}")
 
+                                # Part 2 is confirmed — retroactively rename the first
+                                # segment from its clean name to FILENAME_part1.ext now
+                                # that we know multiple parts exist.
+                                if segment_num == 1 and active_file and os.path.isfile(active_file):
+                                    _part1_path = add_segment_suffix_to_tmpl(active_file, 1)
+                                    try:
+                                        os.rename(active_file, _part1_path)
+                                        site.log_line(
+                                            f"Renamed first segment to: {os.path.basename(_part1_path)}"
+                                        )
+                                        dbg(f"[SPLIT][record_stream] renamed first segment: "
+                                            f"{active_file!r} -> {_part1_path!r}")
+                                    except Exception as _ren_err:
+                                        dbg(f"[SPLIT][record_stream] rename of first segment FAILED: "
+                                            f"{_ren_err!r}")
+
                                 site.unregister_proc(streamer)
                                 try:
                                     close_logs()
@@ -1566,7 +1640,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                         proc_start_time=proc_start_time,
                         last_growth_time=last_growth_time,
                         stall_timeout=stall_timeout,
-                        stall_check_interval=stall_check_interval
+                        stall_check_interval=stall_check_interval,
+                        known_filename=active_file,
                     )
 
                     if stall_detected:
