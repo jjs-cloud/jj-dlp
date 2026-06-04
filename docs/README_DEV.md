@@ -2,7 +2,7 @@
 
 **Version:** 1.11.1
 
-A powerful, multi-site stream recorder with a DOS style curses dashboard. Built on yt-dlp.
+A powerful, multi-site stream recorder with a MenuWorks-style curses dashboard, Twitch EventSub integration, and automatic GitHub-based updates. Built on yt-dlp.
 
 ---
 
@@ -24,14 +24,365 @@ A powerful, multi-site stream recorder with a DOS style curses dashboard. Built 
 
 ## Overview
 
-*[Section to be filled: High-level description of what jj-dlp does, target use cases, key differentiators]*
+### Purpose & Problem Domain
 
-- Multi-site stream monitoring and recording
-- Real-time curses-based dashboard interface
-- Twitch EventSub instant notifications (vs. polling)
-- Automatic updates from GitHub
-- Browser-based cookie authentication
-- Comprehensive logging and debug tools
+**jj-dlp** is a multi-site stream recorder application designed for users who monitor and record streams from multiple platforms simultaneously. It solves the key problems of:
+
+1. **Multi-site coordination** — Monitor and record multiple streamers/sites in parallel without manual intervention
+2. **Real-time notifications** — Detect when streamers go live via both polling and Twitch EventSub webhooks (instant push notifications)
+3. **Graceful process management** — Handle recording interruptions, splits, stalls, and resource constraints
+4. **Interactive control** — Provide a MenuWorks-style curses dashboard for real-time monitoring and control
+5. **Configuration flexibility** — Support multiple independent configurations (one per streamer/site) with global and local settings
+6. **Automatic updates** — Self-update from GitHub without manual intervention
+
+### Core Architecture
+
+jj-dlp is built as a **multi-threaded, event-driven application** with the following high-level structure:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    jj-dlp Main Process                      │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │ Per-Site State (SiteState) — One per config file    │  │
+│  ├──────────────────────────────────────────────────────┤  │
+│  │  • Monitor Thread (liveness polling)                │  │
+│  │  • Config Watcher Thread (file change detection)    │  │
+│  │  • Recording Threads (one per active stream)        │  │
+│  │  • Pipe Drain Threads (stdout/stderr from yt-dlp)  │  │
+│  │  • Twitch EventSub Server (webhook listener)        │  │
+│  │  • Thread-safe state (dash_lock, lock, etc.)       │  │
+│  └──────────────────────────────────────────────────────┘  │
+│                                                             │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │ Curses Dashboard (Main Thread)                       │  │
+│  ├──────────────────────────────────────────────────────┤  │
+│  │  • Event loop reading from terminal input            │  │
+│  │  • Renders panels by reading thread-safe state      │  │
+│  │  • Updates once per frame (~100ms)                  │  │
+│  │  • Can switch between curses/terminal modes         │  │
+│  └──────────────────────────────────────────────────────┘  │
+│                                                             │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │ Shared Services                                      │  │
+│  ├──────────────────────────────────────────────────────┤  │
+│  │  • Global logging infrastructure (logger.py)        │  │
+│  │  • Configuration parsing (config_editor.py)         │  │
+│  │  • Browser cookie auth (browser_config.py)          │  │
+│  │  • GitHub auto-updater (updater.py)                 │  │
+│  │  • Dependency manager (deps.py)                     │  │
+│  └──────────────────────────────────────────────────────┘  │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Thread & Concurrency Model
+
+**Threads spawned by jj-dlp:**
+
+1. **Dashboard Event Loop** (main thread)
+   - Runs the curses UI
+   - Reads keyboard input and renders panels
+   - Does NOT perform blocking operations; relies on thread-safe reads
+   - Can spawn modal dialogs (config editor, browser chooser, config chooser)
+
+2. **Per-Site Monitor Thread** (1 per config file)
+   - Polls the liveness check command (e.g., yt-dlp query API) at `check_interval` seconds
+   - Detects when streamers go live
+   - Spawns recording threads for live streamers
+   - Waits for next check or responds to `trigger_event` signal
+   - Also initializes Twitch EventSub server if enabled
+
+3. **Per-Site Config Watcher Thread** (1 per config file)
+   - Watches the config file for changes (mtime polling)
+   - Signals the monitor thread to re-check when config is updated
+   - Invalidates cached config so monitor picks up new settings
+
+4. **Recording Threads** (1 per active streamer)
+   - Spawns a yt-dlp subprocess to download the stream
+   - Launches 2 pipe drain threads (stdout/stderr) to read subprocess output
+   - Manages recording lifecycle (split, stall detection, blocking, etc.)
+   - Detects when stream ends (yt-dlp process exit) and cleans up
+
+5. **Pipe Drain Threads** (2 per recording = 2 * active recordings)
+   - Read and process stdout/stderr from yt-dlp subprocess
+   - Detect ffmpeg errors and stalls
+   - Log output to per-site log files
+   - Feed debug lines to the dashboard log panel
+
+6. **Twitch EventSub Server Thread** (0 or 1 per config)
+   - Runs a minimal HTTP server on configurable port (default 8888)
+   - Listens for webhook POST requests from Twitch
+   - Verifies HMAC signature on incoming events
+   - Calls `on_stream_online` callback when streamer goes live
+   - Manages EventSub subscriptions (create/delete via Twitch API)
+
+7. **Periodic Update Checker Thread** (daemon, 1 global)
+   - Wakes up every `update_interval` minutes
+   - Checks GitHub for new commits
+   - Sets `UPDATE_AVAILABLE` flag if new version exists
+
+**Synchronization primitives used:**
+
+- `threading.Lock` — Protects mutable shared state (dash_lock, lock, procs_lock, config_cache_lock)
+- `threading.Event` — Used for shutdown signaling (_stop_event) and inter-thread communication (trigger_event)
+- Atomic reads/writes — Global variables like `OUTPUT_MODE` and `UPDATE_AVAILABLE` protected with locks
+
+**Race condition prevention:**
+
+- All dashboard-visible state (dash_*) is protected by `site.dash_lock`
+- All recording-related state (currently_recording, evicted_streamers) is protected by `site.lock`
+- yt-dlp process references (_active_procs) are protected by `_procs_lock`
+- Config cache is read-only after load with TTL; protected by _cfg_cache_lock
+
+### Core Data Structures
+
+#### SiteState (lines 504–650 in main.py)
+
+Encapsulates all mutable runtime state for a single monitored configuration:
+
+```python
+class SiteState:
+    # Identity
+    config_path: str                        # Path to .conf file
+    label: str                              # Display name in dashboard
+    site_order: int                         # Sort order (0=leftmost)
+    
+    # Concurrency control
+    lock: threading.Lock                    # Protects recording state
+    dash_lock: threading.Lock               # Protects dashboard-visible state
+    trigger_event: threading.Event          # Signal monitor to check now
+    _stop_event: threading.Event            # Signal all threads to shut down
+    
+    # Recording management
+    currently_recording: Set[str]           # Streamers being recorded right now
+    evicted_streamers: Set[str]             # Streamers to stop ASAP
+    recording_threads: List[threading.Thread]  # Active recording threads
+    known_streamers: Set[str]               # All streamers in config
+    _active_procs: Dict[str, subprocess.Popen]  # Running yt-dlp processes
+    
+    # Dashboard display state (written by monitor/recording threads, read by dashboard)
+    dash_live_since: Dict[str, float]       # Streamer → time when went live
+    dash_last_live: Dict[str, float]        # Streamer → last time recording ended
+    dash_all_streamers: List[str]           # All configured streamers
+    dash_blocked: Set[str]                  # Currently blocked streamers
+    dash_next_check_in: float               # Seconds until next liveness check
+    dash_log_lines: List[str]               # Recent activity log (last 200 lines)
+    dash_stdout_lines: List[str]            # yt-dlp stdout output
+    dash_stderr_lines: List[str]            # yt-dlp stderr output
+    
+    # Monitoring & config
+    monitor_thread: Optional[threading.Thread]
+    watcher_thread: Optional[threading.Thread]
+    eventsub: Optional[TwitchEventSub]      # Webhook server instance
+    eventsub_state: Optional[EventSubState] # Dashboard-visible EventSub status
+    _cfg_cache: Optional[dict]              # Cached config (TTL 2s)
+    
+    # Error tracking
+    ffmpeg_error_counts: Dict[str, int]     # Streamer → cumulative error count
+    stall_since: Dict[str, float]           # Streamer → when stall detected
+    
+    # UI state
+    show_checker_stdout: bool               # Show JSON output from checker
+    show_checker_stderr: bool
+    show_debug_log: bool                    # Show debug lines in Log panel
+    popup_last_shown: Dict[str, float]      # Streamer → time of last popup
+```
+
+#### Configuration Structure
+
+Configuration is hierarchical and loaded from INI files:
+
+1. **global.conf** — App-wide settings (loaded once)
+   - Global keys like DISK_DRIVES, DEBUG_LOGS, CHECK_FOR_UPDATES, UPDATE_BRANCH, MAX_CONCURRENT_REC
+   - Applies to all sites uniformly
+
+2. **Per-site .conf files** — One per streamer/platform
+   - Site-specific keys like CHECK_INTERVAL, OUTPUT_DIR, SITE_TMPL, STALL_TIMEOUT
+   - [General] section with per-site overrides
+   - [Downloader] section with yt-dlp command arguments
+   - [Checker] section with liveness check command arguments
+   - Streamer-specific sections for per-streamer overrides
+
+3. **global.json** — Persistent state across runs
+   - update_info: {current_sha, latest_sha, update_available} for versioning
+   - startup_configs: Saved list of last-used config files
+   - dbg_filters_state: Saved debug filter tags (on/off per tag)
+
+Configuration is loaded on-demand and cached (TTL 2 seconds) to avoid excessive file I/O during dashboard rendering.
+
+### Core Workflows
+
+#### Startup Sequence
+
+1. Dependency checks (curses, FFmpeg)
+2. Config discovery/selection (auto, prompt, or --config args)
+3. Browser selection (if ASK_FOR_BROWSER is true)
+4. Load global.conf
+5. Check for available updates; prompt user if update pending
+6. Spawn per-site state and threads:
+   - Create SiteState for each config
+   - Start monitor thread (liveness polling + EventSub server)
+   - Start config watcher thread
+7. Configure logger (inject dashboard callbacks)
+8. Enter curses dashboard event loop
+
+#### Monitoring & Recording Workflow
+
+**Monitor Thread Main Loop (lines 1856–1905):**
+
+```
+while not stop:
+    load config
+    get list of live streamers (via liveness check command OR EventSub callback)
+    update dashboard display state
+    if live streamers exist:
+        call start_recording_if_needed()
+    
+    wait check_interval seconds (or until trigger_event fires)
+    if config changed:
+        trigger_event fires → loop again immediately
+```
+
+**Recording Workflow:**
+
+1. `start_recording_if_needed()` checks:
+   - Is streamer already recording? Skip.
+   - Is streamer blocked? Skip.
+   - Have we hit MAX_CONCURRENT_REC limit? Skip.
+   - Otherwise: spawn recording thread.
+
+2. Recording thread (`record_stream()`) does:
+   - Build yt-dlp command with cookies, format, output path
+   - Spawn subprocess with Popen
+   - Launch 2 pipe drain threads for stdout/stderr
+   - Enter inner loop:
+     - Check for stop signals (site._stop_event, evicted_streamers, blocked list)
+     - Check for ffmpeg errors/stalls
+     - If split_after is set: split file every N seconds
+     - Wait for process to exit
+
+3. When stream ends:
+   - yt-dlp subprocess exits (detected via `proc.poll()`)
+   - Pipe drain threads finish reading output
+   - Recording thread cleans up logs and state
+   - Wait cooldown_after_recording seconds before allowing another record
+
+#### Dashboard Rendering
+
+The dashboard is a **MenuWorks-style TUI** (terminal user interface):
+
+- **Panels:** Site columns, system stats sidebar, log tabs
+- **Multi-tab interface:** Dashboard, Stdout, Stderr, Log, Config Editor
+- **Update frequency:** ~10 FPS (100ms frame time)
+- **Input handling:** Keyboard shortcuts for pause, resume, stop, mode switch
+
+The dashboard thread **never blocks** — it only reads thread-safe state via locks. All actual work (checking streams, recording, etc.) happens in background threads.
+
+### Configuration System
+
+jj-dlp uses an **INI-based configuration** with a strict schema defined in `config_editor.py:CONFIG_KEYS`:
+
+- ~40 recognized keys (global + per-site)
+- Each key has a scope (global/site), default value, and help comment
+- Unknown keys are silently ignored for forward compatibility
+- Config can be edited live via dashboard (ConfigEditor modal)
+- Changes trigger config watcher to wake up monitor thread
+
+**Key categories:**
+
+- **Paths & Output:** output_dir, output_tmpl, log_path
+- **Timing & Intervals:** check_interval, cooldown_after_recording, stall_check_interval, stall_timeout, config_check_interval
+- **Recording Quality:** (yt-dlp command arguments in [Downloader] section)
+- **Liveness Detection:** site_tmpl, checker_cookies, downloader_cookies
+- **UI & Notifications:** popup_notifications, popup_timeout, popup_cooldown, panel_resize, progress_bar_*
+- **Advanced:** split_after, twitch_enabled, max_concurrent_rec
+
+### External Integrations
+
+#### yt-dlp Integration
+
+- jj-dlp spawns yt-dlp as a subprocess for both liveness checking and recording
+- Liveness check: `yt-dlp --simulate <url>` (queries API without downloading)
+- Recording: `yt-dlp --output <path> <url>` (downloads video stream)
+- Browser cookies can be passed: `--cookies-from-browser firefox`
+
+#### Twitch EventSub Integration
+
+- Alternative to polling: instead of checking every 60 seconds, receive instant webhook notifications when a streamer goes live
+- Implementation:
+  - HTTP server listens on WEBHOOK_PORT (default 8888)
+  - Register webhooks with Twitch API for each monitored streamer
+  - Twitch POSTs HMAC-signed JSON to CALLBACK_URL when streamer.online
+  - Verify signature and spawn recording immediately
+- Requires:
+  - Twitch OAuth credentials (client_id, client_secret)
+  - Public CALLBACK_URL (e.g., via ngrok or reverse proxy)
+  - Network accessibility from Twitch (port forwarding if behind NAT)
+
+#### GitHub Auto-Update System
+
+- Periodically fetches latest commit SHA from GitHub API
+- Stores current/latest SHA in global.json
+- If new commit found, sets UPDATE_AVAILABLE flag
+- On user request (or at startup), downloads repo ZIP, extracts, and replaces files
+- Preserves config files and certain global settings during update
+- Supports multiple branches (main, testing, experimental)
+
+#### Browser Cookie Authentication
+
+- Extracts cookies from browser local storage (Firefox, Opera, Safari)
+- Used to access age-restricted or account-required content
+- Passed to yt-dlp via `--cookies-from-browser` flag
+- Can be configured per-site for both downloader and checker
+
+### Error Handling & Recovery
+
+**Graceful degradation:**
+
+- If FFmpeg has errors: restart recording automatically (up to error limit)
+- If yt-dlp crashes: detect process exit and retry with cooldown
+- If config file is corrupted: use cached config or defaults
+- If Twitch EventSub fails: fall back to polling
+
+**Stall detection:**
+
+- Monitor output file size growth
+- If file size hasn't changed for `stall_timeout` seconds: restart recording
+- Prevents infinite hangs when stream stops mid-record
+
+**Blocking mechanism:**
+
+- Users can block/unblock streamers via dashboard
+- Blocking immediately kills active recording for that streamer
+- Config change detection wakes monitor thread to refresh
+
+### Performance Considerations
+
+1. **Config caching** — Config files loaded at most every 2 seconds to avoid repeated disk I/O
+2. **Dashboard frame rate** — 10 FPS update limit to avoid excessive CPU and lock contention
+3. **Polling efficiency** — Monitor thread sleeps between checks; can be woken early via trigger_event
+4. **Thread-safe data structures** — Locks are held for minimal time; state is updated atomically
+5. **Log buffer limits** — Dashboard log keeps only last 200 lines to avoid memory bloat
+6. **Subprocess management** — Each recording is a separate process; yt-dlp scales with download bandwidth, not jj-dlp CPU
+
+### Design Patterns Used
+
+1. **Thread-per-site model** — Each config file gets its own monitor/watcher threads for independence
+2. **Producer-consumer pattern** — Monitor thread produces live notifications; recording threads consume and spawn recordings
+3. **Observer pattern** — Config watcher observes file changes and notifies monitor thread
+4. **Singleton pattern** — Global logger, updater, config parser instances
+5. **Event loop pattern** — Dashboard runs a frame-by-frame event loop (input → render → sleep)
+6. **Cache-aside pattern** — Config cache with TTL validation
+
+### Key Implementation Details
+
+- **No spawned GUI frameworks** — Uses curses (standard library) only, works over SSH
+- **No external dependencies** — ffmpeg and yt-dlp are called as subprocesses, not linked libraries
+- **Cross-platform** — Uses `subprocess.CREATE_NO_WINDOW` on Windows; `start_new_session` on Unix for proper subprocess group cleanup
+- **Resilient subprocess management** — Tracks all spawned yt-dlp processes and kills them gracefully on shutdown
+- **Timestamp-based liveness** — Tracks when streamers were first detected live and last seen recording to highlight recent activity
 
 ---
 
