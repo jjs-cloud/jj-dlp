@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.12.1"
+__version__ = "1.12.2"
 
 import subprocess
 import time
@@ -1252,7 +1252,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
             if site._stop_event.is_set() or streamer in site.evicted_streamers:
                 break
             current_output_tmpl = cfg["output_tmpl"]
-            if split_after_seconds > 0:
+            # For segment 1 we intentionally omit the _part1 suffix — it will be
+            # retroactively added (via rename) only if a second part is ever created.
+            if split_after_seconds > 0 and segment_num > 1:
                 current_output_tmpl = add_segment_suffix_to_tmpl(
                     current_output_tmpl,
                     segment_num
@@ -1552,6 +1554,22 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                                     dbg(f"[SPLIT][record_stream] old proc pid={proc.pid} exited cleanly")
                                 except Exception as wait_err:
                                     dbg(f"[SPLIT][record_stream] old proc pid={proc.pid} wait() error: {wait_err}")
+
+                                # Part 2 is confirmed — retroactively rename the first
+                                # segment from its clean name to FILENAME_part1.ext now
+                                # that we know multiple parts exist.
+                                if segment_num == 1 and active_file and os.path.isfile(active_file):
+                                    _part1_path = add_segment_suffix_to_tmpl(active_file, 1)
+                                    try:
+                                        os.rename(active_file, _part1_path)
+                                        site.log_line(
+                                            f"Renamed first segment to: {os.path.basename(_part1_path)}"
+                                        )
+                                        dbg(f"[SPLIT][record_stream] renamed first segment: "
+                                            f"{active_file!r} -> {_part1_path!r}")
+                                    except Exception as _ren_err:
+                                        dbg(f"[SPLIT][record_stream] rename of first segment FAILED: "
+                                            f"{_ren_err!r}")
 
                                 site.unregister_proc(streamer)
                                 try:
