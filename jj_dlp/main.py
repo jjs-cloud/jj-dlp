@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.12.2"
+__version__ = "1.12.3"
 
 import subprocess
 import time
@@ -1340,6 +1340,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
             # the wait window (e.g. the process exits immediately on error).
             _FILENAME_WAIT_TIMEOUT = 15.0
             filename_found = filename_event.wait(timeout=_FILENAME_WAIT_TIMEOUT)
+            active_file = None
             if filename_found and filename_holder:
                 raw_dest = filename_holder[0]
                 # yt-dlp may emit a bare filename or a full path depending on
@@ -1348,17 +1349,64 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                     active_file = os.path.join(output_dir, raw_dest)
                 else:
                     active_file = raw_dest
-                dbg(f"[STALL] resolved active_file from yt-dlp output: {active_file!r}",
-                    site_name=streamer)
-            else:
-                dbg(f"[STALL] no Destination line within {_FILENAME_WAIT_TIMEOUT}s — "
+                
+                # Check if the file actually exists. If yt-dlp outputs garbage characters
+                # for the filename (like missing Chinese characters on Windows), active_file
+                # might be wrong. Wait briefly just in case it's still being written.
+                _chk_start = time.time()
+                while time.time() - _chk_start < 2.0:
+                    if os.path.exists(active_file):
+                        break
+                    time.sleep(0.5)
+
+                if not os.path.exists(active_file):
+                    dbg(f"[STALL] active_file {active_file!r} from Destination line does not exist, discarding.", site_name=streamer)
+                    active_file = None
+                else:
+                    dbg(f"[STALL] resolved active_file from yt-dlp output: {active_file!r}",
+                        site_name=streamer)
+
+            if not active_file:
+                dbg(f"[STALL] no Destination line or missing file — "
                     f"falling back to directory scan for streamer={streamer!r}",
                     site_name=streamer)
                 active_file = wait_for_streamer_file(
                     output_dir,
                     streamer,
                     proc_start_time,
+                    timeout=5.0
                 )
+
+            if not active_file:
+                dbg(f"[STALL] falling back to JSON parsing for streamer={streamer!r}",
+                    site_name=streamer)
+                json_cmd = build_yt_dlp_command(
+                    cfg["yt_dlp_path"],
+                    [],
+                    ["--dump-json", "--no-warnings", "-o", output_path, channel_url]
+                )
+                try:
+                    _run_kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+                    if sys.platform == "win32":
+                        _run_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+                    
+                    dbg(f"[STALL] running json_cmd: {cmd_display_str(json_cmd)!r}", site_name=streamer)
+                    res = subprocess.run(json_cmd, **_run_kwargs)
+                    if res.stdout:
+                        for line in reversed(res.stdout.splitlines()):
+                            line = line.strip()
+                            if line.startswith('{') and line.endswith('}'):
+                                data = json.loads(line)
+                                raw_json_dest = data.get("filename") or data.get("_filename")
+                                if raw_json_dest:
+                                    if not os.path.isabs(raw_json_dest):
+                                        active_file = os.path.join(output_dir, raw_json_dest)
+                                    else:
+                                        active_file = raw_json_dest
+                                    dbg(f"[STALL] resolved active_file from JSON: {active_file!r}", site_name=streamer)
+                                break
+                except Exception as e:
+                    dbg(f"[STALL] json fallback failed: {e}", site_name=streamer)
 
             last_size, _, _ = get_streamer_file_size(
                 output_dir,
