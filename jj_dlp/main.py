@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.13.1"
+__version__ = "1.13.2"
 
 import subprocess
 import time
@@ -3039,10 +3039,11 @@ class JJDlpDashboard:
         return [s for s in all_s if s not in blocked]
 
     def _mgmt_disabled_streamers(self, site) -> list:
-        """Return blocked/disabled streamers for the given site (sorted)."""
+        """Return streamers that are in both [Streamers] and [Block] (disabled, not removed)."""
         with site.dash_lock:
+            all_s   = set(site.dash_all_streamers)
             blocked = sorted(site.dash_blocked)
-        return blocked
+        return [s for s in blocked if s in all_s]
 
     def draw_mgmt_overlay(self):
         if not self._mgmt_mode:
