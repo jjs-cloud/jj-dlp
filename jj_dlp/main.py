@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.13.0"
+__version__ = "1.13.1"
 
 import subprocess
 import time
@@ -914,7 +914,7 @@ def _modify_config_streamer(config_path: str, username: str, action: str) -> str
         if removed_from_block:
             messages.append(f"Unblocked '{username}'.")
         _add_to_section("Streamers", username)
-        messages.append(f"Added/Enabled '{username}'")
+        messages.append(f"Added '{username}' to [Streamers].")
     elif action == "remove":
         removed = _remove_from_section("Streamers", username)
         messages.append(f"Removed '{username}' from [Streamers]." if removed else f"'{username}' not found.")
@@ -3132,13 +3132,18 @@ class JJDlpDashboard:
             input_row  = by2 - 2
             legend_row = by2
 
-            # List area: between by1+3 and input_row-2
-            list_top    = by1 + 3
+            # Row layout (from top):
+            #   by1+1 : site label
+            #   by1+2 : result message
+            #   by1+3 : "Re-enable disabled:" header
+            #   by1+4 : list starts
+            list_header = by1 + 3
+            list_top    = by1 + 4
             list_bottom = input_row - 2   # one blank row gap above input
             visible     = max(0, list_bottom - list_top)
 
             if disabled:
-                self.safe_addstr(self.stdscr, list_top - 1, bx1 + 2,
+                self.safe_addstr(self.stdscr, list_header, bx1 + 2,
                             "Re-enable disabled:",
                             curses.color_pair(self.C_CHROME))
 
