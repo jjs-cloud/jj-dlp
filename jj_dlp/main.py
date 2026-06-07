@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.13.2"
+__version__ = "1.14.0"
 
 import subprocess
 import time
@@ -2268,7 +2268,7 @@ class JJDlpDashboard:
         rec_cnt  = 0
         off_cnt  = 0
         dis_cnt  = 0
-        check_interval = 60
+        site_setting_values = []
 
         for site in self.sites:
             with site.dash_lock:
@@ -2279,7 +2279,8 @@ class JJDlpDashboard:
                 recording  = set(site.currently_recording)
             try:
                 cfg = site.get_cached_config()
-                check_interval = cfg.get("check_interval", 60)
+                site_label = cfg.get("site_label", os.path.basename(site.config_path))
+                site_setting_values.append((site_label, cfg))
             except Exception:
                 pass
             total_streamers += len(all_s)
@@ -2292,6 +2293,43 @@ class JJDlpDashboard:
         uptime_secs = int(time.time() - _SCRIPT_START_TIME)
         uptime_str  = _fmt_duration(uptime_secs)
 
+        def _on_off(value) -> str:
+            return "ON" if value else "OFF"
+
+        def _site_setting_rows(label, key, formatter, enabled_color=None):
+            values = []
+            for site_label, cfg in site_setting_values:
+                value = formatter(cfg.get(key))
+                color = enabled_color(cfg.get(key)) if enabled_color else self.C_CHROME
+                values.append((site_label, value, color))
+            if not values:
+                return [(label, "", self.C_DIM)]
+            unique_values = {value for _, value, _ in values}
+            if len(unique_values) == 1:
+                _, value, color = values[0]
+                return [(label, value, color)]
+            rows_out = [(label, "", self.C_CHROME)]
+            rows_out.extend((f"  {site_label}", value, color) for site_label, value, color in values)
+            return rows_out
+
+        def _split_after_rows():
+            values = []
+            for site_label, cfg in site_setting_values:
+                try:
+                    split_after = int(cfg.get("split_after", 0) or 0)
+                except Exception:
+                    split_after = 0
+                if split_after > 0:
+                    values.append((site_label, f"{split_after}m", self.C_CHROME))
+            if not values:
+                return []
+            if len(values) == len(site_setting_values) and len({value for _, value, _ in values}) == 1:
+                _, value, color = values[0]
+                return [("Split After", value, color)]
+            rows_out = [("Split After", "", self.C_CHROME)]
+            rows_out.extend((f"  {site_label}", value, color) for site_label, value, color in values)
+            return rows_out
+
         rows = [
             ("Streamers", str(total_streamers), self.C_CHROME),
             ("Live",      str(live_cnt),        self.C_LIVE),
@@ -2299,23 +2337,16 @@ class JJDlpDashboard:
             ("Offline",   str(off_cnt),         self.C_DIM),
             ("Disabled",  str(dis_cnt),         self.C_DISABLED),
             ("",          "",                   0),
-            ("Interval",  f"{check_interval}s", self.C_CHROME),
-            ("Logging",   "", self.C_LIVE),   # filled below
-            ("Popups",    "", self.C_LIVE),   # filled below
         ]
-
-        # Fill logging/popups from first site's config
-        try:
-            cfg0 = self.sites[0].get_cached_config() if self.sites else {}
-            rows[7] = ("Logging", "ON" if cfg0.get("logging") else "OFF",
-                       self.C_LIVE if cfg0.get("logging") else self.C_DIM)
-            rows[8] = ("Popups",  "ON" if cfg0.get("popup_notifications") else "OFF",
-                       self.C_LIVE if cfg0.get("popup_notifications") else self.C_DIM)
-        except Exception:
-            pass
+        rows.extend(_site_setting_rows("Interval", "check_interval", lambda v: f"{60 if v is None else v}s"))
+        rows.extend(_site_setting_rows("Logging", "logging", _on_off,
+                    lambda v: self.C_LIVE if v else self.C_DIM))
+        rows.extend(_site_setting_rows("Popups", "popup_notifications", _on_off,
+                    lambda v: self.C_LIVE if v else self.C_DIM))
+        rows.extend(_split_after_rows())
 
         inner_w = x2 - x1 - 2
-        label_w = min(10, inner_w // 2)
+        label_w = min(13, max(10, inner_w // 2))
 
         for i, (label, val, cpair) in enumerate(rows):
             row_y = y1 + 2 + i
