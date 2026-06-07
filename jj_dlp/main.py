@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.12.3"
+__version__ = "1.13.0"
 
 import subprocess
 import time
@@ -914,7 +914,7 @@ def _modify_config_streamer(config_path: str, username: str, action: str) -> str
         if removed_from_block:
             messages.append(f"Unblocked '{username}'.")
         _add_to_section("Streamers", username)
-        messages.append(f"Added '{username}' to [Streamers].")
+        messages.append(f"Added/Enabled '{username}'")
     elif action == "remove":
         removed = _remove_from_section("Streamers", username)
         messages.append(f"Removed '{username}' from [Streamers]." if removed else f"'{username}' not found.")
@@ -2132,6 +2132,8 @@ class JJDlpDashboard:
         self._mgmt_mode   = None
         self._mgmt_buf    = ""
         self._mgmt_result = ""
+        self._mgmt_sel    = 0   # selected index for disable/remove list
+        self._mgmt_scroll = 0   # scroll offset for disable/remove list
         # Color scheme index for randomization
         self._color_scheme_idx = 0
         # Scroll offsets for log/stdout/stderr tabs (lines from bottom; 0 = newest at bottom)
@@ -2981,9 +2983,12 @@ class JJDlpDashboard:
         if self._mgmt_mode:
             action, site_idx = self._mgmt_mode
             site_lbl = os.path.basename(self.sites[site_idx].config_path)
-            hints = (f"  [{action.upper()} streamer on {site_lbl}]  "
-                     f"Type username then Enter  |  Esc to cancel  |  "
-                     f"Input: {self._mgmt_buf}_")
+            if action in ("disable", "remove"):
+                hints = (f"  [{action.upper()} streamer on {site_lbl}]  "
+                         f"\u2191\u2193: select  Enter: confirm  Esc: Go back  ")
+            else:
+                hints = (f"  [{action.upper()} streamer on {site_lbl}]  "
+                         f"\u2191\u2193: select disabled  Type: new name  Enter: add/enable  Esc: Go back  ")
         else:
             current_tab = self.TABS[self.selected_tab]
             if current_tab in ("Log",):
@@ -3013,27 +3018,40 @@ class JJDlpDashboard:
                 sort_lbl = self.sort_manager.current_sort_label
                 hints = (f"  LEFT/RIGHT: switch tabs"
                          f"  [: prev site  ]: next site"
-                         f"  A: add streamer R: remove streamer D: disable streamer"
+                         f"  A: add/enable streamer R: remove streamer D: disable streamer"
                          f"  S: Sort"
                          f"  C: colors  Q: quit  ")
             else:
                 hints = (f"  LEFT/RIGHT: switch tabs"
                          f"  [: prev site  ]: next site"
-                         f"  A: add streamer R: remove streamer D: disable streamer"
+                         f"  A: add/enable streamer R: remove streamer D: disable streamer"
                          f"  C: colors  Q: quit  ")
         self.safe_addstr(self.stdscr, h - 1, 0,
                     hints.ljust(w - 1)[:w - 1],
                     curses.color_pair(self.C_INVHEAD))
 
     # ── Streamer management overlay ───────────────────────────────────────────
+    def _mgmt_enabled_streamers(self, site) -> list:
+        """Return enabled (non-blocked) streamers for the given site."""
+        with site.dash_lock:
+            all_s   = list(site.dash_all_streamers)
+            blocked = set(site.dash_blocked)
+        return [s for s in all_s if s not in blocked]
+
+    def _mgmt_disabled_streamers(self, site) -> list:
+        """Return blocked/disabled streamers for the given site (sorted)."""
+        with site.dash_lock:
+            blocked = sorted(site.dash_blocked)
+        return blocked
+
     def draw_mgmt_overlay(self):
         if not self._mgmt_mode:
             return
         h, w = self.stdscr.getmaxyx()
         action, site_idx = self._mgmt_mode
         site = self.sites[site_idx]
-        with site.dash_lock:
-            all_s = list(site.dash_all_streamers)
+        site_lbl = site.get_cached_config().get("site_label",
+                                                os.path.basename(site.config_path))
 
         box_h, box_w = min(20, h - 4), min(60, w - 4)
         by1 = (h - box_h) // 2
@@ -3048,35 +3066,123 @@ class JJDlpDashboard:
 
         self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_WARN)
         title = f" {action.upper()} STREAMER "
-        site_lbl = site.get_cached_config().get("site_label",
-                               os.path.basename(site.config_path))
         self.safe_addstr(self.stdscr, by1, bx1 + 2, title,
                     curses.color_pair(self.C_WARN) | curses.A_BOLD)
         self.safe_addstr(self.stdscr, by1 + 1, bx1 + 2,
                     f"Site: {site_lbl}", curses.color_pair(self.C_DIM))
 
-        row = by1 + 3
-        if all_s:
-            self.safe_addstr(self.stdscr, row, bx1 + 2, "Streamers:",
-                        curses.color_pair(self.C_CHROME))
-            row += 1
-            for s in all_s:
-                if row >= by2 - 4:
-                    break
-                self.safe_addstr(self.stdscr, row, bx1 + 4, f"- {s}",
-                            curses.color_pair(self.C_DIM))
-                row += 1
+        if action in ("disable", "remove"):
+            # ── List-picker mode: arrow up/down to select a streamer ──────────
+            enabled = self._mgmt_enabled_streamers(site)
 
-        row = by2 - 4
-        if self._mgmt_result:
-            self.safe_addstr(self.stdscr, row, bx1 + 2, self._mgmt_result[:box_w - 4],
-                        curses.color_pair(self.C_LIVE) | curses.A_BOLD)
-        row = by2 - 2
-        self.safe_addstr(self.stdscr, row, bx1 + 2, "Username:",
-                    curses.color_pair(self.C_WARN) | curses.A_BOLD)
-        self.safe_addstr(self.stdscr, row, bx1 + 12,
-                    (self._mgmt_buf + "_")[:box_w - 14],
-                    curses.color_pair(self.C_NORMAL) | curses.A_BOLD)
+            # Result message (shown after an action completes)
+            if self._mgmt_result:
+                self.safe_addstr(self.stdscr, by1 + 2, bx1 + 2,
+                            self._mgmt_result[:box_w - 4],
+                            curses.color_pair(self.C_LIVE) | curses.A_BOLD)
+
+            if not enabled:
+                self.safe_addstr(self.stdscr, by1 + 3, bx1 + 2,
+                            "No enabled streamers.",
+                            curses.color_pair(self.C_DIM))
+                self.safe_addstr(self.stdscr, by2, bx1 + 2,
+                            " Esc: Go back ",
+                            curses.color_pair(self.C_INVHEAD))
+                return
+
+            # Clamp selection
+            self._mgmt_sel = max(0, min(self._mgmt_sel, len(enabled) - 1))
+
+            list_top    = by1 + 3
+            list_bottom = by2 - 1          # leave 1 row for legend
+            visible     = list_bottom - list_top
+
+            # Scroll to keep selection visible
+            if self._mgmt_sel < self._mgmt_scroll:
+                self._mgmt_scroll = self._mgmt_sel
+            elif self._mgmt_sel >= self._mgmt_scroll + visible:
+                self._mgmt_scroll = self._mgmt_sel - visible + 1
+
+            for i in range(self._mgmt_scroll,
+                           min(len(enabled), self._mgmt_scroll + visible)):
+                s      = enabled[i]
+                row_y  = list_top + (i - self._mgmt_scroll)
+                is_sel = (i == self._mgmt_sel)
+                prefix = "> " if is_sel else "  "
+                attr   = (curses.color_pair(self.C_HILIGHT) | curses.A_BOLD
+                          if is_sel else curses.color_pair(self.C_NORMAL))
+                self.safe_addstr(self.stdscr, row_y, bx1 + 2,
+                            (prefix + s)[:box_w - 4], attr)
+
+            self.safe_addstr(self.stdscr, by2, bx1 + 2,
+                        " \u2191\u2193: select  Enter: confirm  Esc: Go back ",
+                        curses.color_pair(self.C_INVHEAD))
+
+        else:
+            # ── ADD mode: disabled-streamer list + text input for new names ───
+            disabled = self._mgmt_disabled_streamers(site)
+
+            # Result message
+            if self._mgmt_result:
+                self.safe_addstr(self.stdscr, by1 + 2, bx1 + 2,
+                            self._mgmt_result[:box_w - 4],
+                            curses.color_pair(self.C_LIVE) | curses.A_BOLD)
+
+            # Fixed rows at the bottom for text input + legend
+            input_row  = by2 - 2
+            legend_row = by2
+
+            # List area: between by1+3 and input_row-2
+            list_top    = by1 + 3
+            list_bottom = input_row - 2   # one blank row gap above input
+            visible     = max(0, list_bottom - list_top)
+
+            if disabled:
+                self.safe_addstr(self.stdscr, list_top - 1, bx1 + 2,
+                            "Re-enable disabled:",
+                            curses.color_pair(self.C_CHROME))
+
+                # Clamp selection (-1 = text input focused, >=0 = list item)
+                if self._mgmt_sel >= 0:
+                    self._mgmt_sel = min(self._mgmt_sel, len(disabled) - 1)
+
+                    # Scroll to keep selection visible
+                    if self._mgmt_sel < self._mgmt_scroll:
+                        self._mgmt_scroll = self._mgmt_sel
+                    elif self._mgmt_sel >= self._mgmt_scroll + visible:
+                        self._mgmt_scroll = self._mgmt_sel - visible + 1
+
+                for i in range(self._mgmt_scroll,
+                               min(len(disabled), self._mgmt_scroll + visible)):
+                    s      = disabled[i]
+                    row_y  = list_top + (i - self._mgmt_scroll)
+                    is_sel = (self._mgmt_sel == i)
+                    prefix = "> " if is_sel else "  "
+                    attr   = (curses.color_pair(self.C_HILIGHT) | curses.A_BOLD
+                              if is_sel else curses.color_pair(self.C_DIM))
+                    self.safe_addstr(self.stdscr, row_y, bx1 + 2,
+                                (prefix + s)[:box_w - 4], attr)
+            else:
+                self.safe_addstr(self.stdscr, list_top, bx1 + 2,
+                            "No disabled streamers.",
+                            curses.color_pair(self.C_DIM))
+
+            # Text input (always shown at bottom)
+            self.safe_addstr(self.stdscr, input_row, bx1 + 2, "New username:",
+                        curses.color_pair(self.C_WARN) | curses.A_BOLD)
+            input_attr = (curses.color_pair(self.C_HILIGHT) | curses.A_BOLD
+                          if self._mgmt_sel == -1
+                          else curses.color_pair(self.C_NORMAL) | curses.A_BOLD)
+            self.safe_addstr(self.stdscr, input_row, bx1 + 16,
+                        (self._mgmt_buf + "_")[:box_w - 18], input_attr)
+
+            if disabled:
+                legend = " \u2191\u2193: select disabled  Enter: add/enable  Esc: Go back "
+            else:
+                legend = " Enter: add  Esc: Go back "
+            self.safe_addstr(self.stdscr, legend_row, bx1 + 2,
+                        legend[:box_w - 4],
+                        curses.color_pair(self.C_INVHEAD))
 
     # ── Full screen refresh ───────────────────────────────────────────────────
     def refresh_screen(self):
@@ -3256,34 +3362,93 @@ class JJDlpDashboard:
         self._mgmt_mode   = (action, self.selected_site_idx)
         self._mgmt_buf    = ""
         self._mgmt_result = ""
+        # For add: -1 = text input focused; >=0 = disabled-list item selected.
+        # For disable/remove: start at first item.
+        self._mgmt_sel    = -1 if action == "add" else 0
+        self._mgmt_scroll = 0
 
     def _handle_mgmt_key(self, key) -> bool:
-        if key == 27:  # Escape
-            self._mgmt_mode   = None
-            self._mgmt_buf    = ""
-            self._mgmt_result = ""
-        elif key in (curses.KEY_BACKSPACE, 127, 8):
-            self._mgmt_buf = self._mgmt_buf[:-1]
-        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
-            if self._mgmt_buf.strip():
-                action, site_idx = self._mgmt_mode
-                site    = self.sites[site_idx]
-                result  = _modify_config_streamer(site.config_path,
-                                                  self._mgmt_buf.strip(), action)
-                # Invalidate the read cache and force UI panels to reload
-                site.invalidate_config_cache()
-                self.config_editor.load_config(site.config_path)
-                self.config_editor.priority_editor.force_reload()
-                
-                site.trigger_event.set()
-                self._mgmt_result = result
-                self._mgmt_buf    = ""
-            else:
+        action, site_idx = self._mgmt_mode
+        site = self.sites[site_idx]
+
+        if action in ("disable", "remove"):
+            # ── List-picker mode ───────────────────────────────────────────────
+            enabled = self._mgmt_enabled_streamers(site)
+            if key == 27:  # Escape
                 self._mgmt_mode   = None
                 self._mgmt_buf    = ""
                 self._mgmt_result = ""
-        elif 32 <= key < 127:
-            self._mgmt_buf += chr(key)
+            elif key == curses.KEY_UP:
+                self._mgmt_sel = max(0, self._mgmt_sel - 1)
+            elif key == curses.KEY_DOWN:
+                self._mgmt_sel = min(max(0, len(enabled) - 1), self._mgmt_sel + 1)
+            elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+                if enabled:
+                    username = enabled[self._mgmt_sel]
+                    result   = _modify_config_streamer(site.config_path, username, action)
+                    site.invalidate_config_cache()
+                    self.config_editor.load_config(site.config_path)
+                    self.config_editor.priority_editor.force_reload()
+                    site.trigger_event.set()
+                    self._mgmt_result = result
+                    # Keep selection clamped to the (now shorter) list
+                    new_enabled = self._mgmt_enabled_streamers(site)
+                    self._mgmt_sel = min(self._mgmt_sel, max(0, len(new_enabled) - 1))
+                else:
+                    self._mgmt_mode   = None
+                    self._mgmt_buf    = ""
+                    self._mgmt_result = ""
+        else:
+            # ── ADD mode: select a disabled streamer OR type a new name ────────
+            disabled = self._mgmt_disabled_streamers(site)
+            if key == 27:  # Escape → go back
+                self._mgmt_mode   = None
+                self._mgmt_buf    = ""
+                self._mgmt_result = ""
+            elif key == curses.KEY_UP:
+                if disabled:
+                    # Move up in list; clamp at 0 (don't wrap into text input)
+                    self._mgmt_sel = max(0, self._mgmt_sel - 1) if self._mgmt_sel >= 0 \
+                                     else len(disabled) - 1
+            elif key == curses.KEY_DOWN:
+                if disabled:
+                    if self._mgmt_sel == -1:
+                        self._mgmt_sel = 0
+                    else:
+                        self._mgmt_sel = min(len(disabled) - 1, self._mgmt_sel + 1)
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                self._mgmt_buf = self._mgmt_buf[:-1]
+                self._mgmt_sel = -1   # typing refocuses text input
+            elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+                if self._mgmt_buf.strip():
+                    # Text input takes priority when it has content
+                    result = _modify_config_streamer(site.config_path,
+                                                     self._mgmt_buf.strip(), "add")
+                    site.invalidate_config_cache()
+                    self.config_editor.load_config(site.config_path)
+                    self.config_editor.priority_editor.force_reload()
+                    site.trigger_event.set()
+                    self._mgmt_result = result
+                    self._mgmt_buf    = ""
+                elif self._mgmt_sel >= 0 and disabled:
+                    # Re-enable the selected disabled streamer
+                    username = disabled[self._mgmt_sel]
+                    result   = _modify_config_streamer(site.config_path, username, "add")
+                    site.invalidate_config_cache()
+                    self.config_editor.load_config(site.config_path)
+                    self.config_editor.priority_editor.force_reload()
+                    site.trigger_event.set()
+                    self._mgmt_result = result
+                    # Clamp selection to refreshed list
+                    new_disabled = self._mgmt_disabled_streamers(site)
+                    self._mgmt_sel = min(self._mgmt_sel, max(-1, len(new_disabled) - 1))
+                else:
+                    self._mgmt_mode   = None
+                    self._mgmt_buf    = ""
+                    self._mgmt_result = ""
+            elif 32 <= key < 127:
+                self._mgmt_buf += chr(key)
+                self._mgmt_sel = -1   # typing refocuses text input
         return True
 
     # ── Live global-config apply (no restart needed) ──────────────────────────
