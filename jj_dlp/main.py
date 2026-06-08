@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.15.1"
+__version__ = "1.15.2"
 
 import subprocess
 import time
@@ -579,6 +579,8 @@ class SiteState:
         self._cfg_cache:          Optional[dict] = None
         self._cfg_cache_time:     float = 0.0
         self._cfg_cache_lock:     threading.Lock = threading.Lock()
+        
+        self.last_ffmpeg_error:   Dict[str, float] = {}
 
     def register_proc(self, streamer: str, proc) -> None:
         """Register an active yt-dlp subprocess so stop() can kill it."""
@@ -604,6 +606,7 @@ class SiteState:
         with self.dash_lock:
             if count > 0:
                 self.ffmpeg_error_counts[streamer] = count
+                self.last_ffmpeg_error[streamer] = time.time()
             else:
                 self.ffmpeg_error_counts.pop(streamer, None)
 
@@ -1312,12 +1315,13 @@ def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) ->
     for s in _global_sites:
         with s.dash_lock:
             counts = dict(s.ffmpeg_error_counts)
+            recent = dict(getattr(s, "last_ffmpeg_error", {}))
         with s.lock:
             recording = set(s.currently_recording)
         for st in recording:
             if st == triggering_streamer and s is triggering_site:
                 continue
-            if counts.get(st, 0) > 0:
+            if counts.get(st, 0) > 0 or (now - recent.get(st, 0.0) < 300):
                 has_other_errors = True
                 break
         if has_other_errors:
