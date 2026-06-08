@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.14.0"
+__version__ = "1.15.0"
 
 import subprocess
 import time
@@ -155,7 +155,8 @@ def _parse_twitch_section(parser: configparser.ConfigParser) -> dict:
 
 
 def _parse_checker_and_downloader(parser: configparser.ConfigParser) -> tuple:
-    """Return (checker_cmd, downloader_cmd) lists from [Checker] and [Downloader]."""
+    """Return (checker_cmd, downloader_cmd, lq_downloader_cmd) lists from
+    [Checker], [Downloader], and [LQ_Downloader]."""
     checker_cmd = []
     if parser.has_section("Checker"):
         for key, val in parser.items("Checker"):
@@ -170,7 +171,14 @@ def _parse_checker_and_downloader(parser: configparser.ConfigParser) -> tuple:
             if item:
                 downloader_cmd.extend(shlex.split(item, posix=(sys.platform != "win32")))
 
-    return checker_cmd, downloader_cmd
+    lq_downloader_cmd = []
+    if parser.has_section("LQ_Downloader"):
+        for key, val in parser.items("LQ_Downloader"):
+            item = (val or key).strip()
+            if item:
+                lq_downloader_cmd.extend(shlex.split(item, posix=(sys.platform != "win32")))
+
+    return checker_cmd, downloader_cmd, lq_downloader_cmd
 
 
 def _derive_username_idx(cfg_dict: dict) -> Optional[int]:
@@ -289,14 +297,15 @@ def load_config(config_path: str) -> dict:
     cfg_dict["streamers"] = streamers
     cfg_dict["blocked"]   = blocked
 
-    checker_cmd, downloader_cmd = _parse_checker_and_downloader(parser)
+    checker_cmd, downloader_cmd, lq_downloader_cmd = _parse_checker_and_downloader(parser)
 
     cfg_dict.update({
-        "checker_cmd":    checker_cmd,
-        "downloader_cmd": downloader_cmd,
-        "username_idx":   _derive_username_idx(cfg_dict),
-        "config_path":    config_path,
-        "yt_dlp_path":    _resolve_yt_dlp_path(cfg_dict),
+        "checker_cmd":       checker_cmd,
+        "downloader_cmd":    downloader_cmd,
+        "lq_downloader_cmd": lq_downloader_cmd,
+        "username_idx":      _derive_username_idx(cfg_dict),
+        "config_path":       config_path,
+        "yt_dlp_path":       _resolve_yt_dlp_path(cfg_dict),
         **_parse_twitch_section(parser),
     })
 
@@ -702,6 +711,16 @@ _CHECKER_STDERR_PREFIX: str = "\x00checker_err\x00"
 # be toggled independently of regular activity messages.
 _DEBUG_LOG_PREFIX: str = "\x00debug\x00"
 FFMPEG_ERROR_RESTART_THRESHOLD: int = 200
+
+# ── LQ (low-quality) downloader bandwidth-saving state ───────────────────────
+# Maps (streamer, site_label) → epoch when an LQ_Downloader recording was last
+# *attempted* for that streamer.  Entries are cleared when the streamer goes
+# offline.  Any entry whose timestamp is within _LQ_RECENT_WINDOW seconds of
+# now is considered "recent" and makes the streamer ineligible for another LQ
+# trigger during that online session.
+_lq_attempted: Dict[Tuple[str, str], float] = {}
+_lq_attempted_lock: threading.Lock = threading.Lock()
+_LQ_RECENT_WINDOW: float = 30 * 60   # 30 minutes
 
 # Wire logger.dbg to this module's OUTPUT_MODE
 def _get_output_mode() -> int:
@@ -1229,7 +1248,163 @@ def wait_for_new_file_growth(filepath: str, timeout: float = 15.0,
 
 
 
-def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
+def _launch_lq_recording(streamer: str, cfg: dict, site: "SiteState",
+                          site_label: str) -> None:
+    """Wait for the evicted recording thread to exit, then start an LQ recording.
+
+    Runs in its own daemon thread so it never blocks the caller.
+    """
+    deadline = time.time() + 20.0
+    while time.time() < deadline:
+        with site.lock:
+            if streamer not in site.currently_recording:
+                break
+        time.sleep(0.3)
+
+    with site.lock:
+        if streamer in site.currently_recording:
+            dbg(f"[LQ] Timed out waiting for {streamer} eviction — aborting LQ start")
+            return
+        # Claim the slot before starting the thread.
+        site.currently_recording.add(streamer)
+        site.evicted_streamers.discard(streamer)
+        with site.dash_lock:
+            if streamer not in site.dash_live_since:
+                site.dash_live_since[streamer] = time.time()
+
+    site.log_line(f"LQ recording starting for {streamer}")
+    dbg(f"[LQ] Launching LQ record_stream for {streamer}")
+    t = threading.Thread(
+        target=record_stream,
+        args=(streamer, cfg, site),
+        kwargs={"use_lq": True},
+        daemon=True,
+        name=f"lq-rec-{streamer}",
+    )
+    t.start()
+    site.recording_threads.append(t)
+
+
+def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) -> None:
+    """Evaluate whether LQ-downloader conditions are satisfied and, if so,
+    stop the lowest-priority eligible recording and restart it in LQ mode.
+
+    Conditions for triggering:
+      1. At least one OTHER currently-recording streamer has any ffmpeg errors.
+      2. There is at least one currently-recording streamer that:
+         - is not the triggering streamer,
+         - is not a bypass streamer,
+         - was not recently attempted with the LQ downloader (< _LQ_RECENT_WINDOW),
+         - has an [LQ_Downloader] section configured in its site config.
+    """
+    now = time.time()
+
+    # ── Condition 1: another active recording must have ffmpeg errors ─────────
+    has_other_errors = False
+    for s in _global_sites:
+        with s.dash_lock:
+            counts = dict(s.ffmpeg_error_counts)
+        with s.lock:
+            recording = set(s.currently_recording)
+        for st in recording:
+            if st == triggering_streamer and s is triggering_site:
+                continue
+            if counts.get(st, 0) > 0:
+                has_other_errors = True
+                break
+        if has_other_errors:
+            break
+
+    if not has_other_errors:
+        dbg("[LQ] Skipping LQ trigger — no other recording has ffmpeg errors")
+        return
+
+    # ── Load priority map from global.json ────────────────────────────────────
+    with _global_json_lock:
+        global_data = _load_global_json()
+    config_id = _get_config_id()
+    saved_entries = (global_data.get("priorities", {})
+                                .get(config_id, {})
+                                .get("entries", []))
+    priority_map: Dict[Tuple[str, str], dict] = {}
+    for e in saved_entries:
+        key = (e.get("streamer", ""), e.get("site", ""))
+        priority_map[key] = {
+            "priority": e.get("priority", 999999),
+            "bypass":   e.get("bypass", False),
+        }
+
+    # ── Condition 2: find eligible candidates ─────────────────────────────────
+    candidates = []
+    for s in _global_sites:
+        try:
+            s_cfg = s.get_cached_config()
+        except Exception:
+            continue
+        # Site must have an LQ_Downloader section configured.
+        if not s_cfg.get("lq_downloader_cmd"):
+            continue
+        s_label = s_cfg.get("site_label", os.path.basename(s.config_path))
+        with s.lock:
+            recording = set(s.currently_recording) - s.evicted_streamers
+        for st in recording:
+            if st == triggering_streamer and s is triggering_site:
+                continue
+            key = (st, s_label)
+            info = priority_map.get(key, {"priority": 999999, "bypass": False})
+            # Bypass streamers are never throttled.
+            if info.get("bypass", False):
+                continue
+            # Skip if recently LQ-attempted.
+            with _lq_attempted_lock:
+                attempt_ts = _lq_attempted.get(key, 0.0)
+            if now - attempt_ts < _LQ_RECENT_WINDOW:
+                dbg(f"[LQ] Skipping {st} — LQ attempted {now - attempt_ts:.0f}s ago (window={_LQ_RECENT_WINDOW}s)")
+                continue
+            candidates.append({
+                "streamer":  st,
+                "site":      s,
+                "site_label": s_label,
+                "priority":  info.get("priority", 999999),
+                "cfg":       s_cfg,
+            })
+
+    if not candidates:
+        dbg("[LQ] LQ conditions met but no eligible candidates found")
+        return
+
+    # ── Choose the lowest-priority (highest numeric value) candidate ──────────
+    target = max(candidates, key=lambda x: x["priority"])
+    tgt_str   = target["streamer"]
+    tgt_site  = target["site"]
+    tgt_cfg   = target["cfg"]
+    tgt_label = target["site_label"]
+
+    dbg(f"[LQ] Targeting {tgt_str} (priority={target['priority']}) for LQ restart")
+    tgt_site.log_line(
+        f"Bandwidth save: stopping {tgt_str} and restarting in LQ mode"
+    )
+
+    # Record the attempt *before* evicting so re-entrant calls can't double-target.
+    with _lq_attempted_lock:
+        _lq_attempted[(tgt_str, tgt_label)] = now
+
+    # Evict the current recording.
+    with tgt_site.lock:
+        tgt_site.evicted_streamers.add(tgt_str)
+    tgt_site.kill_proc_for_streamer(tgt_str)
+
+    # Launch the LQ restart in a background thread (waits for eviction to clear).
+    threading.Thread(
+        target=_launch_lq_recording,
+        args=(tgt_str, tgt_cfg, tgt_site, tgt_label),
+        daemon=True,
+        name=f"lq-launch-{tgt_str}",
+    ).start()
+
+
+def record_stream(streamer: str, cfg: dict, site: "SiteState",
+                  use_lq: bool = False) -> None:
     channel_url = cfg["site_tmpl"].format(username=streamer)
     output_dir  = cfg["output_dir"]
     os.makedirs(output_dir, exist_ok=True)
@@ -1241,7 +1416,16 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
         f"split_after_minutes={split_after_minutes} split_after_seconds={split_after_seconds} "
         f"output_dir={output_dir!r}")
 
-    site.log_line(f"Recording started: {streamer}")
+    site.log_line(f"Recording started: {streamer}" + (" [LQ]" if use_lq else ""))
+
+    # ── LQ attempt bookkeeping ────────────────────────────────────────────────
+    # Record the attempt immediately so that re-entrant LQ triggers during this
+    # session cannot target this streamer again (even if the proc hasn't opened yet).
+    if use_lq:
+        _lq_site_label = cfg.get("site_label", os.path.basename(site.config_path))
+        with _lq_attempted_lock:
+            _lq_attempted[(_lq_site_label_key := (streamer, _lq_site_label))] = time.time()
+        dbg(f"[LQ] LQ attempt recorded for {streamer} on {_lq_site_label}")
 
     proc = None
     close_logs = lambda: None
@@ -1262,9 +1446,18 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
             output_path = os.path.join(output_dir, current_output_tmpl)
 
+            # ── Select downloader command (normal vs LQ) ──────────────────
+            _active_dl_cmd = cfg["downloader_cmd"]
+            if use_lq:
+                _lq_cmd = cfg.get("lq_downloader_cmd", [])
+                if _lq_cmd:
+                    _active_dl_cmd = _lq_cmd
+                else:
+                    dbg(f"[LQ] use_lq=True but lq_downloader_cmd is empty — falling back to normal downloader for {streamer}")
+
             cmd = build_yt_dlp_command(
                 cfg["yt_dlp_path"],
-                cfg["downloader_cmd"],
+                _active_dl_cmd,
                 ["-o", output_path, channel_url]
             )
 
@@ -1477,6 +1670,12 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                         close_logs()
                     except Exception:
                         pass
+
+                    # ── LQ bandwidth-saving trigger (non-LQ recordings only) ──
+                    # Only trigger LQ for normal recordings; if a LQ recording
+                    # itself hits the threshold we just let it restart normally.
+                    if not use_lq:
+                        _maybe_trigger_lq(site, streamer)
 
                     time.sleep(5)
                     break
@@ -1729,6 +1928,13 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                     close_logs()
                 except Exception:
                     pass
+
+                # ── Clear LQ tracking when streamer goes offline ──────────
+                # This ensures the next time they go live the normal downloader
+                # is used (LQ is only attempted once per online session).
+                _offline_site_label = cfg.get("site_label", os.path.basename(site.config_path))
+                with _lq_attempted_lock:
+                    _lq_attempted.pop((streamer, _offline_site_label), None)
 
                 with site.dash_lock:
                     site.dash_last_live[streamer] = time.time()
