@@ -67,6 +67,13 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
             "Which branch of jj-dlp to update to. (main, testing, or experimental)."),
     _KeyDef("MAX_CONCURRENT_REC",    "global", "0",     True,
             "Maximum number of streamers to record simultaneously (0 = unlimited)."),
+    _KeyDef("LQ_DOWNLOADER",         "global", "false", True,
+            "Enable the LQ downloader bandwidth-saving feature. When enabled and ffmpeg errors "
+            "exceed the threshold on any recording, the lowest-priority recording is restarted "
+            "using the [LQ_Downloader] config section (true/false)."),
+    _KeyDef("FF_ERR_THRESH",         "global", "200",   True,
+            "Number of ffmpeg errors before a recording is automatically restarted "
+            "(0 = disabled, default 200)."),
 
     # ── Site keys (per-site .conf) ────────────────────────────────────────────
     _KeyDef("SITE_LABEL",            "site",   "",      True,
@@ -708,13 +715,13 @@ class SiteSortManager:
 
 def _validate_value(key: str, value: str) -> tuple[bool, str]:
     """Validate config values based on their expected types."""
-    bool_keys = {"DEBUG_LOGS", "CHECK_FOR_UPDATES", "ASK_FOR_BROWSER", "ASK_FOR_CONFIG", 
-                 "PANEL_RESIZE", "LOGGING", "SPLIT_LOGS", "POPUP_NOTIFICATIONS", 
-                 "DOWNLOADER_COOKIES", "CHECKER_COOKIES"}
-    int_keys = {"UPDATE_INTERVAL", "SITE_ORDER", "CHECK_INTERVAL", "COOLDOWN_AFTER_RECORDING", 
-                "SPLIT_AFTER", "STALL_CHECK_INTERVAL", "STALL_TIMEOUT", "CONFIG_CHECK_INTERVAL", 
-                "POPUP_TIMEOUT", "POPUP_COOLDOWN", "PROGRESS_BAR_MAX_HOURS", "PROGRESS_BAR_WIDTH", 
-                "LAST_LIVE_HIGHLIGHT", "MAX_CONCURRENT_REC"}
+    bool_keys = {"DEBUG_LOGS", "CHECK_FOR_UPDATES", "ASK_FOR_BROWSER", "ASK_FOR_CONFIG",
+                 "PANEL_RESIZE", "LOGGING", "SPLIT_LOGS", "POPUP_NOTIFICATIONS",
+                 "DOWNLOADER_COOKIES", "CHECKER_COOKIES", "LQ_DOWNLOADER"}
+    int_keys = {"UPDATE_INTERVAL", "SITE_ORDER", "CHECK_INTERVAL", "COOLDOWN_AFTER_RECORDING",
+                "SPLIT_AFTER", "STALL_CHECK_INTERVAL", "STALL_TIMEOUT", "CONFIG_CHECK_INTERVAL",
+                "POPUP_TIMEOUT", "POPUP_COOLDOWN", "PROGRESS_BAR_MAX_HOURS", "PROGRESS_BAR_WIDTH",
+                "LAST_LIVE_HIGHLIGHT", "MAX_CONCURRENT_REC", "FF_ERR_THRESH"}
     if key in bool_keys:
         if value.lower() not in ("true", "false", "yes", "no", "1", "0"):
             return False, "Must be true or false"

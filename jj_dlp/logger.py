@@ -159,6 +159,7 @@ def configure(output_mode_fn, dashboard_log_fn=None, dashboard_dbg_fn=None) -> N
 #   KILL     — yt-dlp process termination
 #   CONFIG   — config editor save/backup operations
 #   POPUP    — live popup notification creation and suppression
+#   LQ       — low-quality/bandwidth-saving downloader logic
 #
 DBG_FILTERS: dict[str, bool] = {
     "DRAIN":   False,
@@ -173,6 +174,7 @@ DBG_FILTERS: dict[str, bool] = {
     "KILL":    False,
     "STALL":   False,
     "POPUP":   False,
+    "LQ":      False,
 }
 
 _dbg_filters_lock = threading.Lock()

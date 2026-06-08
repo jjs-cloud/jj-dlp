@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.15.0"
+__version__ = "1.15.1"
 
 import subprocess
 import time
@@ -389,6 +389,8 @@ def load_global_config() -> dict:
         "ask_for_browser":    _bool("ASK_FOR_BROWSER", True),
         "ask_for_config":     _bool("ASK_FOR_CONFIG", True),
         "max_concurrent_rec": _int("MAX_CONCURRENT_REC", 0),
+        "lq_downloader":      _bool("LQ_DOWNLOADER", False),
+        "ff_err_thresh":      _int("FF_ERR_THRESH", 200),
     }
 
 def _write_global_conf_key(key: str, value: str) -> None:
@@ -1298,6 +1300,12 @@ def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) ->
          - has an [LQ_Downloader] section configured in its site config.
     """
     now = time.time()
+
+    # ── Gate: LQ_DOWNLOADER must be enabled in global.conf ───────────────────
+    _gcfg = load_global_config()
+    if not _gcfg.get("lq_downloader", False):
+        dbg("[LQ] Skipping LQ trigger — LQ_DOWNLOADER is disabled in global config")
+        return
 
     # ── Condition 1: another active recording must have ffmpeg errors ─────────
     has_other_errors = False
@@ -3740,6 +3748,25 @@ class JJDlpDashboard:
             f"DEBUG_LOG_PATH={final_path!r}"
         )
 
+        # ── FF_ERR_THRESH ─────────────────────────────────────────────────────
+        # Apply the new ffmpeg error threshold immediately so in-flight drain
+        # threads pick it up on their next error check.
+        global FFMPEG_ERROR_RESTART_THRESHOLD
+        _new_thresh_raw = new_cfg.get("FF_ERR_THRESH", "200").strip()
+        try:
+            _new_thresh = int(_new_thresh_raw)
+            if _new_thresh >= 0:
+                FFMPEG_ERROR_RESTART_THRESHOLD = _new_thresh
+                _logger.dbg(
+                    f"[CONFIG] apply_global_cfg: FFMPEG_ERROR_RESTART_THRESHOLD "
+                    f"updated to {_new_thresh}"
+                )
+        except (ValueError, TypeError):
+            _logger.dbg(
+                f"[CONFIG] apply_global_cfg: invalid FF_ERR_THRESH value "
+                f"{_new_thresh_raw!r} — keeping current threshold"
+            )
+
     # ── Run loop ──────────────────────────────────────────────────────────────
     def run(self):
         curses.curs_set(0)
@@ -4248,6 +4275,12 @@ def main() -> None:
         raw_path = global_cfg.get("debug_log_path", "")
         debug_path = raw_path if raw_path else get_debug_log_path(load_config(config_paths[0]))
     _configure_debug_log(enabled=any_debug, path=debug_path)
+
+    # ── Apply FF_ERR_THRESH from global config ────────────────────────────────
+    global FFMPEG_ERROR_RESTART_THRESHOLD
+    _startup_thresh = global_cfg.get("ff_err_thresh", 200)
+    if _startup_thresh >= 0:
+        FFMPEG_ERROR_RESTART_THRESHOLD = _startup_thresh
         
     # ── Launch per-site state + threads ──────────────────────────────────────
     global _global_sites
