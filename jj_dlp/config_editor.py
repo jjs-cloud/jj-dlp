@@ -1565,8 +1565,11 @@ class ConfigEditor:
             return self.priority_editor.handle_key(key)
 
         if self._focus == "global":
-            # Escape in global panel without popup → exit Config tab
-            if key == 27 and not self.global_editor.popup_mode:
+            # Escape in global panel without any popup → exit Config tab.
+            # Must also check debug_tags_mode: when the DEBUG LOGGING popup is
+            # open, ESC should close it (handled inside global_editor.handle_key)
+            # rather than switching away from the Config tab.
+            if key == 27 and not self.global_editor.popup_mode and not self.global_editor.debug_tags_mode:
                 self.dashboard.selected_tab = 0
                 return True
             return self.global_editor.handle_key(key)

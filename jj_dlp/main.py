@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.15.2"
+__version__ = "1.15.3"
 
 import subprocess
 import time
@@ -666,7 +666,7 @@ class SiteState:
 
     def log_line(self, msg: str) -> None:
         """Append a timestamped line to the site's activity log (capped at 200 lines)."""
-        ts = datetime.now().strftime("%H:%M:%S")
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         line = f"[{ts}] {msg}"
         with self.dash_lock:
             self.dash_log_lines.append(line)
