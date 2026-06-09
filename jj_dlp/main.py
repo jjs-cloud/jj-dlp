@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.15.3"
+__version__ = "1.15.4"
 
 import subprocess
 import time
@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 import shutil
 
 from .deps import ensure_curses, plain_ffmpeg_check
+from . import logger as _logger
 from .logger import (
     startup_dbg, startup_dbg_flush,
     dbg,
@@ -26,7 +27,6 @@ from .logger import (
     get_debug_log_path, get_log_path, get_log_file_paths,
     ENABLE_CRASH_LOG,
     configure_debug_log as _configure_debug_log,
-    configure as _configure_logger,
 )
 
 from .browser_config import (
@@ -692,12 +692,8 @@ class SiteState:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Global singletons (output mode)
+# Global singletons
 # ══════════════════════════════════════════════════════════════════════════════
-
-# Output mode: 1=curses dashboard  2=terminal
-OUTPUT_MODE = 1
-output_mode_lock = threading.Lock()
 
 # Update availability flag (set during startup, read by dashboard)
 UPDATE_AVAILABLE = False
@@ -727,22 +723,11 @@ _lq_attempted: Dict[Tuple[str, str], float] = {}
 _lq_attempted_lock: threading.Lock = threading.Lock()
 _LQ_RECENT_WINDOW: float = 30 * 60   # 30 minutes
 
-# Wire logger.dbg to this module's OUTPUT_MODE
-def _get_output_mode() -> int:
-    with output_mode_lock:
-        return OUTPUT_MODE
-
-_configure_logger(_get_output_mode)
-
-
-
 # ── Keybinds ──
-KEYBIND_OUTPUT    = "o"
 KEYBIND_ADD       = "a"
 KEYBIND_REMOVE    = "r"
 KEYBIND_DISABLE   = "d"
 KEYBIND_LABELS = {
-    KEYBIND_OUTPUT:    "O",
     KEYBIND_ADD:       "A",
     KEYBIND_REMOVE:    "R",
     KEYBIND_DISABLE:   "D",
@@ -1047,11 +1032,6 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
                     site.add_stdout_line(line)
                 elif pipe_type == "stderr":
                     site.add_stderr_line(line)
-            with output_mode_lock:
-                mode = OUTPUT_MODE
-            if mode == 2:
-                # In terminal mode, print stdout and stderr
-                print(line, flush=True)
             if (ffmpeg_error_counter is not None and ffmpeg_error_event is not None
                     and FFMPEG_ERROR_RESTART_THRESHOLD > 0 and not ffmpeg_error_event.is_set()):
                 line_lower = line.lower()
@@ -3604,11 +3584,6 @@ class JJDlpDashboard:
         elif key in (ord('s'), ord('S')):
             if current_tab_name == "Dashboard":
                 self.sort_manager.open_popup()
-        elif key == ord('\x0f'):  # Ctrl+O — switch to terminal mode
-            with output_mode_lock:
-                global OUTPUT_MODE
-                OUTPUT_MODE = 2
-            return False  # exit curses loop, drop to terminal
         return True
 
     def _start_mgmt(self, action: str):
@@ -4307,7 +4282,7 @@ def main() -> None:
                 if len(s.dash_log_lines) > 200:
                     s.dash_log_lines = s.dash_log_lines[-200:]
 
-    _logger.configure(_get_output_mode, _dash_log, _dash_dbg)
+    _logger.configure(_dash_log, _dash_dbg)
 
     # Sort sites by site_order so they appear in the desired positions in the dashboard
     sites.sort(key=lambda s: s.site_order)
@@ -4341,28 +4316,7 @@ def main() -> None:
                 return
             JJDlpDashboard(stdscr, sites, global_cfg=global_cfg).run()
 
-        while True:
-            with output_mode_lock:
-                mode = OUTPUT_MODE
-            if mode == 1:
-                curses.wrapper(_run_dashboard)
-            # After curses exits check mode again
-            with output_mode_lock:
-                mode = OUTPUT_MODE
-            if mode != 1:
-                # Terminal mode — just wait for Ctrl+C
-                print("\n[jj-dlp terminal mode] Press Ctrl+O to return to dashboard, Ctrl+C to quit.\n",
-                      flush=True)
-                try:
-                    while True:
-                        with output_mode_lock:
-                            if OUTPUT_MODE == 1:
-                                break
-                        time.sleep(0.5)
-                except KeyboardInterrupt:
-                    break
-            else:
-                break
+        curses.wrapper(_run_dashboard)
 
     except KeyboardInterrupt:
         pass

@@ -22,7 +22,7 @@ get_debug_log_config()             Return current (enabled, path) debug-log stat
 get_dbg_filters()                  Return a snapshot copy of DBG_FILTERS {tag: bool}.
 set_dbg_filter(tag, enabled)       Atomically update one tag in DBG_FILTERS.
 load_dbg_filters(overrides)        Batch-apply saved tag states (startup restore).
-configure(output_mode_fn, ...)     Inject output-mode accessor, dashboard logger, and
+configure(dashboard_log_fn, ...)   Inject dashboard logger and optional per-line debug
                                    optional per-line debug callback for the Log tab.
 get_debug_log_path(cfg)            Resolve the debug log path from a config dict.
 get_log_path(cfg)                  Resolve the activity log path from a config dict.
@@ -116,25 +116,23 @@ def load_dbg_filters(overrides: dict) -> None:
             if tag in DBG_FILTERS:
                 DBG_FILTERS[tag] = bool(val)
 
-# ── References to output-mode state (injected by main module at startup) ──────
+# ── References to dashboard callbacks (injected by main module at startup) ────
 # These are set by jj-dlp.py via configure() so logger doesn't import main.
-_output_mode_ref   = None   # callable() -> int  (1=curses, 2=terminal)
 _dashboard_log_ref = None   # callable(str) -> None  (debug-log write errors)
 _dashboard_dbg_ref = None   # callable(str) -> None  (every dbg() line that passes filters)
 
 
-def configure(output_mode_fn, dashboard_log_fn=None, dashboard_dbg_fn=None) -> None:
+def configure(dashboard_log_fn=None, dashboard_dbg_fn=None) -> None:
     """
-    Inject accessor for OUTPUT_MODE and optional dashboard callbacks.
+    Inject optional dashboard callbacks.
 
     dashboard_log_fn  – called with a string when a debug-log write error
                         occurs (existing behaviour).
     dashboard_dbg_fn  – called with every dbg() line that passes the tag
                         filter, so the Log tab can optionally display it.
-    Call once from jj-dlp.py after the globals are defined there.
+    Call once from jj-dlp.py after sites are set up.
     """
-    global _output_mode_ref, _dashboard_log_ref, _dashboard_dbg_ref
-    _output_mode_ref = output_mode_fn
+    global _dashboard_log_ref, _dashboard_dbg_ref
     if dashboard_log_fn is not None:
         _dashboard_log_ref = dashboard_log_fn
     if dashboard_dbg_fn is not None:
