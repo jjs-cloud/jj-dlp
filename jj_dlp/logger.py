@@ -156,10 +156,13 @@ _tags_cache: dict[str, bool] = {}
 _tags_cache_mtime: float = 0.0
 _tags_cache_lock = threading.Lock()
 
+# global.json lives inside the jj_dlp/ package directory (same dir as this file)
+_GLOBAL_JSON_PATH: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "global.json")
+
 def _get_active_tags() -> dict[str, bool]:
     """Return the currently enabled debug tags from global.json, using an mtime cache."""
     global _tags_cache, _tags_cache_mtime
-    path = os.path.join(_ROOT_DIR, "global.json")
+    path = _GLOBAL_JSON_PATH
     
     with _tags_cache_lock:
         try:

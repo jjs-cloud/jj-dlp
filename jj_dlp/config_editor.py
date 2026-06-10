@@ -882,19 +882,8 @@ class GlobalConfigEditor:
         except ImportError:
             import logger as _logger  # type: ignore[no-redef]
 
-        # Start from the live logger state …
+        # get_dbg_filters() reads the live state directly from global.json.
         state = _logger.get_dbg_filters()
-
-        # … then overlay with any overrides previously persisted to global.json.
-        try:
-            from .main import _global_json_lock, _load_global_json
-            with _global_json_lock:
-                gdata = _load_global_json()
-            for tag, val in gdata.get("debug_log_tags", {}).items():
-                if tag in state:
-                    state[tag] = bool(val)
-        except Exception:
-            pass
 
         self._debug_tags_bool   = self.editing_item.value.strip().lower()
         self._debug_tags_state  = state
