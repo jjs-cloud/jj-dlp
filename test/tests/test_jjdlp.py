@@ -654,11 +654,12 @@ class TestLoggerModule(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def test_debug_log_writes_when_enabled(self):
+    @unittest.mock.patch("jj_dlp.logger._get_active_tags")
+    def test_debug_log_writes_when_enabled(self, mock_get_active_tags):
+        mock_get_active_tags.return_value = {"KILL": True}
         from jj_dlp import logger
         log_path = os.path.join(self._tmpdir, "debug.log")
         logger.configure_debug_log(enabled=True, path=log_path)
-        logger.DBG_FILTERS["KILL"] = True
         logger.dbg("[KILL] test message from unit test")
         logger.configure_debug_log(enabled=False, path="")
         self.assertTrue(os.path.isfile(log_path))
@@ -673,15 +674,14 @@ class TestLoggerModule(unittest.TestCase):
         logger.dbg("[KILL] should not appear")
         self.assertFalse(os.path.isfile(log_path))
 
-    def test_dbg_filter_blocks_tag(self):
+    @unittest.mock.patch("jj_dlp.logger._get_active_tags")
+    def test_dbg_filter_blocks_tag(self, mock_get_active_tags):
+        mock_get_active_tags.return_value = {"DRAIN": False}
         from jj_dlp import logger
         log_path = os.path.join(self._tmpdir, "filtered.log")
         logger.configure_debug_log(enabled=True, path=log_path)
-        orig = logger.DBG_FILTERS.get("DRAIN")
-        logger.DBG_FILTERS["DRAIN"] = False
         logger.dbg("[DRAIN] this should be filtered")
         logger.configure_debug_log(enabled=False, path="")
-        logger.DBG_FILTERS["DRAIN"] = orig
         if os.path.isfile(log_path):
             with open(log_path, encoding="utf-8") as f:
                 content = f.read()

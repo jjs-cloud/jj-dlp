@@ -956,13 +956,6 @@ class GlobalConfigEditor:
         except Exception as e:
             _dbg(f"[CONFIG] _save_debug_tags: failed to write global.json: {e}")
 
-        # 3. Apply tag states to the live logger immediately.
-        try:
-            from . import logger as _logger
-        except ImportError:
-            import logger as _logger  # type: ignore[no-redef]
-        _logger.load_dbg_filters(self._debug_tags_state)
-
     def _draw_debug_tags_popup(self, stdscr) -> None:
         """Draw the combined bool-toggle + per-tag-toggle popup for DEBUG_LOGS."""
         db   = self.dashboard

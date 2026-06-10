@@ -19,9 +19,7 @@ dbg(msg)                           Write to debug log (filtered by DBG_FILTERS).
 log_crash(e)                       Write an unhandled exception to jj-dlp-crash.log.
 configure_debug_log(enabled, path) Atomically update the debug-log config.
 get_debug_log_config()             Return current (enabled, path) debug-log state.
-get_dbg_filters()                  Return a snapshot copy of DBG_FILTERS {tag: bool}.
-set_dbg_filter(tag, enabled)       Atomically update one tag in DBG_FILTERS.
-load_dbg_filters(overrides)        Batch-apply saved tag states (startup restore).
+get_dbg_filters()                  Return a snapshot copy of the current tag states.
 configure(dashboard_log_fn, ...)   Inject dashboard logger and optional per-line debug
                                    optional per-line debug callback for the Log tab.
 get_debug_log_path(cfg)            Resolve the debug log path from a config dict.
@@ -89,32 +87,8 @@ def get_dbg_filters() -> dict[str, bool]:
     Call this to read tag states without touching module internals directly.
     Insertion order (Python 3.7+) is preserved so callers get a stable list.
     """
-    with _dbg_filters_lock:
-        return dict(DBG_FILTERS)
-
-
-def set_dbg_filter(tag: str, enabled: bool) -> None:
-    """Atomically update a single tag in DBG_FILTERS.
-
-    Unknown tags are silently ignored so stale callers can't introduce
-    phantom filter keys.
-    """
-    with _dbg_filters_lock:
-        if tag in DBG_FILTERS:
-            DBG_FILTERS[tag] = bool(enabled)
-
-
-def load_dbg_filters(overrides: dict) -> None:
-    """Batch-apply saved tag states from a config / JSON dict.
-
-    Only keys already present in DBG_FILTERS are updated; unknown keys in
-    *overrides* are ignored so stale saved data can't introduce phantom tags.
-    Call this at startup after loading global.json to restore persisted states.
-    """
-    with _dbg_filters_lock:
-        for tag, val in overrides.items():
-            if tag in DBG_FILTERS:
-                DBG_FILTERS[tag] = bool(val)
+    active = _get_active_tags()
+    return {tag: bool(active.get(tag, False)) for tag in DBG_TAGS}
 
 # ── References to dashboard callbacks (injected by main module at startup) ────
 # These are set by jj-dlp.py via configure() so logger doesn't import main.
@@ -159,23 +133,50 @@ def configure(dashboard_log_fn=None, dashboard_dbg_fn=None) -> None:
 #   POPUP    — live popup notification creation and suppression
 #   LQ       — low-quality/bandwidth-saving downloader logic
 #
-DBG_FILTERS: dict[str, bool] = {
-    "DRAIN":   False,
-    "CHECKER": False,
-    "SPLIT":   False,
-    "POPEN":   False,
-    "PERF":    False,
-    "DISK":    False,
-    "UPDATER": False,
-    "TWITCH":  False,
-    "CONFIG":  False,
-    "KILL":    False,
-    "STALL":   False,
-    "POPUP":   False,
-    "LQ":      False,
-}
+DBG_TAGS: list[str] = [
+    "DRAIN",
+    "CHECKER",
+    "SPLIT",
+    "POPEN",
+    "PERF",
+    "DISK",
+    "UPDATER",
+    "TWITCH",
+    "CONFIG",
+    "KILL",
+    "STALL",
+    "POPUP",
+    "LQ",
+]
 
-_dbg_filters_lock = threading.Lock()
+import json
+import time
+
+_tags_cache: dict[str, bool] = {}
+_tags_cache_mtime: float = 0.0
+_tags_cache_lock = threading.Lock()
+
+def _get_active_tags() -> dict[str, bool]:
+    """Return the currently enabled debug tags from global.json, using an mtime cache."""
+    global _tags_cache, _tags_cache_mtime
+    path = os.path.join(_ROOT_DIR, "global.json")
+    
+    with _tags_cache_lock:
+        try:
+            mtime = os.path.getmtime(path)
+        except Exception:
+            mtime = 0.0
+
+        if mtime != _tags_cache_mtime:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                _tags_cache = data.get("debug_log_tags", {})
+                _tags_cache_mtime = mtime
+            except Exception:
+                _tags_cache = {}
+
+        return _tags_cache
 
 
 # ── Startup log ───────────────────────────────────────────────────────────────
@@ -245,8 +246,8 @@ def dbg(msg: str, site_name: str = "") -> None:
         end = msg.find("]")
         if end > 1:
             tag = msg[1:end]
-            with _dbg_filters_lock:
-                allowed = DBG_FILTERS.get(tag, False)   # unknown tags are dropped
+            tags = _get_active_tags()
+            allowed = tags.get(tag, False)   # unknown tags are dropped
             if not allowed:
                 return
 
