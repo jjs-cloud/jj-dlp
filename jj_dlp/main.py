@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.13.2"
+__version__ = "1.15.6"
 
 import subprocess
 import time
@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 import shutil
 
 from .deps import ensure_curses, plain_ffmpeg_check
+from . import logger as _logger
 from .logger import (
     startup_dbg, startup_dbg_flush,
     dbg,
@@ -26,7 +27,6 @@ from .logger import (
     get_debug_log_path, get_log_path, get_log_file_paths,
     ENABLE_CRASH_LOG,
     configure_debug_log as _configure_debug_log,
-    configure as _configure_logger,
 )
 
 from .browser_config import (
@@ -155,7 +155,8 @@ def _parse_twitch_section(parser: configparser.ConfigParser) -> dict:
 
 
 def _parse_checker_and_downloader(parser: configparser.ConfigParser) -> tuple:
-    """Return (checker_cmd, downloader_cmd) lists from [Checker] and [Downloader]."""
+    """Return (checker_cmd, downloader_cmd, lq_downloader_cmd) lists from
+    [Checker], [Downloader], and [LQ_Downloader]."""
     checker_cmd = []
     if parser.has_section("Checker"):
         for key, val in parser.items("Checker"):
@@ -170,7 +171,14 @@ def _parse_checker_and_downloader(parser: configparser.ConfigParser) -> tuple:
             if item:
                 downloader_cmd.extend(shlex.split(item, posix=(sys.platform != "win32")))
 
-    return checker_cmd, downloader_cmd
+    lq_downloader_cmd = []
+    if parser.has_section("LQ_Downloader"):
+        for key, val in parser.items("LQ_Downloader"):
+            item = (val or key).strip()
+            if item:
+                lq_downloader_cmd.extend(shlex.split(item, posix=(sys.platform != "win32")))
+
+    return checker_cmd, downloader_cmd, lq_downloader_cmd
 
 
 def _derive_username_idx(cfg_dict: dict) -> Optional[int]:
@@ -289,14 +297,15 @@ def load_config(config_path: str) -> dict:
     cfg_dict["streamers"] = streamers
     cfg_dict["blocked"]   = blocked
 
-    checker_cmd, downloader_cmd = _parse_checker_and_downloader(parser)
+    checker_cmd, downloader_cmd, lq_downloader_cmd = _parse_checker_and_downloader(parser)
 
     cfg_dict.update({
-        "checker_cmd":    checker_cmd,
-        "downloader_cmd": downloader_cmd,
-        "username_idx":   _derive_username_idx(cfg_dict),
-        "config_path":    config_path,
-        "yt_dlp_path":    _resolve_yt_dlp_path(cfg_dict),
+        "checker_cmd":       checker_cmd,
+        "downloader_cmd":    downloader_cmd,
+        "lq_downloader_cmd": lq_downloader_cmd,
+        "username_idx":      _derive_username_idx(cfg_dict),
+        "config_path":       config_path,
+        "yt_dlp_path":       _resolve_yt_dlp_path(cfg_dict),
         **_parse_twitch_section(parser),
     })
 
@@ -380,6 +389,8 @@ def load_global_config() -> dict:
         "ask_for_browser":    _bool("ASK_FOR_BROWSER", True),
         "ask_for_config":     _bool("ASK_FOR_CONFIG", True),
         "max_concurrent_rec": _int("MAX_CONCURRENT_REC", 0),
+        "lq_downloader":      _bool("LQ_DOWNLOADER", False),
+        "ff_err_thresh":      _int("FF_ERR_THRESH", 200),
     }
 
 def _write_global_conf_key(key: str, value: str) -> None:
@@ -568,6 +579,8 @@ class SiteState:
         self._cfg_cache:          Optional[dict] = None
         self._cfg_cache_time:     float = 0.0
         self._cfg_cache_lock:     threading.Lock = threading.Lock()
+        
+        self.last_ffmpeg_error:   Dict[str, float] = {}
 
     def register_proc(self, streamer: str, proc) -> None:
         """Register an active yt-dlp subprocess so stop() can kill it."""
@@ -593,6 +606,7 @@ class SiteState:
         with self.dash_lock:
             if count > 0:
                 self.ffmpeg_error_counts[streamer] = count
+                self.last_ffmpeg_error[streamer] = time.time()
             else:
                 self.ffmpeg_error_counts.pop(streamer, None)
 
@@ -652,7 +666,7 @@ class SiteState:
 
     def log_line(self, msg: str) -> None:
         """Append a timestamped line to the site's activity log (capped at 200 lines)."""
-        ts = datetime.now().strftime("%H:%M:%S")
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         line = f"[{ts}] {msg}"
         with self.dash_lock:
             self.dash_log_lines.append(line)
@@ -678,12 +692,8 @@ class SiteState:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Global singletons (output mode)
+# Global singletons
 # ══════════════════════════════════════════════════════════════════════════════
-
-# Output mode: 1=curses dashboard  2=terminal
-OUTPUT_MODE = 1
-output_mode_lock = threading.Lock()
 
 # Update availability flag (set during startup, read by dashboard)
 UPDATE_AVAILABLE = False
@@ -703,22 +713,21 @@ _CHECKER_STDERR_PREFIX: str = "\x00checker_err\x00"
 _DEBUG_LOG_PREFIX: str = "\x00debug\x00"
 FFMPEG_ERROR_RESTART_THRESHOLD: int = 200
 
-# Wire logger.dbg to this module's OUTPUT_MODE
-def _get_output_mode() -> int:
-    with output_mode_lock:
-        return OUTPUT_MODE
-
-_configure_logger(_get_output_mode)
-
-
+# ── LQ (low-quality) downloader bandwidth-saving state ───────────────────────
+# Maps (streamer, site_label) → epoch when an LQ_Downloader recording was last
+# *attempted* for that streamer.  Entries are cleared when the streamer goes
+# offline.  Any entry whose timestamp is within _LQ_RECENT_WINDOW seconds of
+# now is considered "recent" and makes the streamer ineligible for another LQ
+# trigger during that online session.
+_lq_attempted: Dict[Tuple[str, str], float] = {}
+_lq_attempted_lock: threading.Lock = threading.Lock()
+_LQ_RECENT_WINDOW: float = 30 * 60   # 30 minutes
 
 # ── Keybinds ──
-KEYBIND_OUTPUT    = "o"
 KEYBIND_ADD       = "a"
 KEYBIND_REMOVE    = "r"
 KEYBIND_DISABLE   = "d"
 KEYBIND_LABELS = {
-    KEYBIND_OUTPUT:    "O",
     KEYBIND_ADD:       "A",
     KEYBIND_REMOVE:    "R",
     KEYBIND_DISABLE:   "D",
@@ -1023,11 +1032,6 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
                     site.add_stdout_line(line)
                 elif pipe_type == "stderr":
                     site.add_stderr_line(line)
-            with output_mode_lock:
-                mode = OUTPUT_MODE
-            if mode == 2:
-                # In terminal mode, print stdout and stderr
-                print(line, flush=True)
             if (ffmpeg_error_counter is not None and ffmpeg_error_event is not None
                     and FFMPEG_ERROR_RESTART_THRESHOLD > 0 and not ffmpeg_error_event.is_set()):
                 line_lower = line.lower()
@@ -1229,7 +1233,170 @@ def wait_for_new_file_growth(filepath: str, timeout: float = 15.0,
 
 
 
-def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
+def _launch_lq_recording(streamer: str, cfg: dict, site: "SiteState",
+                          site_label: str) -> None:
+    """Wait for the evicted recording thread to exit, then start an LQ recording.
+
+    Runs in its own daemon thread so it never blocks the caller.
+    """
+    deadline = time.time() + 20.0
+    while time.time() < deadline:
+        with site.lock:
+            if streamer not in site.currently_recording:
+                break
+        time.sleep(0.3)
+
+    with site.lock:
+        if streamer in site.currently_recording:
+            dbg(f"[LQ] Timed out waiting for {streamer} eviction — aborting LQ start")
+            return
+        # Claim the slot before starting the thread.
+        site.currently_recording.add(streamer)
+        site.evicted_streamers.discard(streamer)
+        with site.dash_lock:
+            if streamer not in site.dash_live_since:
+                site.dash_live_since[streamer] = time.time()
+
+    site.log_line(f"LQ recording starting for {streamer}")
+    dbg(f"[LQ] Launching LQ record_stream for {streamer}")
+    t = threading.Thread(
+        target=record_stream,
+        args=(streamer, cfg, site),
+        kwargs={"use_lq": True},
+        daemon=True,
+        name=f"lq-rec-{streamer}",
+    )
+    t.start()
+    site.recording_threads.append(t)
+
+
+def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) -> None:
+    """Evaluate whether LQ-downloader conditions are satisfied and, if so,
+    stop the lowest-priority eligible recording and restart it in LQ mode.
+
+    Conditions for triggering:
+      1. At least one OTHER currently-recording streamer has any ffmpeg errors.
+      2. There is at least one currently-recording streamer that:
+         - is not the triggering streamer,
+         - is not a bypass streamer,
+         - was not recently attempted with the LQ downloader (< _LQ_RECENT_WINDOW),
+         - has an [LQ_Downloader] section configured in its site config.
+    """
+    now = time.time()
+
+    # ── Gate: LQ_DOWNLOADER must be enabled in global.conf ───────────────────
+    _gcfg = load_global_config()
+    if not _gcfg.get("lq_downloader", False):
+        dbg("[LQ] Skipping LQ trigger — LQ_DOWNLOADER is disabled in global config")
+        return
+
+    # ── Condition 1: another active recording must have ffmpeg errors ─────────
+    has_other_errors = False
+    for s in _global_sites:
+        with s.dash_lock:
+            counts = dict(s.ffmpeg_error_counts)
+            recent = dict(getattr(s, "last_ffmpeg_error", {}))
+        with s.lock:
+            recording = set(s.currently_recording)
+        for st in recording:
+            if st == triggering_streamer and s is triggering_site:
+                continue
+            if counts.get(st, 0) > 0 or (now - recent.get(st, 0.0) < 300):
+                has_other_errors = True
+                break
+        if has_other_errors:
+            break
+
+    if not has_other_errors:
+        dbg("[LQ] Skipping LQ trigger — no other recording has ffmpeg errors")
+        return
+
+    # ── Load priority map from global.json ────────────────────────────────────
+    with _global_json_lock:
+        global_data = _load_global_json()
+    config_id = _get_config_id()
+    saved_entries = (global_data.get("priorities", {})
+                                .get(config_id, {})
+                                .get("entries", []))
+    priority_map: Dict[Tuple[str, str], dict] = {}
+    for e in saved_entries:
+        key = (e.get("streamer", ""), e.get("site", ""))
+        priority_map[key] = {
+            "priority": e.get("priority", 999999),
+            "bypass":   e.get("bypass", False),
+        }
+
+    # ── Condition 2: find eligible candidates ─────────────────────────────────
+    candidates = []
+    for s in _global_sites:
+        try:
+            s_cfg = s.get_cached_config()
+        except Exception:
+            continue
+        # Site must have an LQ_Downloader section configured.
+        if not s_cfg.get("lq_downloader_cmd"):
+            continue
+        s_label = s_cfg.get("site_label", os.path.basename(s.config_path))
+        with s.lock:
+            recording = set(s.currently_recording) - s.evicted_streamers
+        for st in recording:
+            if st == triggering_streamer and s is triggering_site:
+                continue
+            key = (st, s_label)
+            info = priority_map.get(key, {"priority": 999999, "bypass": False})
+            # Bypass streamers are never throttled.
+            if info.get("bypass", False):
+                continue
+            # Skip if recently LQ-attempted.
+            with _lq_attempted_lock:
+                attempt_ts = _lq_attempted.get(key, 0.0)
+            if now - attempt_ts < _LQ_RECENT_WINDOW:
+                dbg(f"[LQ] Skipping {st} — LQ attempted {now - attempt_ts:.0f}s ago (window={_LQ_RECENT_WINDOW}s)")
+                continue
+            candidates.append({
+                "streamer":  st,
+                "site":      s,
+                "site_label": s_label,
+                "priority":  info.get("priority", 999999),
+                "cfg":       s_cfg,
+            })
+
+    if not candidates:
+        dbg("[LQ] LQ conditions met but no eligible candidates found")
+        return
+
+    # ── Choose the lowest-priority (highest numeric value) candidate ──────────
+    target = max(candidates, key=lambda x: x["priority"])
+    tgt_str   = target["streamer"]
+    tgt_site  = target["site"]
+    tgt_cfg   = target["cfg"]
+    tgt_label = target["site_label"]
+
+    dbg(f"[LQ] Targeting {tgt_str} (priority={target['priority']}) for LQ restart")
+    tgt_site.log_line(
+        f"Bandwidth save: stopping {tgt_str} and restarting in LQ mode"
+    )
+
+    # Record the attempt *before* evicting so re-entrant calls can't double-target.
+    with _lq_attempted_lock:
+        _lq_attempted[(tgt_str, tgt_label)] = now
+
+    # Evict the current recording.
+    with tgt_site.lock:
+        tgt_site.evicted_streamers.add(tgt_str)
+    tgt_site.kill_proc_for_streamer(tgt_str)
+
+    # Launch the LQ restart in a background thread (waits for eviction to clear).
+    threading.Thread(
+        target=_launch_lq_recording,
+        args=(tgt_str, tgt_cfg, tgt_site, tgt_label),
+        daemon=True,
+        name=f"lq-launch-{tgt_str}",
+    ).start()
+
+
+def record_stream(streamer: str, cfg: dict, site: "SiteState",
+                  use_lq: bool = False) -> None:
     channel_url = cfg["site_tmpl"].format(username=streamer)
     output_dir  = cfg["output_dir"]
     os.makedirs(output_dir, exist_ok=True)
@@ -1241,7 +1408,16 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
         f"split_after_minutes={split_after_minutes} split_after_seconds={split_after_seconds} "
         f"output_dir={output_dir!r}")
 
-    site.log_line(f"Recording started: {streamer}")
+    site.log_line(f"Recording started: {streamer}" + (" [LQ]" if use_lq else ""))
+
+    # ── LQ attempt bookkeeping ────────────────────────────────────────────────
+    # Record the attempt immediately so that re-entrant LQ triggers during this
+    # session cannot target this streamer again (even if the proc hasn't opened yet).
+    if use_lq:
+        _lq_site_label = cfg.get("site_label", os.path.basename(site.config_path))
+        with _lq_attempted_lock:
+            _lq_attempted[(_lq_site_label_key := (streamer, _lq_site_label))] = time.time()
+        dbg(f"[LQ] LQ attempt recorded for {streamer} on {_lq_site_label}")
 
     proc = None
     close_logs = lambda: None
@@ -1262,9 +1438,18 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
 
             output_path = os.path.join(output_dir, current_output_tmpl)
 
+            # ── Select downloader command (normal vs LQ) ──────────────────
+            _active_dl_cmd = cfg["downloader_cmd"]
+            if use_lq:
+                _lq_cmd = cfg.get("lq_downloader_cmd", [])
+                if _lq_cmd:
+                    _active_dl_cmd = _lq_cmd
+                else:
+                    dbg(f"[LQ] use_lq=True but lq_downloader_cmd is empty — falling back to normal downloader for {streamer}")
+
             cmd = build_yt_dlp_command(
                 cfg["yt_dlp_path"],
-                cfg["downloader_cmd"],
+                _active_dl_cmd,
                 ["-o", output_path, channel_url]
             )
 
@@ -1477,6 +1662,12 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                         close_logs()
                     except Exception:
                         pass
+
+                    # ── LQ bandwidth-saving trigger (non-LQ recordings only) ──
+                    # Only trigger LQ for normal recordings; if a LQ recording
+                    # itself hits the threshold we just let it restart normally.
+                    if not use_lq:
+                        _maybe_trigger_lq(site, streamer)
 
                     time.sleep(5)
                     break
@@ -1729,6 +1920,13 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState") -> None:
                     close_logs()
                 except Exception:
                     pass
+
+                # ── Clear LQ tracking when streamer goes offline ──────────
+                # This ensures the next time they go live the normal downloader
+                # is used (LQ is only attempted once per online session).
+                _offline_site_label = cfg.get("site_label", os.path.basename(site.config_path))
+                with _lq_attempted_lock:
+                    _lq_attempted.pop((streamer, _offline_site_label), None)
 
                 with site.dash_lock:
                     site.dash_last_live[streamer] = time.time()
@@ -2268,7 +2466,7 @@ class JJDlpDashboard:
         rec_cnt  = 0
         off_cnt  = 0
         dis_cnt  = 0
-        check_interval = 60
+        site_setting_values = []
 
         for site in self.sites:
             with site.dash_lock:
@@ -2279,7 +2477,8 @@ class JJDlpDashboard:
                 recording  = set(site.currently_recording)
             try:
                 cfg = site.get_cached_config()
-                check_interval = cfg.get("check_interval", 60)
+                site_label = cfg.get("site_label", os.path.basename(site.config_path))
+                site_setting_values.append((site_label, cfg))
             except Exception:
                 pass
             total_streamers += len(all_s)
@@ -2292,6 +2491,43 @@ class JJDlpDashboard:
         uptime_secs = int(time.time() - _SCRIPT_START_TIME)
         uptime_str  = _fmt_duration(uptime_secs)
 
+        def _on_off(value) -> str:
+            return "ON" if value else "OFF"
+
+        def _site_setting_rows(label, key, formatter, enabled_color=None):
+            values = []
+            for site_label, cfg in site_setting_values:
+                value = formatter(cfg.get(key))
+                color = enabled_color(cfg.get(key)) if enabled_color else self.C_CHROME
+                values.append((site_label, value, color))
+            if not values:
+                return [(label, "", self.C_DIM)]
+            unique_values = {value for _, value, _ in values}
+            if len(unique_values) == 1:
+                _, value, color = values[0]
+                return [(label, value, color)]
+            rows_out = [(label, "", self.C_CHROME)]
+            rows_out.extend((f"  {site_label}", value, color) for site_label, value, color in values)
+            return rows_out
+
+        def _split_after_rows():
+            values = []
+            for site_label, cfg in site_setting_values:
+                try:
+                    split_after = int(cfg.get("split_after", 0) or 0)
+                except Exception:
+                    split_after = 0
+                if split_after > 0:
+                    values.append((site_label, f"{split_after}m", self.C_CHROME))
+            if not values:
+                return []
+            if len(values) == len(site_setting_values) and len({value for _, value, _ in values}) == 1:
+                _, value, color = values[0]
+                return [("Split After", value, color)]
+            rows_out = [("Split After", "", self.C_CHROME)]
+            rows_out.extend((f"  {site_label}", value, color) for site_label, value, color in values)
+            return rows_out
+
         rows = [
             ("Streamers", str(total_streamers), self.C_CHROME),
             ("Live",      str(live_cnt),        self.C_LIVE),
@@ -2299,23 +2535,16 @@ class JJDlpDashboard:
             ("Offline",   str(off_cnt),         self.C_DIM),
             ("Disabled",  str(dis_cnt),         self.C_DISABLED),
             ("",          "",                   0),
-            ("Interval",  f"{check_interval}s", self.C_CHROME),
-            ("Logging",   "", self.C_LIVE),   # filled below
-            ("Popups",    "", self.C_LIVE),   # filled below
         ]
-
-        # Fill logging/popups from first site's config
-        try:
-            cfg0 = self.sites[0].get_cached_config() if self.sites else {}
-            rows[7] = ("Logging", "ON" if cfg0.get("logging") else "OFF",
-                       self.C_LIVE if cfg0.get("logging") else self.C_DIM)
-            rows[8] = ("Popups",  "ON" if cfg0.get("popup_notifications") else "OFF",
-                       self.C_LIVE if cfg0.get("popup_notifications") else self.C_DIM)
-        except Exception:
-            pass
+        rows.extend(_site_setting_rows("Interval", "check_interval", lambda v: f"{60 if v is None else v}s"))
+        rows.extend(_site_setting_rows("Logging", "logging", _on_off,
+                    lambda v: self.C_LIVE if v else self.C_DIM))
+        rows.extend(_site_setting_rows("Popups", "popup_notifications", _on_off,
+                    lambda v: self.C_LIVE if v else self.C_DIM))
+        rows.extend(_split_after_rows())
 
         inner_w = x2 - x1 - 2
-        label_w = min(10, inner_w // 2)
+        label_w = min(13, max(10, inner_w // 2))
 
         for i, (label, val, cpair) in enumerate(rows):
             row_y = y1 + 2 + i
@@ -3355,11 +3584,6 @@ class JJDlpDashboard:
         elif key in (ord('s'), ord('S')):
             if current_tab_name == "Dashboard":
                 self.sort_manager.open_popup()
-        elif key == ord('\x0f'):  # Ctrl+O — switch to terminal mode
-            with output_mode_lock:
-                global OUTPUT_MODE
-                OUTPUT_MODE = 2
-            return False  # exit curses loop, drop to terminal
         return True
 
     def _start_mgmt(self, action: str):
@@ -3502,6 +3726,25 @@ class JJDlpDashboard:
             f"[CONFIG] apply_global_cfg completed: DEBUG_LOGS={final_enabled} "
             f"DEBUG_LOG_PATH={final_path!r}"
         )
+
+        # ── FF_ERR_THRESH ─────────────────────────────────────────────────────
+        # Apply the new ffmpeg error threshold immediately so in-flight drain
+        # threads pick it up on their next error check.
+        global FFMPEG_ERROR_RESTART_THRESHOLD
+        _new_thresh_raw = new_cfg.get("FF_ERR_THRESH", "200").strip()
+        try:
+            _new_thresh = int(_new_thresh_raw)
+            if _new_thresh >= 0:
+                FFMPEG_ERROR_RESTART_THRESHOLD = _new_thresh
+                _logger.dbg(
+                    f"[CONFIG] apply_global_cfg: FFMPEG_ERROR_RESTART_THRESHOLD "
+                    f"updated to {_new_thresh}"
+                )
+        except (ValueError, TypeError):
+            _logger.dbg(
+                f"[CONFIG] apply_global_cfg: invalid FF_ERR_THRESH value "
+                f"{_new_thresh_raw!r} — keeping current threshold"
+            )
 
     # ── Run loop ──────────────────────────────────────────────────────────────
     def run(self):
@@ -4011,6 +4254,12 @@ def main() -> None:
         raw_path = global_cfg.get("debug_log_path", "")
         debug_path = raw_path if raw_path else get_debug_log_path(load_config(config_paths[0]))
     _configure_debug_log(enabled=any_debug, path=debug_path)
+
+    # ── Apply FF_ERR_THRESH from global config ────────────────────────────────
+    global FFMPEG_ERROR_RESTART_THRESHOLD
+    _startup_thresh = global_cfg.get("ff_err_thresh", 200)
+    if _startup_thresh >= 0:
+        FFMPEG_ERROR_RESTART_THRESHOLD = _startup_thresh
         
     # ── Launch per-site state + threads ──────────────────────────────────────
     global _global_sites
@@ -4033,7 +4282,7 @@ def main() -> None:
                 if len(s.dash_log_lines) > 200:
                     s.dash_log_lines = s.dash_log_lines[-200:]
 
-    _logger.configure(_get_output_mode, _dash_log, _dash_dbg)
+    _logger.configure(_dash_log, _dash_dbg)
 
     # Sort sites by site_order so they appear in the desired positions in the dashboard
     sites.sort(key=lambda s: s.site_order)
@@ -4067,28 +4316,7 @@ def main() -> None:
                 return
             JJDlpDashboard(stdscr, sites, global_cfg=global_cfg).run()
 
-        while True:
-            with output_mode_lock:
-                mode = OUTPUT_MODE
-            if mode == 1:
-                curses.wrapper(_run_dashboard)
-            # After curses exits check mode again
-            with output_mode_lock:
-                mode = OUTPUT_MODE
-            if mode != 1:
-                # Terminal mode — just wait for Ctrl+C
-                print("\n[jj-dlp terminal mode] Press Ctrl+O to return to dashboard, Ctrl+C to quit.\n",
-                      flush=True)
-                try:
-                    while True:
-                        with output_mode_lock:
-                            if OUTPUT_MODE == 1:
-                                break
-                        time.sleep(0.5)
-                except KeyboardInterrupt:
-                    break
-            else:
-                break
+        curses.wrapper(_run_dashboard)
 
     except KeyboardInterrupt:
         pass

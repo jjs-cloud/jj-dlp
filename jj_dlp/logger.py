@@ -19,10 +19,8 @@ dbg(msg)                           Write to debug log (filtered by DBG_FILTERS).
 log_crash(e)                       Write an unhandled exception to jj-dlp-crash.log.
 configure_debug_log(enabled, path) Atomically update the debug-log config.
 get_debug_log_config()             Return current (enabled, path) debug-log state.
-get_dbg_filters()                  Return a snapshot copy of DBG_FILTERS {tag: bool}.
-set_dbg_filter(tag, enabled)       Atomically update one tag in DBG_FILTERS.
-load_dbg_filters(overrides)        Batch-apply saved tag states (startup restore).
-configure(output_mode_fn, ...)     Inject output-mode accessor, dashboard logger, and
+get_dbg_filters()                  Return a snapshot copy of the current tag states.
+configure(dashboard_log_fn, ...)   Inject dashboard logger and optional per-line debug
                                    optional per-line debug callback for the Log tab.
 get_debug_log_path(cfg)            Resolve the debug log path from a config dict.
 get_log_path(cfg)                  Resolve the activity log path from a config dict.
@@ -89,52 +87,26 @@ def get_dbg_filters() -> dict[str, bool]:
     Call this to read tag states without touching module internals directly.
     Insertion order (Python 3.7+) is preserved so callers get a stable list.
     """
-    with _dbg_filters_lock:
-        return dict(DBG_FILTERS)
+    active = _get_active_tags()
+    return {tag: bool(active.get(tag, False)) for tag in DBG_TAGS}
 
-
-def set_dbg_filter(tag: str, enabled: bool) -> None:
-    """Atomically update a single tag in DBG_FILTERS.
-
-    Unknown tags are silently ignored so stale callers can't introduce
-    phantom filter keys.
-    """
-    with _dbg_filters_lock:
-        if tag in DBG_FILTERS:
-            DBG_FILTERS[tag] = bool(enabled)
-
-
-def load_dbg_filters(overrides: dict) -> None:
-    """Batch-apply saved tag states from a config / JSON dict.
-
-    Only keys already present in DBG_FILTERS are updated; unknown keys in
-    *overrides* are ignored so stale saved data can't introduce phantom tags.
-    Call this at startup after loading global.json to restore persisted states.
-    """
-    with _dbg_filters_lock:
-        for tag, val in overrides.items():
-            if tag in DBG_FILTERS:
-                DBG_FILTERS[tag] = bool(val)
-
-# ── References to output-mode state (injected by main module at startup) ──────
+# ── References to dashboard callbacks (injected by main module at startup) ────
 # These are set by jj-dlp.py via configure() so logger doesn't import main.
-_output_mode_ref   = None   # callable() -> int  (1=curses, 2=terminal)
 _dashboard_log_ref = None   # callable(str) -> None  (debug-log write errors)
 _dashboard_dbg_ref = None   # callable(str) -> None  (every dbg() line that passes filters)
 
 
-def configure(output_mode_fn, dashboard_log_fn=None, dashboard_dbg_fn=None) -> None:
+def configure(dashboard_log_fn=None, dashboard_dbg_fn=None) -> None:
     """
-    Inject accessor for OUTPUT_MODE and optional dashboard callbacks.
+    Inject optional dashboard callbacks.
 
     dashboard_log_fn  – called with a string when a debug-log write error
                         occurs (existing behaviour).
     dashboard_dbg_fn  – called with every dbg() line that passes the tag
                         filter, so the Log tab can optionally display it.
-    Call once from jj-dlp.py after the globals are defined there.
+    Call once from jj-dlp.py after sites are set up.
     """
-    global _output_mode_ref, _dashboard_log_ref, _dashboard_dbg_ref
-    _output_mode_ref = output_mode_fn
+    global _dashboard_log_ref, _dashboard_dbg_ref
     if dashboard_log_fn is not None:
         _dashboard_log_ref = dashboard_log_fn
     if dashboard_dbg_fn is not None:
@@ -159,23 +131,55 @@ def configure(output_mode_fn, dashboard_log_fn=None, dashboard_dbg_fn=None) -> N
 #   KILL     — yt-dlp process termination
 #   CONFIG   — config editor save/backup operations
 #   POPUP    — live popup notification creation and suppression
+#   LQ       — low-quality/bandwidth-saving downloader logic
 #
-DBG_FILTERS: dict[str, bool] = {
-    "DRAIN":   False,
-    "CHECKER": False,
-    "SPLIT":   False,
-    "POPEN":   False,
-    "PERF":    False,
-    "DISK":    False,
-    "UPDATER": False,
-    "TWITCH":  False,
-    "CONFIG":  False,
-    "KILL":    False,
-    "STALL":   False,
-    "POPUP":   False,
-}
+DBG_TAGS: list[str] = [
+    "DRAIN",
+    "CHECKER",
+    "SPLIT",
+    "POPEN",
+    "PERF",
+    "DISK",
+    "UPDATER",
+    "TWITCH",
+    "CONFIG",
+    "KILL",
+    "STALL",
+    "POPUP",
+    "LQ",
+]
 
-_dbg_filters_lock = threading.Lock()
+import json
+import time
+
+_tags_cache: dict[str, bool] = {}
+_tags_cache_mtime: float = 0.0
+_tags_cache_lock = threading.Lock()
+
+# global.json lives inside the jj_dlp/ package directory (same dir as this file)
+_GLOBAL_JSON_PATH: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "global.json")
+
+def _get_active_tags() -> dict[str, bool]:
+    """Return the currently enabled debug tags from global.json, using an mtime cache."""
+    global _tags_cache, _tags_cache_mtime
+    path = _GLOBAL_JSON_PATH
+    
+    with _tags_cache_lock:
+        try:
+            mtime = os.path.getmtime(path)
+        except Exception:
+            mtime = 0.0
+
+        if mtime != _tags_cache_mtime:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                _tags_cache = data.get("debug_log_tags", {})
+                _tags_cache_mtime = mtime
+            except Exception:
+                _tags_cache = {}
+
+        return _tags_cache
 
 
 # ── Startup log ───────────────────────────────────────────────────────────────
@@ -245,8 +249,8 @@ def dbg(msg: str, site_name: str = "") -> None:
         end = msg.find("]")
         if end > 1:
             tag = msg[1:end]
-            with _dbg_filters_lock:
-                allowed = DBG_FILTERS.get(tag, False)   # unknown tags are dropped
+            tags = _get_active_tags()
+            allowed = tags.get(tag, False)   # unknown tags are dropped
             if not allowed:
                 return
 

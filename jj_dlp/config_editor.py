@@ -67,6 +67,13 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
             "Which branch of jj-dlp to update to. (main, testing, or experimental)."),
     _KeyDef("MAX_CONCURRENT_REC",    "global", "0",     True,
             "Maximum number of streamers to record simultaneously (0 = unlimited)."),
+    _KeyDef("LQ_DOWNLOADER",         "global", "false", True,
+            "Enable the LQ downloader bandwidth-saving feature. When enabled and ffmpeg errors "
+            "exceed the threshold on any recording, the lowest-priority recording is restarted "
+            "using the [LQ_Downloader] config section (true/false)."),
+    _KeyDef("FF_ERR_THRESH",         "global", "200",   True,
+            "Number of ffmpeg errors before a recording is automatically restarted "
+            "(0 = disabled, default 200)."),
 
     # ── Site keys (per-site .conf) ────────────────────────────────────────────
     _KeyDef("SITE_LABEL",            "site",   "",      True,
@@ -708,13 +715,13 @@ class SiteSortManager:
 
 def _validate_value(key: str, value: str) -> tuple[bool, str]:
     """Validate config values based on their expected types."""
-    bool_keys = {"DEBUG_LOGS", "CHECK_FOR_UPDATES", "ASK_FOR_BROWSER", "ASK_FOR_CONFIG", 
-                 "PANEL_RESIZE", "LOGGING", "SPLIT_LOGS", "POPUP_NOTIFICATIONS", 
-                 "DOWNLOADER_COOKIES", "CHECKER_COOKIES"}
-    int_keys = {"UPDATE_INTERVAL", "SITE_ORDER", "CHECK_INTERVAL", "COOLDOWN_AFTER_RECORDING", 
-                "SPLIT_AFTER", "STALL_CHECK_INTERVAL", "STALL_TIMEOUT", "CONFIG_CHECK_INTERVAL", 
-                "POPUP_TIMEOUT", "POPUP_COOLDOWN", "PROGRESS_BAR_MAX_HOURS", "PROGRESS_BAR_WIDTH", 
-                "LAST_LIVE_HIGHLIGHT", "MAX_CONCURRENT_REC"}
+    bool_keys = {"DEBUG_LOGS", "CHECK_FOR_UPDATES", "ASK_FOR_BROWSER", "ASK_FOR_CONFIG",
+                 "PANEL_RESIZE", "LOGGING", "SPLIT_LOGS", "POPUP_NOTIFICATIONS",
+                 "DOWNLOADER_COOKIES", "CHECKER_COOKIES", "LQ_DOWNLOADER"}
+    int_keys = {"UPDATE_INTERVAL", "SITE_ORDER", "CHECK_INTERVAL", "COOLDOWN_AFTER_RECORDING",
+                "SPLIT_AFTER", "STALL_CHECK_INTERVAL", "STALL_TIMEOUT", "CONFIG_CHECK_INTERVAL",
+                "POPUP_TIMEOUT", "POPUP_COOLDOWN", "PROGRESS_BAR_MAX_HOURS", "PROGRESS_BAR_WIDTH",
+                "LAST_LIVE_HIGHLIGHT", "MAX_CONCURRENT_REC", "FF_ERR_THRESH"}
     if key in bool_keys:
         if value.lower() not in ("true", "false", "yes", "no", "1", "0"):
             return False, "Must be true or false"
@@ -875,19 +882,8 @@ class GlobalConfigEditor:
         except ImportError:
             import logger as _logger  # type: ignore[no-redef]
 
-        # Start from the live logger state …
+        # get_dbg_filters() reads the live state directly from global.json.
         state = _logger.get_dbg_filters()
-
-        # … then overlay with any overrides previously persisted to global.json.
-        try:
-            from .main import _global_json_lock, _load_global_json
-            with _global_json_lock:
-                gdata = _load_global_json()
-            for tag, val in gdata.get("debug_log_tags", {}).items():
-                if tag in state:
-                    state[tag] = bool(val)
-        except Exception:
-            pass
 
         self._debug_tags_bool   = self.editing_item.value.strip().lower()
         self._debug_tags_state  = state
@@ -948,13 +944,6 @@ class GlobalConfigEditor:
                 _save_global_json(gdata)
         except Exception as e:
             _dbg(f"[CONFIG] _save_debug_tags: failed to write global.json: {e}")
-
-        # 3. Apply tag states to the live logger immediately.
-        try:
-            from . import logger as _logger
-        except ImportError:
-            import logger as _logger  # type: ignore[no-redef]
-        _logger.load_dbg_filters(self._debug_tags_state)
 
     def _draw_debug_tags_popup(self, stdscr) -> None:
         """Draw the combined bool-toggle + per-tag-toggle popup for DEBUG_LOGS."""
@@ -1558,8 +1547,11 @@ class ConfigEditor:
             return self.priority_editor.handle_key(key)
 
         if self._focus == "global":
-            # Escape in global panel without popup → exit Config tab
-            if key == 27 and not self.global_editor.popup_mode:
+            # Escape in global panel without any popup → exit Config tab.
+            # Must also check debug_tags_mode: when the DEBUG LOGGING popup is
+            # open, ESC should close it (handled inside global_editor.handle_key)
+            # rather than switching away from the Config tab.
+            if key == 27 and not self.global_editor.popup_mode and not self.global_editor.debug_tags_mode:
                 self.dashboard.selected_tab = 0
                 return True
             return self.global_editor.handle_key(key)
