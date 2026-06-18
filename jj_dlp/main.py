@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.15.6"
+__version__ = "1.15.7"
 
 import subprocess
 import time
@@ -449,6 +449,11 @@ def _write_global_conf_key(key: str, value: str) -> None:
 
 _global_json_lock: threading.Lock = threading.Lock()
 
+# How often global.json should be backed up.  The timestamp of the last
+# backup is stored inside global.json itself (key "_last_backup_ts"), so the
+# 24h window survives restarts instead of resetting every time the app launches.
+_GLOBAL_JSON_BACKUP_INTERVAL: float = 24 * 60 * 60  # seconds
+
 
 def _global_json_path() -> str:
     """Return the absolute path to global.json (next to this file)."""
@@ -468,8 +473,47 @@ def _load_global_json() -> dict:
     return {}
 
 
+def _backup_global_json_if_due(data: dict) -> None:
+    """Back up global.json into backups/ if it's due, per "_last_backup_ts".
+
+    "Due" means more than _GLOBAL_JSON_BACKUP_INTERVAL seconds have passed
+    since the last backup, or no backup has ever been recorded.  *data* is
+    the dict about to be written by _save_global_json; on a successful (or
+    skipped-because-the-file-doesn't-exist-yet) check, it is updated in
+    place with a fresh "_last_backup_ts" so the new timestamp gets persisted
+    along with the rest of the save.  If copying the file fails, the
+    timestamp is left untouched so the next save retries.
+    """
+    last_backup_ts = data.get("_last_backup_ts")
+    now = time.time()
+    if isinstance(last_backup_ts, (int, float)) and (now - last_backup_ts) < _GLOBAL_JSON_BACKUP_INTERVAL:
+        return  # Backed up recently enough.
+
+    src = _global_json_path()
+    if os.path.isfile(src):
+        # Same backups/ folder (sibling of configs/) used for global.conf and
+        # site .conf backups in config_editor.py.
+        backup_dir = os.path.abspath("backups")
+        try:
+            os.makedirs(backup_dir, exist_ok=True)
+            stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+            backup_path = os.path.join(backup_dir, f"global.json.{stamp}.bak")
+            shutil.copy2(src, backup_path)
+            dbg(f"[GLOBAL_JSON] backup written to {backup_path!r}")
+        except Exception as e:
+            dbg(f"[GLOBAL_JSON] ERROR writing backup: {e}")
+            return  # Don't update the timestamp — try again on the next save.
+
+    data["_last_backup_ts"] = now
+
+
 def _save_global_json(data: dict) -> None:
-    """Write *data* to global.json.  Silently ignores errors."""
+    """Write *data* to global.json.  Silently ignores errors.
+
+    Before writing, backs up the current global.json to backups/ if it's
+    been more than 24h since the last backup (see _backup_global_json_if_due).
+    """
+    _backup_global_json_if_due(data)
     try:
         with open(_global_json_path(), "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
