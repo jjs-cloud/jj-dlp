@@ -21,6 +21,7 @@ jj-dlp is a app that allows you to automatically record live streams, powered by
 ## Technical Features
 
 - **Dashboard** — Manage your streamer monitoring and recording from a nice dashboard.
+- **Priority System** — For slow connections, and/or to conserve disk space, you can limit the amount of simultaneous recordings and record only your highest priority streamers.
 - **Stall detection** — restarts yt-dlp if the download stalls (common issue with yt-dlp)
 - **Error detection** — restarts yt-dlp if ffmpeg recieves certain errors (common issue with ffmpeg)
 - **Small footprint** — only needs to run 1 yt-dlp process when checking for live streams
@@ -32,31 +33,8 @@ jj-dlp is a app that allows you to automatically record live streams, powered by
 ## Requirements
 
 - [python](https://www.python.org/downloads/)
+- [windows-curses](https://pypi.org/project/windows-curses/) (or curses on linux/mac)
 
 ---
 
-## Advanced Configuration
-
-The script uses a `.conf` file for each streaming website.  Most settings can be configured from within the app in the "Config" tab, and some must be manually configured by editing the `.conf` file in a text editor.
-
-At startup, the script will scan the current folder for `.conf` files and prompt you to choose the ones you want to use.
-
-If you want to skip this step, you can specify the config file(s) with  `--config` option.  
-
-Example: `python jj-dlp.py --config twitch.conf tiktok-live.conf`
-
----
-
-## Usage
-
-```bash
-# Normal usage
-python jj-dlp.py
-
-# Specify a config file
-python jj-dlp.py --config C:\path\to\my.conf
-```
-
-
----
 
