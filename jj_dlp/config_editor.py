@@ -149,7 +149,7 @@ PRESERVED_KEYS: list[str] = [k.name for k in CONFIG_KEYS if k.preserve]
 
 # ── Priority panel ─────────────────────────────────────────────────────────────
 # Width of the PRIORITY panel box (x2 − x1 span), matching the SYSTEM sidebar.
-PRIORITY_PANEL_W: int = 27
+PRIORITY_PANEL_W: int = 31
 
 # ── Sort options for site panels (Dashboard tab) ───────────────────────────────
 SORT_OPTIONS: "list[tuple[str, str]]" = [
