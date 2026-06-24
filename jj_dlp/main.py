@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.15.8"
+__version__ = "1.16.0"
 
 import subprocess
 import time
@@ -391,6 +391,7 @@ def load_global_config() -> dict:
         "max_concurrent_rec": _int("MAX_CONCURRENT_REC", 0),
         "lq_downloader":      _bool("LQ_DOWNLOADER", False),
         "ff_err_thresh":      _int("FF_ERR_THRESH", 200),
+        "subfolders":         _bool("SUBFOLDERS", False),
     }
 
 def _write_global_conf_key(key: str, value: str) -> None:
@@ -1443,6 +1444,13 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                   use_lq: bool = False) -> None:
     channel_url = cfg["site_tmpl"].format(username=streamer)
     output_dir  = cfg["output_dir"]
+
+    # If SUBFOLDERS is enabled in global.conf, nest recordings under a
+    # per-streamer subdirectory (e.g. recordings/streamer_name/).
+    _global_cfg_rs = load_global_config()
+    if _global_cfg_rs.get("subfolders", False):
+        output_dir = os.path.join(output_dir, streamer)
+
     os.makedirs(output_dir, exist_ok=True)
 
     split_after_minutes = max(0, cfg.get("split_after", 0))
