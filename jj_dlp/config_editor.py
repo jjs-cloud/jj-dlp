@@ -74,6 +74,8 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("FF_ERR_THRESH",         "global", "200",   True,
             "Number of ffmpeg errors before a recording is automatically restarted "
             "(0 = disabled, default 200)."),
+    _KeyDef("SUBFOLDERS",            "global", "false", True,
+            "Save recordings into a subfolder named after the streamer inside OUTPUT_DIR (true/false)."),
 
     # ── Site keys (per-site .conf) ────────────────────────────────────────────
     _KeyDef("SITE_LABEL",            "site",   "",      True,
@@ -86,7 +88,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
             "Directory where recordings are saved."),
     _KeyDef("OUTPUT_TMPL",           "site",   "%(title)s [%(id)s].%(ext)s", False,
             "yt-dlp output filename template."),
-    _KeyDef("COOLDOWN_AFTER_RECORDING", "site", "5",   False,
+    _KeyDef("COOLDOWN_AFTER_RECORDING", "site", "60",   False,
             "Seconds to wait after a recording ends before checking again."),
     _KeyDef("SPLIT_AFTER",           "site",   "0",    True,
             "Split recordings after this many seconds (0 = disabled)."),
@@ -100,11 +102,11 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
             "URL template used to build the stream URL from a username."),
     _KeyDef("PANEL_RESIZE",          "site",   "true", True,
             "Allow the dashboard panel to be resized (true/false)."),
-    _KeyDef("LOGGING",               "site",   "false", False,
+    _KeyDef("LOGGING",               "site",   "false", True,
             "Enable per-site log files (true/false)."),
-    _KeyDef("LOG_PATH",              "site",   "",     False,
+    _KeyDef("LOG_PATH",              "site",   "",     True,
             "Path for per-site log files."),
-    _KeyDef("SPLIT_LOGS",            "site",   "false", False,
+    _KeyDef("SPLIT_LOGS",            "site",   "false", True,
             "Write a separate log file per recording session (true/false)."),
     _KeyDef("POPUP_NOTIFICATIONS",   "site",   "true", True,
             "Show popup notifications for recording events (true/false)."),
@@ -149,7 +151,7 @@ PRESERVED_KEYS: list[str] = [k.name for k in CONFIG_KEYS if k.preserve]
 
 # ── Priority panel ─────────────────────────────────────────────────────────────
 # Width of the PRIORITY panel box (x2 − x1 span), matching the SYSTEM sidebar.
-PRIORITY_PANEL_W: int = 27
+PRIORITY_PANEL_W: int = 31
 
 # ── Sort options for site panels (Dashboard tab) ───────────────────────────────
 SORT_OPTIONS: "list[tuple[str, str]]" = [
@@ -717,7 +719,7 @@ def _validate_value(key: str, value: str) -> tuple[bool, str]:
     """Validate config values based on their expected types."""
     bool_keys = {"DEBUG_LOGS", "CHECK_FOR_UPDATES", "ASK_FOR_BROWSER", "ASK_FOR_CONFIG",
                  "PANEL_RESIZE", "LOGGING", "SPLIT_LOGS", "POPUP_NOTIFICATIONS",
-                 "DOWNLOADER_COOKIES", "CHECKER_COOKIES", "LQ_DOWNLOADER"}
+                 "DOWNLOADER_COOKIES", "CHECKER_COOKIES", "LQ_DOWNLOADER", "SUBFOLDERS"}
     int_keys = {"UPDATE_INTERVAL", "SITE_ORDER", "CHECK_INTERVAL", "COOLDOWN_AFTER_RECORDING",
                 "SPLIT_AFTER", "STALL_CHECK_INTERVAL", "STALL_TIMEOUT", "CONFIG_CHECK_INTERVAL",
                 "POPUP_TIMEOUT", "POPUP_COOLDOWN", "PROGRESS_BAR_MAX_HOURS", "PROGRESS_BAR_WIDTH",
