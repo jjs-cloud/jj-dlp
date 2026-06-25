@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.16.0"
+__version__ = "1.16.1"
 
 import subprocess
 import time
@@ -3813,10 +3813,20 @@ class JJDlpDashboard:
             self.refresh_screen()
             _t_after_refresh = time.time()
 
-            key = self.stdscr.getch()
-            if key != -1:
-                if not self.handle_key(key):
+            # Drain ALL pending keypresses before sleeping.
+            # This prevents the input buffer from accumulating a backlog
+            # while napms() is sleeping, which would cause continued movement
+            # after a key is released.
+            should_quit = False
+            while True:
+                key = self.stdscr.getch()
+                if key == -1:
                     break
+                if not self.handle_key(key):
+                    should_quit = True
+                    break
+            if should_quit:
+                break
             self.tick += 1
             curses.napms(50)
 
