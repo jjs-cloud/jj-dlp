@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.16.1"
+__version__ = "1.17.0"
 
 import subprocess
 import time
@@ -10,7 +10,8 @@ import sys
 import os
 import json
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
+from datetime import time as _dt_time
 from typing import List, Set, Tuple, Dict, Optional
 import configparser
 import argparse
@@ -2177,6 +2178,165 @@ def config_watcher(site: "SiteState", poll_interval: int = 3) -> None:
         site._stop_event.wait(timeout=poll_interval)
 
 
+def _process_streamer_schedules(site: "SiteState") -> None:
+    """Evaluate schedule-based enable/disable for every streamer configured in
+    global.json for the current config-id.
+
+    Called at the top of each monitor_site iteration (every check_interval
+    seconds, or sooner if trigger_event fires).
+
+    Enable / disable logic:
+      Enable:  now >= start  AND (last_enable  is None OR last_enable  < start)
+      Disable: now >= end    AND (last_disable is None OR last_disable < end)
+
+    For recurring schedules the most-recent occurrence of start/end is
+    computed dynamically and the same logic is applied.
+    """
+    config_id = _get_config_id()
+    now       = datetime.now()
+
+    # Read entries outside the write-lock so _modify_config_streamer can run
+    # without risk of deadlock (it touches .conf files, not global.json).
+    with _global_json_lock:
+        gdata = _load_global_json()
+
+    prio_block = gdata.get("priorities", {}).get(config_id, {})
+    entries    = prio_block.get("entries", [])
+    if not entries:
+        return
+
+    # Collect actions: list of (streamer, site_label, conf_action, log_label)
+    # conf_action is "add" (enable) or "disable".
+    pending: list = []
+
+    for entry in entries:
+        sched = entry.get("schedule", {})
+        if not sched.get("enabled"):
+            continue
+
+        streamer    = entry.get("streamer", "")
+        site_label  = entry.get("site", "")
+        if not streamer:
+            continue
+
+        mode = sched.get("mode", "one_off")
+
+        def _parse_attempt(s):
+            if not s:
+                return None
+            try:
+                return datetime.fromisoformat(s)
+            except Exception:
+                return None
+
+        last_enable  = _parse_attempt(sched.get("last_enable_attempt"))
+        last_disable = _parse_attempt(sched.get("last_disable_attempt"))
+
+        if mode == "one_off":
+            oo = sched.get("one_off", {})
+            try:
+                start_dt = datetime.strptime(oo.get("start", ""), "%Y-%m-%d %H:%M")
+                end_dt   = datetime.strptime(oo.get("end",   ""), "%Y-%m-%d %H:%M")
+            except Exception:
+                continue
+
+            if now >= start_dt and (last_enable is None or last_enable < start_dt):
+                pending.append((streamer, site_label, "add", "enabled"))
+
+            if now >= end_dt and (last_disable is None or last_disable < end_dt):
+                pending.append((streamer, site_label, "disable", "disabled"))
+
+        elif mode == "recurring":
+            rec            = sched.get("recurring", {})
+            days           = rec.get("days", [])        # list of ints 0=Mon…6=Sun
+            start_time_str = rec.get("start_time", "")
+            end_time_str   = rec.get("end_time",   "")
+
+            if not days or not start_time_str or not end_time_str:
+                continue
+
+            try:
+                sh, sm = map(int, start_time_str.split(":"))
+                eh, em = map(int, end_time_str.split(":"))
+            except Exception:
+                continue
+
+            # Whether the window crosses midnight (e.g. 22:00 → 02:00 next day).
+            crosses_midnight = (eh * 60 + em) < (sh * 60 + sm)
+
+            # Most-recent occurrence of start_time on any selected weekday, <= now.
+            most_recent_start = None
+            for delta in range(14):
+                cand_date = (now - timedelta(days=delta)).date()
+                if cand_date.weekday() in days:
+                    cand_dt = datetime.combine(cand_date, _dt_time(sh, sm))
+                    if cand_dt <= now:
+                        most_recent_start = cand_dt
+                        break
+
+            # Most-recent occurrence of end_time.
+            # If the window crosses midnight the end falls on the day AFTER the
+            # selected weekday; otherwise it falls on the same selected day.
+            most_recent_end = None
+            for delta in range(14):
+                cand_date = (now - timedelta(days=delta)).date()
+                if crosses_midnight:
+                    prev_date = cand_date - timedelta(days=1)
+                    if prev_date.weekday() in days:
+                        cand_dt = datetime.combine(cand_date, _dt_time(eh, em))
+                        if cand_dt <= now:
+                            most_recent_end = cand_dt
+                            break
+                else:
+                    if cand_date.weekday() in days:
+                        cand_dt = datetime.combine(cand_date, _dt_time(eh, em))
+                        if cand_dt <= now:
+                            most_recent_end = cand_dt
+                            break
+
+            if most_recent_start is not None:
+                if last_enable is None or last_enable < most_recent_start:
+                    pending.append((streamer, site_label, "add", "enabled"))
+
+            if most_recent_end is not None:
+                if last_disable is None or last_disable < most_recent_end:
+                    pending.append((streamer, site_label, "disable", "disabled"))
+
+    if not pending:
+        return
+
+    # Execute config changes outside the global-json lock.
+    attempt_ts = now.isoformat(timespec="seconds")
+    for streamer, site_label, conf_action, log_label in pending:
+        result = _modify_config_streamer(site.config_path, streamer, conf_action)
+        site.log_line(f"Schedule: {log_label} {streamer}  ({result.strip()})")
+        dbg(f"[CHECKER] schedule {log_label} {streamer}: {result.strip()}", site.config_path)
+
+    # Persist attempt timestamps (re-read to avoid racing with other writers).
+    with _global_json_lock:
+        gdata   = _load_global_json()
+        entries = (gdata.get("priorities", {})
+                       .get(config_id, {})
+                       .get("entries", []))
+        for streamer, site_label, conf_action, log_label in pending:
+            for e in entries:
+                if e.get("streamer") == streamer and e.get("site") == site_label:
+                    sched = e.setdefault("schedule", {})
+                    if log_label == "enabled":
+                        sched["last_enable_attempt"] = attempt_ts
+                    else:
+                        sched["last_disable_attempt"] = attempt_ts
+                    break
+        if "priorities" in gdata and config_id in gdata["priorities"]:
+            gdata["priorities"][config_id]["entries"] = entries
+        _save_global_json(gdata)
+
+    # Trigger an immediate liveness recheck so the new enable/disable state is
+    # picked up without waiting for the full check_interval.
+    site.trigger_event.set()
+
+
+
 def monitor_site(site: "SiteState") -> None:
     """Main polling loop for a single site — runs in its own thread."""
     try:
@@ -2227,6 +2387,13 @@ def monitor_site(site: "SiteState") -> None:
             site.log_line(f"EventSub init failed: {e}")
 
     while not site._stop_event.is_set():
+        # Evaluate schedule-based enable/disable for all streamers before the
+        # liveness check so any config changes take effect this iteration.
+        try:
+            _process_streamer_schedules(site)
+        except Exception as _sched_exc:
+            dbg(f"[CHECKER] schedule processing error: {_sched_exc}", site.config_path)
+
         cfg       = load_config(site.config_path)
         streamers = cfg["streamers"]
 

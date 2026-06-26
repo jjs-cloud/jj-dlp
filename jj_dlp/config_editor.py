@@ -151,7 +151,7 @@ PRESERVED_KEYS: list[str] = [k.name for k in CONFIG_KEYS if k.preserve]
 
 # ── Priority panel ─────────────────────────────────────────────────────────────
 # Width of the PRIORITY panel box (x2 − x1 span), matching the SYSTEM sidebar.
-PRIORITY_PANEL_W: int = 31
+PRIORITY_PANEL_W: int = 40
 
 # ── Sort options for site panels (Dashboard tab) ───────────────────────────────
 SORT_OPTIONS: "list[tuple[str, str]]" = [
@@ -214,6 +214,7 @@ class PriorityEditor:
         self._scroll_offset: int = 0
         self._loaded:        bool = False
         self._config_id:     str  = ""
+        self._settings_popup: "Optional[StreamerSettingsPopup]" = None
 
     # ── Public interface ───────────────────────────────────────────────────────
 
@@ -305,25 +306,45 @@ class PriorityEditor:
             self._selected_idx = 0
 
     def _save(self) -> None:
-        """Persist current entry ordering and bypass flags to global.json."""
+        """Persist current entry ordering and bypass flags to global.json.
+        
+        Existing per-entry data (e.g. schedule settings) is preserved so that
+        reordering or toggling bypass never wipes schedule configuration.
+        """
         if not self._config_id:
             return
         config_paths = [site.config_path for site in self.dashboard.sites]
-        entries_data = [
-            {
-                "streamer":   e.streamer,
-                "site":       e.site,
-                "config_sha": e.config_sha,
-                "priority":   i,
-                "bypass":     e.bypass,
-            }
-            for i, e in enumerate(self._entries)
-        ]
         from .main import _global_json_lock, _load_global_json, _save_global_json
         with _global_json_lock:
             global_data = _load_global_json()
             if "priorities" not in global_data or not isinstance(global_data["priorities"], dict):
                 global_data["priorities"] = {}
+            # Build a lookup of any extra fields already stored (e.g. schedule)
+            # so we can carry them forward rather than losing them on every save.
+            existing_entries = (global_data["priorities"]
+                                .get(self._config_id, {})
+                                .get("entries", []))
+            existing_map: dict = {}
+            for ex in existing_entries:
+                key = (ex.get("streamer", ""), ex.get("site", ""))
+                existing_map[key] = ex
+
+            entries_data = []
+            for i, e in enumerate(self._entries):
+                ex = existing_map.get((e.streamer, e.site), {})
+                entry_dict: dict = {
+                    "streamer":   e.streamer,
+                    "site":       e.site,
+                    "config_sha": e.config_sha,
+                    "priority":   i,
+                    "bypass":     e.bypass,
+                }
+                # Preserve schedule data (and any future extra fields).
+                for extra_key in ("schedule",):
+                    if extra_key in ex:
+                        entry_dict[extra_key] = ex[extra_key]
+                entries_data.append(entry_dict)
+
             global_data["priorities"][self._config_id] = {
                 "config_files": config_paths,
                 "entries":      entries_data,
@@ -385,6 +406,14 @@ class PriorityEditor:
     def handle_key(self, key) -> bool:
         """Process a keypress while this panel has focus.  Returns True if consumed."""
         self.ensure_loaded()
+
+        # If the settings popup is open, route all keys into it.
+        if self._settings_popup is not None:
+            should_close = self._settings_popup.handle_key(key)
+            if should_close:
+                self._settings_popup = None
+            return True
+
         if key == curses.KEY_UP:
             self._selected_idx = max(0, self._selected_idx - 1)
             return True
@@ -400,6 +429,14 @@ class PriorityEditor:
         elif key in self.KEY_BYPASS:
             self._toggle_bypass(self._selected_idx)
             return True
+        elif key in (10, 13, curses.KEY_ENTER):  # Enter / Return
+            if self._entries and 0 <= self._selected_idx < len(self._entries):
+                self._settings_popup = StreamerSettingsPopup(
+                    self.dashboard,
+                    self._entries[self._selected_idx],
+                    self._config_id,
+                )
+            return True
         return False
 
     # ── Drawing ────────────────────────────────────────────────────────────────
@@ -411,14 +448,16 @@ class PriorityEditor:
 
         # Box border
         db.draw_box(stdscr, y1, x1, y2, x2, db.C_SYSTEM)
-        db.safe_addstr(stdscr, y1, x1 + 2, " PRIORITY ",
+        db.safe_addstr(stdscr, y1, x1 + 2, " STREAMER SETTINGS ",
                        curses.color_pair(db.C_LIVE) | curses.A_BOLD)
         if is_active:
             mode_str = " [ PRI ] "
             db.safe_addstr(stdscr, y1, x2 - len(mode_str) - 1, mode_str,
                            curses.color_pair(db.C_LIVE) | curses.A_BOLD)
 
-        db.safe_addstr(stdscr, y2 - 2, x1 + 2, " bypass=always record ", 
+        db.safe_addstr(stdscr, y2 - 3, x1 + 2, " bypass=always record ",
+                       curses.color_pair(db.C_DIM))
+        db.safe_addstr(stdscr, y2 - 2, x1 + 2, " Enter:More Settings ",
                        curses.color_pair(db.C_DIM))
 
         if not self._entries:
@@ -426,7 +465,7 @@ class PriorityEditor:
                            curses.color_pair(db.C_DIM))
             return
 
-        visible_rows = (y2 - y1) - 2
+        visible_rows = (y2 - y1) - 3   # -3 to leave room for the two hint rows at bottom
         # Scroll to keep selection visible.
         if self._selected_idx < self._scroll_offset:
             self._scroll_offset = self._selected_idx
@@ -459,6 +498,364 @@ class PriorityEditor:
 
             db.safe_addstr(stdscr, row_y, x1 + 1, prefix + label, attr)
             row_y += 1
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Streamer Settings Popup
+# ══════════════════════════════════════════════════════════════════════════════
+
+class StreamerSettingsPopup:
+    """Modal popup for per-streamer settings (scheduling, etc.).
+
+    Opened by PriorityEditor when the user presses Enter on a streamer.
+    All data is stored inside the existing priorities[config_id][entries]
+    structure in global.json — no new top-level key is created.
+    """
+
+    _DATETIME_FMT = "%Y-%m-%d %H:%M"
+    _TIME_FMT     = "%H:%M"
+    _DAY_LABELS   = ["M", "T", "W", "T", "F", "S", "S"]
+
+    # Field keys used internally
+    _FIELD_ENABLED   = "schedule_enabled"
+    _FIELD_MODE      = "mode"
+    _FIELD_OO_START  = "one_off_start"
+    _FIELD_OO_END    = "one_off_end"
+    _FIELD_REC_DAYS  = "recurring_days"
+    _FIELD_REC_START = "recurring_start"
+    _FIELD_REC_END   = "recurring_end"
+
+    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
+        self.dashboard = dashboard
+        self.entry     = entry
+        self.config_id = config_id
+
+        # Working copies of schedule settings
+        self.schedule_enabled: bool      = False
+        self.mode:             str       = "one_off"    # "one_off" | "recurring"
+        self.one_off_start:    str       = ""
+        self.one_off_end:      str       = ""
+        self.recurring_days:   list      = [False] * 7  # Mon–Sun
+        self.recurring_start:  str       = ""
+        self.recurring_end:    str       = ""
+
+        # UI state
+        self._sel:        int  = 0      # selected field index
+        self._editing:    bool = False  # text-field edit sub-mode
+        self._edit_buf:   str  = ""
+        self._day_cursor: int  = 0      # sub-cursor within the Days row
+        self._error:      str  = ""
+
+        self._load()
+
+    # ── Persistence ────────────────────────────────────────────────────────────
+
+    def _load(self) -> None:
+        """Load saved schedule settings from global.json into working state."""
+        try:
+            from .main import _global_json_lock, _load_global_json
+            with _global_json_lock:
+                gdata = _load_global_json()
+            entries = (gdata.get("priorities", {})
+                           .get(self.config_id, {})
+                           .get("entries", []))
+            for e in entries:
+                if (e.get("streamer") == self.entry.streamer
+                        and e.get("site") == self.entry.site):
+                    sched = e.get("schedule", {})
+                    self.schedule_enabled = bool(sched.get("enabled", False))
+                    self.mode             = sched.get("mode", "one_off")
+                    oo  = sched.get("one_off", {})
+                    self.one_off_start    = oo.get("start", "")
+                    self.one_off_end      = oo.get("end",   "")
+                    rec = sched.get("recurring", {})
+                    days_list             = rec.get("days", [])
+                    self.recurring_days   = [(i in days_list) for i in range(7)]
+                    self.recurring_start  = rec.get("start_time", "")
+                    self.recurring_end    = rec.get("end_time",   "")
+                    break
+        except Exception:
+            pass
+
+    def _save(self) -> None:
+        """Write current working state back to global.json under priorities[…][entries]."""
+        try:
+            from .main import _global_json_lock, _load_global_json, _save_global_json
+            with _global_json_lock:
+                gdata   = _load_global_json()
+                entries = (gdata.get("priorities", {})
+                               .get(self.config_id, {})
+                               .get("entries", []))
+                for e in entries:
+                    if (e.get("streamer") == self.entry.streamer
+                            and e.get("site") == self.entry.site):
+                        sched = e.setdefault("schedule", {})
+                        sched["enabled"] = self.schedule_enabled
+                        sched["mode"]    = self.mode
+                        sched.setdefault("one_off", {}).update({
+                            "start": self.one_off_start,
+                            "end":   self.one_off_end,
+                        })
+                        sched.setdefault("recurring", {}).update({
+                            "days":       [i for i, v in enumerate(self.recurring_days) if v],
+                            "start_time": self.recurring_start,
+                            "end_time":   self.recurring_end,
+                        })
+                        # last_enable_attempt / last_disable_attempt are managed by
+                        # the scheduling engine; never overwrite them here.
+                        break
+                if "priorities" in gdata and self.config_id in gdata["priorities"]:
+                    gdata["priorities"][self.config_id]["entries"] = entries
+                _save_global_json(gdata)
+        except Exception:
+            pass
+
+    # ── Field list (dynamic based on mode) ────────────────────────────────────
+
+    def _get_fields(self) -> "list[tuple[str,str,str]]":
+        """Return list of (label, display_value, field_key) for the current mode."""
+        fields = [
+            ("Scheduling Enabled",
+             "[x]" if self.schedule_enabled else "[ ]",
+             self._FIELD_ENABLED),
+            ("Mode",
+             "< One-Off >" if self.mode == "one_off" else "< Recurring >",
+             self._FIELD_MODE),
+        ]
+        if self.mode == "one_off":
+            fields += [
+                ("Start Datetime",
+                 self.one_off_start or "YYYY-MM-DD HH:MM",
+                 self._FIELD_OO_START),
+                ("End Datetime",
+                 self.one_off_end or "YYYY-MM-DD HH:MM",
+                 self._FIELD_OO_END),
+            ]
+        else:
+            days_disp = " ".join(
+                f"[{lbl}]" if self.recurring_days[i] else f" {lbl} "
+                for i, lbl in enumerate(self._DAY_LABELS)
+            )
+            fields += [
+                ("Days (←→ move, Space toggle)",
+                 days_disp,
+                 self._FIELD_REC_DAYS),
+                ("Start Time",
+                 self.recurring_start or "HH:MM",
+                 self._FIELD_REC_START),
+                ("End Time",
+                 self.recurring_end or "HH:MM",
+                 self._FIELD_REC_END),
+            ]
+        return fields
+
+    # ── Validation ─────────────────────────────────────────────────────────────
+
+    def _validate(self) -> "tuple[bool, str]":
+        if not self.schedule_enabled:
+            return True, ""
+        if self.mode == "one_off":
+            for val, label in ((self.one_off_start, "Start"),
+                               (self.one_off_end,   "End")):
+                try:
+                    datetime.strptime(val, self._DATETIME_FMT)
+                except Exception:
+                    return False, f"{label} must be YYYY-MM-DD HH:MM"
+        else:
+            if not any(self.recurring_days):
+                return False, "Select at least one day"
+            for val, label in ((self.recurring_start, "Start"),
+                               (self.recurring_end,   "End")):
+                try:
+                    datetime.strptime(val, self._TIME_FMT)
+                except Exception:
+                    return False, f"{label} time must be HH:MM"
+        return True, ""
+
+    # ── Key handling ───────────────────────────────────────────────────────────
+
+    def handle_key(self, key) -> bool:
+        """Handle one keypress.  Returns True when the popup should close."""
+        fields = self._get_fields()
+        n      = len(fields)
+        _, _, field_key = fields[self._sel] if fields else ("", "", "")
+
+        # ── Text-editing sub-mode ─────────────────────────────────────────────
+        if self._editing:
+            if key == 27:                               # Esc → cancel edit
+                self._editing  = False
+                self._edit_buf = ""
+                self._error    = ""
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                self._edit_buf = self._edit_buf[:-1]
+                self._error    = ""
+            elif key in (ord("\n"), ord("\r"), curses.KEY_ENTER):
+                val = self._edit_buf.strip()
+                fmt = (self._DATETIME_FMT
+                       if field_key in (self._FIELD_OO_START, self._FIELD_OO_END)
+                       else self._TIME_FMT)
+                try:
+                    datetime.strptime(val, fmt)
+                    setattr(self, field_key, val)
+                    self._editing  = False
+                    self._edit_buf = ""
+                    self._error    = ""
+                except Exception:
+                    expected = ("YYYY-MM-DD HH:MM"
+                                if fmt == self._DATETIME_FMT else "HH:MM")
+                    self._error = f"Use format: {expected}"
+            elif 32 <= key < 127:
+                self._edit_buf += chr(key)
+                self._error     = ""
+            return False
+
+        # ── Normal navigation ─────────────────────────────────────────────────
+        if key == 27:                                   # Esc → close without saving
+            return True
+
+        if key == curses.KEY_UP:
+            self._sel   = max(0, self._sel - 1)
+            self._error = ""
+
+        elif key == curses.KEY_DOWN:
+            self._sel   = min(n - 1, self._sel + 1)
+            self._error = ""
+
+        elif key == curses.KEY_LEFT:
+            if field_key == self._FIELD_MODE:
+                self.mode = "one_off"
+                self._sel = min(self._sel, len(self._get_fields()) - 1)
+            elif field_key == self._FIELD_REC_DAYS:
+                self._day_cursor = max(0, self._day_cursor - 1)
+
+        elif key == curses.KEY_RIGHT:
+            if field_key == self._FIELD_MODE:
+                self.mode = "recurring"
+                self._sel = min(self._sel, len(self._get_fields()) - 1)
+            elif field_key == self._FIELD_REC_DAYS:
+                self._day_cursor = min(6, self._day_cursor + 1)
+
+        elif key == ord(" "):
+            self._toggle_current(field_key, fields)
+
+        elif key in (ord("\n"), ord("\r"), curses.KEY_ENTER):
+            if field_key in (self._FIELD_ENABLED, self._FIELD_MODE,
+                             self._FIELD_REC_DAYS):
+                self._toggle_current(field_key, fields)
+            elif field_key in (self._FIELD_OO_START, self._FIELD_OO_END,
+                               self._FIELD_REC_START, self._FIELD_REC_END):
+                self._edit_buf = getattr(self, field_key, "")
+                self._editing  = True
+                self._error    = ""
+
+        elif key in (ord("s"), ord("S")):
+            valid, err = self._validate()
+            if valid:
+                self._save()
+                return True
+            self._error = err
+
+        return False
+
+    def _toggle_current(self, field_key: str, fields: list) -> None:
+        """Toggle/cycle the currently selected field."""
+        if field_key == self._FIELD_ENABLED:
+            self.schedule_enabled = not self.schedule_enabled
+            self._error = ""
+        elif field_key == self._FIELD_MODE:
+            self.mode = "recurring" if self.mode == "one_off" else "one_off"
+            self._sel = min(self._sel, len(self._get_fields()) - 1)
+            self._error = ""
+        elif field_key == self._FIELD_REC_DAYS:
+            self.recurring_days[self._day_cursor] = not self.recurring_days[self._day_cursor]
+            self._error = ""
+
+    # ── Drawing ────────────────────────────────────────────────────────────────
+
+    def draw(self, stdscr) -> None:
+        """Draw the popup centred on screen, on top of everything else."""
+        db    = self.dashboard
+        h, w  = stdscr.getmaxyx()
+        fields = self._get_fields()
+
+        box_w   = min(56, w - 6)
+        # Two screen-rows per field (field line + blank gap), plus borders / header / footer.
+        box_h   = len(fields) * 2 + 4
+        box_h   = max(box_h, 8)
+        box_h   = min(box_h, h - 4)
+
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        # Clear background area
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1),
+                           curses.color_pair(db.C_NORMAL))
+
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
+        title = f" {self.entry.streamer.upper()} SETTINGS "
+        db.safe_addstr(stdscr, by1, bx1 + 2, title,
+                       curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
+
+        # Draw each field
+        row = by1 + 2
+        for i, (label, val_str, field_key) in enumerate(fields):
+            if row >= by2 - 1:
+                break
+            is_sel     = (i == self._sel)
+            prefix     = "> " if is_sel else "  "
+            label_attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
+                          if is_sel else curses.color_pair(db.C_WARN) | curses.A_BOLD)
+            val_attr   = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
+                          if is_sel else curses.color_pair(db.C_NORMAL))
+
+            full_label = f"{prefix}{label}: "
+            db.safe_addstr(stdscr, row, bx1 + 2, full_label, label_attr)
+            val_x   = bx1 + 2 + len(full_label)
+            max_len = max(1, bx2 - val_x - 1)
+
+            if field_key == self._FIELD_REC_DAYS and is_sel:
+                # Render each day token individually so the sub-cursor can be highlighted.
+                dx = val_x
+                for di, day_lbl in enumerate(self._DAY_LABELS):
+                    is_active = self.recurring_days[di]
+                    is_dc     = (di == self._day_cursor)
+                    day_str   = f"[{day_lbl}]" if is_active else f" {day_lbl} "
+                    if is_dc:
+                        day_attr = curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
+                    elif is_active:
+                        day_attr = curses.color_pair(db.C_LIVE) | curses.A_BOLD
+                    else:
+                        day_attr = curses.color_pair(db.C_DIM)
+                    if dx + len(day_str) < bx2:
+                        db.safe_addstr(stdscr, row, dx, day_str, day_attr)
+                    dx += len(day_str) + 1
+            elif (is_sel and self._editing
+                  and field_key in (self._FIELD_OO_START, self._FIELD_OO_END,
+                                    self._FIELD_REC_START, self._FIELD_REC_END)):
+                db.safe_addstr(stdscr, row, val_x,
+                               (self._edit_buf + "_")[:max_len],
+                               curses.color_pair(db.C_NORMAL) | curses.A_BOLD)
+            else:
+                db.safe_addstr(stdscr, row, val_x, val_str[:max_len], val_attr)
+
+            row += 2  # blank line between fields for readability
+
+        # Footer: error message or keybind hint
+        if self._error:
+            db.safe_addstr(stdscr, by2, bx1 + 2,
+                           f" {self._error} "[:box_w - 4],
+                           curses.color_pair(db.C_WARN) | curses.A_BOLD)
+        else:
+            if self._editing:
+                hint = " Enter:Commit  Esc:Cancel edit "
+            else:
+                hint = " S:Save  Esc:Cancel  Space/Enter:Toggle  \u2190\u2192:Mode/Days "
+            db.safe_addstr(stdscr, by2, bx1 + 2, hint[:box_w - 4],
+                           curses.color_pair(db.C_INVHEAD))
 
 
 def apply_sort_to_streamers(
@@ -1373,10 +1770,12 @@ class ConfigEditor:
         #
         # PRIORITY_PANEL_W is the box span (x2−x1), matching the SYSTEM sidebar.
         total_w  = x2 - x1
-        prio_w   = PRIORITY_PANEL_W                       # 27 → same as system sidebar
-        # Global panel gets ~35% of remaining space (after reserving prio column + 2 gaps).
-        global_w = max(28, int((total_w - prio_w - 2) * 0.35))
-        site_w   = total_w - global_w - prio_w - 2        # 2 gaps between columns
+        prio_w   = PRIORITY_PANEL_W                       # same as system sidebar
+        # Split remaining space evenly so SITE SETTINGS and GLOBAL SETTINGS are identical widths.
+        remaining_w = total_w - prio_w - 2               # 2 gaps between the three columns
+        col_w    = max(28, remaining_w // 2)
+        global_w = col_w
+        site_w   = remaining_w - col_w                   # absorbs odd pixel when terminal is odd-width
 
         site_x1   = x1
         site_x2   = x1 + site_w
@@ -1399,7 +1798,7 @@ class ConfigEditor:
                     curses.color_pair(self.dashboard.C_DIM))
 
         # Keybind legend above PRIORITY panel (always visible)
-        prio_hint = "\u2191\u2193:nav  U:up D:dn  B:bypass"
+        prio_hint = "\u2191\u2193:nav  U:up D:dn  B:bypass  Enter:settings"
         self.dashboard.safe_addstr(stdscr, content_y1, prio_x1, prio_hint,
                     curses.color_pair(self.dashboard.C_DIM))
 
@@ -1483,6 +1882,8 @@ class ConfigEditor:
             self.global_editor.draw_popup(stdscr)
         elif self._focus == "site" and self.popup_mode and self.editing_item:
             self.draw_popup(stdscr)
+        elif self.priority_editor._settings_popup is not None:
+            self.priority_editor._settings_popup.draw(stdscr)
 
     def draw_popup(self, stdscr):
         h, w = stdscr.getmaxyx()
@@ -1543,7 +1944,8 @@ class ConfigEditor:
 
         # ── Priority panel focus ──────────────────────────────────────────────
         if self._focus == "priority":
-            if key == 27:
+            # Only exit the Config tab on Esc when no streamer settings popup is open.
+            if key == 27 and self.priority_editor._settings_popup is None:
                 self.dashboard.selected_tab = 0
                 return True
             return self.priority_editor.handle_key(key)
