@@ -2205,6 +2205,14 @@ def _process_streamer_schedules(site: "SiteState") -> None:
     if not entries:
         return
 
+    # Only process entries that belong to this site
+    try:
+        current_site_label = site.get_cached_config().get(
+            "site_label", os.path.basename(site.config_path)
+        )
+    except Exception:
+        current_site_label = os.path.basename(site.config_path)
+    
     # Collect actions: list of (streamer, site_label, conf_action, log_label)
     # conf_action is "add" (enable) or "disable".
     pending: list = []
@@ -2229,7 +2237,8 @@ def _process_streamer_schedules(site: "SiteState") -> None:
         if not streamer:
             continue
 
-        if site_label and site_label.lower() != site.label.lower():
+        # Skip entries that belong to a different site
+        if site_label != current_site_label:
             continue
 
         mode = sched.get("mode", "one_off")
