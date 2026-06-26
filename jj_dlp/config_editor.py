@@ -448,17 +448,12 @@ class PriorityEditor:
 
         # Box border
         db.draw_box(stdscr, y1, x1, y2, x2, db.C_SYSTEM)
-        db.safe_addstr(stdscr, y1, x1 + 2, " STREAMER SETTINGS ",
+        db.safe_addstr(stdscr, y1, x1 + 2, " PRIORITIES/SCHEDULING ",
                        curses.color_pair(db.C_LIVE) | curses.A_BOLD)
         if is_active:
-            mode_str = " [ PRI ] "
+            mode_str = " [  ] "
             db.safe_addstr(stdscr, y1, x2 - len(mode_str) - 1, mode_str,
                            curses.color_pair(db.C_LIVE) | curses.A_BOLD)
-
-        db.safe_addstr(stdscr, y2 - 3, x1 + 2, " bypass=always record ",
-                       curses.color_pair(db.C_DIM))
-        db.safe_addstr(stdscr, y2 - 2, x1 + 2, " Enter:More Settings ",
-                       curses.color_pair(db.C_DIM))
 
         if not self._entries:
             db.safe_addstr(stdscr, y1 + 2, x1 + 2, "No streamers.",
@@ -1547,7 +1542,7 @@ class GlobalConfigEditor:
         title = " GLOBAL SETTINGS "
         self.dashboard.safe_addstr(stdscr, y1, x1 + 2, title, curses.color_pair(db.C_LIVE) | curses.A_BOLD)
         if is_active:
-            mode_str = " [ GLOBAL ] "
+            mode_str = " [  ] "
             self.dashboard.safe_addstr(stdscr, y1, x2 - len(mode_str) - 1, mode_str,
                         curses.color_pair(db.C_LIVE) | curses.A_BOLD)
 
@@ -1828,7 +1823,7 @@ class ConfigEditor:
         site_box_y1 = content_y1 + 1
         self.dashboard.draw_box(stdscr, site_box_y1, site_x1, y2, site_x2, self.dashboard.C_CHROME)
         if self._focus == "site":
-            mode_str = " [ SITE ] "
+            mode_str = " [  ] "
             self.dashboard.safe_addstr(stdscr, site_box_y1, site_x2 - len(mode_str) - 1, mode_str,
                         curses.color_pair(self.dashboard.C_LIVE) | curses.A_BOLD)
         self.dashboard.safe_addstr(stdscr, site_box_y1, site_x1 + 2, " SITE SETTINGS ",
