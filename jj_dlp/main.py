@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.17.1"
+__version__ = "1.17.2"
 
 import subprocess
 import time
@@ -2227,6 +2227,9 @@ def _process_streamer_schedules(site: "SiteState") -> None:
         streamer    = entry.get("streamer", "")
         site_label  = entry.get("site", "")
         if not streamer:
+            continue
+
+        if site_label and site_label.lower() != site.label.lower():
             continue
 
         mode = sched.get("mode", "one_off")
