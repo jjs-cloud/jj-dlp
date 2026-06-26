@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.17.2"
+__version__ = "1.17.3"
 
 import subprocess
 import time
@@ -2206,12 +2206,20 @@ def _process_streamer_schedules(site: "SiteState") -> None:
         return
 
     # Only process entries that belong to this site
+    def normalize_label(lbl: str) -> str:
+        if not lbl:
+            return ""
+        lbl = lbl.lower().strip()
+        if lbl.endswith(".conf"):
+            lbl = lbl[:-5]
+        return lbl
+
     try:
-        current_site_label = site.get_cached_config().get(
+        current_site_label = normalize_label(site.get_cached_config().get(
             "site_label", os.path.basename(site.config_path)
-        )
+        ))
     except Exception:
-        current_site_label = os.path.basename(site.config_path)
+        current_site_label = normalize_label(os.path.basename(site.config_path))
     
     # Collect actions: list of (streamer, site_label, conf_action, log_label)
     # conf_action is "add" (enable) or "disable".
@@ -2221,24 +2229,23 @@ def _process_streamer_schedules(site: "SiteState") -> None:
     _now_str   = now.strftime("%Y-%m-%d %H:%M:%S")
 
     for entry in entries:
-        sched = entry.get("schedule", {})
-
-        # Log even skipped entries so every streamer is accounted for each cycle.
-        if not sched.get("enabled"):
-            _entry_streamer = entry.get("streamer", "?")
-            dbg(
-                f"[SCHEDULE] {_entry_streamer!r}: schedule not enabled — ignored",
-                site.config_path,
-            )
-            continue
-
         streamer    = entry.get("streamer", "")
-        site_label  = entry.get("site", "")
+        site_label  = normalize_label(entry.get("site", ""))
         if not streamer:
             continue
 
         # Skip entries that belong to a different site
         if site_label != current_site_label:
+            continue
+
+        sched = entry.get("schedule", {})
+
+        # Log even skipped entries so every streamer is accounted for each cycle.
+        if not sched.get("enabled"):
+            dbg(
+                f"[SCHEDULE] {streamer!r}: schedule not enabled — ignored",
+                site.config_path,
+            )
             continue
 
         mode = sched.get("mode", "one_off")
