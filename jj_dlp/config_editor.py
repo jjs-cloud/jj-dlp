@@ -638,7 +638,7 @@ class StreamerSettingsPopup:
                 for i, lbl in enumerate(self._DAY_LABELS)
             )
             fields += [
-                ("Days (←→ move, Space toggle)",
+                ("Days",
                  days_disp,
                  self._FIELD_REC_DAYS),
                 ("Start Time",
