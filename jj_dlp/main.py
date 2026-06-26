@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.17.0"
+__version__ = "1.17.1"
 
 import subprocess
 import time
@@ -2209,9 +2209,19 @@ def _process_streamer_schedules(site: "SiteState") -> None:
     # conf_action is "add" (enable) or "disable".
     pending: list = []
 
+    _DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    _now_str   = now.strftime("%Y-%m-%d %H:%M:%S")
+
     for entry in entries:
         sched = entry.get("schedule", {})
+
+        # Log even skipped entries so every streamer is accounted for each cycle.
         if not sched.get("enabled"):
+            _entry_streamer = entry.get("streamer", "?")
+            dbg(
+                f"[SCHEDULE] {_entry_streamer!r}: schedule not enabled — ignored",
+                site.config_path,
+            )
             continue
 
         streamer    = entry.get("streamer", "")
@@ -2238,13 +2248,64 @@ def _process_streamer_schedules(site: "SiteState") -> None:
                 start_dt = datetime.strptime(oo.get("start", ""), "%Y-%m-%d %H:%M")
                 end_dt   = datetime.strptime(oo.get("end",   ""), "%Y-%m-%d %H:%M")
             except Exception:
+                dbg(
+                    f"[SCHEDULE] {streamer!r}: one_off — bad start/end format, skipping",
+                    site.config_path,
+                )
                 continue
 
-            if now >= start_dt and (last_enable is None or last_enable < start_dt):
-                pending.append((streamer, site_label, "add", "enabled"))
+            dbg(
+                f"[SCHEDULE] {streamer!r}: one_off check — "
+                f"now={_now_str}  "
+                f"start={start_dt.strftime('%Y-%m-%d %H:%M')}  "
+                f"end={end_dt.strftime('%Y-%m-%d %H:%M')}  "
+                f"last_enable={last_enable}  last_disable={last_disable}",
+                site.config_path,
+            )
 
-            if now >= end_dt and (last_disable is None or last_disable < end_dt):
-                pending.append((streamer, site_label, "disable", "disabled"))
+            # ── Enable decision ───────────────────────────────────────────────
+            if now >= start_dt:
+                if last_enable is None or last_enable < start_dt:
+                    dbg(
+                        f"[SCHEDULE] {streamer!r}: → ENABLE "
+                        f"(now≥start; last_enable={last_enable or 'never'})",
+                        site.config_path,
+                    )
+                    pending.append((streamer, site_label, "add", "enabled"))
+                else:
+                    dbg(
+                        f"[SCHEDULE] {streamer!r}: → enable skipped "
+                        f"(already enabled at {last_enable})",
+                        site.config_path,
+                    )
+            else:
+                dbg(
+                    f"[SCHEDULE] {streamer!r}: → enable skipped "
+                    f"(start not yet reached: {start_dt.strftime('%Y-%m-%d %H:%M')})",
+                    site.config_path,
+                )
+
+            # ── Disable decision ──────────────────────────────────────────────
+            if now >= end_dt:
+                if last_disable is None or last_disable < end_dt:
+                    dbg(
+                        f"[SCHEDULE] {streamer!r}: → DISABLE "
+                        f"(now≥end; last_disable={last_disable or 'never'})",
+                        site.config_path,
+                    )
+                    pending.append((streamer, site_label, "disable", "disabled"))
+                else:
+                    dbg(
+                        f"[SCHEDULE] {streamer!r}: → disable skipped "
+                        f"(already disabled at {last_disable})",
+                        site.config_path,
+                    )
+            else:
+                dbg(
+                    f"[SCHEDULE] {streamer!r}: → disable skipped "
+                    f"(end not yet reached: {end_dt.strftime('%Y-%m-%d %H:%M')})",
+                    site.config_path,
+                )
 
         elif mode == "recurring":
             rec            = sched.get("recurring", {})
@@ -2253,12 +2314,21 @@ def _process_streamer_schedules(site: "SiteState") -> None:
             end_time_str   = rec.get("end_time",   "")
 
             if not days or not start_time_str or not end_time_str:
+                dbg(
+                    f"[SCHEDULE] {streamer!r}: recurring — missing days/start_time/end_time, skipping",
+                    site.config_path,
+                )
                 continue
 
             try:
                 sh, sm = map(int, start_time_str.split(":"))
                 eh, em = map(int, end_time_str.split(":"))
             except Exception:
+                dbg(
+                    f"[SCHEDULE] {streamer!r}: recurring — bad time format "
+                    f"(start={start_time_str!r} end={end_time_str!r}), skipping",
+                    site.config_path,
+                )
                 continue
 
             # Whether the window crosses midnight (e.g. 22:00 → 02:00 next day).
@@ -2294,13 +2364,66 @@ def _process_streamer_schedules(site: "SiteState") -> None:
                             most_recent_end = cand_dt
                             break
 
+            _days_str = ",".join(_DAY_NAMES[d] for d in sorted(days) if 0 <= d <= 6)
+            dbg(
+                f"[SCHEDULE] {streamer!r}: recurring check — "
+                f"now={_now_str}  "
+                f"days=[{_days_str}]  "
+                f"window={start_time_str}→{end_time_str}  "
+                f"crosses_midnight={crosses_midnight}  "
+                f"most_recent_start={most_recent_start}  "
+                f"most_recent_end={most_recent_end}  "
+                f"last_enable={last_enable}  last_disable={last_disable}",
+                site.config_path,
+            )
+
+            # ── Enable decision ───────────────────────────────────────────────
             if most_recent_start is not None:
                 if last_enable is None or last_enable < most_recent_start:
+                    dbg(
+                        f"[SCHEDULE] {streamer!r}: → ENABLE "
+                        f"(most_recent_start={most_recent_start}; "
+                        f"last_enable={last_enable or 'never'})",
+                        site.config_path,
+                    )
                     pending.append((streamer, site_label, "add", "enabled"))
+                else:
+                    dbg(
+                        f"[SCHEDULE] {streamer!r}: → enable skipped "
+                        f"(already enabled at {last_enable}; "
+                        f"most_recent_start={most_recent_start})",
+                        site.config_path,
+                    )
+            else:
+                dbg(
+                    f"[SCHEDULE] {streamer!r}: → enable skipped "
+                    f"(no matching start day found in past 14 days)",
+                    site.config_path,
+                )
 
+            # ── Disable decision ──────────────────────────────────────────────
             if most_recent_end is not None:
                 if last_disable is None or last_disable < most_recent_end:
+                    dbg(
+                        f"[SCHEDULE] {streamer!r}: → DISABLE "
+                        f"(most_recent_end={most_recent_end}; "
+                        f"last_disable={last_disable or 'never'})",
+                        site.config_path,
+                    )
                     pending.append((streamer, site_label, "disable", "disabled"))
+                else:
+                    dbg(
+                        f"[SCHEDULE] {streamer!r}: → disable skipped "
+                        f"(already disabled at {last_disable}; "
+                        f"most_recent_end={most_recent_end})",
+                        site.config_path,
+                    )
+            else:
+                dbg(
+                    f"[SCHEDULE] {streamer!r}: → disable skipped "
+                    f"(no matching end day found in past 14 days)",
+                    site.config_path,
+                )
 
     if not pending:
         return
