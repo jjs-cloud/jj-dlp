@@ -515,6 +515,14 @@ def _save_global_json(data: dict) -> None:
     Before writing, backs up the current global.json to backups/ if it's
     been more than 24h since the last backup (see _backup_global_json_if_due).
     """
+    # ── DEV WATCH: remove this block to disable ───────────────────────────────
+    global _DEV_WATCH_ALERT
+    _old = _dev_watch_snapshot(_load_global_json())
+    _new = _dev_watch_snapshot(data)
+    if _old != _new:
+        with _DEV_WATCH_LOCK:
+            _DEV_WATCH_ALERT = True
+    # ── END DEV WATCH ─────────────────────────────────────────────────────────
     _backup_global_json_if_due(data)
     try:
         with open(_global_json_path(), "w", encoding="utf-8") as f:
@@ -744,6 +752,19 @@ class SiteState:
 # Update availability flag (set during startup, read by dashboard)
 UPDATE_AVAILABLE = False
 update_available_lock = threading.Lock()
+
+# ── DEV WATCH: remove this block to disable ───────────────────────────────────
+_DEV_WATCH_ALERT = False
+_DEV_WATCH_LOCK  = threading.Lock()
+_DEV_WATCH_ENTRY = {"streamer": "emiru", "site": "twitch",
+                    "config_sha": "66fb446ad5081c8c", "priority": 0, "bypass": True}
+def _dev_watch_snapshot(data: dict):
+    """Return the watched entry's current values from global.json data, or None."""
+    for e in data.get("entries", []):
+        if e.get("streamer") == _DEV_WATCH_ENTRY["streamer"] and e.get("site") == _DEV_WATCH_ENTRY["site"]:
+            return {k: e.get(k) for k in _DEV_WATCH_ENTRY}
+    return None
+# ── END DEV WATCH ─────────────────────────────────────────────────────────────
 
 FFMPEG_ERROR_PATTERNS: List[str] = [
     "timestamp discontinuity",
@@ -3805,6 +3826,15 @@ class JJDlpDashboard:
                             curses.color_pair(self.C_WARN) | curses.A_BOLD)
                 next_right_row += 1
         
+        # ── DEV WATCH: remove this block to disable ───────────────────────────
+        with _DEV_WATCH_LOCK:
+            if _DEV_WATCH_ALERT:
+                _dw_str = "!! GLOBAL.JSON WATCH ENTRY CHANGED !!"
+                _dw_attr = curses.color_pair(self.C_REC) | curses.A_BOLD | (curses.A_BLINK if self.tick % 2 == 0 else 0)
+                self.safe_addstr(self.stdscr, next_right_row, w - len(_dw_str) - 3, _dw_str, _dw_attr)
+                next_right_row += 1
+        # ── END DEV WATCH ─────────────────────────────────────────────────────
+
         # App version indicator (Below Update Available, or directly below time)
         version_str = f"v{__version__}"
         self.safe_addstr(self.stdscr, next_right_row, w - len(version_str) - 3, version_str,
