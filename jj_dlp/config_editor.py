@@ -1564,7 +1564,11 @@ class GlobalConfigEditor:
             val_attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
                         if is_sel else curses.color_pair(db.C_LIVE))
             self.dashboard.safe_addstr(stdscr, row_y, x1 + 1, prefix + f"{item.key:<22}", key_attr)
-            self.dashboard.safe_addstr(stdscr, row_y, x1 + 26, "= " + str(item.value), val_attr)
+            val_str = "= " + str(item.value)
+            max_val_w = (x2 - x1) - 26 - 1   # columns between value start and right border
+            if len(val_str) > max_val_w:
+                val_str = val_str[:max_val_w - 1] + "\u25ba"
+            self.dashboard.safe_addstr(stdscr, row_y, x1 + 26, val_str, val_attr)
             row_y += 1
 
         if self.popup_mode and self.editing_item:
@@ -1868,7 +1872,11 @@ class ConfigEditor:
                                 else curses.color_pair(self.dashboard.C_LIVE))
                     self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 2, prefix + f"{item.key:<25}", key_attr)
                     if item.has_equals:
-                        self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 29, "= " + str(item.value), val_attr)
+                        val_str = "= " + str(item.value)
+                        max_val_w = (site_x2 - site_x1) - 29 - 1   # columns between value start and right border
+                        if len(val_str) > max_val_w:
+                            val_str = val_str[:max_val_w - 1] + "\u25ba"
+                        self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 29, val_str, val_attr)
                 row_y += 1
 
         # Draw popup (whichever sub-editor owns it)
