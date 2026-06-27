@@ -1,13 +1,18 @@
-- fixed bug with holding down the arrow keys to scroll caused the scrolling to continue after the keys are released
+v1.18.3
+
+- fixed a bug with holding down the arrow keys to scroll caused 
+the scrolling to continue after the keys are released
 
 - added the ability to schedule when a streamer is enabled/disabled.   steps to use:
-    1. add the streamer
-    2. press enter on the streamer in the PRIORITIES/SCHEDULING panel
+    1. add the streamer in the Dashboard tab
+    2. press enter on the streamer in the Config tab on the PRIORITIES/SCHEDULING panel
     3. configure the schedule
-The script will automatically enable the streamer at the start time, and disable the streamer at the end time.
+The streamer will be automatically enabled at the start time, and disabled at the end time.
 
 - added twitch ad detection.  steps to use:
     1. enable the the "AD_ALERT" key in the twitch SITE SETTINGS" panel
-An alert will be displayed in the SYSTEM panel any time an ad is detected in a twitch stream.   Note: The ad detection currently only applies to twitch.
+An alert will be displayed in the SYSTEM panel any time an ad is detected in a twitch stream.   
+The alert is cleared when the recording ends.  
+Note: The ad detection currently only applies to twitch.
 
 - added changelog popup at startup after an update
