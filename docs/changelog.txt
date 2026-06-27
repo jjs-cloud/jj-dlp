@@ -1,4 +1,4 @@
-v1.18.3 
+v1.18.4
 
 - fixed a bug with holding down the arrow keys to scroll which caused 
 the scrolling to continue after the keys are released
@@ -10,7 +10,7 @@ the scrolling to continue after the keys are released
 The streamer will be automatically enabled at the start time, and disabled at the end time.
 
 - added twitch ad detection.  steps to use:
-    1. enable the the "AD_ALERT" key in the twitch SITE SETTINGS" panel
+    1. enable the the "AD_ALERT" key in the twitch SITE SETTINGS panel
 An alert will be displayed in the SYSTEM panel any time an ad is detected in a twitch stream.   
 The alert is cleared when the recording ends.  
 Note: The ad detection currently only applies to twitch.
