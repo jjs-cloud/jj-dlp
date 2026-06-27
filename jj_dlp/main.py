@@ -3061,7 +3061,7 @@ class JJDlpDashboard:
                     self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
                                 _label, _attr)
                     self.safe_addstr(self.stdscr, disk_row_y, x1 + 2 + label_w + 1,
-                                "Ad"[:inner_w - label_w - 1], _attr)
+                                "Ad detected"[:inner_w - label_w - 1], _attr)
                     disk_row_y += 1
                 disk_row_y += 1
         except Exception as _ad_exc:
