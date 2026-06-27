@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.18.1"
+__version__ = "1.18.2"
 
 import subprocess
 import time
@@ -779,7 +779,6 @@ FFMPEG_ERROR_RESTART_THRESHOLD: int = 200
 _AD_DISCONTINUITY_RE = _re.compile(r"#EXT-X-DISCONTINUITY(?!-SEQUENCE)", _re.IGNORECASE)
 _AD_SEGMENT_URL_RE   = _re.compile(r"(amazon|twitch-ad|/ad/|admanifest|/ads/)", _re.IGNORECASE)
 _AD_TWITCH_TAG_RE    = _re.compile(r'#EXT-X-TWITCH-AD|CLASS="twitch-stitched-ad"', _re.IGNORECASE)
-_AD_ALERT_WINDOW: float = 90.0
 
 # ── LQ (low-quality) downloader bandwidth-saving state ───────────────────────
 # Maps (streamer, site_label) → epoch when an LQ_Downloader recording was last
@@ -3039,16 +3038,14 @@ class JJDlpDashboard:
         except Exception as _stall_exc:
             dbg(f"[SYSTEM] stall section exception: {_stall_exc!r}")
 
-        # Ad alerts — one flashing row per streamer with a recent ad signal.
+        # Ad alerts — one row per streamer with a recent ad signal.
         try:
-            _now = time.time()
             all_ad_alerts: List[str] = []
             for _site in self.sites:
                 with _site.dash_lock:
                     site_ads = dict(_site.ad_alerts)
-                for _streamer, _last_seen in sorted(site_ads.items()):
-                    if _now - _last_seen < _AD_ALERT_WINDOW:
-                        all_ad_alerts.append(_streamer)
+                for _streamer in sorted(site_ads.keys()):
+                    all_ad_alerts.append(_streamer)
 
             if all_ad_alerts:
                 if disk_row_y < y2 - 1:
@@ -3056,18 +3053,15 @@ class JJDlpDashboard:
                                 "── ads ──"[:inner_w],
                                 curses.color_pair(self.C_WARN) | curses.A_BOLD)
                     disk_row_y += 1
-                _flash_on = (self.tick // self.FLASH_CYCLE) % 2 == 0
                 for _streamer in all_ad_alerts:
                     if disk_row_y >= y2 - 1:
                         break
                     _label = _streamer[:label_w].ljust(label_w)
                     _attr  = curses.color_pair(self.C_WARN) | curses.A_BOLD
-                    if _flash_on:
-                        _attr |= curses.A_REVERSE
                     self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
                                 _label, _attr)
                     self.safe_addstr(self.stdscr, disk_row_y, x1 + 2 + label_w + 1,
-                                "⚠ Ad"[:inner_w - label_w - 1], _attr)
+                                "Ad"[:inner_w - label_w - 1], _attr)
                     disk_row_y += 1
                 disk_row_y += 1
         except Exception as _ad_exc:
