@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.18.0"
+__version__ = "1.18.1"
 
 import subprocess
 import time
@@ -2951,8 +2951,6 @@ class JJDlpDashboard:
                     lambda v: self.C_LIVE if v else self.C_DIM))
         rows.extend(_site_setting_rows("Popups", "popup_notifications", _on_off,
                     lambda v: self.C_LIVE if v else self.C_DIM))
-        rows.extend(_site_setting_rows("Ad Alerts", "ad_alerts", _on_off,
-                    lambda v: self.C_WARN if v else self.C_DIM))
         rows.extend(_split_after_rows())
 
         inner_w = x2 - x1 - 2
