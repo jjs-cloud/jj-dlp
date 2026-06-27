@@ -2,13 +2,14 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.17.3"
+__version__ = "1.18.0"
 
 import subprocess
 import time
 import sys
 import os
 import json
+import re as _re
 import threading
 from datetime import datetime, timedelta
 from datetime import time as _dt_time
@@ -620,6 +621,10 @@ class SiteState:
         # Set when size stops growing; cleared when growth resumes or recording ends.
         self.stall_since: Dict[str, float] = {}
 
+        # Ad alert tracking — streamer -> epoch of most recent ad signal.
+        # Written by _drain_pipe (update_ad_alert); read by draw_system_panel.
+        self.ad_alerts: Dict[str, float] = {}
+
         # Cached config for the dashboard renderer — refreshed at most every 2s
         # so we avoid 7+ file reads per frame in draw_system_panel.
         self._cfg_cache:          Optional[dict] = None
@@ -670,6 +675,16 @@ class SiteState:
         """Clear stall tracking for *streamer* (growth resumed or recording ended)."""
         with self.dash_lock:
             self.stall_since.pop(streamer, None)
+
+    def update_ad_alert(self, streamer: str) -> None:
+        """Record that an ad signal was just seen for *streamer*."""
+        with self.dash_lock:
+            self.ad_alerts[streamer] = time.time()
+
+    def clear_ad_alert(self, streamer: str) -> None:
+        """Remove the ad alert for *streamer* (called when recording ends)."""
+        with self.dash_lock:
+            self.ad_alerts.pop(streamer, None)
 
     def kill_all_procs(self) -> None:
         """Kill every registered yt-dlp process. Called on quit."""
@@ -758,6 +773,13 @@ _CHECKER_STDERR_PREFIX: str = "\x00checker_err\x00"
 # be toggled independently of regular activity messages.
 _DEBUG_LOG_PREFIX: str = "\x00debug\x00"
 FFMPEG_ERROR_RESTART_THRESHOLD: int = 200
+
+# ── Ad detection patterns (used by _drain_pipe when AD_ALERTS is enabled) ─────
+# Any match updates the per-streamer last-seen timestamp in site.ad_alerts.
+_AD_DISCONTINUITY_RE = _re.compile(r"#EXT-X-DISCONTINUITY(?!-SEQUENCE)", _re.IGNORECASE)
+_AD_SEGMENT_URL_RE   = _re.compile(r"(amazon|twitch-ad|/ad/|admanifest|/ads/)", _re.IGNORECASE)
+_AD_TWITCH_TAG_RE    = _re.compile(r'#EXT-X-TWITCH-AD|CLASS="twitch-stitched-ad"', _re.IGNORECASE)
+_AD_ALERT_WINDOW: float = 90.0
 
 # ── LQ (low-quality) downloader bandwidth-saving state ───────────────────────
 # Maps (streamer, site_label) → epoch when an LQ_Downloader recording was last
@@ -1037,7 +1059,8 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
                 ffmpeg_error_counter=None, ffmpeg_error_event=None,
                 streamer: str = "", site: Optional[SiteState] = None,
                 filename_holder: Optional[List[str]] = None,
-                filename_event: Optional[threading.Event] = None) -> None:
+                filename_event: Optional[threading.Event] = None,
+                ad_alerts_enabled: bool = False) -> None:
     """Drain one pipe (stdout or stderr) from a yt-dlp subprocess.
 
     If *filename_holder* and *filename_event* are provided, the first
@@ -1089,6 +1112,15 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
                         if ffmpeg_error_counter[0] >= FFMPEG_ERROR_RESTART_THRESHOLD:
                             ffmpeg_error_event.set()
                         break
+
+            if ad_alerts_enabled and site is not None and streamer:
+                if (_AD_DISCONTINUITY_RE.search(line) or
+                        _AD_SEGMENT_URL_RE.search(line) or
+                        _AD_TWITCH_TAG_RE.search(line)):
+                    site.update_ad_alert(streamer)
+                    dbg(f"[AD] signal detected streamer={streamer!r} "
+                        f"pipe={pipe_type!r}: {line[:120]!r}",
+                        site_name=streamer)
     except Exception as _drain_exc:
         dbg(f"[DRAIN] pipe_type={pipe_type!r} streamer={streamer!r} EXCEPTION: {_drain_exc!r}")
     dbg(f"[DRAIN] thread exiting pipe_type={pipe_type!r} streamer={streamer!r} total_lines={line_count}")
@@ -1545,6 +1577,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         "site": site,
                         "filename_holder": filename_holder,
                         "filename_event": filename_event,
+                        "ad_alerts_enabled": cfg.get("ad_alerts", False),
                     },
                     daemon=True
                 ).start()
@@ -1559,6 +1592,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         "site": site,
                         "filename_holder": filename_holder,
                         "filename_event": filename_event,
+                        "ad_alerts_enabled": cfg.get("ad_alerts", False),
                     },
                     daemon=True
                 ).start()
@@ -1694,6 +1728,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     site.unregister_proc(streamer)
                     site.clear_ffmpeg_error_count(streamer)
                     site.clear_stall_since(streamer)
+                    site.clear_ad_alert(streamer)
 
                     try:
                         close_logs()
@@ -1710,6 +1745,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     site.log_line(f"ffmpeg error threshold reached for {streamer} — restarting")
                     kill_proc(proc)
                     site.unregister_proc(streamer)
+                    site.clear_ad_alert(streamer)
 
                     try:
                         close_logs()
@@ -1779,14 +1815,22 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                             threading.Thread(
                                 target=_drain_pipe,
                                 args=(next_proc.stdout, next_log_out_fp, "stdout"),
-                                kwargs={"streamer": streamer, "site": site},
+                                kwargs={
+                                    "streamer": streamer,
+                                    "site": site,
+                                    "ad_alerts_enabled": cfg.get("ad_alerts", False),
+                                },
                                 daemon=True
                             ).start()
 
                             threading.Thread(
                                 target=_drain_pipe,
                                 args=(next_proc.stderr, next_log_err_fp, "stderr"),
-                                kwargs={"streamer": streamer, "site": site},
+                                kwargs={
+                                    "streamer": streamer,
+                                    "site": site,
+                                    "ad_alerts_enabled": cfg.get("ad_alerts", False),
+                                },
                                 daemon=True
                             ).start()
 
@@ -1942,6 +1986,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         kill_proc(proc)
                         site.unregister_proc(streamer)
                         site.clear_stall_since(streamer)
+                        site.clear_ad_alert(streamer)
 
                         try:
                             close_logs()
@@ -1968,6 +2013,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 site.unregister_proc(streamer)
                 site.clear_stall_since(streamer)
                 site.clear_ffmpeg_error_count(streamer)
+                site.clear_ad_alert(streamer)
 
                 try:
                     close_logs()
@@ -1997,6 +2043,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 pass
 
         site.unregister_proc(streamer)
+        site.clear_ad_alert(streamer)
 
         try:
             close_logs()
@@ -2012,6 +2059,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             # reach this finally block the thread is done regardless of why it
             # stopped (normal end, eviction, or crash).
             site.evicted_streamers.discard(streamer)
+
+        site.clear_ad_alert(streamer)
 
         time.sleep(cfg["cooldown_after_recording"])
 
@@ -2902,6 +2951,8 @@ class JJDlpDashboard:
                     lambda v: self.C_LIVE if v else self.C_DIM))
         rows.extend(_site_setting_rows("Popups", "popup_notifications", _on_off,
                     lambda v: self.C_LIVE if v else self.C_DIM))
+        rows.extend(_site_setting_rows("Ad Alerts", "ad_alerts", _on_off,
+                    lambda v: self.C_WARN if v else self.C_DIM))
         rows.extend(_split_after_rows())
 
         inner_w = x2 - x1 - 2
@@ -2989,6 +3040,40 @@ class JJDlpDashboard:
                 disk_row_y += 1
         except Exception as _stall_exc:
             dbg(f"[SYSTEM] stall section exception: {_stall_exc!r}")
+
+        # Ad alerts — one flashing row per streamer with a recent ad signal.
+        try:
+            _now = time.time()
+            all_ad_alerts: List[str] = []
+            for _site in self.sites:
+                with _site.dash_lock:
+                    site_ads = dict(_site.ad_alerts)
+                for _streamer, _last_seen in sorted(site_ads.items()):
+                    if _now - _last_seen < _AD_ALERT_WINDOW:
+                        all_ad_alerts.append(_streamer)
+
+            if all_ad_alerts:
+                if disk_row_y < y2 - 1:
+                    self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
+                                "── ads ──"[:inner_w],
+                                curses.color_pair(self.C_WARN) | curses.A_BOLD)
+                    disk_row_y += 1
+                _flash_on = (self.tick // self.FLASH_CYCLE) % 2 == 0
+                for _streamer in all_ad_alerts:
+                    if disk_row_y >= y2 - 1:
+                        break
+                    _label = _streamer[:label_w].ljust(label_w)
+                    _attr  = curses.color_pair(self.C_WARN) | curses.A_BOLD
+                    if _flash_on:
+                        _attr |= curses.A_REVERSE
+                    self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
+                                _label, _attr)
+                    self.safe_addstr(self.stdscr, disk_row_y, x1 + 2 + label_w + 1,
+                                "⚠ Ad"[:inner_w - label_w - 1], _attr)
+                    disk_row_y += 1
+                disk_row_y += 1
+        except Exception as _ad_exc:
+            dbg(f"[SYSTEM] ad alerts section exception: {_ad_exc!r}")
 
         # Disk space rows — drives from global.conf take precedence; fall back to per-site
         try:

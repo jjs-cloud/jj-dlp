@@ -143,6 +143,7 @@ DBG_TAGS: list[str] = [
     "DISK",
     "UPDATER",
     "TWITCH",
+    "AD",
     "CONFIG",
     "KILL",
     "STALL",
