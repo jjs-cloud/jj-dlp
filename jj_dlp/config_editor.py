@@ -111,8 +111,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("POPUP_NOTIFICATIONS",   "site",   "true", True,
             "Show popup notifications for recording events (true/false)."),
     _KeyDef("AD_ALERTS",             "site",   "True", True,
-            "Show an alert in the system panel when ads are detected in a recording "
-            "(true/false). Currently only applies to twitch.tv"
+            "Show an alert in the system panel when ads are detected in a recording (true/false)."),
     _KeyDef("POPUP_TIMEOUT",         "site",   "15",   True,
             "Seconds a notification popup stays visible."),
     _KeyDef("POPUP_COOLDOWN",        "site",   "30",   True,
