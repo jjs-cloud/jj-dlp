@@ -1,6 +1,6 @@
 v1.18.3 
 
-- fixed a bug with holding down the arrow keys to scroll caused 
+- fixed a bug with holding down the arrow keys to scroll which caused 
 the scrolling to continue after the keys are released
 
 - added the ability to schedule when a streamer is enabled/disabled.   steps to use:
