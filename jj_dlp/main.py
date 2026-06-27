@@ -2,15 +2,17 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.16.0"
+__version__ = "1.18.4"
 
 import subprocess
 import time
 import sys
 import os
 import json
+import re as _re
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
+from datetime import time as _dt_time
 from typing import List, Set, Tuple, Dict, Optional
 import configparser
 import argparse
@@ -619,6 +621,10 @@ class SiteState:
         # Set when size stops growing; cleared when growth resumes or recording ends.
         self.stall_since: Dict[str, float] = {}
 
+        # Ad alert tracking — streamer -> epoch of most recent ad signal.
+        # Written by _drain_pipe (update_ad_alert); read by draw_system_panel.
+        self.ad_alerts: Dict[str, float] = {}
+
         # Cached config for the dashboard renderer — refreshed at most every 2s
         # so we avoid 7+ file reads per frame in draw_system_panel.
         self._cfg_cache:          Optional[dict] = None
@@ -669,6 +675,16 @@ class SiteState:
         """Clear stall tracking for *streamer* (growth resumed or recording ended)."""
         with self.dash_lock:
             self.stall_since.pop(streamer, None)
+
+    def update_ad_alert(self, streamer: str) -> None:
+        """Record that an ad signal was just seen for *streamer*."""
+        with self.dash_lock:
+            self.ad_alerts[streamer] = time.time()
+
+    def clear_ad_alert(self, streamer: str) -> None:
+        """Remove the ad alert for *streamer* (called when recording ends)."""
+        with self.dash_lock:
+            self.ad_alerts.pop(streamer, None)
 
     def kill_all_procs(self) -> None:
         """Kill every registered yt-dlp process. Called on quit."""
@@ -757,6 +773,12 @@ _CHECKER_STDERR_PREFIX: str = "\x00checker_err\x00"
 # be toggled independently of regular activity messages.
 _DEBUG_LOG_PREFIX: str = "\x00debug\x00"
 FFMPEG_ERROR_RESTART_THRESHOLD: int = 200
+
+# ── Ad detection patterns (used by _drain_pipe when AD_ALERTS is enabled) ─────
+# Any match updates the per-streamer last-seen timestamp in site.ad_alerts.
+_AD_DISCONTINUITY_RE = _re.compile(r"#EXT-X-DISCONTINUITY(?!-SEQUENCE)", _re.IGNORECASE)
+_AD_SEGMENT_URL_RE   = _re.compile(r"(amazon|twitch-ad|/ad/|admanifest|/ads/)", _re.IGNORECASE)
+_AD_TWITCH_TAG_RE    = _re.compile(r'#EXT-X-TWITCH-AD|CLASS="twitch-stitched-ad"', _re.IGNORECASE)
 
 # ── LQ (low-quality) downloader bandwidth-saving state ───────────────────────
 # Maps (streamer, site_label) → epoch when an LQ_Downloader recording was last
@@ -1036,7 +1058,8 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
                 ffmpeg_error_counter=None, ffmpeg_error_event=None,
                 streamer: str = "", site: Optional[SiteState] = None,
                 filename_holder: Optional[List[str]] = None,
-                filename_event: Optional[threading.Event] = None) -> None:
+                filename_event: Optional[threading.Event] = None,
+                ad_alerts_enabled: bool = False) -> None:
     """Drain one pipe (stdout or stderr) from a yt-dlp subprocess.
 
     If *filename_holder* and *filename_event* are provided, the first
@@ -1088,6 +1111,15 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
                         if ffmpeg_error_counter[0] >= FFMPEG_ERROR_RESTART_THRESHOLD:
                             ffmpeg_error_event.set()
                         break
+
+            if ad_alerts_enabled and site is not None and streamer:
+                if (_AD_DISCONTINUITY_RE.search(line) or
+                        _AD_SEGMENT_URL_RE.search(line) or
+                        _AD_TWITCH_TAG_RE.search(line)):
+                    site.update_ad_alert(streamer)
+                    dbg(f"[AD] signal detected streamer={streamer!r} "
+                        f"pipe={pipe_type!r}: {line[:120]!r}",
+                        site_name=streamer)
     except Exception as _drain_exc:
         dbg(f"[DRAIN] pipe_type={pipe_type!r} streamer={streamer!r} EXCEPTION: {_drain_exc!r}")
     dbg(f"[DRAIN] thread exiting pipe_type={pipe_type!r} streamer={streamer!r} total_lines={line_count}")
@@ -1544,6 +1576,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         "site": site,
                         "filename_holder": filename_holder,
                         "filename_event": filename_event,
+                        "ad_alerts_enabled": cfg.get("ad_alerts", False),
                     },
                     daemon=True
                 ).start()
@@ -1558,6 +1591,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         "site": site,
                         "filename_holder": filename_holder,
                         "filename_event": filename_event,
+                        "ad_alerts_enabled": cfg.get("ad_alerts", False),
                     },
                     daemon=True
                 ).start()
@@ -1693,6 +1727,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     site.unregister_proc(streamer)
                     site.clear_ffmpeg_error_count(streamer)
                     site.clear_stall_since(streamer)
+                    site.clear_ad_alert(streamer)
 
                     try:
                         close_logs()
@@ -1709,6 +1744,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     site.log_line(f"ffmpeg error threshold reached for {streamer} — restarting")
                     kill_proc(proc)
                     site.unregister_proc(streamer)
+                    site.clear_ad_alert(streamer)
 
                     try:
                         close_logs()
@@ -1778,14 +1814,22 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                             threading.Thread(
                                 target=_drain_pipe,
                                 args=(next_proc.stdout, next_log_out_fp, "stdout"),
-                                kwargs={"streamer": streamer, "site": site},
+                                kwargs={
+                                    "streamer": streamer,
+                                    "site": site,
+                                    "ad_alerts_enabled": cfg.get("ad_alerts", False),
+                                },
                                 daemon=True
                             ).start()
 
                             threading.Thread(
                                 target=_drain_pipe,
                                 args=(next_proc.stderr, next_log_err_fp, "stderr"),
-                                kwargs={"streamer": streamer, "site": site},
+                                kwargs={
+                                    "streamer": streamer,
+                                    "site": site,
+                                    "ad_alerts_enabled": cfg.get("ad_alerts", False),
+                                },
                                 daemon=True
                             ).start()
 
@@ -1941,6 +1985,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         kill_proc(proc)
                         site.unregister_proc(streamer)
                         site.clear_stall_since(streamer)
+                        site.clear_ad_alert(streamer)
 
                         try:
                             close_logs()
@@ -1967,6 +2012,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 site.unregister_proc(streamer)
                 site.clear_stall_since(streamer)
                 site.clear_ffmpeg_error_count(streamer)
+                site.clear_ad_alert(streamer)
 
                 try:
                     close_logs()
@@ -1996,6 +2042,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 pass
 
         site.unregister_proc(streamer)
+        site.clear_ad_alert(streamer)
 
         try:
             close_logs()
@@ -2011,6 +2058,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             # reach this finally block the thread is done regardless of why it
             # stopped (normal end, eviction, or crash).
             site.evicted_streamers.discard(streamer)
+
+        site.clear_ad_alert(streamer)
 
         time.sleep(cfg["cooldown_after_recording"])
 
@@ -2177,6 +2226,307 @@ def config_watcher(site: "SiteState", poll_interval: int = 3) -> None:
         site._stop_event.wait(timeout=poll_interval)
 
 
+def _process_streamer_schedules(site: "SiteState") -> None:
+    """Evaluate schedule-based enable/disable for every streamer configured in
+    global.json for the current config-id.
+
+    Called at the top of each monitor_site iteration (every check_interval
+    seconds, or sooner if trigger_event fires).
+
+    Enable / disable logic:
+      Enable:  now >= start  AND (last_enable  is None OR last_enable  < start)
+      Disable: now >= end    AND (last_disable is None OR last_disable < end)
+
+    For recurring schedules the most-recent occurrence of start/end is
+    computed dynamically and the same logic is applied.
+    """
+    config_id = _get_config_id()
+    now       = datetime.now()
+
+    # Read entries outside the write-lock so _modify_config_streamer can run
+    # without risk of deadlock (it touches .conf files, not global.json).
+    with _global_json_lock:
+        gdata = _load_global_json()
+
+    prio_block = gdata.get("priorities", {}).get(config_id, {})
+    entries    = prio_block.get("entries", [])
+    if not entries:
+        return
+
+    # Only process entries that belong to this site
+    def normalize_label(lbl: str) -> str:
+        if not lbl:
+            return ""
+        lbl = lbl.lower().strip()
+        if lbl.endswith(".conf"):
+            lbl = lbl[:-5]
+        return lbl
+
+    try:
+        current_site_label = normalize_label(site.get_cached_config().get(
+            "site_label", os.path.basename(site.config_path)
+        ))
+    except Exception:
+        current_site_label = normalize_label(os.path.basename(site.config_path))
+    
+    # Collect actions: list of (streamer, site_label, conf_action, log_label)
+    # conf_action is "add" (enable) or "disable".
+    pending: list = []
+
+    _DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    _now_str   = now.strftime("%Y-%m-%d %H:%M:%S")
+
+    for entry in entries:
+        streamer    = entry.get("streamer", "")
+        site_label  = normalize_label(entry.get("site", ""))
+        if not streamer:
+            continue
+
+        # Skip entries that belong to a different site
+        if site_label != current_site_label:
+            continue
+
+        sched = entry.get("schedule", {})
+
+        # Log even skipped entries so every streamer is accounted for each cycle.
+        if not sched.get("enabled"):
+            dbg(
+                f"[SCHEDULE] {streamer!r}: schedule not enabled — ignored",
+                site.config_path,
+            )
+            continue
+
+        mode = sched.get("mode", "one_off")
+
+        def _parse_attempt(s):
+            if not s:
+                return None
+            try:
+                return datetime.fromisoformat(s)
+            except Exception:
+                return None
+
+        last_enable  = _parse_attempt(sched.get("last_enable_attempt"))
+        last_disable = _parse_attempt(sched.get("last_disable_attempt"))
+
+        if mode == "one_off":
+            oo = sched.get("one_off", {})
+            try:
+                start_dt = datetime.strptime(oo.get("start", ""), "%Y-%m-%d %H:%M")
+                end_dt   = datetime.strptime(oo.get("end",   ""), "%Y-%m-%d %H:%M")
+            except Exception:
+                dbg(
+                    f"[SCHEDULE] {streamer!r}: one_off — bad start/end format, skipping",
+                    site.config_path,
+                )
+                continue
+
+            dbg(
+                f"[SCHEDULE] {streamer!r}: one_off check — "
+                f"now={_now_str}  "
+                f"start={start_dt.strftime('%Y-%m-%d %H:%M')}  "
+                f"end={end_dt.strftime('%Y-%m-%d %H:%M')}  "
+                f"last_enable={last_enable}  last_disable={last_disable}",
+                site.config_path,
+            )
+
+            # ── Enable decision ───────────────────────────────────────────────
+            if now >= start_dt:
+                if last_enable is None or last_enable < start_dt:
+                    dbg(
+                        f"[SCHEDULE] {streamer!r}: → ENABLE "
+                        f"(now≥start; last_enable={last_enable or 'never'})",
+                        site.config_path,
+                    )
+                    pending.append((streamer, site_label, "add", "enabled"))
+                else:
+                    dbg(
+                        f"[SCHEDULE] {streamer!r}: → enable skipped "
+                        f"(already enabled at {last_enable})",
+                        site.config_path,
+                    )
+            else:
+                dbg(
+                    f"[SCHEDULE] {streamer!r}: → enable skipped "
+                    f"(start not yet reached: {start_dt.strftime('%Y-%m-%d %H:%M')})",
+                    site.config_path,
+                )
+
+            # ── Disable decision ──────────────────────────────────────────────
+            if now >= end_dt:
+                if last_disable is None or last_disable < end_dt:
+                    dbg(
+                        f"[SCHEDULE] {streamer!r}: → DISABLE "
+                        f"(now≥end; last_disable={last_disable or 'never'})",
+                        site.config_path,
+                    )
+                    pending.append((streamer, site_label, "disable", "disabled"))
+                else:
+                    dbg(
+                        f"[SCHEDULE] {streamer!r}: → disable skipped "
+                        f"(already disabled at {last_disable})",
+                        site.config_path,
+                    )
+            else:
+                dbg(
+                    f"[SCHEDULE] {streamer!r}: → disable skipped "
+                    f"(end not yet reached: {end_dt.strftime('%Y-%m-%d %H:%M')})",
+                    site.config_path,
+                )
+
+        elif mode == "recurring":
+            rec            = sched.get("recurring", {})
+            days           = rec.get("days", [])        # list of ints 0=Mon…6=Sun
+            start_time_str = rec.get("start_time", "")
+            end_time_str   = rec.get("end_time",   "")
+
+            if not days or not start_time_str or not end_time_str:
+                dbg(
+                    f"[SCHEDULE] {streamer!r}: recurring — missing days/start_time/end_time, skipping",
+                    site.config_path,
+                )
+                continue
+
+            try:
+                sh, sm = map(int, start_time_str.split(":"))
+                eh, em = map(int, end_time_str.split(":"))
+            except Exception:
+                dbg(
+                    f"[SCHEDULE] {streamer!r}: recurring — bad time format "
+                    f"(start={start_time_str!r} end={end_time_str!r}), skipping",
+                    site.config_path,
+                )
+                continue
+
+            # Whether the window crosses midnight (e.g. 22:00 → 02:00 next day).
+            crosses_midnight = (eh * 60 + em) < (sh * 60 + sm)
+
+            # Most-recent occurrence of start_time on any selected weekday, <= now.
+            most_recent_start = None
+            for delta in range(14):
+                cand_date = (now - timedelta(days=delta)).date()
+                if cand_date.weekday() in days:
+                    cand_dt = datetime.combine(cand_date, _dt_time(sh, sm))
+                    if cand_dt <= now:
+                        most_recent_start = cand_dt
+                        break
+
+            # Most-recent occurrence of end_time.
+            # If the window crosses midnight the end falls on the day AFTER the
+            # selected weekday; otherwise it falls on the same selected day.
+            most_recent_end = None
+            for delta in range(14):
+                cand_date = (now - timedelta(days=delta)).date()
+                if crosses_midnight:
+                    prev_date = cand_date - timedelta(days=1)
+                    if prev_date.weekday() in days:
+                        cand_dt = datetime.combine(cand_date, _dt_time(eh, em))
+                        if cand_dt <= now:
+                            most_recent_end = cand_dt
+                            break
+                else:
+                    if cand_date.weekday() in days:
+                        cand_dt = datetime.combine(cand_date, _dt_time(eh, em))
+                        if cand_dt <= now:
+                            most_recent_end = cand_dt
+                            break
+
+            _days_str = ",".join(_DAY_NAMES[d] for d in sorted(days) if 0 <= d <= 6)
+            dbg(
+                f"[SCHEDULE] {streamer!r}: recurring check — "
+                f"now={_now_str}  "
+                f"days=[{_days_str}]  "
+                f"window={start_time_str}→{end_time_str}  "
+                f"crosses_midnight={crosses_midnight}  "
+                f"most_recent_start={most_recent_start}  "
+                f"most_recent_end={most_recent_end}  "
+                f"last_enable={last_enable}  last_disable={last_disable}",
+                site.config_path,
+            )
+
+            # ── Enable decision ───────────────────────────────────────────────
+            if most_recent_start is not None:
+                if last_enable is None or last_enable < most_recent_start:
+                    dbg(
+                        f"[SCHEDULE] {streamer!r}: → ENABLE "
+                        f"(most_recent_start={most_recent_start}; "
+                        f"last_enable={last_enable or 'never'})",
+                        site.config_path,
+                    )
+                    pending.append((streamer, site_label, "add", "enabled"))
+                else:
+                    dbg(
+                        f"[SCHEDULE] {streamer!r}: → enable skipped "
+                        f"(already enabled at {last_enable}; "
+                        f"most_recent_start={most_recent_start})",
+                        site.config_path,
+                    )
+            else:
+                dbg(
+                    f"[SCHEDULE] {streamer!r}: → enable skipped "
+                    f"(no matching start day found in past 14 days)",
+                    site.config_path,
+                )
+
+            # ── Disable decision ──────────────────────────────────────────────
+            if most_recent_end is not None:
+                if last_disable is None or last_disable < most_recent_end:
+                    dbg(
+                        f"[SCHEDULE] {streamer!r}: → DISABLE "
+                        f"(most_recent_end={most_recent_end}; "
+                        f"last_disable={last_disable or 'never'})",
+                        site.config_path,
+                    )
+                    pending.append((streamer, site_label, "disable", "disabled"))
+                else:
+                    dbg(
+                        f"[SCHEDULE] {streamer!r}: → disable skipped "
+                        f"(already disabled at {last_disable}; "
+                        f"most_recent_end={most_recent_end})",
+                        site.config_path,
+                    )
+            else:
+                dbg(
+                    f"[SCHEDULE] {streamer!r}: → disable skipped "
+                    f"(no matching end day found in past 14 days)",
+                    site.config_path,
+                )
+
+    if not pending:
+        return
+
+    # Execute config changes outside the global-json lock.
+    attempt_ts = now.isoformat(timespec="seconds")
+    for streamer, site_label, conf_action, log_label in pending:
+        result = _modify_config_streamer(site.config_path, streamer, conf_action)
+        site.log_line(f"Schedule: {log_label} {streamer}  ({result.strip()})")
+        dbg(f"[CHECKER] schedule {log_label} {streamer}: {result.strip()}", site.config_path)
+
+    # Persist attempt timestamps (re-read to avoid racing with other writers).
+    with _global_json_lock:
+        gdata   = _load_global_json()
+        entries = (gdata.get("priorities", {})
+                       .get(config_id, {})
+                       .get("entries", []))
+        for streamer, site_label, conf_action, log_label in pending:
+            for e in entries:
+                if e.get("streamer") == streamer and e.get("site") == site_label:
+                    sched = e.setdefault("schedule", {})
+                    if log_label == "enabled":
+                        sched["last_enable_attempt"] = attempt_ts
+                    else:
+                        sched["last_disable_attempt"] = attempt_ts
+                    break
+        if "priorities" in gdata and config_id in gdata["priorities"]:
+            gdata["priorities"][config_id]["entries"] = entries
+        _save_global_json(gdata)
+
+    # Trigger an immediate liveness recheck so the new enable/disable state is
+    # picked up without waiting for the full check_interval.
+    site.trigger_event.set()
+
+
+
 def monitor_site(site: "SiteState") -> None:
     """Main polling loop for a single site — runs in its own thread."""
     try:
@@ -2227,6 +2577,13 @@ def monitor_site(site: "SiteState") -> None:
             site.log_line(f"EventSub init failed: {e}")
 
     while not site._stop_event.is_set():
+        # Evaluate schedule-based enable/disable for all streamers before the
+        # liveness check so any config changes take effect this iteration.
+        try:
+            _process_streamer_schedules(site)
+        except Exception as _sched_exc:
+            dbg(f"[CHECKER] schedule processing error: {_sched_exc}", site.config_path)
+
         cfg       = load_config(site.config_path)
         streamers = cfg["streamers"]
 
@@ -2401,6 +2758,13 @@ class JJDlpDashboard:
 
         # Sort manager — controls streamer ordering in site panels
         self.sort_manager = SiteSortManager(self)
+
+        # ── Changelog popup state ─────────────────────────────────────────────
+        # Shown once after startup when update_available=false & changelog_shown=false.
+        self._changelog_popup_open   = False
+        self._changelog_scroll       = 0   # lines scrolled up from the bottom (0 = top)
+        self._changelog_lines: List[str] = []
+        self._changelog_popup_queued = False   # will be set to True after first frame
 
     # ── Color palette ────────────────────────────────────────────────────────
     # Pair numbers and their meanings — easy to change here
@@ -2680,6 +3044,35 @@ class JJDlpDashboard:
                 disk_row_y += 1
         except Exception as _stall_exc:
             dbg(f"[SYSTEM] stall section exception: {_stall_exc!r}")
+
+        # Ad alerts — one row per streamer with a recent ad signal.
+        try:
+            all_ad_alerts: List[str] = []
+            for _site in self.sites:
+                with _site.dash_lock:
+                    site_ads = dict(_site.ad_alerts)
+                for _streamer in sorted(site_ads.keys()):
+                    all_ad_alerts.append(_streamer)
+
+            if all_ad_alerts:
+                if disk_row_y < y2 - 1:
+                    self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
+                                "── ads ──"[:inner_w],
+                                curses.color_pair(self.C_WARN) | curses.A_BOLD)
+                    disk_row_y += 1
+                for _streamer in all_ad_alerts:
+                    if disk_row_y >= y2 - 1:
+                        break
+                    _label = _streamer[:label_w].ljust(label_w)
+                    _attr  = curses.color_pair(self.C_WARN) | curses.A_BOLD
+                    self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
+                                _label, _attr)
+                    self.safe_addstr(self.stdscr, disk_row_y, x1 + 2 + label_w + 1,
+                                "Ad detected"[:inner_w - label_w - 1], _attr)
+                    disk_row_y += 1
+                disk_row_y += 1
+        except Exception as _ad_exc:
+            dbg(f"[SYSTEM] ad alerts section exception: {_ad_exc!r}")
 
         # Disk space rows — drives from global.conf take precedence; fall back to per-site
         try:
@@ -3550,6 +3943,10 @@ class JJDlpDashboard:
         if self.sort_manager.popup_open:
             self.sort_manager.draw_popup(self.stdscr)
 
+        # Changelog popup — drawn on top of sort popup if both somehow open.
+        if self._changelog_popup_open:
+            self.draw_changelog_popup()
+
         self.stdscr.refresh()
 
         # Log timing every 100 frames (~5 seconds at 20fps)
@@ -3563,6 +3960,25 @@ class JJDlpDashboard:
     # ── Input handling ────────────────────────────────────────────────────────
     def handle_key(self, key) -> bool:
         """Returns False to quit."""
+        # Changelog popup intercepts all keys while open.
+        if self._changelog_popup_open:
+            if key in (ord('q'), ord('Q'), 27,            # Q / Esc → close
+                       ord('\n'), ord('\r'), curses.KEY_ENTER):
+                self._changelog_popup_open = False
+            elif key in (curses.KEY_UP, ord('k')):
+                self._changelog_scroll = max(0, self._changelog_scroll - 1)
+            elif key in (curses.KEY_DOWN, ord('j')):
+                self._changelog_scroll += 1   # clamped in draw method
+            elif key == curses.KEY_PPAGE:
+                h, _ = self.stdscr.getmaxyx()
+                page = max(1, min(h - 4, 40) - 3)
+                self._changelog_scroll = max(0, self._changelog_scroll - page)
+            elif key == curses.KEY_NPAGE:
+                h, _ = self.stdscr.getmaxyx()
+                page = max(1, min(h - 4, 40) - 3)
+                self._changelog_scroll += page   # clamped in draw method
+            return True
+
         if self._mgmt_mode:
             return self._handle_mgmt_key(key)
 
@@ -3798,6 +4214,109 @@ class JJDlpDashboard:
                 f"{_new_thresh_raw!r} — keeping current threshold"
             )
 
+    # ── Changelog popup helpers ───────────────────────────────────────────────
+    def _should_show_changelog(self) -> bool:
+        """Return True when the changelog should be shown at startup.
+
+        Show when:
+          - update_available is False, AND
+          - changelog_shown is False OR the key is missing entirely
+            (missing = fresh install or manual update; treat it the same as False
+             so the popup shows on the very first launch of any new version)
+
+        Do NOT show when:
+          - update_available is True  (update pending; changelog is for a version
+            the user doesn't have yet)
+          - changelog_shown is True   (already seen this version's changelog)
+        """
+        with update_available_lock:
+            update_av = UPDATE_AVAILABLE
+        if update_av:
+            return False
+        with _global_json_lock:
+            gd = _load_global_json()
+        # Key missing (fresh install / manual update / global.json reset) OR
+        # explicitly False → show the changelog.
+        return gd.get("changelog_shown") is not True
+
+    def _mark_changelog_shown(self) -> None:
+        """Persist changelog_shown=True immediately when the popup opens."""
+        with _global_json_lock:
+            gd = _load_global_json()
+            gd["changelog_shown"] = True
+            _save_global_json(gd)
+        dbg("[CHANGELOG] changelog_shown marked True")
+
+    def _load_changelog_lines(self) -> List[str]:
+        """Read jj-dlp/docs/changelog.txt and return its lines, or an error message."""
+        changelog_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "docs", "changelog.txt"
+        )
+        try:
+            with open(changelog_path, "r", encoding="utf-8") as f:
+                lines = [ln.rstrip("\n") for ln in f.readlines()]
+            return lines if lines else ["(changelog is empty)"]
+        except FileNotFoundError:
+            return [f"Changelog not found at:", changelog_path]
+        except Exception as e:
+            return [f"Error reading changelog: {e}"]
+
+    def open_changelog_popup(self) -> None:
+        """Open the changelog popup, load content, and persist changelog_shown=True."""
+        self._changelog_lines = self._load_changelog_lines()
+        self._changelog_scroll = 0
+        self._changelog_popup_open = True
+        self._mark_changelog_shown()
+
+    def draw_changelog_popup(self) -> None:
+        """Draw the scrollable changelog popup centred on screen."""
+        if not self._changelog_popup_open:
+            return
+        h, w = self.stdscr.getmaxyx()
+
+        box_h = min(h - 4, 40)
+        box_w = min(w - 4, 100)
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        # Fill background
+        for y in range(by1, by2 + 1):
+            self.safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1),
+                        curses.color_pair(self.C_NORMAL))
+
+        self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_CHROME)
+        title = " WHAT'S NEW "
+        self.safe_addstr(self.stdscr, by1, bx1 + 2, title,
+                    curses.color_pair(self.C_HILIGHT) | curses.A_BOLD)
+
+        content_width = max(1, box_w - 4)
+        wrapped = self._wrap_lines(self._changelog_lines, content_width)
+
+        visible_rows = box_h - 3   # top border + title row + bottom legend row
+        max_scroll   = max(0, len(wrapped) - visible_rows)
+        self._changelog_scroll = min(self._changelog_scroll, max_scroll)
+
+        start = self._changelog_scroll
+        view  = wrapped[start : start + visible_rows]
+
+        for i, line in enumerate(view):
+            self.safe_addstr(self.stdscr, by1 + 1 + i, bx1 + 2, line,
+                        curses.color_pair(self.C_NORMAL))
+
+        # Scroll indicator
+        if max_scroll > 0:
+            pct = int(100 * self._changelog_scroll / max_scroll)
+            scroll_info = f" ↑↓/PgUp/PgDn  {pct}% "
+        else:
+            scroll_info = " (all) "
+        legend = f" Q/Esc: close {scroll_info}"
+        self.safe_addstr(self.stdscr, by2, bx1 + 2,
+                    legend[:box_w - 4],
+                    curses.color_pair(self.C_INVHEAD))
+
     # ── Run loop ──────────────────────────────────────────────────────────────
     def run(self):
         curses.curs_set(0)
@@ -3813,10 +4332,28 @@ class JJDlpDashboard:
             self.refresh_screen()
             _t_after_refresh = time.time()
 
-            key = self.stdscr.getch()
-            if key != -1:
-                if not self.handle_key(key):
+            # After the first frame has been drawn, check whether we should show
+            # the changelog popup.  We defer this by one frame so the dashboard
+            # is fully visible before the overlay appears.
+            if not self._changelog_popup_queued:
+                self._changelog_popup_queued = True
+                if self._should_show_changelog():
+                    self.open_changelog_popup()
+
+            # Drain ALL pending keypresses before sleeping.
+            # This prevents the input buffer from accumulating a backlog
+            # while napms() is sleeping, which would cause continued movement
+            # after a key is released.
+            should_quit = False
+            while True:
+                key = self.stdscr.getch()
+                if key == -1:
                     break
+                if not self.handle_key(key):
+                    should_quit = True
+                    break
+            if should_quit:
+                break
             self.tick += 1
             curses.napms(50)
 
@@ -4275,6 +4812,13 @@ def main() -> None:
         if startup_available:
             with update_available_lock:
                 UPDATE_AVAILABLE = True
+            # Reset changelog_shown so it will display after the update is applied.
+            with _global_json_lock:
+                _gd = _load_global_json()
+                if _gd.get("changelog_shown") is not False:
+                    _gd["changelog_shown"] = False
+                    _save_global_json(_gd)
+                    dbg("[UPDATER] startup: update available — changelog_shown set to false")
             print("\n[Updater] A new version of jj-dlp is available!")
             ans = _input_with_timeout("[Updater] Do you want to update now? (y/n) [timeout in 10s]: ", timeout_seconds=10)
             if ans == 'y':
@@ -4292,6 +4836,14 @@ def main() -> None:
                     prev_available = UPDATE_AVAILABLE
                     UPDATE_AVAILABLE = new_available
                 dbg(f"[UPDATER] periodic check prev={prev_available} new={new_available}")
+                # When an update becomes newly available, reset changelog_shown so it will
+                # display to the user after the update is applied.
+                if new_available and not prev_available:
+                    with _global_json_lock:
+                        _gd = _load_global_json()
+                        _gd["changelog_shown"] = False
+                        _save_global_json(_gd)
+                    dbg("[UPDATER] periodic: update newly available — changelog_shown set to false")
                 # When an update becomes available while the dashboard is active,
                 # only use the dashboard indicator and do not prompt interactively.
                 time.sleep(update_interval * 60)

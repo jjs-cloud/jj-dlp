@@ -132,6 +132,7 @@ def configure(dashboard_log_fn=None, dashboard_dbg_fn=None) -> None:
 #   CONFIG   — config editor save/backup operations
 #   POPUP    — live popup notification creation and suppression
 #   LQ       — low-quality/bandwidth-saving downloader logic
+#   SCHEDULE — per-streamer schedule evaluation on every check interval
 #
 DBG_TAGS: list[str] = [
     "DRAIN",
@@ -142,11 +143,13 @@ DBG_TAGS: list[str] = [
     "DISK",
     "UPDATER",
     "TWITCH",
+    "AD",
     "CONFIG",
     "KILL",
     "STALL",
     "POPUP",
     "LQ",
+    "SCHEDULE",
 ]
 
 import json
