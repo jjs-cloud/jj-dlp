@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.18.2"
+__version__ = "1.18.3"
 
 import subprocess
 import time
@@ -2759,6 +2759,13 @@ class JJDlpDashboard:
         # Sort manager — controls streamer ordering in site panels
         self.sort_manager = SiteSortManager(self)
 
+        # ── Changelog popup state ─────────────────────────────────────────────
+        # Shown once after startup when update_available=false & changelog_shown=false.
+        self._changelog_popup_open   = False
+        self._changelog_scroll       = 0   # lines scrolled up from the bottom (0 = top)
+        self._changelog_lines: List[str] = []
+        self._changelog_popup_queued = False   # will be set to True after first frame
+
     # ── Color palette ────────────────────────────────────────────────────────
     # Pair numbers and their meanings — easy to change here
     C_CHROME    = 1   # borders, labels
@@ -3936,6 +3943,10 @@ class JJDlpDashboard:
         if self.sort_manager.popup_open:
             self.sort_manager.draw_popup(self.stdscr)
 
+        # Changelog popup — drawn on top of sort popup if both somehow open.
+        if self._changelog_popup_open:
+            self.draw_changelog_popup()
+
         self.stdscr.refresh()
 
         # Log timing every 100 frames (~5 seconds at 20fps)
@@ -3949,6 +3960,25 @@ class JJDlpDashboard:
     # ── Input handling ────────────────────────────────────────────────────────
     def handle_key(self, key) -> bool:
         """Returns False to quit."""
+        # Changelog popup intercepts all keys while open.
+        if self._changelog_popup_open:
+            if key in (ord('q'), ord('Q'), 27,            # Q / Esc → close
+                       ord('\n'), ord('\r'), curses.KEY_ENTER):
+                self._changelog_popup_open = False
+            elif key in (curses.KEY_UP, ord('k')):
+                self._changelog_scroll = max(0, self._changelog_scroll - 1)
+            elif key in (curses.KEY_DOWN, ord('j')):
+                self._changelog_scroll += 1   # clamped in draw method
+            elif key == curses.KEY_PPAGE:
+                h, _ = self.stdscr.getmaxyx()
+                page = max(1, min(h - 4, 40) - 3)
+                self._changelog_scroll = max(0, self._changelog_scroll - page)
+            elif key == curses.KEY_NPAGE:
+                h, _ = self.stdscr.getmaxyx()
+                page = max(1, min(h - 4, 40) - 3)
+                self._changelog_scroll += page   # clamped in draw method
+            return True
+
         if self._mgmt_mode:
             return self._handle_mgmt_key(key)
 
@@ -4184,6 +4214,102 @@ class JJDlpDashboard:
                 f"{_new_thresh_raw!r} — keeping current threshold"
             )
 
+    # ── Changelog popup helpers ───────────────────────────────────────────────
+    def _should_show_changelog(self) -> bool:
+        """Return True only when update_available=False AND changelog_shown=False.
+
+        If the 'changelog_shown' key is absent from global.json (i.e. a brand-new
+        install that has never seen the changelog feature) we do NOT show the popup.
+        """
+        with update_available_lock:
+            update_av = UPDATE_AVAILABLE
+        if update_av:
+            return False
+        with _global_json_lock:
+            gd = _load_global_json()
+        # Key absent → first-ever launch; don't show.
+        if "changelog_shown" not in gd:
+            return False
+        return gd["changelog_shown"] is False
+
+    def _mark_changelog_shown(self) -> None:
+        """Persist changelog_shown=True immediately when the popup opens."""
+        with _global_json_lock:
+            gd = _load_global_json()
+            gd["changelog_shown"] = True
+            _save_global_json(gd)
+        dbg("[CHANGELOG] changelog_shown marked True")
+
+    def _load_changelog_lines(self) -> List[str]:
+        """Read jj-dlp/docs/changelog.txt and return its lines, or an error message."""
+        changelog_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "docs", "changelog.txt"
+        )
+        try:
+            with open(changelog_path, "r", encoding="utf-8") as f:
+                lines = [ln.rstrip("\n") for ln in f.readlines()]
+            return lines if lines else ["(changelog is empty)"]
+        except FileNotFoundError:
+            return [f"Changelog not found at:", changelog_path]
+        except Exception as e:
+            return [f"Error reading changelog: {e}"]
+
+    def open_changelog_popup(self) -> None:
+        """Open the changelog popup, load content, and persist changelog_shown=True."""
+        self._changelog_lines = self._load_changelog_lines()
+        self._changelog_scroll = 0
+        self._changelog_popup_open = True
+        self._mark_changelog_shown()
+
+    def draw_changelog_popup(self) -> None:
+        """Draw the scrollable changelog popup centred on screen."""
+        if not self._changelog_popup_open:
+            return
+        h, w = self.stdscr.getmaxyx()
+
+        box_h = min(h - 4, 40)
+        box_w = min(w - 4, 100)
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        # Fill background
+        for y in range(by1, by2 + 1):
+            self.safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1),
+                        curses.color_pair(self.C_NORMAL))
+
+        self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_CHROME)
+        title = " WHAT'S NEW "
+        self.safe_addstr(self.stdscr, by1, bx1 + 2, title,
+                    curses.color_pair(self.C_HILIGHT) | curses.A_BOLD)
+
+        content_width = max(1, box_w - 4)
+        wrapped = self._wrap_lines(self._changelog_lines, content_width)
+
+        visible_rows = box_h - 3   # top border + title row + bottom legend row
+        max_scroll   = max(0, len(wrapped) - visible_rows)
+        self._changelog_scroll = min(self._changelog_scroll, max_scroll)
+
+        start = self._changelog_scroll
+        view  = wrapped[start : start + visible_rows]
+
+        for i, line in enumerate(view):
+            self.safe_addstr(self.stdscr, by1 + 1 + i, bx1 + 2, line,
+                        curses.color_pair(self.C_NORMAL))
+
+        # Scroll indicator
+        if max_scroll > 0:
+            pct = int(100 * self._changelog_scroll / max_scroll)
+            scroll_info = f" ↑↓/PgUp/PgDn  {pct}% "
+        else:
+            scroll_info = " (all) "
+        legend = f" Q/Esc: close {scroll_info}"
+        self.safe_addstr(self.stdscr, by2, bx1 + 2,
+                    legend[:box_w - 4],
+                    curses.color_pair(self.C_INVHEAD))
+
     # ── Run loop ──────────────────────────────────────────────────────────────
     def run(self):
         curses.curs_set(0)
@@ -4198,6 +4324,14 @@ class JJDlpDashboard:
             _t_frame_start = time.time()
             self.refresh_screen()
             _t_after_refresh = time.time()
+
+            # After the first frame has been drawn, check whether we should show
+            # the changelog popup.  We defer this by one frame so the dashboard
+            # is fully visible before the overlay appears.
+            if not self._changelog_popup_queued:
+                self._changelog_popup_queued = True
+                if self._should_show_changelog():
+                    self.open_changelog_popup()
 
             # Drain ALL pending keypresses before sleeping.
             # This prevents the input buffer from accumulating a backlog
@@ -4671,6 +4805,13 @@ def main() -> None:
         if startup_available:
             with update_available_lock:
                 UPDATE_AVAILABLE = True
+            # Reset changelog_shown so it will display after the update is applied.
+            with _global_json_lock:
+                _gd = _load_global_json()
+                if _gd.get("changelog_shown") is not False:
+                    _gd["changelog_shown"] = False
+                    _save_global_json(_gd)
+                    dbg("[UPDATER] startup: update available — changelog_shown set to false")
             print("\n[Updater] A new version of jj-dlp is available!")
             ans = _input_with_timeout("[Updater] Do you want to update now? (y/n) [timeout in 10s]: ", timeout_seconds=10)
             if ans == 'y':
@@ -4688,6 +4829,14 @@ def main() -> None:
                     prev_available = UPDATE_AVAILABLE
                     UPDATE_AVAILABLE = new_available
                 dbg(f"[UPDATER] periodic check prev={prev_available} new={new_available}")
+                # When an update becomes newly available, reset changelog_shown so it will
+                # display to the user after the update is applied.
+                if new_available and not prev_available:
+                    with _global_json_lock:
+                        _gd = _load_global_json()
+                        _gd["changelog_shown"] = False
+                        _save_global_json(_gd)
+                    dbg("[UPDATER] periodic: update newly available — changelog_shown set to false")
                 # When an update becomes available while the dashboard is active,
                 # only use the dashboard indicator and do not prompt interactively.
                 time.sleep(update_interval * 60)
