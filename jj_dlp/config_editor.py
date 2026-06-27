@@ -1151,6 +1151,37 @@ def _wrap_text(text: str, width: int) -> list:
     return lines
 
 
+def _wrap_value(text: str, width: int) -> list:
+    """Wrap a value string to fit within `width` columns.
+
+    Unlike _wrap_text, this also handles long tokens (e.g. paths, comma-
+    separated lists without spaces) by falling back to character-level splits
+    so that nothing is silently truncated.
+    """
+    if not text or width <= 0:
+        return [text] if text else []
+    lines: list = []
+    current = ""
+    for word in text.split():
+        # If the word itself is wider than the column, character-split it.
+        while len(word) > width:
+            if current:
+                lines.append(current)
+                current = ""
+            lines.append(word[:width])
+            word = word[width:]
+        if not current:
+            current = word
+        elif len(current) + 1 + len(word) <= width:
+            current += " " + word
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines if lines else [text[:width]]
+
+
 class GlobalConfigEditor:
     """Loads and edits global.conf — the app-wide settings."""
 
@@ -1548,23 +1579,42 @@ class GlobalConfigEditor:
             self.dashboard.safe_addstr(stdscr, y1, x2 - len(mode_str) - 1, mode_str,
                         curses.color_pair(db.C_LIVE) | curses.A_BOLD)
 
+        val_col   = x1 + 26
+        val_width = max(1, x2 - val_col - 1)
         visible_rows = (y2 - y1) - 2
+
+        # Pre-compute wrapped value lines for every item so scroll math is exact.
+        item_wrapped = [_wrap_value("= " + str(it.value), val_width) for it in self.items]
+
+        # Scroll so the selected item stays in view, counting actual display rows.
         if self.selected_idx < self.scroll_offset:
             self.scroll_offset = self.selected_idx
-        elif self.selected_idx >= self.scroll_offset + visible_rows:
-            self.scroll_offset = self.selected_idx - visible_rows + 1
+        else:
+            rows_used = sum(len(item_wrapped[i]) for i in range(self.scroll_offset, self.selected_idx + 1))
+            while rows_used > visible_rows and self.scroll_offset < self.selected_idx:
+                rows_used -= len(item_wrapped[self.scroll_offset])
+                self.scroll_offset += 1
 
         row_y = y1 + 1
-        for i in range(self.scroll_offset, min(len(self.items), self.scroll_offset + visible_rows)):
-            item = self.items[i]
-            is_sel = is_active and (i == self.selected_idx)
-            prefix = "> " if is_sel else "  "
+        for i in range(self.scroll_offset, len(self.items)):
+            if row_y >= y2:
+                break
+            item    = self.items[i]
+            wrapped = item_wrapped[i]
+            is_sel  = is_active and (i == self.selected_idx)
+            prefix   = "> " if is_sel else "  "
             key_attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
                         if is_sel else curses.color_pair(db.C_WARN) | curses.A_BOLD)
             val_attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
                         if is_sel else curses.color_pair(db.C_LIVE))
             self.dashboard.safe_addstr(stdscr, row_y, x1 + 1, prefix + f"{item.key:<22}", key_attr)
-            self.dashboard.safe_addstr(stdscr, row_y, x1 + 26, "= " + str(item.value), val_attr)
+            if wrapped:
+                self.dashboard.safe_addstr(stdscr, row_y, val_col, wrapped[0], val_attr)
+                for cont in wrapped[1:]:
+                    row_y += 1
+                    if row_y >= y2:
+                        break
+                    self.dashboard.safe_addstr(stdscr, row_y, val_col, cont, val_attr)
             row_y += 1
 
         if self.popup_mode and self.editing_item:
@@ -1836,16 +1886,33 @@ class ConfigEditor:
                         "No configurable items found.",
                         curses.color_pair(self.dashboard.C_DIM))
         else:
+            val_col   = site_x1 + 29
+            val_width = max(1, site_x2 - val_col - 1)
             visible_rows = (y2 - site_box_y1) - 2
+
+            # Pre-compute wrapped value lines per item for accurate scroll math.
+            item_wrapped = []
+            for item in self.items:
+                if not item.is_section and item.has_equals:
+                    item_wrapped.append(_wrap_value("= " + str(item.value), val_width))
+                else:
+                    item_wrapped.append([""])  # sections / no-equals items occupy 1 row
+
+            # Scroll so the selected item stays in view, counting actual display rows.
             if self.selected_idx < self.scroll_offset:
                 self.scroll_offset = self.selected_idx
-            elif self.selected_idx >= self.scroll_offset + visible_rows:
-                self.scroll_offset = self.selected_idx - visible_rows + 1
+            else:
+                rows_used = sum(len(item_wrapped[i]) for i in range(self.scroll_offset, self.selected_idx + 1))
+                while rows_used > visible_rows and self.scroll_offset < self.selected_idx:
+                    rows_used -= len(item_wrapped[self.scroll_offset])
+                    self.scroll_offset += 1
 
             row_y = site_box_y1 + 1
-            for i in range(self.scroll_offset,
-                           min(len(self.items), self.scroll_offset + visible_rows)):
-                item = self.items[i]
+            for i in range(self.scroll_offset, len(self.items)):
+                if row_y >= y2:
+                    break
+                item       = self.items[i]
+                wrapped    = item_wrapped[i]
                 is_selected = self._focus == "site" and (i == self.selected_idx)
 
                 if is_selected:
@@ -1867,8 +1934,13 @@ class ConfigEditor:
                     val_attr = (attr if is_selected
                                 else curses.color_pair(self.dashboard.C_LIVE))
                     self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 2, prefix + f"{item.key:<25}", key_attr)
-                    if item.has_equals:
-                        self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 29, "= " + str(item.value), val_attr)
+                    if item.has_equals and wrapped:
+                        self.dashboard.safe_addstr(stdscr, row_y, val_col, wrapped[0], val_attr)
+                        for cont in wrapped[1:]:
+                            row_y += 1
+                            if row_y >= y2:
+                                break
+                            self.dashboard.safe_addstr(stdscr, row_y, val_col, cont, val_attr)
                 row_y += 1
 
         # Draw popup (whichever sub-editor owns it)
