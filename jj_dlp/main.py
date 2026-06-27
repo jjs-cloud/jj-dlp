@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.18.3"
+__version__ = "1.18.4"
 
 import subprocess
 import time
@@ -4216,10 +4216,18 @@ class JJDlpDashboard:
 
     # ── Changelog popup helpers ───────────────────────────────────────────────
     def _should_show_changelog(self) -> bool:
-        """Return True only when update_available=False AND changelog_shown=False.
+        """Return True when the changelog should be shown at startup.
 
-        If the 'changelog_shown' key is absent from global.json (i.e. a brand-new
-        install that has never seen the changelog feature) we do NOT show the popup.
+        Show when:
+          - update_available is False, AND
+          - changelog_shown is False OR the key is missing entirely
+            (missing = fresh install or manual update; treat it the same as False
+             so the popup shows on the very first launch of any new version)
+
+        Do NOT show when:
+          - update_available is True  (update pending; changelog is for a version
+            the user doesn't have yet)
+          - changelog_shown is True   (already seen this version's changelog)
         """
         with update_available_lock:
             update_av = UPDATE_AVAILABLE
@@ -4227,10 +4235,9 @@ class JJDlpDashboard:
             return False
         with _global_json_lock:
             gd = _load_global_json()
-        # Key absent → first-ever launch; don't show.
-        if "changelog_shown" not in gd:
-            return False
-        return gd["changelog_shown"] is False
+        # Key missing (fresh install / manual update / global.json reset) OR
+        # explicitly False → show the changelog.
+        return gd.get("changelog_shown") is not True
 
     def _mark_changelog_shown(self) -> None:
         """Persist changelog_shown=True immediately when the popup opens."""
