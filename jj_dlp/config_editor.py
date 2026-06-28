@@ -53,7 +53,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("DEBUG_LOG_PATH",        "global", "",      True,  "Path for the debug log file. Can be a relative or absolute path (e.g. logs/debug.log)"),
     _KeyDef("CHECK_FOR_UPDATES",     "global", "true",  True,  "Whether to check for app updates at startup and periodically (true/false)."),
     _KeyDef("UPDATE_INTERVAL",       "global", "30",    True,  "Number of minutes between app update checks."),
-    _KeyDef("ASK_FOR_BROWSER",       "global", "true",  True,  "Show the browser chooser on startup (true/false)."),
+    _KeyDef("ASK_FOR_BROWSER",       "global", "true",  False,  "Show the browser chooser on startup (true/false)."),
     _KeyDef("ASK_FOR_CONFIG",        "global", "true",  True,  "Show the config file chooser on startup (true/false)."),
     _KeyDef("UPDATE_BRANCH",         "global", "main",  True,  "Which branch of jj-dlp to update to. (main, testing, or experimental)."),
     _KeyDef("MAX_CONCURRENT_REC",    "global", "0",     True,  'The maximum number of simultaneous recordings allowed to run.  Use the "PRIORITIES" panel in the Config tab to adjust the priority of each streamer. (0=no limit)'),
