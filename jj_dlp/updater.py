@@ -278,6 +278,7 @@ def perform_update():
             _logger().dbg(f"[UPDATER] perform_update: preserved sections for {fname}: streamers={bool(streamers)} block={bool(blocked)}")
 
             merged_content = inject_preserved_keys(new_content, user_cfg)
+            merged_content = update_config_comments(merged_content)
             merged_content = replace_section(merged_content, "Streamers", streamers)
             merged_content = replace_section(merged_content, "Block", blocked)
 
@@ -404,6 +405,65 @@ def inject_preserved_keys(new_text, old_config_path):
             if pattern.search(new_text):
                 new_text = pattern.sub(lambda m, val=old_val: f"{m.group(1)} {val}", new_text)
     return new_text
+
+
+def update_config_comments(text):
+    """Replace or insert the canonical comment line immediately above each
+    CONFIG_KEYS entry found in the [General] section.
+
+    Rules:
+    - Only touches lines inside [General]; other sections are left unchanged.
+    - If the line immediately preceding a key assignment starts with '#', it is
+      replaced with the comment from CONFIG_KEYS.
+    - If there is no preceding comment line, one is inserted.
+    - Multi-line comment blocks are not collapsed; only the single line
+      immediately above the key is considered.
+    - Keys not present in CONFIG_KEYS are left untouched.
+    """
+    # Resolve CONFIG_KEYS whether called as a package or as __main__.
+    try:
+        from .config_editor import CONFIG_KEYS as _ck
+    except ImportError:
+        try:
+            _pkg_dir = os.path.dirname(os.path.abspath(__file__))
+            _proj_root = os.path.dirname(_pkg_dir)
+            if _proj_root not in sys.path:
+                sys.path.insert(0, _proj_root)
+            from jj_dlp.config_editor import CONFIG_KEYS as _ck
+        except Exception:
+            return text
+
+    comment_map = {kdef.name.upper(): kdef.comment for kdef in _ck}
+
+    lines = text.splitlines(keepends=True)
+    in_general = False
+    result = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Track section changes.
+        if stripped.startswith('[') and stripped.endswith(']'):
+            in_general = (stripped[1:-1].lower() == 'general')
+            result.append(line)
+            continue
+
+        # Only process key assignments inside [General].
+        if in_general and '=' in stripped and not stripped.startswith('#'):
+            key_part = stripped.split('=', 1)[0].strip().upper()
+            if key_part in comment_map:
+                new_comment = f"# {comment_map[key_part]}\n"
+                # Replace the immediately preceding comment, or insert one.
+                if result and result[-1].strip().startswith('#'):
+                    result[-1] = new_comment
+                else:
+                    result.append(new_comment)
+                result.append(line)
+                continue
+
+        result.append(line)
+
+    return ''.join(result)
 
 
 def replace_section(text, sec_name, new_content):
@@ -612,6 +672,7 @@ if __name__ == "__main__":
                         if _pat.search(_new_txt):
                             _new_txt = _pat.sub(lambda m, v=_oval: f"{m.group(1)} {v}", _new_txt)
 
+                _new_txt = update_config_comments(_new_txt)
                 _new_txt = replace_section(_new_txt, "Streamers", _streamers)
                 _new_txt = replace_section(_new_txt, "Block", _blocked)
                 create_diff(_old_txt, _new_txt, _ucfg, _diff_dir)

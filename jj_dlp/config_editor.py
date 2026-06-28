@@ -76,6 +76,11 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
             "(0 = disabled, default 200)."),
     _KeyDef("SUBFOLDERS",            "global", "false", True,
             "Save recordings into a subfolder named after the streamer inside OUTPUT_DIR (true/false)."),
+    _KeyDef("SITE_SORT",             "global", "added_first", True,
+            "Sort order for streamer panels on the Dashboard tab. "
+            "Options: added_first, added_last, alpha_asc, alpha_desc, "
+            "last_live_asc, last_live_desc, priority_asc, priority_desc, "
+            "live_first, live_last."),
 
     # ── Site keys (per-site .conf) ────────────────────────────────────────────
     _KeyDef("SITE_LABEL",            "site",   "",      True,
@@ -1134,6 +1139,9 @@ def _validate_value(key: str, value: str) -> tuple[bool, str]:
                 return False, "Must be >= 0"
         except ValueError:
             return False, "Must be an integer"
+    if key == "SITE_SORT":
+        if value.lower() not in _SORT_KEYS:
+            return False, f"Must be one of: {', '.join(_SORT_KEYS)}"
     return True, ""
 
 
