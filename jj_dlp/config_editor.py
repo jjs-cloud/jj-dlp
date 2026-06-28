@@ -194,11 +194,12 @@ def _compute_config_sha(config_path: str) -> str:
 
 class PriorityEntry(NamedTuple):
     """Represents one streamer entry in the PRIORITY panel."""
-    streamer:    str   # lowercase username
-    site:        str   # SITE_LABEL from the config that owns this streamer
-    config_path: str   # absolute path to the .conf file
-    config_sha:  str   # short SHA of that .conf file at last load
-    bypass:      bool  # True → always-record (displayed in green, sorted to top)
+    streamer:         str   # lowercase username
+    site:             str   # SITE_LABEL from the config that owns this streamer
+    config_path:      str   # absolute path to the .conf file
+    config_sha:       str   # short SHA of that .conf file at last load
+    bypass:           bool  # True → always-record (displayed in green, sorted to top)
+    schedule_enabled: bool = False  # True → streamer has an active schedule
 
 
 class PriorityEditor:
@@ -268,8 +269,9 @@ class PriorityEditor:
         for i, e in enumerate(saved_entries):
             key = (e.get("streamer", ""), e.get("site", ""))
             saved_map[key] = {
-                "bypass":   e.get("bypass", False),
-                "priority": i,
+                "bypass":           e.get("bypass", False),
+                "priority":         i,
+                "schedule_enabled": bool(e.get("schedule", {}).get("enabled", False)),
             }
 
         # Build enriched list with saved priority / bypass values.
@@ -278,12 +280,13 @@ class PriorityEditor:
             key      = (streamer, site_label)
             saved    = saved_map.get(key, {"bypass": False, "priority": 999999})
             enriched.append({
-                "streamer":    streamer,
-                "site":        site_label,
-                "config_path": config_path,
-                "config_sha":  config_sha,
-                "bypass":      saved["bypass"],
-                "priority":    saved["priority"],
+                "streamer":        streamer,
+                "site":            site_label,
+                "config_path":     config_path,
+                "config_sha":      config_sha,
+                "bypass":          saved["bypass"],
+                "schedule_enabled": saved.get("schedule_enabled", False),
+                "priority":        saved["priority"],
             })
 
         # Sort: bypass entries first (by saved order), then normal entries (by saved order).
@@ -292,11 +295,12 @@ class PriorityEditor:
 
         self._entries = [
             PriorityEntry(
-                streamer    = e["streamer"],
-                site        = e["site"],
-                config_path = e["config_path"],
-                config_sha  = e["config_sha"],
-                bypass      = e["bypass"],
+                streamer         = e["streamer"],
+                site             = e["site"],
+                config_path      = e["config_path"],
+                config_sha       = e["config_sha"],
+                bypass           = e["bypass"],
+                schedule_enabled = e["schedule_enabled"],
             )
             for e in (bypass_part + normal_part)
         ]
@@ -387,7 +391,7 @@ class PriorityEditor:
         if not (0 <= idx < len(self._entries)):
             return
         e       = self._entries[idx]
-        new_e   = PriorityEntry(e.streamer, e.site, e.config_path, e.config_sha, not e.bypass)
+        new_e   = PriorityEntry(e.streamer, e.site, e.config_path, e.config_sha, not e.bypass, e.schedule_enabled)
         lst     = list(self._entries)
         lst.pop(idx)
         # Insert at the boundary between bypass and normal sections.
@@ -414,6 +418,7 @@ class PriorityEditor:
             should_close = self._settings_popup.handle_key(key)
             if should_close:
                 self._settings_popup = None
+                self.force_reload()  # Refresh entries so schedule_enabled asterisk updates.
             return True
 
         if key == curses.KEY_UP:
@@ -477,7 +482,8 @@ class PriorityEditor:
             entry  = self._entries[i]
             is_sel = is_active and (i == self._selected_idx)
 
-            label = f"{entry.streamer}:{entry.site}"
+            streamer_display = f"*{entry.streamer}" if entry.schedule_enabled else entry.streamer
+            label = f"{streamer_display}:{entry.site}"
             if len(label) > panel_inner_w - 2:
                 label = label[:panel_inner_w - 5] + "..."
 

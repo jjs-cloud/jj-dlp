@@ -1,5 +1,9 @@
 - prevented text from spilling out of panels in the config tab
 
+- changed unicode character in the [► REC] status to enhance compatability
+
+- added an asterisk beside the streamer in the PRIORITIES/SCHEDULING panel when a schedule is enabled for that streamer.
+
 v1.18.4
 
 - fixed a bug with holding down the arrow keys to scroll which caused 
