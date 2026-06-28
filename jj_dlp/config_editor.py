@@ -455,7 +455,7 @@ class PriorityEditor:
 
         # Box border
         db.draw_box(stdscr, y1, x1, y2, x2, db.C_SYSTEM)
-        db.safe_addstr(stdscr, y1, x1 + 2, " PRIORITIES/SCHEDULING ",
+        db.safe_addstr(stdscr, y1, x1 + 2, " PRIORITY/SCHEDULING ",
                        curses.color_pair(db.C_LIVE) | curses.A_BOLD)
         if is_active:
             mode_str = " [  ] "
