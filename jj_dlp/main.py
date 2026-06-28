@@ -42,7 +42,7 @@ from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS, _compute_config_id, SiteS
 import curses  # noqa: E402
 
 
-# ── Script start time (for uptime display)) ───────────────────────────────────
+# ── Script start time (for uptime display)) ──────────────────────────────────
 _SCRIPT_START_TIME: float = time.time()
 
 # ── Global structures for concurrency control ────────────────────────────────
