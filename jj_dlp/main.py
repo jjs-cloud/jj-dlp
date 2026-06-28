@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.18.5"
+__version__ = "1.18.6"
 
 import subprocess
 import time
@@ -3287,7 +3287,7 @@ class JJDlpDashboard:
                         status_str  = "[●Live]"
                         status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
                     else:
-                        status_str  = "[▶ REC] "
+                        status_str  = "[► REC] "
                         status_attr = curses.color_pair(self.C_REC) | curses.A_BOLD
                 else:
                     status_str  = "[●Live]"
