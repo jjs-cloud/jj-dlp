@@ -4,6 +4,8 @@
 
 - added an asterisk beside the streamer in the PRIORITIES/SCHEDULING panel when a schedule is enabled for that streamer.
 
+- updated bundled yt-dlp fork
+
 v1.18.4
 
 - fixed a bug with holding down the arrow keys to scroll which caused 
