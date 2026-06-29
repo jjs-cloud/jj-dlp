@@ -306,14 +306,15 @@ def perform_update():
                     _logger().dbg(f"[UPDATER] perform_update: skipping global.json at {dst}")
                     return
                 if os.path.exists(dst):
-                    with open(dst, 'r', encoding='utf-8', errors='ignore') as f:
-                        old_content = f.read()
-                    with open(src, 'r', encoding='utf-8', errors='ignore') as f:
-                        new_content = f.read()
-                    if old_content != new_content and not dst.endswith(".conf"):
-                        create_diff(old_content, new_content, dst, actual_diff_dir)
-                        if os.path.basename(dst) == "updater.py":
-                            _logger().dbg(f"[UPDATER] perform_update: updater.py changed, copying {src} -> {dst}")
+                    if not _is_binary(dst) and not dst.endswith(".conf"):
+                        with open(dst, 'r', encoding='utf-8', errors='ignore') as f:
+                            old_content = f.read()
+                        with open(src, 'r', encoding='utf-8', errors='ignore') as f:
+                            new_content = f.read()
+                        if old_content != new_content:
+                            create_diff(old_content, new_content, dst, actual_diff_dir)
+                    if os.path.basename(dst) == "updater.py":
+                        _logger().dbg(f"[UPDATER] perform_update: updater.py changed, copying {src} -> {dst}")
                 else:
                     if os.path.basename(dst) == "updater.py":
                         _logger().dbg(f"[UPDATER] perform_update: installing new updater.py {src} -> {dst}")
@@ -515,6 +516,15 @@ def _mark_bin_executable(base_dir):
             print(f"  Marked executable: bin/{fname}")
 
 
+def _is_binary(path: str) -> bool:
+    """Return True if *path* looks like a binary file (contains a null byte in the first 8 KB)."""
+    try:
+        with open(path, 'rb') as f:
+            return b'\x00' in f.read(8192)
+    except Exception:
+        return False
+
+
 def create_diff(old_content, new_content, file_path, diff_dir):
     old_lines = old_content.splitlines(keepends=True)
     new_lines = new_content.splitlines(keepends=True)
@@ -693,12 +703,12 @@ if __name__ == "__main__":
                 else:
                     if dst.endswith(".pyc") or os.path.basename(dst) == "global.json":
                         return
-                    if os.path.exists(dst):
+                    if os.path.exists(dst) and not _is_binary(dst) and not dst.endswith(".conf"):
                         with open(dst, "r", encoding="utf-8", errors="ignore") as _f:
                             _oc = _f.read()
                         with open(src, "r", encoding="utf-8", errors="ignore") as _f:
                             _nc = _f.read()
-                        if _oc != _nc and not dst.endswith(".conf"):
+                        if _oc != _nc:
                             create_diff(_oc, _nc, dst, _diff_dir)
                     try:
                         shutil.copy2(src, dst)
