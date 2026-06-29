@@ -18,7 +18,7 @@ _VALID_BRANCHES = {"main", "testing", "experimental"}
 # ── Updater version ───────────────────────────────────────────────────────────
 # Incremented independently of the main jj-dlp version so we can tell which
 # updater logic is actually running during an update.
-UPDATER_VERSION = "2.1.0"
+UPDATER_VERSION = "2.1.1"
 
 # ── Lazy package imports ──────────────────────────────────────────────────────
 # Relative imports are deferred to call time so this file is also safe to
@@ -278,6 +278,7 @@ def perform_update():
             _logger().dbg(f"[UPDATER] perform_update: preserved sections for {fname}: streamers={bool(streamers)} block={bool(blocked)}")
 
             merged_content = inject_preserved_keys(new_content, user_cfg)
+            merged_content = update_config_comments(merged_content)
             merged_content = replace_section(merged_content, "Streamers", streamers)
             merged_content = replace_section(merged_content, "Block", blocked)
 
@@ -305,14 +306,15 @@ def perform_update():
                     _logger().dbg(f"[UPDATER] perform_update: skipping global.json at {dst}")
                     return
                 if os.path.exists(dst):
-                    with open(dst, 'r', encoding='utf-8', errors='ignore') as f:
-                        old_content = f.read()
-                    with open(src, 'r', encoding='utf-8', errors='ignore') as f:
-                        new_content = f.read()
-                    if old_content != new_content and not dst.endswith(".conf"):
-                        create_diff(old_content, new_content, dst, actual_diff_dir)
-                        if os.path.basename(dst) == "updater.py":
-                            _logger().dbg(f"[UPDATER] perform_update: updater.py changed, copying {src} -> {dst}")
+                    if not _is_binary(dst) and not dst.endswith(".conf"):
+                        with open(dst, 'r', encoding='utf-8', errors='ignore') as f:
+                            old_content = f.read()
+                        with open(src, 'r', encoding='utf-8', errors='ignore') as f:
+                            new_content = f.read()
+                        if old_content != new_content:
+                            create_diff(old_content, new_content, dst, actual_diff_dir)
+                    if os.path.basename(dst) == "updater.py":
+                        _logger().dbg(f"[UPDATER] perform_update: updater.py changed, copying {src} -> {dst}")
                 else:
                     if os.path.basename(dst) == "updater.py":
                         _logger().dbg(f"[UPDATER] perform_update: installing new updater.py {src} -> {dst}")
@@ -406,6 +408,65 @@ def inject_preserved_keys(new_text, old_config_path):
     return new_text
 
 
+def update_config_comments(text):
+    """Replace or insert the canonical comment line immediately above each
+    CONFIG_KEYS entry found in the [General] section.
+
+    Rules:
+    - Only touches lines inside [General]; other sections are left unchanged.
+    - If the line immediately preceding a key assignment starts with '#', it is
+      replaced with the comment from CONFIG_KEYS.
+    - If there is no preceding comment line, one is inserted.
+    - Multi-line comment blocks are not collapsed; only the single line
+      immediately above the key is considered.
+    - Keys not present in CONFIG_KEYS are left untouched.
+    """
+    # Resolve CONFIG_KEYS whether called as a package or as __main__.
+    try:
+        from .config_editor import CONFIG_KEYS as _ck
+    except ImportError:
+        try:
+            _pkg_dir = os.path.dirname(os.path.abspath(__file__))
+            _proj_root = os.path.dirname(_pkg_dir)
+            if _proj_root not in sys.path:
+                sys.path.insert(0, _proj_root)
+            from jj_dlp.config_editor import CONFIG_KEYS as _ck
+        except Exception:
+            return text
+
+    comment_map = {kdef.name.upper(): kdef.comment for kdef in _ck}
+
+    lines = text.splitlines(keepends=True)
+    in_general = False
+    result = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Track section changes.
+        if stripped.startswith('[') and stripped.endswith(']'):
+            in_general = (stripped[1:-1].lower() == 'general')
+            result.append(line)
+            continue
+
+        # Only process key assignments inside [General].
+        if in_general and '=' in stripped and not stripped.startswith('#'):
+            key_part = stripped.split('=', 1)[0].strip().upper()
+            if key_part in comment_map:
+                new_comment = f"# {comment_map[key_part]}\n"
+                # Replace the immediately preceding comment, or insert one.
+                if result and result[-1].strip().startswith('#'):
+                    result[-1] = new_comment
+                else:
+                    result.append(new_comment)
+                result.append(line)
+                continue
+
+        result.append(line)
+
+    return ''.join(result)
+
+
 def replace_section(text, sec_name, new_content):
     lines = text.splitlines()
     out = []
@@ -453,6 +514,15 @@ def _mark_bin_executable(base_dir):
         if current != executable_mode:
             os.chmod(fpath, executable_mode)
             print(f"  Marked executable: bin/{fname}")
+
+
+def _is_binary(path: str) -> bool:
+    """Return True if *path* looks like a binary file (contains a null byte in the first 8 KB)."""
+    try:
+        with open(path, 'rb') as f:
+            return b'\x00' in f.read(8192)
+    except Exception:
+        return False
 
 
 def create_diff(old_content, new_content, file_path, diff_dir):
@@ -612,6 +682,7 @@ if __name__ == "__main__":
                         if _pat.search(_new_txt):
                             _new_txt = _pat.sub(lambda m, v=_oval: f"{m.group(1)} {v}", _new_txt)
 
+                _new_txt = update_config_comments(_new_txt)
                 _new_txt = replace_section(_new_txt, "Streamers", _streamers)
                 _new_txt = replace_section(_new_txt, "Block", _blocked)
                 create_diff(_old_txt, _new_txt, _ucfg, _diff_dir)
@@ -632,12 +703,12 @@ if __name__ == "__main__":
                 else:
                     if dst.endswith(".pyc") or os.path.basename(dst) == "global.json":
                         return
-                    if os.path.exists(dst):
+                    if os.path.exists(dst) and not _is_binary(dst) and not dst.endswith(".conf"):
                         with open(dst, "r", encoding="utf-8", errors="ignore") as _f:
                             _oc = _f.read()
                         with open(src, "r", encoding="utf-8", errors="ignore") as _f:
                             _nc = _f.read()
-                        if _oc != _nc and not dst.endswith(".conf"):
+                        if _oc != _nc:
                             create_diff(_oc, _nc, dst, _diff_dir)
                     try:
                         shutil.copy2(src, dst)

@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.18.4"
+__version__ = "1.18.9"
 
 import subprocess
 import time
@@ -42,7 +42,7 @@ from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS, _compute_config_id, SiteS
 import curses  # noqa: E402
 
 
-# ── Script start time (for uptime display)) ───────────────────────────────────
+# ── Script start time (for uptime display)) ──────────────────────────────────
 _SCRIPT_START_TIME: float = time.time()
 
 # ── Global structures for concurrency control ────────────────────────────────
@@ -3287,7 +3287,7 @@ class JJDlpDashboard:
                         status_str  = "[●Live]"
                         status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
                     else:
-                        status_str  = "[▶ REC] "
+                        status_str  = "[► REC] "
                         status_attr = curses.color_pair(self.C_REC) | curses.A_BOLD
                 else:
                     status_str  = "[●Live]"

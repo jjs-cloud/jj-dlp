@@ -48,90 +48,48 @@ class _KeyDef(NamedTuple):
 
 CONFIG_KEYS: tuple[_KeyDef, ...] = (
     # ── Global keys (global.conf) ─────────────────────────────────────────────
-    _KeyDef("DISK_DRIVES",           "global", "",      True,
-            "Comma-separated list of drives or paths to show disk info in the system panel. "
-            "(e.g. C:\\,D:\\ or /home,/mnt/data)."),
-    _KeyDef("DEBUG_LOGS",            "global", "false", True,
-            "Enable debug logging to a file (true/false)."),
-    _KeyDef("DEBUG_LOG_PATH",        "global", "",      True,
-            "Path for the debug log file. Can be a relative or absolute path (e.g. logs/debug.log)."),
-    _KeyDef("CHECK_FOR_UPDATES",     "global", "true",  True,
-            "Whether to periodically check for app updates (true/false)."),
-    _KeyDef("UPDATE_INTERVAL",       "global", "30",    True,
-            "Number of minutes between app update checks."),
-    _KeyDef("ASK_FOR_BROWSER",       "global", "true",  True,
-            "Show the browser chooser on startup (true/false)."),
-    _KeyDef("ASK_FOR_CONFIG",        "global", "true",  True,
-            "Show the config file chooser on startup (true/false)."),
-    _KeyDef("UPDATE_BRANCH",         "global", "main",  True,
-            "Which branch of jj-dlp to update to. (main, testing, or experimental)."),
-    _KeyDef("MAX_CONCURRENT_REC",    "global", "0",     True,
-            "Maximum number of streamers to record simultaneously (0 = unlimited)."),
-    _KeyDef("LQ_DOWNLOADER",         "global", "false", True,
-            "Enable the LQ downloader bandwidth-saving feature. When enabled and ffmpeg errors "
-            "exceed the threshold on any recording, the lowest-priority recording is restarted "
-            "using the [LQ_Downloader] config section (true/false)."),
-    _KeyDef("FF_ERR_THRESH",         "global", "200",   True,
-            "Number of ffmpeg errors before a recording is automatically restarted "
-            "(0 = disabled, default 200)."),
-    _KeyDef("SUBFOLDERS",            "global", "false", True,
-            "Save recordings into a subfolder named after the streamer inside OUTPUT_DIR (true/false)."),
+    _KeyDef("DISK_DRIVES",           "global", "",      True,  "Comma-separated list of drives or paths to show disk info in the system panel. (e.g. C:\\, D:\\, E:\\  or  /home,/mnt/data)."),
+    _KeyDef("DEBUG_LOGS",            "global", "false", True,  "Enable debug logging to a file(true/false)."),
+    _KeyDef("DEBUG_LOG_PATH",        "global", "",      True,  "Path for the debug log file. Can be a relative or absolute path (e.g. logs/debug.log)"),
+    _KeyDef("CHECK_FOR_UPDATES",     "global", "true",  True,  "Whether to check for app updates at startup and periodically (true/false)."),
+    _KeyDef("UPDATE_INTERVAL",       "global", "30",    True,  "Number of minutes between app update checks."),
+    _KeyDef("ASK_FOR_BROWSER",       "global", "true",  False,  "Show the browser chooser on startup (true/false)."),
+    _KeyDef("ASK_FOR_CONFIG",        "global", "true",  True,  "Show the config file chooser on startup (true/false)."),
+    _KeyDef("UPDATE_BRANCH",         "global", "main",  True,  "Which branch of jj-dlp to update to. (main, testing, or experimental)."),
+    _KeyDef("MAX_CONCURRENT_REC",    "global", "0",     True,  'The maximum number of simultaneous recordings allowed to run.  Use the "PRIORITIES" panel in the Config tab to adjust the priority of each streamer. (0=no limit)'),
+    _KeyDef("LQ_DOWNLOADER",         "global", "false", True,  "When any recording reaches the ffmpeg error threshold (FF_ERR_THRESH) lower the video qualtiy of the lowest priority streamer, freeing up bandwidth for the remaining streamers."),
+    _KeyDef("FF_ERR_THRESH",         "global", "200",   True,  'Restart the download if we see this many ffmpeg errors ("timestamp discontinuity", "Packet corrupt") default: 200'),
+    _KeyDef("SUBFOLDERS",            "global", "false", True,  "Save recordings into a subfolder named after the streamer inside OUTPUT_DIR (true/false)."),
+    _KeyDef("SITE_SORT",             "global", "added_first", True, "Order to display streamers on each site panel.   This can also be adjusted by pressing the S key on the Dashboard tab."),
 
     # ── Site keys (per-site .conf) ────────────────────────────────────────────
-    _KeyDef("SITE_LABEL",            "site",   "",      True,
-            "Display label for this site in the dashboard."),
-    _KeyDef("SITE_ORDER",            "site",   "999",   True,
-            "Sort position of this site in the dashboard (lower = further left)."),
-    _KeyDef("CHECK_INTERVAL",        "site",   "60",    False,
-            "Seconds between liveness checks for this site."),
-    _KeyDef("OUTPUT_DIR",            "site",   "recordings", True,
-            "Directory where recordings are saved."),
-    _KeyDef("OUTPUT_TMPL",           "site",   "%(title)s [%(id)s].%(ext)s", False,
-            "yt-dlp output filename template."),
-    _KeyDef("COOLDOWN_AFTER_RECORDING", "site", "60",   False,
-            "Seconds to wait after a recording ends before checking again."),
-    _KeyDef("SPLIT_AFTER",           "site",   "0",    True,
-            "Split recordings after this many seconds (0 = disabled)."),
-    _KeyDef("STALL_CHECK_INTERVAL",  "site",   "30",   False,
-            "Seconds between stall-detection checks."),
-    _KeyDef("STALL_TIMEOUT",         "site",   "120",  False,
-            "Seconds without output before a recording is considered stalled."),
-    _KeyDef("CONFIG_CHECK_INTERVAL", "site",   "3",    False,
-            "Seconds between config-file reload checks."),
-    _KeyDef("SITE_TMPL",             "site",   "",     False,
-            "URL template used to build the stream URL from a username."),
-    _KeyDef("PANEL_RESIZE",          "site",   "true", True,
-            "Allow the dashboard panel to be resized (true/false)."),
-    _KeyDef("LOGGING",               "site",   "false", True,
-            "Enable per-site log files (true/false)."),
-    _KeyDef("LOG_PATH",              "site",   "",     True,
-            "Path for per-site log files."),
-    _KeyDef("SPLIT_LOGS",            "site",   "false", True,
-            "Write a separate log file per recording session (true/false)."),
-    _KeyDef("POPUP_NOTIFICATIONS",   "site",   "true", True,
-            "Show popup notifications for recording events (true/false)."),
-    _KeyDef("AD_ALERTS",             "site",   "True", True,
-            "Show an alert in the system panel when ads are detected in a recording (true/false)."),
-    _KeyDef("POPUP_TIMEOUT",         "site",   "15",   True,
-            "Seconds a notification popup stays visible."),
-    _KeyDef("POPUP_COOLDOWN",        "site",   "30",   True,
-            "Minimum seconds between successive popups for the same site."),
-    _KeyDef("YT_DLP_PATH_WINDOWS",   "site",   "",     False,
-            "Path to yt-dlp executable on Windows. Leave blank to use the bundled copy."),
-    _KeyDef("YT_DLP_PATH_MAC",       "site",   "",     False,
-            "Path to yt-dlp executable on macOS. Leave blank to use the bundled copy."),
-    _KeyDef("YT_DLP_PATH_LINUX",     "site",   "",     False,
-            "Path to yt-dlp executable on Linux. Leave blank to use the bundled copy."),
-    _KeyDef("PROGRESS_BAR_MAX_HOURS","site",   "6",    True,
-            "Maximum hours shown on the recording progress bar."),
-    _KeyDef("PROGRESS_BAR_WIDTH",    "site",   "14",   True,
-            "Width (in characters) of the recording progress bar."),
-    _KeyDef("DOWNLOADER_COOKIES",    "site",   "true", False,
-            "Pass browser cookies to yt-dlp for downloading (true/false)."),
-    _KeyDef("CHECKER_COOKIES",       "site",   "false", False,
-            "Pass browser cookies to yt-dlp for liveness checks (true/false)."),
-    _KeyDef("LAST_LIVE_HIGHLIGHT",   "site",   "0",    True,
-            "Seconds to highlight a streamer after they were last seen live (0 = disabled)."),
+    _KeyDef("SITE_LABEL",            "site",   "",      True,  "The name of this site"),
+    _KeyDef("SITE_ORDER",            "site",   "999",   True,  "The position on the dashboard to display this site's panel (e.g. 0 for top-left, 1 for top-right, 2 for bottom-left, 3 for bottom-right, etc.)"),
+    _KeyDef("CHECK_INTERVAL",        "site",   "60",    False, "How often to check if streamers are live (in seconds).  (Default: 60)"),
+    _KeyDef("OUTPUT_DIR",            "site",   "recordings", True, 'Folder where recordings will be saved.  Can be an absolute path or relative path.  example: "C:\\recordings" or "recordings"'),
+    _KeyDef("OUTPUT_TMPL",           "site",   "%(title)s [%(id)s].%(ext)s", False, "Template for naming the video files. (Reference: https://github.com/yt-dlp/yt-dlp#output-templates)"),
+    _KeyDef("COOLDOWN_AFTER_RECORDING", "site", "60",   False, "Seconds to wait after a recording ends before checking again."),
+    _KeyDef("SPLIT_AFTER",           "site",   "0",    True,  "When recording a stream, split the video file(s) every X minutes. (0 = no split)"),
+    _KeyDef("STALL_CHECK_INTERVAL",  "site",   "30",   False, "How often to check if the recording has stalled (in seconds). (Default: 30)"),
+    _KeyDef("STALL_TIMEOUT",         "site",   "120",  False, "Time to wait before considering a recording stalled (in seconds). (Default: 120)"),
+    _KeyDef("CONFIG_CHECK_INTERVAL", "site",   "3",    False, "How often to check for changes to the configuration file (in seconds). (Default: 3)"),
+    _KeyDef("SITE_TMPL",             "site",   "",     False, "URL where the live stream can be accessed. {username} will be replaced with the streamer's username."),
+    _KeyDef("PANEL_RESIZE",          "site",   "true", True,  "When true, site panels will expand vertically as needed to display all streamers."),
+    _KeyDef("LOGGING",               "site",   "false", True, "Log yt-dlp (stdout) and ffmpeg (stderr) to a file."),
+    _KeyDef("LOG_PATH",              "site",   "",     True,  "Path to save the log file.  Can be an absolute or relative path."),
+    _KeyDef("SPLIT_LOGS",            "site",   "false", True, "When LOGGING = true, create 2 separate log files.  One for yt-dlp (stdout) and one for ffmpeg (stderr)."),
+    _KeyDef("POPUP_NOTIFICATIONS",   "site",   "true", True,  "Show a popup notification when a streamer goes live."),
+    _KeyDef("AD_ALERTS",             "site",   "True", True,  "Show an alert in the system panel when ads are detected in a recording (true/false)."),
+    _KeyDef("POPUP_TIMEOUT",         "site",   "15",   True,  "Seconds to show the popup notification when a streamer goes live."),
+    _KeyDef("POPUP_COOLDOWN",        "site",   "30",   True,  "Minutes to wait before showing another popup notification for the same streamer."),
+    _KeyDef("YT_DLP_PATH_WINDOWS",   "site",   "",     False, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
+    _KeyDef("YT_DLP_PATH_MAC",       "site",   "",     False, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
+    _KeyDef("YT_DLP_PATH_LINUX",     "site",   "",     False, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
+    _KeyDef("PROGRESS_BAR_MAX_HOURS","site",   "6",    True,  "Duration of the progress bar in the site panel of the dashboard. (in hours)"),
+    _KeyDef("PROGRESS_BAR_WIDTH",    "site",   "14",   True,  "Width of the progress bar in the site panel of the dashboard. (in characters)"),
+    _KeyDef("DOWNLOADER_COOKIES",    "site",   "true", False, "Whether to write the --cookies-from-browser flag to this config file's [Downloader] section when a browser is selected at startup."),
+    _KeyDef("CHECKER_COOKIES",       "site",   "false", False, "Whether to write the --cookies-from-browser flag to this config file's [Checker] section when a browser is selected at startup."),
+    _KeyDef("LAST_LIVE_HIGHLIGHT",   "site",   "0",    True,  'Highlight the "Last Live" timestamp when the streamer was last live within X days.'),
 )
 
 # ── Derived helpers (consumed by this module and importable by others) ─────────
@@ -194,11 +152,12 @@ def _compute_config_sha(config_path: str) -> str:
 
 class PriorityEntry(NamedTuple):
     """Represents one streamer entry in the PRIORITY panel."""
-    streamer:    str   # lowercase username
-    site:        str   # SITE_LABEL from the config that owns this streamer
-    config_path: str   # absolute path to the .conf file
-    config_sha:  str   # short SHA of that .conf file at last load
-    bypass:      bool  # True → always-record (displayed in green, sorted to top)
+    streamer:         str   # lowercase username
+    site:             str   # SITE_LABEL from the config that owns this streamer
+    config_path:      str   # absolute path to the .conf file
+    config_sha:       str   # short SHA of that .conf file at last load
+    bypass:           bool  # True → always-record (displayed in green, sorted to top)
+    schedule_enabled: bool = False  # True → streamer has an active schedule
 
 
 class PriorityEditor:
@@ -268,8 +227,9 @@ class PriorityEditor:
         for i, e in enumerate(saved_entries):
             key = (e.get("streamer", ""), e.get("site", ""))
             saved_map[key] = {
-                "bypass":   e.get("bypass", False),
-                "priority": i,
+                "bypass":           e.get("bypass", False),
+                "priority":         i,
+                "schedule_enabled": bool(e.get("schedule", {}).get("enabled", False)),
             }
 
         # Build enriched list with saved priority / bypass values.
@@ -278,12 +238,13 @@ class PriorityEditor:
             key      = (streamer, site_label)
             saved    = saved_map.get(key, {"bypass": False, "priority": 999999})
             enriched.append({
-                "streamer":    streamer,
-                "site":        site_label,
-                "config_path": config_path,
-                "config_sha":  config_sha,
-                "bypass":      saved["bypass"],
-                "priority":    saved["priority"],
+                "streamer":        streamer,
+                "site":            site_label,
+                "config_path":     config_path,
+                "config_sha":      config_sha,
+                "bypass":          saved["bypass"],
+                "schedule_enabled": saved.get("schedule_enabled", False),
+                "priority":        saved["priority"],
             })
 
         # Sort: bypass entries first (by saved order), then normal entries (by saved order).
@@ -292,11 +253,12 @@ class PriorityEditor:
 
         self._entries = [
             PriorityEntry(
-                streamer    = e["streamer"],
-                site        = e["site"],
-                config_path = e["config_path"],
-                config_sha  = e["config_sha"],
-                bypass      = e["bypass"],
+                streamer         = e["streamer"],
+                site             = e["site"],
+                config_path      = e["config_path"],
+                config_sha       = e["config_sha"],
+                bypass           = e["bypass"],
+                schedule_enabled = e["schedule_enabled"],
             )
             for e in (bypass_part + normal_part)
         ]
@@ -387,7 +349,7 @@ class PriorityEditor:
         if not (0 <= idx < len(self._entries)):
             return
         e       = self._entries[idx]
-        new_e   = PriorityEntry(e.streamer, e.site, e.config_path, e.config_sha, not e.bypass)
+        new_e   = PriorityEntry(e.streamer, e.site, e.config_path, e.config_sha, not e.bypass, e.schedule_enabled)
         lst     = list(self._entries)
         lst.pop(idx)
         # Insert at the boundary between bypass and normal sections.
@@ -414,6 +376,7 @@ class PriorityEditor:
             should_close = self._settings_popup.handle_key(key)
             if should_close:
                 self._settings_popup = None
+                self.force_reload()  # Refresh entries so schedule_enabled asterisk updates.
             return True
 
         if key == curses.KEY_UP:
@@ -450,7 +413,7 @@ class PriorityEditor:
 
         # Box border
         db.draw_box(stdscr, y1, x1, y2, x2, db.C_SYSTEM)
-        db.safe_addstr(stdscr, y1, x1 + 2, " PRIORITIES/SCHEDULING ",
+        db.safe_addstr(stdscr, y1, x1 + 2, " PRIORITY/SCHEDULING ",
                        curses.color_pair(db.C_LIVE) | curses.A_BOLD)
         if is_active:
             mode_str = " [  ] "
@@ -477,7 +440,8 @@ class PriorityEditor:
             entry  = self._entries[i]
             is_sel = is_active and (i == self._selected_idx)
 
-            label = f"{entry.streamer}:{entry.site}"
+            streamer_display = f"*{entry.streamer}" if entry.schedule_enabled else entry.streamer
+            label = f"{streamer_display}:{entry.site}"
             if len(label) > panel_inner_w - 2:
                 label = label[:panel_inner_w - 5] + "..."
 
@@ -1128,6 +1092,9 @@ def _validate_value(key: str, value: str) -> tuple[bool, str]:
                 return False, "Must be >= 0"
         except ValueError:
             return False, "Must be an integer"
+    if key == "SITE_SORT":
+        if value.lower() not in _SORT_KEYS:
+            return False, f"Must be one of: {', '.join(_SORT_KEYS)}"
     return True, ""
 
 
@@ -1564,7 +1531,11 @@ class GlobalConfigEditor:
             val_attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
                         if is_sel else curses.color_pair(db.C_LIVE))
             self.dashboard.safe_addstr(stdscr, row_y, x1 + 1, prefix + f"{item.key:<22}", key_attr)
-            self.dashboard.safe_addstr(stdscr, row_y, x1 + 26, "= " + str(item.value), val_attr)
+            val_str = "= " + str(item.value)
+            max_val_w = (x2 - x1) - 26 - 1   # columns between value start and right border
+            if len(val_str) > max_val_w:
+                val_str = val_str[:max_val_w - 1] + "\u25ba"
+            self.dashboard.safe_addstr(stdscr, row_y, x1 + 26, val_str, val_attr)
             row_y += 1
 
         if self.popup_mode and self.editing_item:
@@ -1868,7 +1839,11 @@ class ConfigEditor:
                                 else curses.color_pair(self.dashboard.C_LIVE))
                     self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 2, prefix + f"{item.key:<25}", key_attr)
                     if item.has_equals:
-                        self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 29, "= " + str(item.value), val_attr)
+                        val_str = "= " + str(item.value)
+                        max_val_w = (site_x2 - site_x1) - 29 - 1   # columns between value start and right border
+                        if len(val_str) > max_val_w:
+                            val_str = val_str[:max_val_w - 1] + "\u25ba"
+                        self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 29, val_str, val_attr)
                 row_y += 1
 
         # Draw popup (whichever sub-editor owns it)
