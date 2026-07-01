@@ -4,7 +4,7 @@ import curses
 import hashlib
 import threading
 from datetime import datetime
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 try:
     from .logger import dbg as _dbg
