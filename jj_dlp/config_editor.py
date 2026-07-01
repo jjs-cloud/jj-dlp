@@ -82,7 +82,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("AD_ALERTS",             "site",   "True", True,  "Show an alert in the system panel when ads are detected in a recording (true/false)."),
     _KeyDef("POPUP_TIMEOUT",         "site",   "15",   True,  "Seconds to show the popup notification when a streamer goes live."),
     _KeyDef("POPUP_COOLDOWN",        "site",   "30",   True,  "Minutes to wait before showing another popup notification for the same streamer."),
-    _KeyDef("YT_DLP_PATH_WINDOWS",   "site",   "",     True, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
+    _KeyDef("YT_DLP_PATH_WINDOWS",   "site",   "",     False, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
     _KeyDef("YT_DLP_PATH_MAC",       "site",   "",     True, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
     _KeyDef("YT_DLP_PATH_LINUX",     "site",   "",     True, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
     _KeyDef("PROGRESS_BAR_MAX_HOURS","site",   "10",    True,  "Duration of the progress bar in the site panel of the dashboard. (in hours)"),
