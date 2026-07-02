@@ -696,19 +696,15 @@ class StreamerSettingsPopup:
                 self._day_cursor = min(6, self._day_cursor + 1)
 
         elif key == ord(" "):
-            self._toggle_current(field_key, fields)
-
-        elif key in (ord("\n"), ord("\r"), curses.KEY_ENTER):
-            if field_key in (self._FIELD_ENABLED, self._FIELD_MODE,
-                             self._FIELD_REC_DAYS):
-                self._toggle_current(field_key, fields)
-            elif field_key in (self._FIELD_OO_START, self._FIELD_OO_END,
-                               self._FIELD_REC_START, self._FIELD_REC_END):
+            if field_key in (self._FIELD_OO_START, self._FIELD_OO_END,
+                             self._FIELD_REC_START, self._FIELD_REC_END):
                 self._edit_buf = getattr(self, field_key, "")
                 self._editing  = True
                 self._error    = ""
+            else:
+                self._toggle_current(field_key, fields)
 
-        elif key in (ord("s"), ord("S")):
+        elif key in (ord("\n"), ord("\r"), curses.KEY_ENTER):
             valid, err = self._validate()
             if valid:
                 self._save()
@@ -812,7 +808,7 @@ class StreamerSettingsPopup:
             if self._editing:
                 hint = " Enter:Commit  Esc:Cancel edit "
             else:
-                hint = " S:Save  Esc:Cancel  Space/Enter:Toggle  \u2190\u2192:Mode/Days "
+                hint = " Enter:Save  Esc:Cancel  Space:Toggle/Edit  \u2190\u2192:Mode/Days "
             db.safe_addstr(stdscr, by2, bx1 + 2, hint[:box_w - 4],
                            curses.color_pair(db.C_INVHEAD))
 
@@ -1753,16 +1749,6 @@ class ConfigEditor:
         content_y1 = y1
 
         # ── Hint row (content_y1) — above boxes ──────────────────────────────
-        # Tab-focus navigation hint above GLOBAL panel
-        if self._focus == "site":
-            focus_hint = "  Tab: Global Settings \u25ba  "
-        elif self._focus == "global":
-            focus_hint = "  \u25c4 Site  Tab: Priority \u25ba  "
-        else:
-            focus_hint = "  \u25c4 Tab: Global Settings  "
-        self.dashboard.safe_addstr(stdscr, content_y1, global_x1, focus_hint,
-                    curses.color_pair(self.dashboard.C_DIM))
-
         # Keybind legend above PRIORITY panel (always visible)
         prio_hint = "\u2191\u2193:nav  U:up D:dn  B:bypass  Enter:settings"
         self.dashboard.safe_addstr(stdscr, content_y1, prio_x1, prio_hint,
