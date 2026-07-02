@@ -217,7 +217,17 @@ class PriorityEditor:
         from .main import _global_json_lock, _load_global_json
         with _global_json_lock:
             global_data = _load_global_json()
-        saved_block   = global_data.get("priorities", {}).get(self._config_id, {})
+        priorities_block = global_data.get("priorities", {})
+        # First time we've ever seen this config_id (e.g. fresh clone, no
+        # priority/bypass action has been taken yet) → there is no saved
+        # block at all.  If we don't persist something now, downstream
+        # consumers that only *update* existing entries (e.g.
+        # StreamerSettingsPopup._save(), _process_streamer_schedules()) will
+        # silently find nothing to work with until the user happens to
+        # reorder or bypass a streamer.  Seed it immediately so scheduling
+        # works out of the box.
+        needs_seed    = self._config_id not in priorities_block
+        saved_block   = priorities_block.get(self._config_id, {})
         saved_entries = saved_block.get("entries", [])
 
         # Build a lookup: (streamer, site) → saved dict
@@ -266,6 +276,13 @@ class PriorityEditor:
             self._selected_idx = min(self._selected_idx, len(self._entries) - 1)
         else:
             self._selected_idx = 0
+
+        # Seed global.json for a config_id we've never saved before, so that
+        # everything downstream (schedule popup, scheduler loop) has a real
+        # entries list to work with immediately, rather than only after the
+        # user manually reorders/bypasses a streamer.
+        if needs_seed and self._entries:
+            self._save()
 
     def _save(self) -> None:
         """Persist current entry ordering and bypass flags to global.json.
@@ -546,26 +563,43 @@ class StreamerSettingsPopup:
                 entries = (gdata.get("priorities", {})
                                .get(self.config_id, {})
                                .get("entries", []))
+                target = None
                 for e in entries:
                     if (e.get("streamer") == self.entry.streamer
                             and e.get("site") == self.entry.site):
-                        sched = e.setdefault("schedule", {})
-                        sched["enabled"] = self.schedule_enabled
-                        sched["mode"]    = self.mode
-                        sched.setdefault("one_off", {}).update({
-                            "start": self.one_off_start,
-                            "end":   self.one_off_end,
-                        })
-                        sched.setdefault("recurring", {}).update({
-                            "days":       [i for i, v in enumerate(self.recurring_days) if v],
-                            "start_time": self.recurring_start,
-                            "end_time":   self.recurring_end,
-                        })
-                        # last_enable_attempt / last_disable_attempt are managed by
-                        # the scheduling engine; never overwrite them here.
+                        target = e
                         break
-                if "priorities" in gdata and self.config_id in gdata["priorities"]:
-                    gdata["priorities"][self.config_id]["entries"] = entries
+                if target is None:
+                    # No pre-existing entry (e.g. a fresh clone where the
+                    # PRIORITY panel's seed hasn't run yet, or this streamer
+                    # was added after the last seed/save). Create one rather
+                    # than silently dropping the schedule the user just set.
+                    target = {
+                        "streamer":   self.entry.streamer,
+                        "site":       self.entry.site,
+                        "config_sha": self.entry.config_sha,
+                        "priority":   len(entries),
+                        "bypass":     self.entry.bypass,
+                    }
+                    entries.append(target)
+                sched = target.setdefault("schedule", {})
+                sched["enabled"] = self.schedule_enabled
+                sched["mode"]    = self.mode
+                sched.setdefault("one_off", {}).update({
+                    "start": self.one_off_start,
+                    "end":   self.one_off_end,
+                })
+                sched.setdefault("recurring", {}).update({
+                    "days":       [i for i, v in enumerate(self.recurring_days) if v],
+                    "start_time": self.recurring_start,
+                    "end_time":   self.recurring_end,
+                })
+                # last_enable_attempt / last_disable_attempt are managed by
+                # the scheduling engine; never overwrite them here.
+
+                gdata.setdefault("priorities", {}).setdefault(
+                    self.config_id, {"config_files": [], "entries": []}
+                )["entries"] = entries
                 _save_global_json(gdata)
         except Exception:
             pass
