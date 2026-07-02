@@ -696,20 +696,20 @@ class StreamerSettingsPopup:
                 self._day_cursor = min(6, self._day_cursor + 1)
 
         elif key == ord(" "):
-            self._toggle_current(field_key, fields)
-
-        elif key in (ord("\n"), ord("\r"), curses.KEY_ENTER):
             if field_key in (self._FIELD_OO_START, self._FIELD_OO_END,
                              self._FIELD_REC_START, self._FIELD_REC_END):
                 self._edit_buf = getattr(self, field_key, "")
                 self._editing  = True
                 self._error    = ""
             else:
-                valid, err = self._validate()
-                if valid:
-                    self._save()
-                    return True
-                self._error = err
+                self._toggle_current(field_key, fields)
+
+        elif key in (ord("\n"), ord("\r"), curses.KEY_ENTER):
+            valid, err = self._validate()
+            if valid:
+                self._save()
+                return True
+            self._error = err
 
         return False
 
@@ -808,7 +808,7 @@ class StreamerSettingsPopup:
             if self._editing:
                 hint = " Enter:Commit  Esc:Cancel edit "
             else:
-                hint = " Enter:Save  Esc:Cancel  Space:Toggle  \u2190\u2192:Mode/Days "
+                hint = " Enter:Save  Esc:Cancel  Space:Toggle/Edit  \u2190\u2192:Mode/Days "
             db.safe_addstr(stdscr, by2, bx1 + 2, hint[:box_w - 4],
                            curses.color_pair(db.C_INVHEAD))
 
