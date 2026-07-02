@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.18.10"
+__version__ = "1.18.11"
 
 import subprocess
 import time
@@ -3698,7 +3698,7 @@ class JJDlpDashboard:
             else:
                 hints = (f"  LEFT/RIGHT: switch tabs"
                          f"  [: prev site  ]: next site"
-                         f"  A: add/enable streamer R: remove streamer D: disable streamer"
+                         f"  Tab: Next Panel"
                          f"  C: colors  Q: quit  ")
         self.safe_addstr(self.stdscr, h - 1, 0,
                     hints.ljust(w - 1)[:w - 1],
@@ -3998,7 +3998,7 @@ class JJDlpDashboard:
 
         if key in (ord('q'), ord('Q'), 27):
             return False
-        elif key in (ord('\t'), curses.KEY_RIGHT, ord('l')):
+        elif key in (curses.KEY_RIGHT, ord('l')):
             self.selected_tab = (self.selected_tab + 1) % len(self.TABS)
         elif key in (curses.KEY_LEFT, ord('h')):
             self.selected_tab = (self.selected_tab - 1) % len(self.TABS)
