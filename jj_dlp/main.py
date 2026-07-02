@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.18.12"
+__version__ = "1.18.13"
 
 import subprocess
 import time
@@ -3963,7 +3963,7 @@ class JJDlpDashboard:
         # Changelog popup intercepts all keys while open.
         if self._changelog_popup_open:
             if key in (ord('q'), ord('Q'), 27,            # Q / Esc → close
-                       ord('\n'), ord('\r'), curses.KEY_ENTER):
+                       ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
                 self._changelog_popup_open = False
             elif key in (curses.KEY_UP, ord('k')):
                 self._changelog_scroll = max(0, self._changelog_scroll - 1)
@@ -4080,7 +4080,7 @@ class JJDlpDashboard:
                 self._mgmt_sel = max(0, self._mgmt_sel - 1)
             elif key == curses.KEY_DOWN:
                 self._mgmt_sel = min(max(0, len(enabled) - 1), self._mgmt_sel + 1)
-            elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+            elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
                 if enabled:
                     username = enabled[self._mgmt_sel]
                     result   = _modify_config_streamer(site.config_path, username, action)
@@ -4117,7 +4117,7 @@ class JJDlpDashboard:
             elif key in (curses.KEY_BACKSPACE, 127, 8):
                 self._mgmt_buf = self._mgmt_buf[:-1]
                 self._mgmt_sel = -1   # typing refocuses text input
-            elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+            elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
                 if self._mgmt_buf.strip():
                     # Text input takes priority when it has content
                     result = _modify_config_streamer(site.config_path,
@@ -4473,7 +4473,7 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
                 selected.add(cursor)
         elif key in (ord('d'), ord('D')):
             do_not_show_config = not do_not_show_config
-        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
             if selected:
                 chosen_files = [found[i] for i in sorted(selected)]
                 
@@ -4598,7 +4598,7 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
             br_cursor = (br_cursor + 1) % nb
         elif key in (ord('d'), ord('D')):
             do_not_show = not do_not_show
-        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
             chosen_browser = browsers[br_cursor]
             for fname in chosen_files:
                 fpath = os.path.join(os.getcwd(), fname)

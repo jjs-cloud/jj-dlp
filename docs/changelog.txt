@@ -1,3 +1,11 @@
+
+
+- fixed bug with scheduler on fresh installs
+
+- removed confusing/irrelevant keybind hints
+
+- keypad enter now works everywhere enter/return is used
+
 v1.18.9
 
 - prevented text from spilling out of panels in the config tab

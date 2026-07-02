@@ -409,7 +409,7 @@ class PriorityEditor:
         elif key in self.KEY_BYPASS:
             self._toggle_bypass(self._selected_idx)
             return True
-        elif key in (10, 13, curses.KEY_ENTER):  # Enter / Return
+        elif key in (10, 13, curses.KEY_ENTER, 459):  # Enter / Return
             if self._entries and 0 <= self._selected_idx < len(self._entries):
                 self._settings_popup = StreamerSettingsPopup(
                     self.dashboard,
@@ -683,7 +683,7 @@ class StreamerSettingsPopup:
             elif key in (curses.KEY_BACKSPACE, 127, 8):
                 self._edit_buf = self._edit_buf[:-1]
                 self._error    = ""
-            elif key in (ord("\n"), ord("\r"), curses.KEY_ENTER):
+            elif key in (ord("\n"), ord("\r"), curses.KEY_ENTER, 459):
                 val = self._edit_buf.strip()
                 fmt = (self._DATETIME_FMT
                        if field_key in (self._FIELD_OO_START, self._FIELD_OO_END)
@@ -738,7 +738,7 @@ class StreamerSettingsPopup:
             else:
                 self._toggle_current(field_key, fields)
 
-        elif key in (ord("\n"), ord("\r"), curses.KEY_ENTER):
+        elif key in (ord("\n"), ord("\r"), curses.KEY_ENTER, 459):
             valid, err = self._validate()
             if valid:
                 self._save()
@@ -980,7 +980,7 @@ class SiteSortManager:
             self._popup_sel = max(0, self._popup_sel - 1)
         elif key == curses.KEY_DOWN:
             self._popup_sel = min(n - 1, self._popup_sel + 1)
-        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, ord(' ')):
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459, ord(' ')):
             new_key = _SORT_KEYS[self._popup_sel]
             if new_key != self._current_sort:
                 self._current_sort = new_key
@@ -1309,7 +1309,7 @@ class GlobalConfigEditor:
                 self._debug_tags_state[tag] = not self._debug_tags_state.get(tag, False)
             return True
 
-        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):   # Enter → save + close
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):   # Enter → save + close
             self._save_debug_tags()
             self.debug_tags_mode = False
             self.editing_item    = None
@@ -1481,7 +1481,7 @@ class GlobalConfigEditor:
             elif key in (curses.KEY_BACKSPACE, 127, 8):
                 self.popup_buf = self.popup_buf[:-1]
                 self.popup_error = ""
-            elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+            elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
                 if self.editing_item:
                     new_val = self.popup_buf.strip()
                     _dbg(f"[CONFIG] GlobalConfigEditor.handle_key() Enter pressed for {self.editing_item.key!r} new_val={new_val!r}")
@@ -1519,7 +1519,7 @@ class GlobalConfigEditor:
         elif key == curses.KEY_DOWN:
             self.selected_idx = min(len(self.items) - 1, self.selected_idx + 1)
             return True
-        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
             if self.items:
                 self.editing_item = self.items[self.selected_idx]
                 if self.editing_item.key == "DEBUG_LOGS":
@@ -1960,7 +1960,7 @@ class ConfigEditor:
             elif key in (curses.KEY_BACKSPACE, 127, 8):
                 self.popup_buf = self.popup_buf[:-1]
                 self.popup_error = ""
-            elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+            elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
                 if self.editing_item:
                     new_val = self.popup_buf.strip()
                     is_valid, err_msg = _validate_value(self.editing_item.key, new_val)
@@ -2004,7 +2004,7 @@ class ConfigEditor:
             if self.items:
                 self.selected_idx = min(len(self.items) - 1, self.selected_idx + 1)
             return True
-        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
             if self.items and not self.items[self.selected_idx].is_section:
                 self.editing_item = self.items[self.selected_idx]
                 if self.editing_item.has_equals:
