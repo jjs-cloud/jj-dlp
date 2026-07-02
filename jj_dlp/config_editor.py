@@ -1749,6 +1749,16 @@ class ConfigEditor:
         content_y1 = y1
 
         # ── Hint row (content_y1) — above boxes ──────────────────────────────
+        # Tab-focus navigation hint above GLOBAL panel
+        if self._focus == "site":
+            focus_hint = "  Tab: Global Settings \u25ba  "
+        elif self._focus == "global":
+            focus_hint = "  \u25c4 Site  Tab: Priority \u25ba  "
+        else:
+            focus_hint = "  \u25c4 Tab: Global Settings  "
+        self.dashboard.safe_addstr(stdscr, content_y1, global_x1, focus_hint,
+                    curses.color_pair(self.dashboard.C_DIM))
+
         # Keybind legend above PRIORITY panel (always visible)
         prio_hint = "\u2191\u2193:nav  U:up D:dn  B:bypass  Enter:settings"
         self.dashboard.safe_addstr(stdscr, content_y1, prio_x1, prio_hint,
