@@ -414,7 +414,7 @@ class PriorityEditor:
         db.safe_addstr(stdscr, y1, x1 + 2, " PRIORITY/SCHEDULING ",
                        curses.color_pair(db.C_LIVE) | curses.A_BOLD)
         if is_active:
-            mode_str = " [  ] "
+            mode_str = " [Tab:Next Panel] "
             db.safe_addstr(stdscr, y1, x2 - len(mode_str) - 1, mode_str,
                            curses.color_pair(db.C_LIVE) | curses.A_BOLD)
 
@@ -1505,7 +1505,7 @@ class GlobalConfigEditor:
         title = " GLOBAL SETTINGS "
         self.dashboard.safe_addstr(stdscr, y1, x1 + 2, title, curses.color_pair(db.C_LIVE) | curses.A_BOLD)
         if is_active:
-            mode_str = " [  ] "
+            mode_str = " [Tab:Next Panel] "
             self.dashboard.safe_addstr(stdscr, y1, x2 - len(mode_str) - 1, mode_str,
                         curses.color_pair(db.C_LIVE) | curses.A_BOLD)
 
@@ -1780,7 +1780,7 @@ class ConfigEditor:
         site_box_y1 = content_y1 + 1
         self.dashboard.draw_box(stdscr, site_box_y1, site_x1, y2, site_x2, self.dashboard.C_CHROME)
         if self._focus == "site":
-            mode_str = " [  ] "
+            mode_str = " [Tab:Next Panel] "
             self.dashboard.safe_addstr(stdscr, site_box_y1, site_x2 - len(mode_str) - 1, mode_str,
                         curses.color_pair(self.dashboard.C_LIVE) | curses.A_BOLD)
         self.dashboard.safe_addstr(stdscr, site_box_y1, site_x1 + 2, " SITE SETTINGS ",
