@@ -1,3 +1,10 @@
+- fixed popup notification bug that displayed popups too often
+
+
+
+====================
+====================
+
 v1.20.1
 
 - fixed bug with scheduler on fresh installs

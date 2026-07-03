@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.20.1"
+__version__ = "1.20.2"
 
 import subprocess
 import time
@@ -607,6 +607,12 @@ class SiteState:
 
         # Popup cooldown: streamer -> epoch of last popup shown
         self.popup_last_shown:    Dict[str, float] = {}
+        # Streamers for whom a "not recording" (disabled / lower-priority) popup
+        # has already been shown during the current continuous live session.
+        # Cleared when the streamer goes offline so the popup can fire again
+        # next time they go live. This prevents the popup from re-appearing
+        # every popup_cooldown minutes for as long as the streamer stays live.
+        self.popup_shown_session: set = set()
 
         # Active yt-dlp subprocesses: streamer -> proc
         # Written by record_stream threads; read by stop() for clean kill.
@@ -974,6 +980,18 @@ def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
         dbg(f"[POPUP] popup skipped for streamer={streamer!r} show_popup={show_popup} popup_notifications={cfg.get('popup_notifications', True)}")
         return
 
+    # Streamers that are NOT being recorded (disabled / lower-priority) get
+    # re-passed to this function on every single poll for as long as they
+    # remain live, since nothing else about their state changes to exclude
+    # them from the caller's candidate list. Relying on popup_cooldown alone
+    # then means the popup keeps re-appearing every popup_cooldown minutes
+    # for the entire time they're live. Instead, only show this popup once
+    # per continuous live session; site.popup_shown_session is cleared when
+    # the streamer goes offline (see the poll loop).
+    if not is_recording and streamer in site.popup_shown_session:
+        dbg(f"[POPUP] popup suppressed - already shown this live session for streamer={streamer!r} reason={reason!r}")
+        return
+
     dbg(f"[POPUP] popup condition check for streamer={streamer!r} show_popup={show_popup} popup_notifications={cfg.get('popup_notifications', True)}")
     cooldown_secs = cfg.get("popup_cooldown", 30) * 60
     last_shown    = site.popup_last_shown.get(streamer, 0)
@@ -986,6 +1004,8 @@ def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
                          reason=reason,
                          warning=warning)
         site.popup_last_shown[streamer] = time.time()
+        if not is_recording:
+            site.popup_shown_session.add(streamer)
     else:
         dbg(f"[POPUP] popup suppressed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s required={cooldown_secs}s")
 
@@ -2693,6 +2713,7 @@ def monitor_site(site: "SiteState") -> None:
                 for s in streamers:
                     if s not in live_set:
                         site.dash_live_since.pop(s, None)
+                        site.popup_shown_session.discard(s)
                     elif s not in site.dash_live_since:
                         site.dash_live_since[s] = time.time()
 
