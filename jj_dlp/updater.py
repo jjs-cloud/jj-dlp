@@ -18,7 +18,7 @@ _VALID_BRANCHES = {"main", "testing", "experimental"}
 # ── Updater version ───────────────────────────────────────────────────────────
 # Incremented independently of the main jj-dlp version so we can tell which
 # updater logic is actually running during an update.
-UPDATER_VERSION = "2.1.1"
+UPDATER_VERSION = "2.2.0"
 
 # ── Lazy package imports ──────────────────────────────────────────────────────
 # Relative imports are deferred to call time so this file is also safe to
@@ -40,12 +40,18 @@ def _save_global_json(data: dict) -> None:
     from .main import _save_global_json as _f
     _f(data)
 
-def _get_preserved_keys() -> list:
-    try:
-        from .config_editor import PRESERVED_KEYS as _pk
-        return _pk
-    except ImportError:
+def _get_preserved_keys(source_dir=None) -> list:
+    """Return the list of preserved key names, derived from CONFIG_KEYS.
+
+    Uses the same source_dir-aware loading as _load_config_keys, for the same
+    reason: during an update this runs before the new files are copied over
+    the old install, so importing the installed package would silently
+    return stale data (see _load_config_keys docstring).
+    """
+    _ck = _load_config_keys(source_dir)
+    if not _ck:
         return []
+    return [k.name for k in _ck if k.preserve]
 
 
 class UpdateError(Exception):
@@ -277,8 +283,8 @@ def perform_update():
             blocked   = get_old_config_section(user_cfg, "Block")
             _logger().dbg(f"[UPDATER] perform_update: preserved sections for {fname}: streamers={bool(streamers)} block={bool(blocked)}")
 
-            merged_content = inject_preserved_keys(new_content, user_cfg)
-            merged_content = update_config_comments(merged_content)
+            merged_content = inject_preserved_keys(new_content, user_cfg, source_dir)
+            merged_content = update_config_comments(merged_content, source_dir)
             merged_content = replace_section(merged_content, "Streamers", streamers)
             merged_content = replace_section(merged_content, "Block", blocked)
 
@@ -388,14 +394,14 @@ def get_old_config_section(config_path, section_name):
     return ""
 
 
-def inject_preserved_keys(new_text, old_config_path):
+def inject_preserved_keys(new_text, old_config_path, source_dir=None):
     parser = configparser.ConfigParser(allow_no_value=True, interpolation=None)
     try:
         parser.read(old_config_path, encoding='utf-8')
     except Exception:
         return new_text
 
-    for key in _get_preserved_keys():
+    for key in _get_preserved_keys(source_dir):
         old_val = None
         for sec in parser.sections():
             if parser.has_option(sec, key):
@@ -408,7 +414,48 @@ def inject_preserved_keys(new_text, old_config_path):
     return new_text
 
 
-def update_config_comments(text):
+def _load_config_keys(source_dir=None):
+    """Return the CONFIG_KEYS tuple, preferring the freshly downloaded copy in
+    `source_dir` (the just-extracted update) over the currently-installed,
+    already-imported package.
+
+    This matters because during an update, this code runs *before* the new
+    files are copied over the old installation (see Step 3 vs Step 4 in
+    perform_update). Falling back to `from .config_editor import CONFIG_KEYS`
+    would silently pull the stale, currently-running module — since Python
+    caches imports, even the correct file path wouldn't help without a fresh
+    load — which is what caused comment/default changes to lag by one extra
+    update cycle. Always try the on-disk source_dir copy first.
+    """
+    if source_dir:
+        _candidate = os.path.join(source_dir, "jj_dlp", "config_editor.py")
+        if os.path.isfile(_candidate):
+            try:
+                import importlib.util
+                _spec = importlib.util.spec_from_file_location("_jj_dlp_update_config_editor", _candidate)
+                _mod = importlib.util.module_from_spec(_spec)
+                _spec.loader.exec_module(_mod)
+                return _mod.CONFIG_KEYS
+            except Exception:
+                pass  # fall through to the installed-package lookup below
+
+    # Resolve CONFIG_KEYS whether called as a package or as __main__.
+    try:
+        from .config_editor import CONFIG_KEYS as _ck
+        return _ck
+    except ImportError:
+        try:
+            _pkg_dir = os.path.dirname(os.path.abspath(__file__))
+            _proj_root = os.path.dirname(_pkg_dir)
+            if _proj_root not in sys.path:
+                sys.path.insert(0, _proj_root)
+            from jj_dlp.config_editor import CONFIG_KEYS as _ck
+            return _ck
+        except Exception:
+            return None
+
+
+def update_config_comments(text, source_dir=None):
     """Replace or insert the canonical comment line immediately above each
     CONFIG_KEYS entry found in the [General] section.
 
@@ -420,19 +467,14 @@ def update_config_comments(text):
     - Multi-line comment blocks are not collapsed; only the single line
       immediately above the key is considered.
     - Keys not present in CONFIG_KEYS are left untouched.
+
+    `source_dir` should be the freshly-extracted update directory, when
+    available, so the comment text reflects the version being installed
+    rather than the version currently running (see _load_config_keys).
     """
-    # Resolve CONFIG_KEYS whether called as a package or as __main__.
-    try:
-        from .config_editor import CONFIG_KEYS as _ck
-    except ImportError:
-        try:
-            _pkg_dir = os.path.dirname(os.path.abspath(__file__))
-            _proj_root = os.path.dirname(_pkg_dir)
-            if _proj_root not in sys.path:
-                sys.path.insert(0, _proj_root)
-            from jj_dlp.config_editor import CONFIG_KEYS as _ck
-        except Exception:
-            return text
+    _ck = _load_config_keys(source_dir)
+    if not _ck:
+        return text
 
     comment_map = {kdef.name.upper(): kdef.comment for kdef in _ck}
 
@@ -613,15 +655,9 @@ if __name__ == "__main__":
             _sdbg(f"mark_done: current_sha={_ui.get('current_sha')} update_available=False")
             _save_json(_gd)
 
-        # ── PRESERVED_KEYS: read from config_editor if importable, else [] ───
-        try:
-            _pkg_dir = os.path.dirname(os.path.abspath(__file__))
-            _proj_root = os.path.dirname(_pkg_dir)
-            if _proj_root not in sys.path:
-                sys.path.insert(0, _proj_root)
-            from jj_dlp.config_editor import PRESERVED_KEYS as _PKEYS
-        except Exception:
-            _PKEYS = []
+        # ── PRESERVED_KEYS: read from the freshly downloaded config_editor,
+        #    falling back to the installed package if unavailable ───────────
+        _PKEYS = _get_preserved_keys(_source_dir)
 
         _sdbg(f"stage2-compat starting: source={_source_dir} base={_base_dir} temp={_temp_dir}")
         print("Running stage 2 of update (compat mode)...")
@@ -682,7 +718,7 @@ if __name__ == "__main__":
                         if _pat.search(_new_txt):
                             _new_txt = _pat.sub(lambda m, v=_oval: f"{m.group(1)} {v}", _new_txt)
 
-                _new_txt = update_config_comments(_new_txt)
+                _new_txt = update_config_comments(_new_txt, _source_dir)
                 _new_txt = replace_section(_new_txt, "Streamers", _streamers)
                 _new_txt = replace_section(_new_txt, "Block", _blocked)
                 create_diff(_old_txt, _new_txt, _ucfg, _diff_dir)

@@ -1,3 +1,30 @@
+v1.20.1
+
+- fixed bug with scheduler on fresh installs
+- Renamed the PRIORITIES/SCHEDULING panel to STREAMER SETTINGS and made the keyboard hints easier to understand.  
+- Added a settings menu when you select a streamer in the STREAMER SETTINGS panel.
+- keypad enter now works everywhere enter/return is used
+- added the ability to record a streamer in a lower quality (720p).  Steps to use:
+    1. add the streamer in the Dashboard tab
+    2. press enter on the streamer in the Config tab on the STREAMER SETTINGS panel
+    3. configure the quality settings
+Note: Active recordings must be restarted for the quality settings to take effect. (Disable and then enable the streamer
+)
+
+- made jj-dlp open in fullscreen on windows
+- Expanded the SPLIT_AFTER site setting to be a per-streamer setting.   Steps to use:
+    1. add the streamer in the Dashboard tab
+    2. press enter on the streamer in the Config tab on the STREAMER SETTINGS panel
+    3. configure the split settings
+When recording a stream, the video file will automatically be split into multiple files based on the amount of time you set.
+Note: This will override the SPLIT_AFTER site setting.
+
+- Added arrows on the Config tab that indicate if there are more items above or below the visible items.
+- Live notification popups now show if the stream is recording or not recording due to disabled/low priority, or if another streamer is being evicted.
+
+====================
+====================
+
 v1.18.9
 
 - prevented text from spilling out of panels in the config tab

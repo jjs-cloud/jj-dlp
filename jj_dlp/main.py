@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.18.9"
+__version__ = "1.20.1"
 
 import subprocess
 import time
@@ -878,15 +878,33 @@ def cmd_display_str(cmd: List[str]) -> str:
 # Popup notification
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 15) -> None:
-    dbg(f"[POPUP] enqueue popup streamer={streamer!r} source={source!r} timeout={popup_timeout}")
+def _format_live_popup(streamer: str, is_recording: bool = True,
+                       reason: str = "", warning: str = "") -> list:
+    marker = "🔴" if is_recording else "🟡"
+    status = "Recording" if is_recording else "Not recording"
+    lines = [
+        f"{marker} {streamer} is LIVE",
+        f"● {status}",
+    ]
+    if warning:
+        lines.append(f"Warning: {warning}")
+    if reason:
+        lines.append(f"Reason: {reason}")
+    return lines
+
+
+def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 15,
+                     is_recording: bool = True, reason: str = "",
+                     warning: str = "") -> None:
+    dbg(f"[POPUP] enqueue popup streamer={streamer!r} source={source!r} timeout={popup_timeout} is_recording={is_recording} reason={reason!r} warning={warning!r}")
     def _run():
+        popup_lines = _format_live_popup(streamer, is_recording, reason, warning)
+        popup_text = "\n".join(popup_lines)
         if sys.platform.startswith("linux"):
             notify_cmd = shutil.which("notify-send")
             if notify_cmd:
-                title = "jj-dlp — Stream Live"
-                body = (f"🔴  {streamer} is now LIVE "
-                        f"via {'EventSub' if source == 'eventsub' else 'poll check'}")
+                title = popup_lines[0]
+                body = "\n".join(popup_lines[1:])
                 try:
                     subprocess.run([notify_cmd, "-t", str(popup_timeout * 1000), title, body],
                                    check=False)
@@ -905,11 +923,39 @@ def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 1
             win.title("jj-dlp — Stream Live")
             win.resizable(False, False)
             win.attributes("-topmost", True)
-            tk.Label(win, text=f"🔴  {streamer}  is now LIVE",
-                     font=("Segoe UI", 16, "bold"), padx=20, pady=10).pack()
-            tk.Label(win, text=f"via {'EventSub' if source == 'eventsub' else 'poll check'}",
-                     font=("Segoe UI", 10), fg="gray", padx=20).pack()
-            tk.Button(win, text="Dismiss", command=win.destroy, padx=12, pady=4).pack(pady=(4, 12))
+            bg = "#15171a"
+            fg = "#f4f5f7"
+            muted_fg = "#d5d8de"
+            accent = "#ff4d4f" if is_recording else "#f5c542"
+            button_bg = "#24282e"
+            button_active = "#303640"
+
+            win.configure(bg=bg)
+            content = tk.Frame(win, bg=bg, padx=22, pady=16)
+            content.pack(fill="both", expand=True)
+
+            title_row = tk.Frame(content, bg=bg)
+            title_row.pack(anchor="w", fill="x")
+            title_dot = tk.Canvas(title_row, width=14, height=14, bg=bg, highlightthickness=0)
+            title_dot.create_oval(1, 1, 13, 13, fill=accent, outline=accent)
+            title_dot.pack(side="left")
+            tk.Label(title_row, text=f" {streamer} is LIVE", fg=fg, bg=bg,
+                     font=("Segoe UI", 15, "bold")).pack(side="left")
+
+            for line in popup_lines[1:]:
+                text = line[2:] if len(line) > 1 and line[1] == " " else line
+                row = tk.Frame(content, bg=bg)
+                row.pack(anchor="w", fill="x", padx=(22, 0), pady=(3, 0))
+                dot = tk.Canvas(row, width=8, height=8, bg=bg, highlightthickness=0)
+                dot.create_oval(1, 1, 7, 7, fill=accent, outline=accent)
+                dot.pack(side="left", pady=(4, 0))
+                tk.Label(row, text=f" {text}", fg=muted_fg, bg=bg,
+                         font=("Segoe UI", 11, "bold"), justify="left").pack(side="left")
+
+            tk.Button(win, text="Dismiss", command=win.destroy, padx=14, pady=4,
+                      bg=button_bg, fg=fg, activebackground=button_active,
+                      activeforeground=fg, relief="flat",
+                      highlightthickness=1, highlightbackground="#3a4048").pack(pady=(0, 14))
             win.after(popup_timeout * 1000, win.destroy)
             dbg(f"[POPUP] running popup mainloop for streamer={streamer!r}")
             root.mainloop()
@@ -918,6 +964,30 @@ def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 1
         except Exception as e:
             dbg(f"[POPUP] exception while creating popup for streamer={streamer!r}: {e}")
     threading.Thread(target=_run, daemon=True, name=f"popup-{streamer}").start()
+
+
+def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
+                           show_popup: bool = True, source: str = "poll",
+                           is_recording: bool = True, reason: str = "",
+                           warning: str = "") -> None:
+    if not show_popup or not cfg.get("popup_notifications", True):
+        dbg(f"[POPUP] popup skipped for streamer={streamer!r} show_popup={show_popup} popup_notifications={cfg.get('popup_notifications', True)}")
+        return
+
+    dbg(f"[POPUP] popup condition check for streamer={streamer!r} show_popup={show_popup} popup_notifications={cfg.get('popup_notifications', True)}")
+    cooldown_secs = cfg.get("popup_cooldown", 30) * 60
+    last_shown    = site.popup_last_shown.get(streamer, 0)
+    elapsed       = time.time() - last_shown
+    if elapsed >= cooldown_secs:
+        dbg(f"[POPUP] popup allowed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s cooldown={cooldown_secs}s")
+        _show_live_popup(streamer, source=source,
+                         popup_timeout=cfg.get("popup_timeout", 15),
+                         is_recording=is_recording,
+                         reason=reason,
+                         warning=warning)
+        site.popup_last_shown[streamer] = time.time()
+    else:
+        dbg(f"[POPUP] popup suppressed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s required={cooldown_secs}s")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1399,8 +1469,10 @@ def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) ->
     for e in saved_entries:
         key = (e.get("streamer", ""), e.get("site", ""))
         priority_map[key] = {
-            "priority": e.get("priority", 999999),
-            "bypass":   e.get("bypass", False),
+            "priority":      e.get("priority", 999999),
+            "bypass":        e.get("bypass", False),
+            "split_enabled": e.get("split_enabled", False),
+            "split_after":   e.get("split_after", 0),
         }
 
     # ── Condition 2: find eligible candidates ─────────────────────────────────
@@ -1435,7 +1507,7 @@ def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) ->
                 "site":      s,
                 "site_label": s_label,
                 "priority":  info.get("priority", 999999),
-                "cfg":       s_cfg,
+                "cfg":       _resolve_split_after(s_cfg, info),
             })
 
     if not candidates:
@@ -1470,6 +1542,32 @@ def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) ->
         daemon=True,
         name=f"lq-launch-{tgt_str}",
     ).start()
+
+
+def _resolve_split_after(cfg: dict, entry_info: dict) -> dict:
+    """Return a cfg dict to use for a single streamer, applying that
+    streamer's per-streamer Split override (set via the SPLIT settings
+    popup) on top of the site's SPLIT_AFTER config value if enabled.
+
+    entry_info is the priorities[...][entries] dict-like info for the
+    streamer, expected to (optionally) contain "split_enabled" (bool) and
+    "split_after" (int, minutes). When split_enabled is falsy or
+    split_after <= 0, the site's SPLIT_AFTER config is left untouched and
+    the *same* cfg object is returned (no copy needed). The override never
+    affects other streamers sharing the same site config.
+    """
+    if not entry_info:
+        return cfg
+    try:
+        split_enabled = bool(entry_info.get("split_enabled", False))
+        split_after   = int(entry_info.get("split_after", 0) or 0)
+    except (TypeError, ValueError):
+        return cfg
+    if not split_enabled or split_after <= 0:
+        return cfg
+    overridden = dict(cfg)
+    overridden["split_after"] = split_after
+    return overridden
 
 
 def record_stream(streamer: str, cfg: dict, site: "SiteState",
@@ -2065,13 +2163,23 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
 
 def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
-                               show_popup: bool = True) -> None:
+                               show_popup: bool = True, source: str = "poll") -> None:
     with site.lock:
+        currently_recording = set(site.currently_recording)
+        blocked = set(cfg["blocked"])
+        disabled_live = [s for s in live_now
+                         if s in blocked and s not in currently_recording]
         to_start = [s for s in live_now
-                    if s not in site.currently_recording and s not in cfg["blocked"]]
-        if not to_start:
-            site.recording_threads[:] = [t for t in site.recording_threads if t.is_alive()]
-            return
+                    if s not in currently_recording and s not in blocked]
+
+    for streamer in disabled_live:
+        _maybe_show_live_popup(streamer, cfg, site, show_popup=show_popup,
+                               source=source, is_recording=False,
+                               reason="Disabled")
+
+    if not to_start:
+        site.recording_threads[:] = [t for t in site.recording_threads if t.is_alive()]
+        return
 
     global_cfg = load_global_config()
     max_concurrent = global_cfg.get("max_concurrent_rec", 0)
@@ -2088,7 +2196,10 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
         s_site = e.get("site", "")
         priority_map[(s_name, s_site)] = {
             "priority": e.get("priority", 999999),
-            "bypass": e.get("bypass", False)
+            "bypass": e.get("bypass", False),
+            "lq_enabled": e.get("lq_enabled", False),
+            "split_enabled": e.get("split_enabled", False),
+            "split_after": e.get("split_after", 0),
         }
 
     site_label = cfg.get("site_label", os.path.basename(site.config_path))
@@ -2096,25 +2207,29 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
     with _recording_start_lock:
         # Re-check what still needs to start
         with site.lock:
-            to_start = [s for s in to_start if s not in site.currently_recording]
+            to_start = [s for s in to_start
+                        if s not in site.currently_recording and s not in cfg["blocked"]]
             if not to_start:
                 return
 
         for streamer in to_start:
-            streamer_info = priority_map.get((streamer, site_label), {"priority": 999999, "bypass": False})
+            streamer_info = priority_map.get((streamer, site_label), {"priority": 999999, "bypass": False, "lq_enabled": False})
             is_bypass = streamer_info["bypass"]
             streamer_prio = streamer_info["priority"]
+            is_lq = streamer_info.get("lq_enabled", False)
+            streamer_cfg = _resolve_split_after(cfg, streamer_info)
+            eviction_warning = ""
 
-            # ── Concurrency enforcement ───────────────────────────────────────
+            # Concurrency enforcement
             # Lock ordering inside this block:
             #   _recording_start_lock  (already held by the outer `with`)
-            #   → site.lock / s.lock   (acquired below, released before kill)
-            #   → kill_proc_for_streamer (no locks held during the blocking call)
+            #   -> site.lock / s.lock   (acquired below, released before kill)
+            #   -> kill_proc_for_streamer (no locks held during the blocking call)
             #
             # Stale-count window: after kill_proc_for_streamer() returns, the
             # evicted record_stream thread is still alive until its finally block
-            # removes the streamer from currently_recording.  Both the evicted
-            # and the new streamer are briefly in currently_recording.  Because
+            # removes the streamer from currently_recording. Both the evicted
+            # and the new streamer are briefly in currently_recording. Because
             # _recording_start_lock serialises all starts, this window cannot
             # trigger a second eviction cascade.
             if max_concurrent > 0:
@@ -2135,13 +2250,6 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                             })
 
                 if len(active_recordings) >= max_concurrent:
-                    # Candidate pool: non-bypass active streamers are always
-                    # eligible for eviction.  For a non-bypass newcomer we also
-                    # require that the candidate has a strictly lower priority
-                    # (higher numeric value); a bypass newcomer evicts the
-                    # *lowest*-priority non-bypass streamer unconditionally so
-                    # it can try to stay within the limit — but always proceeds
-                    # even if no candidate exists.
                     if is_bypass:
                         eviction_candidates = [r for r in active_recordings if not r["bypass"]]
                     else:
@@ -2155,26 +2263,27 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                         dbg(f"[CONCURRENCY] Evicting {target_streamer} "
                             f"(prio: {evict_target['priority']}) for {streamer} "
                             f"(prio: {streamer_prio}, bypass={is_bypass})")
-                        # User-visible eviction log (Fix #8)
                         target_site.log_line(
-                            f"Warning: Evicted {target_streamer} (lower priority) — making room for {streamer}"
+                            f"Warning: Evicted {target_streamer} (lower priority) - making room for {streamer}"
                         )
                         with target_site.lock:
                             target_site.evicted_streamers.add(target_streamer)
-                        # kill_proc_for_streamer is called *without* holding
+                        # kill_proc_for_streamer is called without holding
                         # any site.lock so it cannot deadlock against the
                         # finally block in record_stream.
                         target_site.kill_proc_for_streamer(target_streamer)
+                        eviction_warning = f"evicted {target_streamer}"
 
                     elif not is_bypass:
-                        # No eviction candidate and streamer is not bypass →
-                        # cannot start; skip this streamer entirely.
                         dbg(f"[CONCURRENCY] max_concurrent ({max_concurrent}) reached. "
                             f"Streamer {streamer} (prio: {streamer_prio}) cannot evict "
                             f"any active stream.")
+                        _maybe_show_live_popup(streamer, cfg, site,
+                                               show_popup=show_popup,
+                                               source=source,
+                                               is_recording=False,
+                                               reason="Lower priority")
                         continue
-                    # else: bypass with no eviction candidate → fall through and
-                    # start anyway (intentionally exceeds the limit).
 
             with site.lock:
                 site.currently_recording.add(streamer)
@@ -2182,26 +2291,16 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                 with site.dash_lock:
                     if streamer not in site.dash_live_since:
                         site.dash_live_since[streamer] = time.time()
-            if show_popup and cfg.get("popup_notifications", True):
-                dbg(f"[POPUP] popup condition check for streamer={streamer!r} show_popup={show_popup} popup_notifications={cfg.get('popup_notifications', True)}")
-                cooldown_secs = cfg.get("popup_cooldown", 30) * 60
-                last_shown    = site.popup_last_shown.get(streamer, 0)
-                elapsed       = time.time() - last_shown
-                if elapsed >= cooldown_secs:
-                    dbg(f"[POPUP] popup allowed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s cooldown={cooldown_secs}s")
-                    _show_live_popup(streamer, source="poll", popup_timeout=cfg.get("popup_timeout", 15))
-                    site.popup_last_shown[streamer] = time.time()
-                else:
-                    dbg(f"[POPUP] popup suppressed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s required={cooldown_secs}s")
-            else:
-                dbg(f"[POPUP] popup skipped for streamer={streamer!r} show_popup={show_popup} popup_notifications={cfg.get('popup_notifications', True)}")
-            t = threading.Thread(target=record_stream, args=(streamer, cfg, site), daemon=True)
+            _maybe_show_live_popup(streamer, cfg, site,
+                                   show_popup=show_popup,
+                                   source=source,
+                                   is_recording=True,
+                                   warning=eviction_warning)
+            t = threading.Thread(target=record_stream, args=(streamer, streamer_cfg, site), kwargs={"use_lq": is_lq}, daemon=True)
             t.start()
             site.recording_threads.append(t)
             
         site.recording_threads[:] = [t for t in site.recording_threads if t.is_alive()]
-
-
 def config_watcher(site: "SiteState", poll_interval: int = 3) -> None:
     prev_streamers: Set[str] = set()
     first_run = True
@@ -2543,24 +2642,9 @@ def monitor_site(site: "SiteState") -> None:
                 if broadcaster_login not in site.dash_live_since:
                     site.dash_live_since[broadcaster_login] = time.time()
             current_cfg = load_config(cfg["config_path"])
-            if broadcaster_login in current_cfg.get("streamers", []) and \
-               broadcaster_login not in current_cfg.get("blocked", []):
-                if current_cfg.get("popup_notifications", True):
-                    dbg(f"[POPUP] eventsub popup condition check for broadcaster={broadcaster_login!r} popup_notifications={current_cfg.get('popup_notifications', True)}")
-                    cooldown_secs = current_cfg.get("popup_cooldown", 30) * 60
-                    last_shown    = site.popup_last_shown.get(broadcaster_login, 0)
-                    elapsed       = time.time() - last_shown
-                    if elapsed >= cooldown_secs:
-                        dbg(f"[POPUP] eventsub popup allowed by cooldown for broadcaster={broadcaster_login!r} elapsed={elapsed:.1f}s cooldown={cooldown_secs}s")
-                        _show_live_popup(broadcaster_login, source="eventsub",
-                                         popup_timeout=current_cfg.get("popup_timeout", 15))
-                        site.popup_last_shown[broadcaster_login] = time.time()
-                    else:
-                        dbg(f"[POPUP] eventsub popup suppressed by cooldown for broadcaster={broadcaster_login!r} elapsed={elapsed:.1f}s required={cooldown_secs}s")
-                else:
-                    dbg(f"[POPUP] eventsub popups disabled for broadcaster={broadcaster_login!r}")
-
-                start_recording_if_needed([broadcaster_login], current_cfg, site, show_popup=False)
+            if broadcaster_login in current_cfg.get("streamers", []):
+                start_recording_if_needed([broadcaster_login], current_cfg, site,
+                                          source="eventsub")
 
         try:
             from .twitch_eventsub import TwitchEventSub
@@ -3698,7 +3782,7 @@ class JJDlpDashboard:
             else:
                 hints = (f"  LEFT/RIGHT: switch tabs"
                          f"  [: prev site  ]: next site"
-                         f"  A: add/enable streamer R: remove streamer D: disable streamer"
+                         f"  Tab: Next Panel"
                          f"  C: colors  Q: quit  ")
         self.safe_addstr(self.stdscr, h - 1, 0,
                     hints.ljust(w - 1)[:w - 1],
@@ -3963,7 +4047,7 @@ class JJDlpDashboard:
         # Changelog popup intercepts all keys while open.
         if self._changelog_popup_open:
             if key in (ord('q'), ord('Q'), 27,            # Q / Esc → close
-                       ord('\n'), ord('\r'), curses.KEY_ENTER):
+                       ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
                 self._changelog_popup_open = False
             elif key in (curses.KEY_UP, ord('k')):
                 self._changelog_scroll = max(0, self._changelog_scroll - 1)
@@ -3998,7 +4082,7 @@ class JJDlpDashboard:
 
         if key in (ord('q'), ord('Q'), 27):
             return False
-        elif key in (ord('\t'), curses.KEY_RIGHT, ord('l')):
+        elif key in (curses.KEY_RIGHT, ord('l')):
             self.selected_tab = (self.selected_tab + 1) % len(self.TABS)
         elif key in (curses.KEY_LEFT, ord('h')):
             self.selected_tab = (self.selected_tab - 1) % len(self.TABS)
@@ -4080,7 +4164,7 @@ class JJDlpDashboard:
                 self._mgmt_sel = max(0, self._mgmt_sel - 1)
             elif key == curses.KEY_DOWN:
                 self._mgmt_sel = min(max(0, len(enabled) - 1), self._mgmt_sel + 1)
-            elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+            elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
                 if enabled:
                     username = enabled[self._mgmt_sel]
                     result   = _modify_config_streamer(site.config_path, username, action)
@@ -4117,7 +4201,7 @@ class JJDlpDashboard:
             elif key in (curses.KEY_BACKSPACE, 127, 8):
                 self._mgmt_buf = self._mgmt_buf[:-1]
                 self._mgmt_sel = -1   # typing refocuses text input
-            elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+            elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
                 if self._mgmt_buf.strip():
                     # Text input takes priority when it has content
                     result = _modify_config_streamer(site.config_path,
@@ -4473,7 +4557,7 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
                 selected.add(cursor)
         elif key in (ord('d'), ord('D')):
             do_not_show_config = not do_not_show_config
-        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
             if selected:
                 chosen_files = [found[i] for i in sorted(selected)]
                 
@@ -4598,7 +4682,7 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
             br_cursor = (br_cursor + 1) % nb
         elif key in (ord('d'), ord('D')):
             do_not_show = not do_not_show
-        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
             chosen_browser = browsers[br_cursor]
             for fname in chosen_files:
                 fpath = os.path.join(os.getcwd(), fname)

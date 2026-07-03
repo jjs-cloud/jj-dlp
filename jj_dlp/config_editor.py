@@ -4,7 +4,7 @@ import curses
 import hashlib
 import threading
 from datetime import datetime
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 try:
     from .logger import dbg as _dbg
@@ -28,13 +28,11 @@ class ConfigItem:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Single source of truth for all config keys
-#
 # scope    : "global"  → lives in global.conf, shown in GlobalConfigEditor
 #            "site"    → lives in per-site .conf, shown in site ConfigEditor
-# default  : value written when the key is missing / a fresh file is created
+# default  : value written when the key is missing / a fresh file is created.  The default value is rarely used, since we provide template config files with all the keys prepopulated.
 # preserve : True  → value is carried over from the user's file during an update
-#            False → value is reset to the new template default on update
+#            False → value is reset to the value in the template config file during an update.
 # comment  : help text shown in the edit popup
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -49,7 +47,7 @@ class _KeyDef(NamedTuple):
 CONFIG_KEYS: tuple[_KeyDef, ...] = (
     # ── Global keys (global.conf) ─────────────────────────────────────────────
     _KeyDef("DISK_DRIVES",           "global", "",      True,  "Comma-separated list of drives or paths to show disk info in the system panel. (e.g. C:\\, D:\\, E:\\  or  /home,/mnt/data)."),
-    _KeyDef("DEBUG_LOGS",            "global", "false", True,  "Enable debug logging to a file(true/false)."),
+    _KeyDef("DEBUG_LOGS",            "global", "false", True,  "Enable debug logging to a file (true/false)."),
     _KeyDef("DEBUG_LOG_PATH",        "global", "",      True,  "Path for the debug log file. Can be a relative or absolute path (e.g. logs/debug.log)"),
     _KeyDef("CHECK_FOR_UPDATES",     "global", "true",  True,  "Whether to check for app updates at startup and periodically (true/false)."),
     _KeyDef("UPDATE_INTERVAL",       "global", "30",    True,  "Number of minutes between app update checks."),
@@ -57,36 +55,36 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("ASK_FOR_CONFIG",        "global", "true",  True,  "Show the config file chooser on startup (true/false)."),
     _KeyDef("UPDATE_BRANCH",         "global", "main",  True,  "Which branch of jj-dlp to update to. (main, testing, or experimental)."),
     _KeyDef("MAX_CONCURRENT_REC",    "global", "0",     True,  'The maximum number of simultaneous recordings allowed to run.  Use the "PRIORITIES" panel in the Config tab to adjust the priority of each streamer. (0=no limit)'),
-    _KeyDef("LQ_DOWNLOADER",         "global", "false", True,  "When any recording reaches the ffmpeg error threshold (FF_ERR_THRESH) lower the video qualtiy of the lowest priority streamer, freeing up bandwidth for the remaining streamers."),
+    _KeyDef("LQ_DOWNLOADER",         "global", "false", True,  "When any recording reaches the ffmpeg error threshold (FF_ERR_THRESH) lower the video quality of the lowest priority streamer, freeing up bandwidth for the remaining streamers."),
     _KeyDef("FF_ERR_THRESH",         "global", "200",   True,  'Restart the download if we see this many ffmpeg errors ("timestamp discontinuity", "Packet corrupt") default: 200'),
     _KeyDef("SUBFOLDERS",            "global", "false", True,  "Save recordings into a subfolder named after the streamer inside OUTPUT_DIR (true/false)."),
-    _KeyDef("SITE_SORT",             "global", "added_first", True, "Order to display streamers on each site panel.   This can also be adjusted by pressing the S key on the Dashboard tab."),
+    _KeyDef("SITE_SORT",             "global", "added_first", True, "The order to display streamers on each site panel.   This can also be adjusted by pressing the S key on the Dashboard tab."),
 
     # ── Site keys (per-site .conf) ────────────────────────────────────────────
-    _KeyDef("SITE_LABEL",            "site",   "",      True,  "The name of this site"),
+    _KeyDef("SITE_LABEL",            "site",   "",      True,  "The name of this site."),
     _KeyDef("SITE_ORDER",            "site",   "999",   True,  "The position on the dashboard to display this site's panel (e.g. 0 for top-left, 1 for top-right, 2 for bottom-left, 3 for bottom-right, etc.)"),
     _KeyDef("CHECK_INTERVAL",        "site",   "60",    False, "How often to check if streamers are live (in seconds).  (Default: 60)"),
     _KeyDef("OUTPUT_DIR",            "site",   "recordings", True, 'Folder where recordings will be saved.  Can be an absolute path or relative path.  example: "C:\\recordings" or "recordings"'),
     _KeyDef("OUTPUT_TMPL",           "site",   "%(title)s [%(id)s].%(ext)s", False, "Template for naming the video files. (Reference: https://github.com/yt-dlp/yt-dlp#output-templates)"),
     _KeyDef("COOLDOWN_AFTER_RECORDING", "site", "60",   False, "Seconds to wait after a recording ends before checking again."),
     _KeyDef("SPLIT_AFTER",           "site",   "0",    True,  "When recording a stream, split the video file(s) every X minutes. (0 = no split)"),
-    _KeyDef("STALL_CHECK_INTERVAL",  "site",   "30",   False, "How often to check if the recording has stalled (in seconds). (Default: 30)"),
-    _KeyDef("STALL_TIMEOUT",         "site",   "120",  False, "Time to wait before considering a recording stalled (in seconds). (Default: 120)"),
+    _KeyDef("STALL_CHECK_INTERVAL",  "site",   "30",   True, "How often to check if the recording has stalled (in seconds).  Disable by setting this to a large number. (Default: 30)"),
+    _KeyDef("STALL_TIMEOUT",         "site",   "120",  True, "Time to wait before considering a recording stalled (in seconds). (Default: 120)"),
     _KeyDef("CONFIG_CHECK_INTERVAL", "site",   "3",    False, "How often to check for changes to the configuration file (in seconds). (Default: 3)"),
     _KeyDef("SITE_TMPL",             "site",   "",     False, "URL where the live stream can be accessed. {username} will be replaced with the streamer's username."),
     _KeyDef("PANEL_RESIZE",          "site",   "true", True,  "When true, site panels will expand vertically as needed to display all streamers."),
     _KeyDef("LOGGING",               "site",   "false", True, "Log yt-dlp (stdout) and ffmpeg (stderr) to a file."),
     _KeyDef("LOG_PATH",              "site",   "",     True,  "Path to save the log file.  Can be an absolute or relative path."),
-    _KeyDef("SPLIT_LOGS",            "site",   "false", True, "When LOGGING = true, create 2 separate log files.  One for yt-dlp (stdout) and one for ffmpeg (stderr)."),
+    _KeyDef("SPLIT_LOGS",            "site",   "false", True, "When LOGGING = true, create 2 separate log files.  One for stdout (yt-dlp) and one for stderr (ffmpeg)."),
     _KeyDef("POPUP_NOTIFICATIONS",   "site",   "true", True,  "Show a popup notification when a streamer goes live."),
     _KeyDef("AD_ALERTS",             "site",   "True", True,  "Show an alert in the system panel when ads are detected in a recording (true/false)."),
     _KeyDef("POPUP_TIMEOUT",         "site",   "15",   True,  "Seconds to show the popup notification when a streamer goes live."),
     _KeyDef("POPUP_COOLDOWN",        "site",   "30",   True,  "Minutes to wait before showing another popup notification for the same streamer."),
-    _KeyDef("YT_DLP_PATH_WINDOWS",   "site",   "",     False, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
-    _KeyDef("YT_DLP_PATH_MAC",       "site",   "",     False, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
-    _KeyDef("YT_DLP_PATH_LINUX",     "site",   "",     False, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
-    _KeyDef("PROGRESS_BAR_MAX_HOURS","site",   "6",    True,  "Duration of the progress bar in the site panel of the dashboard. (in hours)"),
-    _KeyDef("PROGRESS_BAR_WIDTH",    "site",   "14",   True,  "Width of the progress bar in the site panel of the dashboard. (in characters)"),
+    _KeyDef("YT_DLP_PATH_WINDOWS",   "site",   "",     True, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
+    _KeyDef("YT_DLP_PATH_MAC",       "site",   "",     True, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
+    _KeyDef("YT_DLP_PATH_LINUX",     "site",   "",     True, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
+    _KeyDef("PROGRESS_BAR_MAX_HOURS","site",   "10",    True,  "Duration of the progress bar in the site panel of the dashboard. (in hours)"),
+    _KeyDef("PROGRESS_BAR_WIDTH",    "site",   "58",   True,  "Width of the progress bar in the site panel of the dashboard. (in characters)"),
     _KeyDef("DOWNLOADER_COOKIES",    "site",   "true", False, "Whether to write the --cookies-from-browser flag to this config file's [Downloader] section when a browser is selected at startup."),
     _KeyDef("CHECKER_COOKIES",       "site",   "false", False, "Whether to write the --cookies-from-browser flag to this config file's [Checker] section when a browser is selected at startup."),
     _KeyDef("LAST_LIVE_HIGHLIGHT",   "site",   "0",    True,  'Highlight the "Last Live" timestamp when the streamer was last live within X days.'),
@@ -219,7 +217,17 @@ class PriorityEditor:
         from .main import _global_json_lock, _load_global_json
         with _global_json_lock:
             global_data = _load_global_json()
-        saved_block   = global_data.get("priorities", {}).get(self._config_id, {})
+        priorities_block = global_data.get("priorities", {})
+        # First time we've ever seen this config_id (e.g. fresh clone, no
+        # priority/bypass action has been taken yet) → there is no saved
+        # block at all.  If we don't persist something now, downstream
+        # consumers that only *update* existing entries (e.g.
+        # StreamerSettingsPopup._save(), _process_streamer_schedules()) will
+        # silently find nothing to work with until the user happens to
+        # reorder or bypass a streamer.  Seed it immediately so scheduling
+        # works out of the box.
+        needs_seed    = self._config_id not in priorities_block
+        saved_block   = priorities_block.get(self._config_id, {})
         saved_entries = saved_block.get("entries", [])
 
         # Build a lookup: (streamer, site) → saved dict
@@ -269,6 +277,13 @@ class PriorityEditor:
         else:
             self._selected_idx = 0
 
+        # Seed global.json for a config_id we've never saved before, so that
+        # everything downstream (schedule popup, scheduler loop) has a real
+        # entries list to work with immediately, rather than only after the
+        # user manually reorders/bypasses a streamer.
+        if needs_seed and self._entries:
+            self._save()
+
     def _save(self) -> None:
         """Persist current entry ordering and bypass flags to global.json.
         
@@ -304,7 +319,7 @@ class PriorityEditor:
                     "bypass":     e.bypass,
                 }
                 # Preserve schedule data (and any future extra fields).
-                for extra_key in ("schedule",):
+                for extra_key in ("schedule", "lq_enabled"):
                     if extra_key in ex:
                         entry_dict[extra_key] = ex[extra_key]
                 entries_data.append(entry_dict)
@@ -394,7 +409,7 @@ class PriorityEditor:
         elif key in self.KEY_BYPASS:
             self._toggle_bypass(self._selected_idx)
             return True
-        elif key in (10, 13, curses.KEY_ENTER):  # Enter / Return
+        elif key in (10, 13, curses.KEY_ENTER, 459):  # Enter / Return
             if self._entries and 0 <= self._selected_idx < len(self._entries):
                 self._settings_popup = StreamerSettingsPopup(
                     self.dashboard,
@@ -411,32 +426,49 @@ class PriorityEditor:
         self.ensure_loaded()
         db = self.dashboard
 
+        # Scroll calculation moved up for title arrows
+        visible_rows = max(0, y2 - (y1 + 8))
+        if self._entries:
+            if self._selected_idx < self._scroll_offset:
+                self._scroll_offset = self._selected_idx
+            elif self._selected_idx >= self._scroll_offset + visible_rows:
+                self._scroll_offset = max(0, self._selected_idx - visible_rows + 1)
+
         # Box border
         db.draw_box(stdscr, y1, x1, y2, x2, db.C_SYSTEM)
-        db.safe_addstr(stdscr, y1, x1 + 2, " PRIORITY/SCHEDULING ",
+        title = " STREAMER SETTINGS "
+        
+        db.safe_addstr(stdscr, y1, x1 + 2, title,
                        curses.color_pair(db.C_LIVE) | curses.A_BOLD)
         if is_active:
             mode_str = " [  ] "
             db.safe_addstr(stdscr, y1, x2 - len(mode_str) - 1, mode_str,
                            curses.color_pair(db.C_LIVE) | curses.A_BOLD)
 
+        row_y = y1 + 1
+        hints = [
+            "↑↓:Navigation",
+            "U:Increase Priority",
+            "D:Decrease Priority",
+            "B:Enable Bypass",
+            "Enter:More Settings"
+        ]
+        for hint in hints:
+            db.safe_addstr(stdscr, row_y, x1 + 2, hint, curses.color_pair(db.C_DIM))
+            row_y += 1
+        
+        row_y += 2
+
         if not self._entries:
-            db.safe_addstr(stdscr, y1 + 2, x1 + 2, "No streamers.",
+            db.safe_addstr(stdscr, row_y, x1 + 2, "No streamers.",
                            curses.color_pair(db.C_DIM))
             return
 
-        visible_rows = (y2 - y1) - 3   # -3 to leave room for the two hint rows at bottom
-        # Scroll to keep selection visible.
-        if self._selected_idx < self._scroll_offset:
-            self._scroll_offset = self._selected_idx
-        elif self._selected_idx >= self._scroll_offset + visible_rows:
-            self._scroll_offset = self._selected_idx - visible_rows + 1
+        # usable character columns inside box (reduced by 1 to guarantee space for the arrow)
+        panel_inner_w = (x2 - x1) - 4   
 
-        panel_inner_w = (x2 - x1) - 3   # usable character columns inside box
-
-        row_y = y1 + 1
-        for i in range(self._scroll_offset,
-                       min(len(self._entries), self._scroll_offset + visible_rows)):
+        loop_end = min(len(self._entries), self._scroll_offset + visible_rows)
+        for i in range(self._scroll_offset, loop_end):
             entry  = self._entries[i]
             is_sel = is_active and (i == self._selected_idx)
 
@@ -458,6 +490,13 @@ class PriorityEditor:
                         else curses.color_pair(db.C_NORMAL))
 
             db.safe_addstr(stdscr, row_y, x1 + 1, prefix + label, attr)
+
+            # --- Add Scroll Arrows ---
+            if i == self._scroll_offset and self._scroll_offset > 0:
+                db.safe_addstr(stdscr, row_y, x2 - 2, "\u25b2", curses.color_pair(db.C_LIVE) | curses.A_BOLD)
+            if i == loop_end - 1 and loop_end < len(self._entries):
+                db.safe_addstr(stdscr, row_y, x2 - 2, "\u25bc", curses.color_pair(db.C_LIVE) | curses.A_BOLD)
+
             row_y += 1
 
 
@@ -467,9 +506,429 @@ class PriorityEditor:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class StreamerSettingsPopup:
-    """Modal popup for per-streamer settings (scheduling, etc.).
+    """Main settings menu for a streamer.
 
     Opened by PriorityEditor when the user presses Enter on a streamer.
+    """
+    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
+        self.dashboard = dashboard
+        self.entry     = entry
+        self.config_id = config_id
+
+        self.options = ["Schedule", "Quality", "Split"]
+        self._sel: int = 0
+        self._schedule_popup: "Optional[ScheduleSettingsPopup]" = None
+        self._quality_popup: "Optional[QualitySettingsPopup]" = None
+        self._split_popup: "Optional[SplitSettingsPopup]" = None
+
+    def handle_key(self, key) -> bool:
+        if self._schedule_popup is not None:
+            should_close = self._schedule_popup.handle_key(key)
+            if should_close:
+                self._schedule_popup = None
+                return True
+            return False
+
+        if self._quality_popup is not None:
+            should_close = self._quality_popup.handle_key(key)
+            if should_close:
+                self._quality_popup = None
+                return True
+            return False
+
+        if self._split_popup is not None:
+            should_close = self._split_popup.handle_key(key)
+            if should_close:
+                self._split_popup = None
+                return True
+            return False
+
+        if key == 27:  # Esc
+            return True
+        elif key == curses.KEY_UP:
+            self._sel = max(0, self._sel - 1)
+        elif key == curses.KEY_DOWN:
+            self._sel = min(len(self.options) - 1, self._sel + 1)
+        elif key in (10, 13, curses.KEY_ENTER, 459, ord(' ')):
+            if self.options[self._sel] == "Schedule":
+                self._schedule_popup = ScheduleSettingsPopup(
+                    self.dashboard,
+                    self.entry,
+                    self.config_id,
+                )
+            elif self.options[self._sel] == "Quality":
+                self._quality_popup = QualitySettingsPopup(
+                    self.dashboard,
+                    self.entry,
+                    self.config_id,
+                )
+            elif self.options[self._sel] == "Split":
+                self._split_popup = SplitSettingsPopup(
+                    self.dashboard,
+                    self.entry,
+                    self.config_id,
+                )
+        return False
+
+    def draw(self, stdscr) -> None:
+        if self._schedule_popup is not None:
+            self._schedule_popup.draw(stdscr)
+            return
+
+        if self._quality_popup is not None:
+            self._quality_popup.draw(stdscr)
+            return
+
+        if self._split_popup is not None:
+            self._split_popup.draw(stdscr)
+            return
+
+        db = self.dashboard
+        h, w = stdscr.getmaxyx()
+        
+        box_w = min(40, w - 6)
+        box_h = max(len(self.options) * 2 + 4, 7)
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+        
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), curses.color_pair(db.C_NORMAL))
+            
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
+        title = f" {self.entry.streamer.upper()} SETTINGS "
+        db.safe_addstr(stdscr, by1, bx1 + 2, title, curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
+        
+        row = by1 + 2
+        for i, opt in enumerate(self.options):
+            is_sel = (i == self._sel)
+            prefix = "> " if is_sel else "  "
+            attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD) if is_sel else (curses.color_pair(db.C_WARN) | curses.A_BOLD)
+            db.safe_addstr(stdscr, row, bx1 + 2, prefix + opt, attr)
+            row += 2
+            
+        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Select  Esc:Cancel "[:box_w-4], curses.color_pair(db.C_INVHEAD))
+
+
+class QualitySettingsPopup:
+    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
+        self.dashboard = dashboard
+        self.entry     = entry
+        self.config_id = config_id
+        self.lq_enabled = False
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            from .main import _global_json_lock, _load_global_json
+            with _global_json_lock:
+                gdata = _load_global_json()
+            entries = (gdata.get("priorities", {})
+                           .get(self.config_id, {})
+                           .get("entries", []))
+            for e in entries:
+                if (e.get("streamer") == self.entry.streamer
+                        and e.get("site") == self.entry.site):
+                    self.lq_enabled = bool(e.get("lq_enabled", False))
+                    break
+        except Exception:
+            pass
+
+    def _save(self) -> None:
+        try:
+            from .main import _global_json_lock, _load_global_json, _save_global_json
+            with _global_json_lock:
+                gdata   = _load_global_json()
+                entries = (gdata.get("priorities", {})
+                               .get(self.config_id, {})
+                               .get("entries", []))
+                target = None
+                for e in entries:
+                    if (e.get("streamer") == self.entry.streamer
+                            and e.get("site") == self.entry.site):
+                        target = e
+                        break
+                if target is None:
+                    target = {
+                        "streamer":   self.entry.streamer,
+                        "site":       self.entry.site,
+                        "config_sha": self.entry.config_sha,
+                        "priority":   len(entries),
+                        "bypass":     self.entry.bypass,
+                    }
+                    entries.append(target)
+                target["lq_enabled"] = self.lq_enabled
+
+                gdata.setdefault("priorities", {}).setdefault(
+                    self.config_id, {"config_files": [], "entries": []}
+                )["entries"] = entries
+                _save_global_json(gdata)
+        except Exception:
+            pass
+
+    def handle_key(self, key) -> bool:
+        if key == 27:
+            return True
+        elif key == ord(' '):
+            self.lq_enabled = not self.lq_enabled
+        elif key in (10, 13, curses.KEY_ENTER, 459):
+            self._save()
+            return True
+        return False
+
+    def draw(self, stdscr) -> None:
+        db = self.dashboard
+        h, w = stdscr.getmaxyx()
+        
+        box_w = min(40, w - 6)
+        box_h = 7
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+        
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), curses.color_pair(db.C_NORMAL))
+            
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
+        title = f" {self.entry.streamer.upper()} SETTINGS "
+        db.safe_addstr(stdscr, by1, bx1 + 2, title, curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
+        
+        val_str = "[x]" if self.lq_enabled else "[ ]"
+        db.safe_addstr(stdscr, by1 + 2, bx1 + 2, "> Low Quality Enabled: ", curses.color_pair(db.C_HILIGHT) | curses.A_BOLD)
+        db.safe_addstr(stdscr, by1 + 2, bx1 + 25, val_str, curses.color_pair(db.C_HILIGHT) | curses.A_BOLD)
+            
+        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space:Toggle  Esc:Cancel "[:box_w-4], curses.color_pair(db.C_INVHEAD))
+
+
+class SplitSettingsPopup:
+    """Modal popup for per-streamer split-after-X-minutes settings.
+
+    Opened by StreamerSettingsPopup when the user presses Enter on Split.
+    Data is stored inside the existing priorities[config_id][entries]
+    structure in global.json, alongside lq_enabled/schedule — no new
+    top-level key is created.
+
+    When split_enabled is True and split_after is > 0, this value overrides
+    the site's SPLIT_AFTER config setting for this streamer only; every
+    other streamer on the same site continues to use SPLIT_AFTER as
+    configured. See _resolve_split_after() in main.py for the override
+    logic applied at record start.
+    """
+
+    _FIELD_ENABLED = "split_enabled"
+    _FIELD_MINUTES = "split_after"
+
+    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
+        self.dashboard = dashboard
+        self.entry     = entry
+        self.config_id = config_id
+
+        self.split_enabled: bool = False
+        self.split_after:   int  = 0
+
+        self._sel:      int  = 0      # 0 = enabled row, 1 = minutes row
+        self._editing:  bool = False  # text-field edit sub-mode
+        self._edit_buf: str  = ""
+        self._error:    str  = ""
+
+        self._load()
+
+    # ── Persistence ────────────────────────────────────────────────────────────
+
+    def _load(self) -> None:
+        try:
+            from .main import _global_json_lock, _load_global_json
+            with _global_json_lock:
+                gdata = _load_global_json()
+            entries = (gdata.get("priorities", {})
+                           .get(self.config_id, {})
+                           .get("entries", []))
+            for e in entries:
+                if (e.get("streamer") == self.entry.streamer
+                        and e.get("site") == self.entry.site):
+                    self.split_enabled = bool(e.get("split_enabled", False))
+                    try:
+                        self.split_after = max(0, int(e.get("split_after", 0) or 0))
+                    except (TypeError, ValueError):
+                        self.split_after = 0
+                    break
+        except Exception:
+            pass
+
+    def _save(self) -> None:
+        try:
+            from .main import _global_json_lock, _load_global_json, _save_global_json
+            with _global_json_lock:
+                gdata   = _load_global_json()
+                entries = (gdata.get("priorities", {})
+                               .get(self.config_id, {})
+                               .get("entries", []))
+                target = None
+                for e in entries:
+                    if (e.get("streamer") == self.entry.streamer
+                            and e.get("site") == self.entry.site):
+                        target = e
+                        break
+                if target is None:
+                    target = {
+                        "streamer":   self.entry.streamer,
+                        "site":       self.entry.site,
+                        "config_sha": self.entry.config_sha,
+                        "priority":   len(entries),
+                        "bypass":     self.entry.bypass,
+                    }
+                    entries.append(target)
+                target["split_enabled"] = self.split_enabled
+                target["split_after"]   = self.split_after
+
+                gdata.setdefault("priorities", {}).setdefault(
+                    self.config_id, {"config_files": [], "entries": []}
+                )["entries"] = entries
+                _save_global_json(gdata)
+        except Exception:
+            pass
+
+    # ── Validation ─────────────────────────────────────────────────────────────
+
+    def _validate(self) -> "tuple[bool, str]":
+        if self.split_enabled and self.split_after <= 0:
+            return False, "Enter a split time > 0 minutes"
+        return True, ""
+
+    # ── Field list ─────────────────────────────────────────────────────────────
+
+    def _get_fields(self) -> "list[tuple[str,str,str]]":
+        return [
+            ("Split enabled",
+             "[x]" if self.split_enabled else "[ ]",
+             self._FIELD_ENABLED),
+            ("Split after X minutes",
+             str(self.split_after) if self.split_after else "",
+             self._FIELD_MINUTES),
+        ]
+
+    # ── Key handling ───────────────────────────────────────────────────────────
+
+    def handle_key(self, key) -> bool:
+        """Handle one keypress. Returns True when the popup should close."""
+        fields = self._get_fields()
+        _, _, field_key = fields[self._sel]
+
+        # ── Text-editing sub-mode (minutes field) ───────────────────────────────
+        if self._editing:
+            if key == 27:                               # Esc → cancel edit
+                self._editing  = False
+                self._edit_buf = ""
+                self._error    = ""
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                self._edit_buf = self._edit_buf[:-1]
+                self._error    = ""
+            elif key in (ord("\n"), ord("\r"), curses.KEY_ENTER, 459):
+                val = self._edit_buf.strip()
+                if val == "":
+                    self.split_after = 0
+                    self._editing  = False
+                    self._edit_buf = ""
+                    self._error    = ""
+                elif val.isdigit() and int(val) > 0:
+                    self.split_after = int(val)
+                    self._editing  = False
+                    self._edit_buf = ""
+                    self._error    = ""
+                else:
+                    self._error = "Enter a whole number of minutes"
+            elif 48 <= key <= 57:                        # digits only
+                self._edit_buf += chr(key)
+                self._error     = ""
+            return False
+
+        # ── Normal navigation ─────────────────────────────────────────────────
+        if key == 27:                                   # Esc → close without saving
+            return True
+
+        elif key == curses.KEY_UP:
+            self._sel   = max(0, self._sel - 1)
+            self._error = ""
+
+        elif key == curses.KEY_DOWN:
+            self._sel   = min(len(fields) - 1, self._sel + 1)
+            self._error = ""
+
+        elif key == ord(" "):
+            if field_key == self._FIELD_ENABLED:
+                self.split_enabled = not self.split_enabled
+                self._error = ""
+            else:
+                self._edit_buf = str(self.split_after) if self.split_after else ""
+                self._editing  = True
+                self._error    = ""
+
+        elif key in (ord("\n"), ord("\r"), curses.KEY_ENTER, 459):
+            valid, err = self._validate()
+            if valid:
+                self._save()
+                return True
+            self._error = err
+
+        return False
+
+    # ── Drawing ────────────────────────────────────────────────────────────────
+
+    def draw(self, stdscr) -> None:
+        db     = self.dashboard
+        h, w   = stdscr.getmaxyx()
+        fields = self._get_fields()
+
+        box_w = min(46, w - 6)
+        box_h = 9
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), curses.color_pair(db.C_NORMAL))
+
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
+        title = f" {self.entry.streamer.upper()} SETTINGS "
+        db.safe_addstr(stdscr, by1, bx1 + 2, title, curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
+
+        row = by1 + 2
+        for i, (label, val_str, field_key) in enumerate(fields):
+            is_sel     = (i == self._sel)
+            prefix     = "> " if is_sel else "  "
+            label_attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
+                          if is_sel else curses.color_pair(db.C_WARN) | curses.A_BOLD)
+            val_attr   = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
+                          if is_sel else curses.color_pair(db.C_NORMAL))
+
+            full_label = f"{prefix}{label}: "
+            db.safe_addstr(stdscr, row, bx1 + 2, full_label, label_attr)
+
+            if field_key == self._FIELD_MINUTES and self._editing and is_sel:
+                shown = self._edit_buf + "_"
+            else:
+                shown = val_str
+            val_x   = bx1 + 2 + len(full_label)
+            max_len = max(1, bx2 - val_x - 1)
+            db.safe_addstr(stdscr, row, val_x, shown[:max_len], val_attr)
+
+            row += 2
+
+        if self._error:
+            db.safe_addstr(stdscr, by2 - 1, bx1 + 2, self._error[:box_w - 4],
+                           curses.color_pair(db.C_WARN) | curses.A_BOLD)
+
+        footer = " Enter:Save  Space:Toggle/Edit  Esc:Cancel "
+        db.safe_addstr(stdscr, by2, bx1 + 2, footer[:box_w - 4], curses.color_pair(db.C_INVHEAD))
+
+
+class ScheduleSettingsPopup:
+    """Modal popup for per-streamer schedule settings.
+
+    Opened by StreamerSettingsPopup when the user presses Enter on Schedule.
     All data is stored inside the existing priorities[config_id][entries]
     structure in global.json — no new top-level key is created.
     """
@@ -548,26 +1007,43 @@ class StreamerSettingsPopup:
                 entries = (gdata.get("priorities", {})
                                .get(self.config_id, {})
                                .get("entries", []))
+                target = None
                 for e in entries:
                     if (e.get("streamer") == self.entry.streamer
                             and e.get("site") == self.entry.site):
-                        sched = e.setdefault("schedule", {})
-                        sched["enabled"] = self.schedule_enabled
-                        sched["mode"]    = self.mode
-                        sched.setdefault("one_off", {}).update({
-                            "start": self.one_off_start,
-                            "end":   self.one_off_end,
-                        })
-                        sched.setdefault("recurring", {}).update({
-                            "days":       [i for i, v in enumerate(self.recurring_days) if v],
-                            "start_time": self.recurring_start,
-                            "end_time":   self.recurring_end,
-                        })
-                        # last_enable_attempt / last_disable_attempt are managed by
-                        # the scheduling engine; never overwrite them here.
+                        target = e
                         break
-                if "priorities" in gdata and self.config_id in gdata["priorities"]:
-                    gdata["priorities"][self.config_id]["entries"] = entries
+                if target is None:
+                    # No pre-existing entry (e.g. a fresh clone where the
+                    # PRIORITY panel's seed hasn't run yet, or this streamer
+                    # was added after the last seed/save). Create one rather
+                    # than silently dropping the schedule the user just set.
+                    target = {
+                        "streamer":   self.entry.streamer,
+                        "site":       self.entry.site,
+                        "config_sha": self.entry.config_sha,
+                        "priority":   len(entries),
+                        "bypass":     self.entry.bypass,
+                    }
+                    entries.append(target)
+                sched = target.setdefault("schedule", {})
+                sched["enabled"] = self.schedule_enabled
+                sched["mode"]    = self.mode
+                sched.setdefault("one_off", {}).update({
+                    "start": self.one_off_start,
+                    "end":   self.one_off_end,
+                })
+                sched.setdefault("recurring", {}).update({
+                    "days":       [i for i, v in enumerate(self.recurring_days) if v],
+                    "start_time": self.recurring_start,
+                    "end_time":   self.recurring_end,
+                })
+                # last_enable_attempt / last_disable_attempt are managed by
+                # the scheduling engine; never overwrite them here.
+
+                gdata.setdefault("priorities", {}).setdefault(
+                    self.config_id, {"config_files": [], "entries": []}
+                )["entries"] = entries
                 _save_global_json(gdata)
         except Exception:
             pass
@@ -577,7 +1053,7 @@ class StreamerSettingsPopup:
     def _get_fields(self) -> "list[tuple[str,str,str]]":
         """Return list of (label, display_value, field_key) for the current mode."""
         fields = [
-            ("Scheduling Enabled",
+            ("Schedule Enabled",
              "[x]" if self.schedule_enabled else "[ ]",
              self._FIELD_ENABLED),
             ("Mode",
@@ -651,7 +1127,7 @@ class StreamerSettingsPopup:
             elif key in (curses.KEY_BACKSPACE, 127, 8):
                 self._edit_buf = self._edit_buf[:-1]
                 self._error    = ""
-            elif key in (ord("\n"), ord("\r"), curses.KEY_ENTER):
+            elif key in (ord("\n"), ord("\r"), curses.KEY_ENTER, 459):
                 val = self._edit_buf.strip()
                 fmt = (self._DATETIME_FMT
                        if field_key in (self._FIELD_OO_START, self._FIELD_OO_END)
@@ -698,19 +1174,15 @@ class StreamerSettingsPopup:
                 self._day_cursor = min(6, self._day_cursor + 1)
 
         elif key == ord(" "):
-            self._toggle_current(field_key, fields)
-
-        elif key in (ord("\n"), ord("\r"), curses.KEY_ENTER):
-            if field_key in (self._FIELD_ENABLED, self._FIELD_MODE,
-                             self._FIELD_REC_DAYS):
-                self._toggle_current(field_key, fields)
-            elif field_key in (self._FIELD_OO_START, self._FIELD_OO_END,
-                               self._FIELD_REC_START, self._FIELD_REC_END):
+            if field_key in (self._FIELD_OO_START, self._FIELD_OO_END,
+                             self._FIELD_REC_START, self._FIELD_REC_END):
                 self._edit_buf = getattr(self, field_key, "")
                 self._editing  = True
                 self._error    = ""
+            else:
+                self._toggle_current(field_key, fields)
 
-        elif key in (ord("s"), ord("S")):
+        elif key in (ord("\n"), ord("\r"), curses.KEY_ENTER, 459):
             valid, err = self._validate()
             if valid:
                 self._save()
@@ -814,7 +1286,7 @@ class StreamerSettingsPopup:
             if self._editing:
                 hint = " Enter:Commit  Esc:Cancel edit "
             else:
-                hint = " S:Save  Esc:Cancel  Space/Enter:Toggle  \u2190\u2192:Mode/Days "
+                hint = " Enter:Save  Esc:Cancel  Space:Toggle/Edit  \u2190\u2192:Mode/Days "
             db.safe_addstr(stdscr, by2, bx1 + 2, hint[:box_w - 4],
                            curses.color_pair(db.C_INVHEAD))
 
@@ -952,7 +1424,7 @@ class SiteSortManager:
             self._popup_sel = max(0, self._popup_sel - 1)
         elif key == curses.KEY_DOWN:
             self._popup_sel = min(n - 1, self._popup_sel + 1)
-        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, ord(' ')):
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459, ord(' ')):
             new_key = _SORT_KEYS[self._popup_sel]
             if new_key != self._current_sort:
                 self._current_sort = new_key
@@ -1281,7 +1753,7 @@ class GlobalConfigEditor:
                 self._debug_tags_state[tag] = not self._debug_tags_state.get(tag, False)
             return True
 
-        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):   # Enter → save + close
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):   # Enter → save + close
             self._save_debug_tags()
             self.debug_tags_mode = False
             self.editing_item    = None
@@ -1453,7 +1925,7 @@ class GlobalConfigEditor:
             elif key in (curses.KEY_BACKSPACE, 127, 8):
                 self.popup_buf = self.popup_buf[:-1]
                 self.popup_error = ""
-            elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+            elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
                 if self.editing_item:
                     new_val = self.popup_buf.strip()
                     _dbg(f"[CONFIG] GlobalConfigEditor.handle_key() Enter pressed for {self.editing_item.key!r} new_val={new_val!r}")
@@ -1491,7 +1963,7 @@ class GlobalConfigEditor:
         elif key == curses.KEY_DOWN:
             self.selected_idx = min(len(self.items) - 1, self.selected_idx + 1)
             return True
-        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
             if self.items:
                 self.editing_item = self.items[self.selected_idx]
                 if self.editing_item.key == "DEBUG_LOGS":
@@ -1507,22 +1979,24 @@ class GlobalConfigEditor:
         self._ensure_loaded()
         db = self.dashboard
 
-        self.dashboard.draw_box(stdscr, y1, x1, y2, x2, db.C_SYSTEM)
-        title = " GLOBAL SETTINGS "
-        self.dashboard.safe_addstr(stdscr, y1, x1 + 2, title, curses.color_pair(db.C_LIVE) | curses.A_BOLD)
-        if is_active:
-            mode_str = " [  ] "
-            self.dashboard.safe_addstr(stdscr, y1, x2 - len(mode_str) - 1, mode_str,
-                        curses.color_pair(db.C_LIVE) | curses.A_BOLD)
-
         visible_rows = (y2 - y1) - 2
         if self.selected_idx < self.scroll_offset:
             self.scroll_offset = self.selected_idx
         elif self.selected_idx >= self.scroll_offset + visible_rows:
             self.scroll_offset = self.selected_idx - visible_rows + 1
 
+        self.dashboard.draw_box(stdscr, y1, x1, y2, x2, db.C_SYSTEM)
+        title = " GLOBAL SETTINGS "
+            
+        self.dashboard.safe_addstr(stdscr, y1, x1 + 2, title, curses.color_pair(db.C_LIVE) | curses.A_BOLD)
+        if is_active:
+            mode_str = " [  ] "
+            self.dashboard.safe_addstr(stdscr, y1, x2 - len(mode_str) - 1, mode_str,
+                        curses.color_pair(db.C_LIVE) | curses.A_BOLD)
+
         row_y = y1 + 1
-        for i in range(self.scroll_offset, min(len(self.items), self.scroll_offset + visible_rows)):
+        loop_end = min(len(self.items), self.scroll_offset + visible_rows)
+        for i in range(self.scroll_offset, loop_end):
             item = self.items[i]
             is_sel = is_active and (i == self.selected_idx)
             prefix = "> " if is_sel else "  "
@@ -1532,10 +2006,20 @@ class GlobalConfigEditor:
                         if is_sel else curses.color_pair(db.C_LIVE))
             self.dashboard.safe_addstr(stdscr, row_y, x1 + 1, prefix + f"{item.key:<22}", key_attr)
             val_str = "= " + str(item.value)
-            max_val_w = (x2 - x1) - 26 - 1   # columns between value start and right border
+            
+            # columns between value start and right border (reduced by 2 to leave space for arrows)
+            max_val_w = (x2 - x1) - 26 - 3   
+            
             if len(val_str) > max_val_w:
                 val_str = val_str[:max_val_w - 1] + "\u25ba"
             self.dashboard.safe_addstr(stdscr, row_y, x1 + 26, val_str, val_attr)
+            
+            # --- Add Scroll Arrows ---
+            if i == self.scroll_offset and self.scroll_offset > 0:
+                self.dashboard.safe_addstr(stdscr, row_y, x2 - 2, "\u25b2", curses.color_pair(db.C_LIVE) | curses.A_BOLD)
+            if i == loop_end - 1 and loop_end < len(self.items):
+                self.dashboard.safe_addstr(stdscr, row_y, x2 - 2, "\u25bc", curses.color_pair(db.C_LIVE) | curses.A_BOLD)
+                
             row_y += 1
 
         if self.popup_mode and self.editing_item:
@@ -1754,22 +2238,6 @@ class ConfigEditor:
 
         content_y1 = y1
 
-        # ── Hint row (content_y1) — above boxes ──────────────────────────────
-        # Tab-focus navigation hint above GLOBAL panel
-        if self._focus == "site":
-            focus_hint = "  Tab: Global Settings \u25ba  "
-        elif self._focus == "global":
-            focus_hint = "  \u25c4 Site  Tab: Priority \u25ba  "
-        else:
-            focus_hint = "  \u25c4 Tab: Global Settings  "
-        self.dashboard.safe_addstr(stdscr, content_y1, global_x1, focus_hint,
-                    curses.color_pair(self.dashboard.C_DIM))
-
-        # Keybind legend above PRIORITY panel (always visible)
-        prio_hint = "\u2191\u2193:nav  U:up D:dn  B:bypass  Enter:settings"
-        self.dashboard.safe_addstr(stdscr, content_y1, prio_x1, prio_hint,
-                    curses.color_pair(self.dashboard.C_DIM))
-
         # ── Draw GLOBAL SETTINGS panel (middle column) ────────────────────────
         self.global_editor.draw(stdscr, content_y1 + 1, global_x1, y2, global_x2,
                                 is_active=(self._focus == "global"))
@@ -1792,6 +2260,8 @@ class ConfigEditor:
             self.dashboard.safe_addstr(stdscr, content_y1, tab_x, label, attr)
             tab_x += len(label) + 1
 
+        self.dashboard.safe_addstr(stdscr, content_y1, tab_x + 2, "[: prev site  ]: next site  Tab: Next Panel", curses.color_pair(self.dashboard.C_DIM))
+
         # ── Draw SITE SETTINGS box (left column) ──────────────────────────────
         site_box_y1 = content_y1 + 1
         self.dashboard.draw_box(stdscr, site_box_y1, site_x1, y2, site_x2, self.dashboard.C_CHROME)
@@ -1799,7 +2269,16 @@ class ConfigEditor:
             mode_str = " [  ] "
             self.dashboard.safe_addstr(stdscr, site_box_y1, site_x2 - len(mode_str) - 1, mode_str,
                         curses.color_pair(self.dashboard.C_LIVE) | curses.A_BOLD)
-        self.dashboard.safe_addstr(stdscr, site_box_y1, site_x1 + 2, " SITE SETTINGS ",
+                        
+        title = " SITE SETTINGS "
+        if self.items:
+            visible_rows = (y2 - site_box_y1) - 2
+            if self.selected_idx < self.scroll_offset:
+                self.scroll_offset = self.selected_idx
+            elif self.selected_idx >= self.scroll_offset + visible_rows:
+                self.scroll_offset = self.selected_idx - visible_rows + 1
+
+        self.dashboard.safe_addstr(stdscr, site_box_y1, site_x1 + 2, title,
                     curses.color_pair(self.dashboard.C_LIVE) | curses.A_BOLD)
 
         if not self.items:
@@ -1807,15 +2286,9 @@ class ConfigEditor:
                         "No configurable items found.",
                         curses.color_pair(self.dashboard.C_DIM))
         else:
-            visible_rows = (y2 - site_box_y1) - 2
-            if self.selected_idx < self.scroll_offset:
-                self.scroll_offset = self.selected_idx
-            elif self.selected_idx >= self.scroll_offset + visible_rows:
-                self.scroll_offset = self.selected_idx - visible_rows + 1
-
             row_y = site_box_y1 + 1
-            for i in range(self.scroll_offset,
-                           min(len(self.items), self.scroll_offset + visible_rows)):
+            loop_end = min(len(self.items), self.scroll_offset + visible_rows)
+            for i in range(self.scroll_offset, loop_end):
                 item = self.items[i]
                 is_selected = self._focus == "site" and (i == self.selected_idx)
 
@@ -1840,10 +2313,20 @@ class ConfigEditor:
                     self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 2, prefix + f"{item.key:<25}", key_attr)
                     if item.has_equals:
                         val_str = "= " + str(item.value)
-                        max_val_w = (site_x2 - site_x1) - 29 - 1   # columns between value start and right border
+                        
+                        # columns between value start and right border (reduced by 2 to leave space for arrows)
+                        max_val_w = (site_x2 - site_x1) - 29 - 3   
+                        
                         if len(val_str) > max_val_w:
                             val_str = val_str[:max_val_w - 1] + "\u25ba"
                         self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 29, val_str, val_attr)
+                
+                # --- Add Scroll Arrows ---
+                if i == self.scroll_offset and self.scroll_offset > 0:
+                    self.dashboard.safe_addstr(stdscr, row_y, site_x2 - 2, "\u25b2", curses.color_pair(self.dashboard.C_LIVE) | curses.A_BOLD)
+                if i == loop_end - 1 and loop_end < len(self.items):
+                    self.dashboard.safe_addstr(stdscr, row_y, site_x2 - 2, "\u25bc", curses.color_pair(self.dashboard.C_LIVE) | curses.A_BOLD)
+                    
                 row_y += 1
 
         # Draw popup (whichever sub-editor owns it)
@@ -1942,7 +2425,7 @@ class ConfigEditor:
             elif key in (curses.KEY_BACKSPACE, 127, 8):
                 self.popup_buf = self.popup_buf[:-1]
                 self.popup_error = ""
-            elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+            elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
                 if self.editing_item:
                     new_val = self.popup_buf.strip()
                     is_valid, err_msg = _validate_value(self.editing_item.key, new_val)
@@ -1986,7 +2469,7 @@ class ConfigEditor:
             if self.items:
                 self.selected_idx = min(len(self.items) - 1, self.selected_idx + 1)
             return True
-        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
             if self.items and not self.items[self.selected_idx].is_section:
                 self.editing_item = self.items[self.selected_idx]
                 if self.editing_item.has_equals:
