@@ -1996,7 +1996,7 @@ class ConfigEditor:
             self.dashboard.safe_addstr(stdscr, content_y1, tab_x, label, attr)
             tab_x += len(label) + 1
 
-        self.dashboard.safe_addstr(stdscr, content_y1, tab_x + 2, "Tab:Next Panel", curses.color_pair(self.dashboard.C_DIM))
+        self.dashboard.safe_addstr(stdscr, content_y1, tab_x + 2, "[: prev site  ]: next site  Tab: Next Panel", curses.color_pair(self.dashboard.C_DIM))
 
         # ── Draw SITE SETTINGS box (left column) ──────────────────────────────
         site_box_y1 = content_y1 + 1
