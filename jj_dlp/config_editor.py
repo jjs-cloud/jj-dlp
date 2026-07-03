@@ -109,7 +109,7 @@ PRESERVED_KEYS: list[str] = [k.name for k in CONFIG_KEYS if k.preserve]
 
 # ── Priority panel ─────────────────────────────────────────────────────────────
 # Width of the PRIORITY panel box (x2 − x1 span), matching the SYSTEM sidebar.
-PRIORITY_PANEL_W: int = 40
+PRIORITY_PANEL_W: int = 48
 
 # ── Sort options for site panels (Dashboard tab) ───────────────────────────────
 SORT_OPTIONS: "list[tuple[str, str]]" = [
@@ -319,7 +319,7 @@ class PriorityEditor:
                     "bypass":     e.bypass,
                 }
                 # Preserve schedule data (and any future extra fields).
-                for extra_key in ("schedule",):
+                for extra_key in ("schedule", "lq_enabled"):
                     if extra_key in ex:
                         entry_dict[extra_key] = ex[extra_key]
                 entries_data.append(entry_dict)
@@ -428,7 +428,7 @@ class PriorityEditor:
 
         # Box border
         db.draw_box(stdscr, y1, x1, y2, x2, db.C_SYSTEM)
-        db.safe_addstr(stdscr, y1, x1 + 2, " PRIORITY/SCHEDULING ",
+        db.safe_addstr(stdscr, y1, x1 + 2, " PRIORITY/STREAMER SETTINGS ",
                        curses.color_pair(db.C_LIVE) | curses.A_BOLD)
         if is_active:
             mode_str = " [Tab:Next Panel] "
@@ -482,9 +482,188 @@ class PriorityEditor:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class StreamerSettingsPopup:
-    """Modal popup for per-streamer settings (scheduling, etc.).
+    """Main settings menu for a streamer.
 
     Opened by PriorityEditor when the user presses Enter on a streamer.
+    """
+    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
+        self.dashboard = dashboard
+        self.entry     = entry
+        self.config_id = config_id
+
+        self.options = ["Schedule", "Quality"]
+        self._sel: int = 0
+        self._schedule_popup: "Optional[ScheduleSettingsPopup]" = None
+        self._quality_popup: "Optional[QualitySettingsPopup]" = None
+
+    def handle_key(self, key) -> bool:
+        if self._schedule_popup is not None:
+            should_close = self._schedule_popup.handle_key(key)
+            if should_close:
+                self._schedule_popup = None
+                return True
+            return False
+
+        if self._quality_popup is not None:
+            should_close = self._quality_popup.handle_key(key)
+            if should_close:
+                self._quality_popup = None
+                return True
+            return False
+
+        if key == 27:  # Esc
+            return True
+        elif key == curses.KEY_UP:
+            self._sel = max(0, self._sel - 1)
+        elif key == curses.KEY_DOWN:
+            self._sel = min(len(self.options) - 1, self._sel + 1)
+        elif key in (10, 13, curses.KEY_ENTER, 459, ord(' ')):
+            if self.options[self._sel] == "Schedule":
+                self._schedule_popup = ScheduleSettingsPopup(
+                    self.dashboard,
+                    self.entry,
+                    self.config_id,
+                )
+            elif self.options[self._sel] == "Quality":
+                self._quality_popup = QualitySettingsPopup(
+                    self.dashboard,
+                    self.entry,
+                    self.config_id,
+                )
+        return False
+
+    def draw(self, stdscr) -> None:
+        if self._schedule_popup is not None:
+            self._schedule_popup.draw(stdscr)
+            return
+
+        if self._quality_popup is not None:
+            self._quality_popup.draw(stdscr)
+            return
+
+        db = self.dashboard
+        h, w = stdscr.getmaxyx()
+        
+        box_w = min(40, w - 6)
+        box_h = max(len(self.options) * 2 + 4, 7)
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+        
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), curses.color_pair(db.C_NORMAL))
+            
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
+        title = f" {self.entry.streamer.upper()} SETTINGS "
+        db.safe_addstr(stdscr, by1, bx1 + 2, title, curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
+        
+        row = by1 + 2
+        for i, opt in enumerate(self.options):
+            is_sel = (i == self._sel)
+            prefix = "> " if is_sel else "  "
+            attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD) if is_sel else (curses.color_pair(db.C_WARN) | curses.A_BOLD)
+            db.safe_addstr(stdscr, row, bx1 + 2, prefix + opt, attr)
+            row += 2
+            
+        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Select  Esc:Cancel "[:box_w-4], curses.color_pair(db.C_INVHEAD))
+
+
+class QualitySettingsPopup:
+    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
+        self.dashboard = dashboard
+        self.entry     = entry
+        self.config_id = config_id
+        self.lq_enabled = False
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            from .main import _global_json_lock, _load_global_json
+            with _global_json_lock:
+                gdata = _load_global_json()
+            entries = (gdata.get("priorities", {})
+                           .get(self.config_id, {})
+                           .get("entries", []))
+            for e in entries:
+                if (e.get("streamer") == self.entry.streamer
+                        and e.get("site") == self.entry.site):
+                    self.lq_enabled = bool(e.get("lq_enabled", False))
+                    break
+        except Exception:
+            pass
+
+    def _save(self) -> None:
+        try:
+            from .main import _global_json_lock, _load_global_json, _save_global_json
+            with _global_json_lock:
+                gdata   = _load_global_json()
+                entries = (gdata.get("priorities", {})
+                               .get(self.config_id, {})
+                               .get("entries", []))
+                target = None
+                for e in entries:
+                    if (e.get("streamer") == self.entry.streamer
+                            and e.get("site") == self.entry.site):
+                        target = e
+                        break
+                if target is None:
+                    target = {
+                        "streamer":   self.entry.streamer,
+                        "site":       self.entry.site,
+                        "config_sha": self.entry.config_sha,
+                        "priority":   len(entries),
+                        "bypass":     self.entry.bypass,
+                    }
+                    entries.append(target)
+                target["lq_enabled"] = self.lq_enabled
+
+                gdata.setdefault("priorities", {}).setdefault(
+                    self.config_id, {"config_files": [], "entries": []}
+                )["entries"] = entries
+                _save_global_json(gdata)
+        except Exception:
+            pass
+
+    def handle_key(self, key) -> bool:
+        if key == 27:
+            return True
+        elif key == ord(' '):
+            self.lq_enabled = not self.lq_enabled
+        elif key in (10, 13, curses.KEY_ENTER, 459):
+            self._save()
+            return True
+        return False
+
+    def draw(self, stdscr) -> None:
+        db = self.dashboard
+        h, w = stdscr.getmaxyx()
+        
+        box_w = min(40, w - 6)
+        box_h = 7
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+        
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), curses.color_pair(db.C_NORMAL))
+            
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
+        title = f" {self.entry.streamer.upper()} SETTINGS "
+        db.safe_addstr(stdscr, by1, bx1 + 2, title, curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
+        
+        val_str = "[x]" if self.lq_enabled else "[ ]"
+        db.safe_addstr(stdscr, by1 + 2, bx1 + 2, "> Low Quality Enabled: ", curses.color_pair(db.C_HILIGHT) | curses.A_BOLD)
+        db.safe_addstr(stdscr, by1 + 2, bx1 + 25, val_str, curses.color_pair(db.C_HILIGHT) | curses.A_BOLD)
+            
+        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space:Toggle  Esc:Cancel "[:box_w-4], curses.color_pair(db.C_INVHEAD))
+
+
+class ScheduleSettingsPopup:
+    """Modal popup for per-streamer schedule settings.
+
+    Opened by StreamerSettingsPopup when the user presses Enter on Schedule.
     All data is stored inside the existing priorities[config_id][entries]
     structure in global.json — no new top-level key is created.
     """
@@ -609,7 +788,7 @@ class StreamerSettingsPopup:
     def _get_fields(self) -> "list[tuple[str,str,str]]":
         """Return list of (label, display_value, field_key) for the current mode."""
         fields = [
-            ("Scheduling Enabled",
+            ("Schedule Enabled",
              "[x]" if self.schedule_enabled else "[ ]",
              self._FIELD_ENABLED),
             ("Mode",

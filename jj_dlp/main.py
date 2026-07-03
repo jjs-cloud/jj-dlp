@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.18.13"
+__version__ = "1.19.0"
 
 import subprocess
 import time
@@ -2088,7 +2088,8 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
         s_site = e.get("site", "")
         priority_map[(s_name, s_site)] = {
             "priority": e.get("priority", 999999),
-            "bypass": e.get("bypass", False)
+            "bypass": e.get("bypass", False),
+            "lq_enabled": e.get("lq_enabled", False)
         }
 
     site_label = cfg.get("site_label", os.path.basename(site.config_path))
@@ -2101,9 +2102,10 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                 return
 
         for streamer in to_start:
-            streamer_info = priority_map.get((streamer, site_label), {"priority": 999999, "bypass": False})
+            streamer_info = priority_map.get((streamer, site_label), {"priority": 999999, "bypass": False, "lq_enabled": False})
             is_bypass = streamer_info["bypass"]
             streamer_prio = streamer_info["priority"]
+            is_lq = streamer_info.get("lq_enabled", False)
 
             # ── Concurrency enforcement ───────────────────────────────────────
             # Lock ordering inside this block:
@@ -2195,7 +2197,7 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                     dbg(f"[POPUP] popup suppressed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s required={cooldown_secs}s")
             else:
                 dbg(f"[POPUP] popup skipped for streamer={streamer!r} show_popup={show_popup} popup_notifications={cfg.get('popup_notifications', True)}")
-            t = threading.Thread(target=record_stream, args=(streamer, cfg, site), daemon=True)
+            t = threading.Thread(target=record_stream, args=(streamer, cfg, site), kwargs={"use_lq": is_lq}, daemon=True)
             t.start()
             site.recording_threads.append(t)
             

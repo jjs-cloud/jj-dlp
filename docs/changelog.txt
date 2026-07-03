@@ -6,6 +6,12 @@
 
 - keypad enter now works everywhere enter/return is used
 
+- added the ability to record a streamer in a lower quality (720p).  Steps to use:
+    1. add the streamer in the Dashboard tab
+    2. press enter on the streamer in the Config tab on the PRIORITY/SETTINGS panel
+    3. configure the quality settings
+Note: Active recordings must be restarted for the quality settings to take effect. (Disable and then enable the streamer
+)
 v1.18.9
 
 - prevented text from spilling out of panels in the config tab
