@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.19.2"
+__version__ = "1.19.3"
 
 import subprocess
 import time
@@ -923,9 +923,39 @@ def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 1
             win.title("jj-dlp — Stream Live")
             win.resizable(False, False)
             win.attributes("-topmost", True)
-            tk.Label(win, text=popup_text, justify="left",
-                     font=("Segoe UI", 14, "bold"), padx=20, pady=14).pack()
-            tk.Button(win, text="Dismiss", command=win.destroy, padx=12, pady=4).pack(pady=(4, 12))
+            bg = "#15171a"
+            fg = "#f4f5f7"
+            muted_fg = "#d5d8de"
+            accent = "#ff4d4f" if is_recording else "#f5c542"
+            button_bg = "#24282e"
+            button_active = "#303640"
+
+            win.configure(bg=bg)
+            content = tk.Frame(win, bg=bg, padx=22, pady=16)
+            content.pack(fill="both", expand=True)
+
+            title_row = tk.Frame(content, bg=bg)
+            title_row.pack(anchor="w", fill="x")
+            title_dot = tk.Canvas(title_row, width=14, height=14, bg=bg, highlightthickness=0)
+            title_dot.create_oval(1, 1, 13, 13, fill=accent, outline=accent)
+            title_dot.pack(side="left")
+            tk.Label(title_row, text=f" {streamer} is LIVE", fg=fg, bg=bg,
+                     font=("Segoe UI", 15, "bold")).pack(side="left")
+
+            for line in popup_lines[1:]:
+                text = line[2:] if len(line) > 1 and line[1] == " " else line
+                row = tk.Frame(content, bg=bg)
+                row.pack(anchor="w", fill="x", padx=(22, 0), pady=(3, 0))
+                dot = tk.Canvas(row, width=8, height=8, bg=bg, highlightthickness=0)
+                dot.create_oval(1, 1, 7, 7, fill=accent, outline=accent)
+                dot.pack(side="left", pady=(4, 0))
+                tk.Label(row, text=f" {text}", fg=muted_fg, bg=bg,
+                         font=("Segoe UI", 11, "bold"), justify="left").pack(side="left")
+
+            tk.Button(win, text="Dismiss", command=win.destroy, padx=14, pady=4,
+                      bg=button_bg, fg=fg, activebackground=button_active,
+                      activeforeground=fg, relief="flat",
+                      highlightthickness=1, highlightbackground="#3a4048").pack(pady=(0, 14))
             win.after(popup_timeout * 1000, win.destroy)
             dbg(f"[POPUP] running popup mainloop for streamer={streamer!r}")
             root.mainloop()
