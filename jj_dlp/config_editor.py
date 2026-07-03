@@ -426,9 +426,19 @@ class PriorityEditor:
         self.ensure_loaded()
         db = self.dashboard
 
+        # Scroll calculation moved up for title arrows
+        visible_rows = max(0, y2 - (y1 + 8))
+        if self._entries:
+            if self._selected_idx < self._scroll_offset:
+                self._scroll_offset = self._selected_idx
+            elif self._selected_idx >= self._scroll_offset + visible_rows:
+                self._scroll_offset = max(0, self._selected_idx - visible_rows + 1)
+
         # Box border
         db.draw_box(stdscr, y1, x1, y2, x2, db.C_SYSTEM)
-        db.safe_addstr(stdscr, y1, x1 + 2, " STREAMER SETTINGS ",
+        title = " STREAMER SETTINGS "
+        
+        db.safe_addstr(stdscr, y1, x1 + 2, title,
                        curses.color_pair(db.C_LIVE) | curses.A_BOLD)
         if is_active:
             mode_str = " [  ] "
@@ -454,17 +464,11 @@ class PriorityEditor:
                            curses.color_pair(db.C_DIM))
             return
 
-        visible_rows = max(0, y2 - row_y)
-        # Scroll to keep selection visible.
-        if self._selected_idx < self._scroll_offset:
-            self._scroll_offset = self._selected_idx
-        elif self._selected_idx >= self._scroll_offset + visible_rows:
-            self._scroll_offset = max(0, self._selected_idx - visible_rows + 1)
+        # usable character columns inside box (reduced by 1 to guarantee space for the arrow)
+        panel_inner_w = (x2 - x1) - 4   
 
-        panel_inner_w = (x2 - x1) - 3   # usable character columns inside box
-
-        for i in range(self._scroll_offset,
-                       min(len(self._entries), self._scroll_offset + visible_rows)):
+        loop_end = min(len(self._entries), self._scroll_offset + visible_rows)
+        for i in range(self._scroll_offset, loop_end):
             entry  = self._entries[i]
             is_sel = is_active and (i == self._selected_idx)
 
@@ -486,6 +490,13 @@ class PriorityEditor:
                         else curses.color_pair(db.C_NORMAL))
 
             db.safe_addstr(stdscr, row_y, x1 + 1, prefix + label, attr)
+
+            # --- Add Scroll Arrows ---
+            if i == self._scroll_offset and self._scroll_offset > 0:
+                db.safe_addstr(stdscr, row_y, x2 - 2, "\u25b2", curses.color_pair(db.C_LIVE) | curses.A_BOLD)
+            if i == loop_end - 1 and loop_end < len(self._entries):
+                db.safe_addstr(stdscr, row_y, x2 - 2, "\u25bc", curses.color_pair(db.C_LIVE) | curses.A_BOLD)
+
             row_y += 1
 
 
@@ -1968,22 +1979,24 @@ class GlobalConfigEditor:
         self._ensure_loaded()
         db = self.dashboard
 
-        self.dashboard.draw_box(stdscr, y1, x1, y2, x2, db.C_SYSTEM)
-        title = " GLOBAL SETTINGS "
-        self.dashboard.safe_addstr(stdscr, y1, x1 + 2, title, curses.color_pair(db.C_LIVE) | curses.A_BOLD)
-        if is_active:
-            mode_str = " [  ] "
-            self.dashboard.safe_addstr(stdscr, y1, x2 - len(mode_str) - 1, mode_str,
-                        curses.color_pair(db.C_LIVE) | curses.A_BOLD)
-
         visible_rows = (y2 - y1) - 2
         if self.selected_idx < self.scroll_offset:
             self.scroll_offset = self.selected_idx
         elif self.selected_idx >= self.scroll_offset + visible_rows:
             self.scroll_offset = self.selected_idx - visible_rows + 1
 
+        self.dashboard.draw_box(stdscr, y1, x1, y2, x2, db.C_SYSTEM)
+        title = " GLOBAL SETTINGS "
+            
+        self.dashboard.safe_addstr(stdscr, y1, x1 + 2, title, curses.color_pair(db.C_LIVE) | curses.A_BOLD)
+        if is_active:
+            mode_str = " [  ] "
+            self.dashboard.safe_addstr(stdscr, y1, x2 - len(mode_str) - 1, mode_str,
+                        curses.color_pair(db.C_LIVE) | curses.A_BOLD)
+
         row_y = y1 + 1
-        for i in range(self.scroll_offset, min(len(self.items), self.scroll_offset + visible_rows)):
+        loop_end = min(len(self.items), self.scroll_offset + visible_rows)
+        for i in range(self.scroll_offset, loop_end):
             item = self.items[i]
             is_sel = is_active and (i == self.selected_idx)
             prefix = "> " if is_sel else "  "
@@ -1993,10 +2006,20 @@ class GlobalConfigEditor:
                         if is_sel else curses.color_pair(db.C_LIVE))
             self.dashboard.safe_addstr(stdscr, row_y, x1 + 1, prefix + f"{item.key:<22}", key_attr)
             val_str = "= " + str(item.value)
-            max_val_w = (x2 - x1) - 26 - 1   # columns between value start and right border
+            
+            # columns between value start and right border (reduced by 2 to leave space for arrows)
+            max_val_w = (x2 - x1) - 26 - 3   
+            
             if len(val_str) > max_val_w:
                 val_str = val_str[:max_val_w - 1] + "\u25ba"
             self.dashboard.safe_addstr(stdscr, row_y, x1 + 26, val_str, val_attr)
+            
+            # --- Add Scroll Arrows ---
+            if i == self.scroll_offset and self.scroll_offset > 0:
+                self.dashboard.safe_addstr(stdscr, row_y, x2 - 2, "\u25b2", curses.color_pair(db.C_LIVE) | curses.A_BOLD)
+            if i == loop_end - 1 and loop_end < len(self.items):
+                self.dashboard.safe_addstr(stdscr, row_y, x2 - 2, "\u25bc", curses.color_pair(db.C_LIVE) | curses.A_BOLD)
+                
             row_y += 1
 
         if self.popup_mode and self.editing_item:
@@ -2246,7 +2269,16 @@ class ConfigEditor:
             mode_str = " [  ] "
             self.dashboard.safe_addstr(stdscr, site_box_y1, site_x2 - len(mode_str) - 1, mode_str,
                         curses.color_pair(self.dashboard.C_LIVE) | curses.A_BOLD)
-        self.dashboard.safe_addstr(stdscr, site_box_y1, site_x1 + 2, " SITE SETTINGS ",
+                        
+        title = " SITE SETTINGS "
+        if self.items:
+            visible_rows = (y2 - site_box_y1) - 2
+            if self.selected_idx < self.scroll_offset:
+                self.scroll_offset = self.selected_idx
+            elif self.selected_idx >= self.scroll_offset + visible_rows:
+                self.scroll_offset = self.selected_idx - visible_rows + 1
+
+        self.dashboard.safe_addstr(stdscr, site_box_y1, site_x1 + 2, title,
                     curses.color_pair(self.dashboard.C_LIVE) | curses.A_BOLD)
 
         if not self.items:
@@ -2254,15 +2286,9 @@ class ConfigEditor:
                         "No configurable items found.",
                         curses.color_pair(self.dashboard.C_DIM))
         else:
-            visible_rows = (y2 - site_box_y1) - 2
-            if self.selected_idx < self.scroll_offset:
-                self.scroll_offset = self.selected_idx
-            elif self.selected_idx >= self.scroll_offset + visible_rows:
-                self.scroll_offset = self.selected_idx - visible_rows + 1
-
             row_y = site_box_y1 + 1
-            for i in range(self.scroll_offset,
-                           min(len(self.items), self.scroll_offset + visible_rows)):
+            loop_end = min(len(self.items), self.scroll_offset + visible_rows)
+            for i in range(self.scroll_offset, loop_end):
                 item = self.items[i]
                 is_selected = self._focus == "site" and (i == self.selected_idx)
 
@@ -2287,10 +2313,20 @@ class ConfigEditor:
                     self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 2, prefix + f"{item.key:<25}", key_attr)
                     if item.has_equals:
                         val_str = "= " + str(item.value)
-                        max_val_w = (site_x2 - site_x1) - 29 - 1   # columns between value start and right border
+                        
+                        # columns between value start and right border (reduced by 2 to leave space for arrows)
+                        max_val_w = (site_x2 - site_x1) - 29 - 3   
+                        
                         if len(val_str) > max_val_w:
                             val_str = val_str[:max_val_w - 1] + "\u25ba"
                         self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 29, val_str, val_attr)
+                
+                # --- Add Scroll Arrows ---
+                if i == self.scroll_offset and self.scroll_offset > 0:
+                    self.dashboard.safe_addstr(stdscr, row_y, site_x2 - 2, "\u25b2", curses.color_pair(self.dashboard.C_LIVE) | curses.A_BOLD)
+                if i == loop_end - 1 and loop_end < len(self.items):
+                    self.dashboard.safe_addstr(stdscr, row_y, site_x2 - 2, "\u25bc", curses.color_pair(self.dashboard.C_LIVE) | curses.A_BOLD)
+                    
                 row_y += 1
 
         # Draw popup (whichever sub-editor owns it)

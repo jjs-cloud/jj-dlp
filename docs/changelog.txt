@@ -24,6 +24,8 @@ Note: Active recordings must be restarted for the quality settings to take effec
 When recording a stream, the video file will automatically be split into multiple files based on the amount of time you set.
 Note: This will override the SPLIT_AFTER site setting.
 
+- Added arrows on the Config tab that indicate if there are more items above or below the visible items.
+
 ====================
 ====================
 
