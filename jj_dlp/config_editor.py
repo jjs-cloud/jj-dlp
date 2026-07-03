@@ -109,7 +109,7 @@ PRESERVED_KEYS: list[str] = [k.name for k in CONFIG_KEYS if k.preserve]
 
 # ── Priority panel ─────────────────────────────────────────────────────────────
 # Width of the PRIORITY panel box (x2 − x1 span), matching the SYSTEM sidebar.
-PRIORITY_PANEL_W: int = 48
+PRIORITY_PANEL_W: int = 40
 
 # ── Sort options for site panels (Dashboard tab) ───────────────────────────────
 SORT_OPTIONS: "list[tuple[str, str]]" = [
@@ -428,28 +428,41 @@ class PriorityEditor:
 
         # Box border
         db.draw_box(stdscr, y1, x1, y2, x2, db.C_SYSTEM)
-        db.safe_addstr(stdscr, y1, x1 + 2, " PRIORITY/STREAMER SETTINGS ",
+        db.safe_addstr(stdscr, y1, x1 + 2, " STREAMER SETTINGS ",
                        curses.color_pair(db.C_LIVE) | curses.A_BOLD)
         if is_active:
             mode_str = " [Tab:Next Panel] "
             db.safe_addstr(stdscr, y1, x2 - len(mode_str) - 1, mode_str,
                            curses.color_pair(db.C_LIVE) | curses.A_BOLD)
 
+        row_y = y1 + 1
+        hints = [
+            "↑↓:Navigation",
+            "U:Increase Priority",
+            "D:Decrease Priority",
+            "B:Enable Bypass",
+            "Enter:More Settings"
+        ]
+        for hint in hints:
+            db.safe_addstr(stdscr, row_y, x1 + 2, hint, curses.color_pair(db.C_DIM))
+            row_y += 1
+        
+        row_y += 2
+
         if not self._entries:
-            db.safe_addstr(stdscr, y1 + 2, x1 + 2, "No streamers.",
+            db.safe_addstr(stdscr, row_y, x1 + 2, "No streamers.",
                            curses.color_pair(db.C_DIM))
             return
 
-        visible_rows = (y2 - y1) - 3   # -3 to leave room for the two hint rows at bottom
+        visible_rows = max(0, y2 - row_y)
         # Scroll to keep selection visible.
         if self._selected_idx < self._scroll_offset:
             self._scroll_offset = self._selected_idx
         elif self._selected_idx >= self._scroll_offset + visible_rows:
-            self._scroll_offset = self._selected_idx - visible_rows + 1
+            self._scroll_offset = max(0, self._selected_idx - visible_rows + 1)
 
         panel_inner_w = (x2 - x1) - 3   # usable character columns inside box
 
-        row_y = y1 + 1
         for i in range(self._scroll_offset,
                        min(len(self._entries), self._scroll_offset + visible_rows)):
             entry  = self._entries[i]
@@ -1960,12 +1973,6 @@ class ConfigEditor:
         prio_x2   = x2                                    # == prio_x1 + prio_w
 
         content_y1 = y1
-
-        # ── Hint row (content_y1) — above boxes ──────────────────────────────
-        # Keybind legend above PRIORITY panel (always visible)
-        prio_hint = "\u2191\u2193:nav  U:up D:dn  B:bypass  Enter:settings"
-        self.dashboard.safe_addstr(stdscr, content_y1, prio_x1, prio_hint,
-                    curses.color_pair(self.dashboard.C_DIM))
 
         # ── Draw GLOBAL SETTINGS panel (middle column) ────────────────────────
         self.global_editor.draw(stdscr, content_y1 + 1, global_x1, y2, global_x2,
