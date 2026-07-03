@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.19.3"
+__version__ = "1.20.0"
 
 import subprocess
 import time
@@ -1469,8 +1469,10 @@ def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) ->
     for e in saved_entries:
         key = (e.get("streamer", ""), e.get("site", ""))
         priority_map[key] = {
-            "priority": e.get("priority", 999999),
-            "bypass":   e.get("bypass", False),
+            "priority":      e.get("priority", 999999),
+            "bypass":        e.get("bypass", False),
+            "split_enabled": e.get("split_enabled", False),
+            "split_after":   e.get("split_after", 0),
         }
 
     # ── Condition 2: find eligible candidates ─────────────────────────────────
@@ -1505,7 +1507,7 @@ def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) ->
                 "site":      s,
                 "site_label": s_label,
                 "priority":  info.get("priority", 999999),
-                "cfg":       s_cfg,
+                "cfg":       _resolve_split_after(s_cfg, info),
             })
 
     if not candidates:
@@ -1540,6 +1542,32 @@ def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) ->
         daemon=True,
         name=f"lq-launch-{tgt_str}",
     ).start()
+
+
+def _resolve_split_after(cfg: dict, entry_info: dict) -> dict:
+    """Return a cfg dict to use for a single streamer, applying that
+    streamer's per-streamer Split override (set via the SPLIT settings
+    popup) on top of the site's SPLIT_AFTER config value if enabled.
+
+    entry_info is the priorities[...][entries] dict-like info for the
+    streamer, expected to (optionally) contain "split_enabled" (bool) and
+    "split_after" (int, minutes). When split_enabled is falsy or
+    split_after <= 0, the site's SPLIT_AFTER config is left untouched and
+    the *same* cfg object is returned (no copy needed). The override never
+    affects other streamers sharing the same site config.
+    """
+    if not entry_info:
+        return cfg
+    try:
+        split_enabled = bool(entry_info.get("split_enabled", False))
+        split_after   = int(entry_info.get("split_after", 0) or 0)
+    except (TypeError, ValueError):
+        return cfg
+    if not split_enabled or split_after <= 0:
+        return cfg
+    overridden = dict(cfg)
+    overridden["split_after"] = split_after
+    return overridden
 
 
 def record_stream(streamer: str, cfg: dict, site: "SiteState",
@@ -2169,7 +2197,9 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
         priority_map[(s_name, s_site)] = {
             "priority": e.get("priority", 999999),
             "bypass": e.get("bypass", False),
-            "lq_enabled": e.get("lq_enabled", False)
+            "lq_enabled": e.get("lq_enabled", False),
+            "split_enabled": e.get("split_enabled", False),
+            "split_after": e.get("split_after", 0),
         }
 
     site_label = cfg.get("site_label", os.path.basename(site.config_path))
@@ -2187,6 +2217,7 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
             is_bypass = streamer_info["bypass"]
             streamer_prio = streamer_info["priority"]
             is_lq = streamer_info.get("lq_enabled", False)
+            streamer_cfg = _resolve_split_after(cfg, streamer_info)
             eviction_warning = ""
 
             # Concurrency enforcement
@@ -2265,7 +2296,7 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                                    source=source,
                                    is_recording=True,
                                    warning=eviction_warning)
-            t = threading.Thread(target=record_stream, args=(streamer, cfg, site), kwargs={"use_lq": is_lq}, daemon=True)
+            t = threading.Thread(target=record_stream, args=(streamer, streamer_cfg, site), kwargs={"use_lq": is_lq}, daemon=True)
             t.start()
             site.recording_threads.append(t)
             

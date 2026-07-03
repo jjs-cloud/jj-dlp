@@ -17,6 +17,16 @@ Note: Active recordings must be restarted for the quality settings to take effec
 
 - made jj-dlp open in fullscreen on windows
 
+- Expanded the SPLIT_AFTER site setting to be a per-streamer setting.   Steps to use:
+    1. add the streamer in the Dashboard tab
+    2. press enter on the streamer in the Config tab on the STREAMER SETTINGS panel
+    3. configure the split settings
+When recording a stream, the video file will automatically be split into multiple files based on the amount of time you set.
+Note: This will override the SPLIT_AFTER site setting.
+
+====================
+====================
+
 v1.18.9
 
 - prevented text from spilling out of panels in the config tab
