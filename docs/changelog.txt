@@ -2,16 +2,21 @@
 
 - fixed bug with scheduler on fresh installs
 
-- removed confusing/irrelevant keybind hints
+- Renamed the PRIORITIES/SCHEDULING panel to STREAMER SETTINGS and made the keyboard hints easier to understand.  
+
+- Added a settings menu when you select a streamer in the STREAMER SETTINGS panel.
 
 - keypad enter now works everywhere enter/return is used
 
 - added the ability to record a streamer in a lower quality (720p).  Steps to use:
     1. add the streamer in the Dashboard tab
-    2. press enter on the streamer in the Config tab on the PRIORITY/SETTINGS panel
+    2. press enter on the streamer in the Config tab on the STREAMER SETTINGS panel
     3. configure the quality settings
 Note: Active recordings must be restarted for the quality settings to take effect. (Disable and then enable the streamer
 )
+
+- made jj-dlp open in fullscreen on windows
+
 v1.18.9
 
 - prevented text from spilling out of panels in the config tab

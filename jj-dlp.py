@@ -11,6 +11,13 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 if __name__ == "__main__":
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 3)
+        except Exception:
+            pass
+
     try:
         from jj_dlp.main import main
         main()
