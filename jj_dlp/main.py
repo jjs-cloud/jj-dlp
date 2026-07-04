@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.20.2"
+__version__ = "1.20.3"
 
 import subprocess
 import time
@@ -1855,7 +1855,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     with site.lock:
                         site.currently_recording.discard(streamer)
 
-                    time.sleep(cfg["cooldown_after_recording"])
+                    # Interruptible: wake immediately on shutdown instead of
+                    # blocking the thread (and thus main()'s shutdown join)
+                    # for the full cooldown period.
+                    site._stop_event.wait(timeout=cfg["cooldown_after_recording"])
                     return
 
                 if ffmpeg_error_event.is_set():
@@ -2179,7 +2182,12 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
         site.clear_ad_alert(streamer)
 
-        time.sleep(cfg["cooldown_after_recording"])
+        # Interruptible: on shutdown this returns instantly instead of
+        # keeping the thread (and is_alive()) reporting "active" for up to
+        # cooldown_after_recording seconds after the recording has actually
+        # stopped. This is what was inflating the shutdown count and making
+        # quit take so long.
+        site._stop_event.wait(timeout=cfg["cooldown_after_recording"])
 
 
 def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
@@ -5042,8 +5050,15 @@ def main() -> None:
         active = [t for site in sites for t in site.recording_threads if t.is_alive()]
         if active:
             print(f"Waiting for {len(active)} active recording(s) to finish...")
+            # Join against a single shared deadline rather than giving each
+            # thread its own 15s timeout — otherwise N active recordings
+            # could take up to 15*N seconds to shut down instead of ~15s.
+            deadline = time.time() + 15
             for t in active:
-                t.join(timeout=15)
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                t.join(timeout=remaining)
         print("✓  All done. Goodbye!\n")
 
 
