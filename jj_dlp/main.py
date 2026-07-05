@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.21.0"
+__version__ = "1.20.3"
 
 import subprocess
 import time
@@ -394,8 +394,6 @@ def load_global_config() -> dict:
         "lq_downloader":      _bool("LQ_DOWNLOADER", False),
         "ff_err_thresh":      _int("FF_ERR_THRESH", 200),
         "subfolders":         _bool("SUBFOLDERS", False),
-        "checker_queue":      _bool("CHECKER_QUEUE", True),
-        "checker_queue_timeout": _int("CHECKER_QUEUE_TIMEOUT", 30),
     }
 
 def _write_global_conf_key(key: str, value: str) -> None:
@@ -807,79 +805,6 @@ KEYBIND_LABELS = {
     KEYBIND_REMOVE:    "R",
     KEYBIND_DISABLE:   "D",
 }
-
-
-# ── Checker queue (CHECKER_QUEUE global key) ─────────────────────────────────
-# When checker_queue is True, only one site may run get_live_streamers() at a
-# time.  A Semaphore(1) acts as the mutex.
-_checker_queue_lock  = threading.Semaphore(1)   # 1 = only one runner at a time
-_checker_active_site: Optional[str] = None      # display name of current holder
-_checker_active_lock = threading.Lock()         # guards _checker_active_site
-
-
-def _run_checker_queued(streamers, cfg, site):
-    """
-    Call get_live_streamers() through the global checker queue when
-    CHECKER_QUEUE is enabled. Falls back to a direct call when disabled.
-
-    If the checker runs longer than the timeout, a warning is emitted and the
-    site's turn is aborted to unblock the queue.
-    """
-    gcfg = load_global_config()
-    if not gcfg.get("checker_queue", True):
-        return get_live_streamers(streamers, cfg, site=site)
-
-    label = cfg.get("site_label", os.path.basename(site.config_path))
-    timeout = gcfg.get("checker_queue_timeout", 30.0)
-
-    # ── Wait for the semaphore (queue position) ───────────────────────────
-    dbg(f"[CHECKER_QUEUE] {label!r} waiting for checker slot")
-    _checker_queue_lock.acquire()
-
-    # ── Announce ourselves as the active checker ──────────────────────────
-    with _checker_active_lock:
-        global _checker_active_site
-        _checker_active_site = label
-
-    dbg(f"[CHECKER_QUEUE] {label!r} acquired checker slot — running checker")
-
-    result = []
-    try:
-        # Run the checker in a sub-thread so we can enforce the execution timeout.
-        holder: list = []
-        exc_holder: list = []
-
-        def _run():
-            try:
-                holder.append(get_live_streamers(streamers, cfg, site=site))
-            except Exception as e:
-                exc_holder.append(e)
-
-        t = threading.Thread(target=_run, daemon=True,
-                             name=f"checker-{label}")
-        t.start()
-        t.join(timeout=timeout)
-
-        if t.is_alive():
-            warn_msg = (
-                f"[CHECKER_QUEUE] WARNING: {label!r} checker exceeded "
-                f"{timeout:.0f}s timeout — forcing release of checker slot"
-            )
-            dbg(warn_msg)
-            site.log_line(warn_msg)
-            # The sub-thread is daemon, so it won't block shutdown.
-            # We release the semaphore and return empty.
-        elif exc_holder:
-            dbg(f"[CHECKER_QUEUE] {label!r} checker raised: {exc_holder[0]!r}")
-        else:
-            result = holder[0] if holder else []
-    finally:
-        with _checker_active_lock:
-            _checker_active_site = None
-        _checker_queue_lock.release()
-        dbg(f"[CHECKER_QUEUE] {label!r} released checker slot")
-
-    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2784,7 +2709,7 @@ def monitor_site(site: "SiteState") -> None:
         if not streamers:
             site.log_line("ERROR: No streamers configured.")
         else:
-            live_now = _run_checker_queued(streamers, cfg, site=site)
+            live_now = get_live_streamers(streamers, cfg, site=site)
             cfg = load_config(site.config_path)
 
             with site.dash_lock:
