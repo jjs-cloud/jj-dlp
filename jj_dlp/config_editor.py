@@ -59,6 +59,8 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("FF_ERR_THRESH",         "global", "200",   True,  'Restart the download if we see this many ffmpeg errors ("timestamp discontinuity", "Packet corrupt") default: 200'),
     _KeyDef("SUBFOLDERS",            "global", "false", True,  "Save recordings into a subfolder named after the streamer inside OUTPUT_DIR (true/false)."),
     _KeyDef("SITE_SORT",             "global", "added_first", True, "The order to display streamers on each site panel.   This can also be adjusted by pressing the S key on the Dashboard tab."),
+    _KeyDef("CHECKER_QUEUE",         "global", "true",  True,  "Queue liveness checks so only one site runs its checker at a time, preventing CPU spikes from concurrent yt-dlp processes (true/false)."),
+    _KeyDef("CHECKER_QUEUE_TIMEOUT", "global", "30",    True,  "Maximum time in seconds a checker is allowed to run before releasing the slot to unblock the queue. (Default: 30)"),
 
     # ── Site keys (per-site .conf) ────────────────────────────────────────────
     _KeyDef("SITE_LABEL",            "site",   "",      True,  "The name of this site."),

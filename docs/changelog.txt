@@ -1,6 +1,6 @@
-- fixed popup notification bug that displayed popups too often
-
-
+- fixed an issue with popup notifications that displayed popups too often for disabled/lower priority streamers
+- fixed an issue with cooldown_after_recording, making the app shutdown process much faster
+- Added a queue system for liveness checks, preventing CPU spikes due to multiple sites checking at the same time.
 
 ====================
 ====================
