@@ -88,6 +88,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("DOWNLOADER_COOKIES",    "site",   "true", False, "Whether to write the --cookies-from-browser flag to this config file's [Downloader] section when a browser is selected at startup."),
     _KeyDef("CHECKER_COOKIES",       "site",   "false", False, "Whether to write the --cookies-from-browser flag to this config file's [Checker] section when a browser is selected at startup."),
     _KeyDef("LAST_LIVE_HIGHLIGHT",   "site",   "0",    True,  'Highlight the "Last Live" timestamp when the streamer was last live within X days.'),
+    _KeyDef("UPGRADE_QUALITY",       "site",   "true", True, "Restart the recording when a higher quality is available. (true/false)."),
 )
 
 # ── Derived helpers (consumed by this module and importable by others) ─────────
@@ -1549,7 +1550,8 @@ def _validate_value(key: str, value: str) -> tuple[bool, str]:
     """Validate config values based on their expected types."""
     bool_keys = {"DEBUG_LOGS", "CHECK_FOR_UPDATES", "ASK_FOR_BROWSER", "ASK_FOR_CONFIG",
                  "PANEL_RESIZE", "LOGGING", "SPLIT_LOGS", "POPUP_NOTIFICATIONS",
-                 "DOWNLOADER_COOKIES", "CHECKER_COOKIES", "LQ_DOWNLOADER", "SUBFOLDERS"}
+                 "DOWNLOADER_COOKIES", "CHECKER_COOKIES", "LQ_DOWNLOADER", "SUBFOLDERS",
+                 "UPGRADE_QUALITY"}
     int_keys = {"UPDATE_INTERVAL", "SITE_ORDER", "CHECK_INTERVAL", "COOLDOWN_AFTER_RECORDING",
                 "SPLIT_AFTER", "STALL_CHECK_INTERVAL", "STALL_TIMEOUT", "CONFIG_CHECK_INTERVAL",
                 "POPUP_TIMEOUT", "POPUP_COOLDOWN", "PROGRESS_BAR_MAX_HOURS", "PROGRESS_BAR_WIDTH",

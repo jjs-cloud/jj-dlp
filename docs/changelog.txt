@@ -1,5 +1,6 @@
 - fixed an issue with popup notifications that displayed popups too often for disabled/lower priority streamers
 - fixed an issue with cooldown_after_recording, making the app shutdown process much faster
+- Added a new site setting called "QUALITY_UPGRADE".  When this is set to true on the site settings panel, the recording will be restarted automatically when a higher quality is detected.
 
 ====================
 ====================

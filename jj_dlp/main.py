@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.20.3"
+__version__ = "1.21.0"
 
 import subprocess
 import time
@@ -573,6 +573,11 @@ class SiteState:
         self.lock                 = threading.Lock()
         self.currently_recording: Set[str] = set()
         self.evicted_streamers:   Set[str] = set()
+        # Resolution (height, in px) each currently-recording streamer started
+        # at, per the checker's --dump-json output. Used by UPGRADE_QUALITY to
+        # detect when a source switches to a higher resolution mid-recording.
+        # Guarded by self.lock. Cleared when the recording ends.
+        self.recording_resolution: Dict[str, int] = {}
         self.recording_threads:   List[threading.Thread] = []
         self.known_streamers:     Set[str] = set()
         self.trigger_event        = threading.Event()
@@ -1215,10 +1220,87 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
     dbg(f"[DRAIN] thread exiting pipe_type={pipe_type!r} streamer={streamer!r} total_lines={line_count}")
 
 
+_RESOLUTION_RE = _re.compile(r'(\d+)\s*x\s*(\d+)')
+
+
+def _extract_resolution_height(info: dict) -> Optional[int]:
+    """Best-effort extraction of the vertical resolution (height, in px) a
+    checker (--dump-json) result reports for a live stream.
+
+    Different extractors populate wildly
+    different subsets of fields, so this falls through several strategies,
+    roughly cheapest/most-reliable first:
+
+      1. Top-level "resolution" string, e.g. "1920x1080".
+      2. Top-level "height" (already an int on most extractors).
+      3. A "WIDTHxHEIGHT" pattern embedded in the top-level "format" string.
+      4. The tallest "height" among "requested_formats" entries that have an
+         actual video track (vcodec != "none") -- these are the formats
+         yt-dlp actually resolved for the current format selector.
+      5. The "formats" list entry whose format_id matches the top-level
+         format_id, using its "height" or "resolution" field.
+
+    Returns None when nothing yields usable info (e.g. some formats report 
+    resolution as null everywhere, such as the
+    "hls-pull - unknown" format).
+    """
+    if not isinstance(info, dict):
+        return None
+
+    res = info.get("resolution")
+    if isinstance(res, str):
+        m = _RESOLUTION_RE.search(res)
+        if m:
+            return int(m.group(2))
+
+    height = info.get("height")
+    if isinstance(height, (int, float)) and height > 0:
+        return int(height)
+
+    fmt = info.get("format")
+    if isinstance(fmt, str):
+        m = _RESOLUTION_RE.search(fmt)
+        if m:
+            return int(m.group(2))
+
+    requested = info.get("requested_formats")
+    if isinstance(requested, list):
+        heights = [
+            f.get("height") for f in requested
+            if isinstance(f, dict) and f.get("vcodec") not in (None, "none")
+            and isinstance(f.get("height"), (int, float))
+        ]
+        if heights:
+            return int(max(heights))
+
+    format_id = info.get("format_id")
+    formats = info.get("formats")
+    if format_id and isinstance(formats, list):
+        for f in formats:
+            if isinstance(f, dict) and f.get("format_id") == format_id:
+                h = f.get("height")
+                if isinstance(h, (int, float)) and h > 0:
+                    return int(h)
+                f_res = f.get("resolution")
+                if isinstance(f_res, str):
+                    m = _RESOLUTION_RE.search(f_res)
+                    if m:
+                        return int(m.group(2))
+                break
+
+    return None
+
+
 def get_live_streamers(streamers: List[str], cfg: dict,
-                       site: Optional["SiteState"] = None) -> List[str]:
+                       site: Optional["SiteState"] = None) -> Dict[str, Optional[int]]:
+    """Run the checker command and return the streamers found to be live.
+
+    Returns a dict mapping each (lower-cased) live streamer username to the
+    best-effort resolution height of their current stream (see
+    _extract_resolution_height), or None if it couldn't be determined.
+    """
     if not streamers:
-        return []
+        return {}
     # NOTE: Do NOT filter out blocked streamers here. We still need to know
     # if a blocked/disabled streamer is live so the dashboard can flash
     # [●Live] ↔ [DIS]. Recording is suppressed downstream in
@@ -1251,7 +1333,7 @@ def get_live_streamers(streamers: List[str], cfg: dict,
             site.add_stdout_line(_CHECKER_STDOUT_PREFIX + _chk_line)
         for _chk_line in result.stderr.splitlines():
             site.add_stderr_line(_CHECKER_STDERR_PREFIX + _chk_line)
-    live = []
+    live: Dict[str, Optional[int]] = {}
     for line in result.stdout.splitlines():
         if not line.strip():
             continue
@@ -1265,7 +1347,7 @@ def get_live_streamers(streamers: List[str], cfg: dict,
                 except Exception:
                     streamer = url.rstrip("/").split("/")[-1].lstrip("@").lower().strip()
                 if streamer:
-                    live.append(streamer)
+                    live[streamer] = _extract_resolution_height(info)
         except Exception:
             pass
     return live
@@ -2173,6 +2255,11 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
     finally:
         with site.lock:
             site.currently_recording.discard(streamer)
+            # Clear the UPGRADE_QUALITY baseline along with currently_recording
+            # so the next time this streamer starts recording (fresh or
+            # restarted-for-quality) gets a clean baseline rather than
+            # comparing against a stale resolution from a previous session.
+            site.recording_resolution.pop(streamer, None)
             # Always clean up evicted_streamers here so the set doesn't grow
             # unboundedly over the lifetime of the process.  The eviction flag
             # is only meaningful while the recording thread is alive; once we
@@ -2191,7 +2278,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
 
 def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
-                               show_popup: bool = True, source: str = "poll") -> None:
+                               show_popup: bool = True, source: str = "poll",
+                               resolution_map: Optional[Dict[str, Optional[int]]] = None) -> None:
     with site.lock:
         currently_recording = set(site.currently_recording)
         blocked = set(cfg["blocked"])
@@ -2316,6 +2404,12 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
             with site.lock:
                 site.currently_recording.add(streamer)
                 site.evicted_streamers.discard(streamer)
+                if resolution_map is not None:
+                    _start_height = resolution_map.get(streamer)
+                    if _start_height is not None:
+                        site.recording_resolution[streamer] = _start_height
+                    else:
+                        site.recording_resolution.pop(streamer, None)
                 with site.dash_lock:
                     if streamer not in site.dash_live_since:
                         site.dash_live_since[streamer] = time.time()
@@ -2654,6 +2748,51 @@ def _process_streamer_schedules(site: "SiteState") -> None:
 
 
 
+def _check_quality_upgrades(site: "SiteState",
+                            live_info: Dict[str, Optional[int]]) -> None:
+    """Compare this cycle's checker resolutions against the resolution each
+    currently-recording streamer started at (UPGRADE_QUALITY feature).
+
+    If a streamer's source has switched to a higher resolution since the
+    recording began (e.g. the streamer started at a low res and then fixed
+    their settings), restart that streamer's recording so subsequent output
+    is captured at the new, higher quality. Restart reuses the same
+    kill+evict path as the concurrency-eviction feature: the current
+    record_stream thread notices it's in evicted_streamers, tears itself
+    down cleanly, and start_recording_if_needed picks the streamer back up
+    fresh on (or before) the next poll cycle since it's still live.
+    """
+    with site.lock:
+        active = set(site.currently_recording) - site.evicted_streamers
+
+    for streamer in active:
+        if streamer not in live_info:
+            continue
+        new_height = live_info[streamer]
+        if new_height is None:
+            continue
+
+        with site.lock:
+            old_height = site.recording_resolution.get(streamer)
+            if old_height is None:
+                # No baseline yet (e.g. recording was started via EventSub,
+                # which doesn't have checker JSON handy) -- establish one now
+                # rather than guessing whether this is an upgrade.
+                site.recording_resolution[streamer] = new_height
+                continue
+            is_upgrade = new_height > old_height
+
+        if is_upgrade:
+            site.log_line(
+                f"Quality upgrade detected for {streamer}: "
+                f"{old_height}p -> {new_height}p — restarting recording to capture higher quality"
+            )
+            with site.lock:
+                site.recording_resolution[streamer] = new_height
+                site.evicted_streamers.add(streamer)
+            site.kill_proc_for_streamer(streamer)
+
+
 def monitor_site(site: "SiteState") -> None:
     """Main polling loop for a single site — runs in its own thread."""
     try:
@@ -2709,7 +2848,8 @@ def monitor_site(site: "SiteState") -> None:
         if not streamers:
             site.log_line("ERROR: No streamers configured.")
         else:
-            live_now = get_live_streamers(streamers, cfg, site=site)
+            live_info = get_live_streamers(streamers, cfg, site=site)
+            live_now  = list(live_info.keys())
             cfg = load_config(site.config_path)
 
             with site.dash_lock:
@@ -2726,7 +2866,10 @@ def monitor_site(site: "SiteState") -> None:
                         site.dash_live_since[s] = time.time()
 
             if live_now:
-                start_recording_if_needed(live_now, cfg, site)
+                start_recording_if_needed(live_now, cfg, site, resolution_map=live_info)
+
+            if cfg.get("upgrade_quality", False):
+                _check_quality_upgrades(site, live_info)
 
         wait_secs = cfg.get("check_interval", 60)
         deadline = time.time() + wait_secs
