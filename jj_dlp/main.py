@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.21.1"
+__version__ = "1.21.2"
 
 import subprocess
 import time
@@ -2765,11 +2765,14 @@ def _check_quality_upgrades(site: "SiteState",
     with site.lock:
         active = set(site.currently_recording) - site.evicted_streamers
 
+    dbg(f"[UPGRADE_QUALITY] Checking quality upgrades for {site.label}, active_recordings={active}")
     for streamer in active:
         if streamer not in live_info:
+            dbg(f"[UPGRADE_QUALITY] {streamer} not in live_info - skipping")
             continue
         new_height = live_info[streamer]
         if new_height is None:
+            dbg(f"[UPGRADE_QUALITY] {streamer} new_height is None - skipping")
             continue
 
         with site.lock:
@@ -2778,11 +2781,14 @@ def _check_quality_upgrades(site: "SiteState",
                 # No baseline yet (e.g. recording was started via EventSub,
                 # which doesn't have checker JSON handy) -- establish one now
                 # rather than guessing whether this is an upgrade.
+                dbg(f"[UPGRADE_QUALITY] {streamer} old_height is None, establishing baseline: {new_height}p")
                 site.recording_resolution[streamer] = new_height
                 continue
             is_upgrade = new_height > old_height
 
+        dbg(f"[UPGRADE_QUALITY] {streamer}: old_height={old_height}p, new_height={new_height}p, is_upgrade={is_upgrade}")
         if is_upgrade:
+            dbg(f"[UPGRADE_QUALITY] Restarting recording for {streamer} to capture higher quality ({new_height}p > {old_height}p)")
             site.log_line(
                 f"Quality upgrade detected for {streamer}: "
                 f"{old_height}p -> {new_height}p — restarting recording to capture higher quality"
@@ -3554,7 +3560,8 @@ class JJDlpDashboard:
                 bar_str     = _live_bar(elapsed, bar_w, _bar_max_secs)
                 bar_attr    = curses.color_pair(self.C_LIVE)
                 dur_str     = _fmt_duration(elapsed)
-                last_live_str = ""  # currently live, no "last live"
+                if not (is_rec and recording_res.get(s) is not None):
+                    last_live_str = ""  # currently live, no "last live"
             else:
                 name_attr   = curses.color_pair(self.C_DIM)
                 status_str  = "[○ off]"

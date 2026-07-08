@@ -150,6 +150,7 @@ DBG_TAGS: list[str] = [
     "POPUP",
     "LQ",
     "SCHEDULE",
+    "UPGRADE_QUALITY",
 ]
 
 import json
