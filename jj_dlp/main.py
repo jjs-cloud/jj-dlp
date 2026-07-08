@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.21.2"
+__version__ = "1.21.3"
 
 import subprocess
 import time
@@ -1287,6 +1287,25 @@ def _extract_resolution_height(info: dict) -> Optional[int]:
                     if m:
                         return int(m.group(2))
                 break
+
+    # 6. Fallback: some extractors (e.g. TikTok live) emit a "formats" entry
+    #    for the selected format_id that is effectively an alias of another
+    #    entry -- same "url", but with no "height"/"resolution" populated on
+    #    it. In that case, scan the rest of the "formats" list for any entry
+    #    sharing the top-level "url" and pull resolution/height from there.
+    top_url = info.get("url")
+    if top_url and isinstance(formats, list):
+        for f in formats:
+            if not isinstance(f, dict) or f.get("url") != top_url:
+                continue
+            h = f.get("height")
+            if isinstance(h, (int, float)) and h > 0:
+                return int(h)
+            f_res = f.get("resolution")
+            if isinstance(f_res, str):
+                m = _RESOLUTION_RE.search(f_res)
+                if m:
+                    return int(m.group(2))
 
     return None
 
