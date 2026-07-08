@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.20.1"
+__version__ = "1.21.4"
 
 import subprocess
 import time
@@ -573,6 +573,11 @@ class SiteState:
         self.lock                 = threading.Lock()
         self.currently_recording: Set[str] = set()
         self.evicted_streamers:   Set[str] = set()
+        # Resolution (height, in px) each currently-recording streamer started
+        # at, per the checker's --dump-json output. Used by UPGRADE_QUALITY to
+        # detect when a source switches to a higher resolution mid-recording.
+        # Guarded by self.lock. Cleared when the recording ends.
+        self.recording_resolution: Dict[str, int] = {}
         self.recording_threads:   List[threading.Thread] = []
         self.known_streamers:     Set[str] = set()
         self.trigger_event        = threading.Event()
@@ -607,6 +612,12 @@ class SiteState:
 
         # Popup cooldown: streamer -> epoch of last popup shown
         self.popup_last_shown:    Dict[str, float] = {}
+        # Streamers for whom a "not recording" (disabled / lower-priority) popup
+        # has already been shown during the current continuous live session.
+        # Cleared when the streamer goes offline so the popup can fire again
+        # next time they go live. This prevents the popup from re-appearing
+        # every popup_cooldown minutes for as long as the streamer stays live.
+        self.popup_shown_session: set = set()
 
         # Active yt-dlp subprocesses: streamer -> proc
         # Written by record_stream threads; read by stop() for clean kill.
@@ -974,6 +985,18 @@ def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
         dbg(f"[POPUP] popup skipped for streamer={streamer!r} show_popup={show_popup} popup_notifications={cfg.get('popup_notifications', True)}")
         return
 
+    # Streamers that are NOT being recorded (disabled / lower-priority) get
+    # re-passed to this function on every single poll for as long as they
+    # remain live, since nothing else about their state changes to exclude
+    # them from the caller's candidate list. Relying on popup_cooldown alone
+    # then means the popup keeps re-appearing every popup_cooldown minutes
+    # for the entire time they're live. Instead, only show this popup once
+    # per continuous live session; site.popup_shown_session is cleared when
+    # the streamer goes offline (see the poll loop).
+    if not is_recording and streamer in site.popup_shown_session:
+        dbg(f"[POPUP] popup suppressed - already shown this live session for streamer={streamer!r} reason={reason!r}")
+        return
+
     dbg(f"[POPUP] popup condition check for streamer={streamer!r} show_popup={show_popup} popup_notifications={cfg.get('popup_notifications', True)}")
     cooldown_secs = cfg.get("popup_cooldown", 30) * 60
     last_shown    = site.popup_last_shown.get(streamer, 0)
@@ -986,6 +1009,8 @@ def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
                          reason=reason,
                          warning=warning)
         site.popup_last_shown[streamer] = time.time()
+        if not is_recording:
+            site.popup_shown_session.add(streamer)
     else:
         dbg(f"[POPUP] popup suppressed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s required={cooldown_secs}s")
 
@@ -1195,10 +1220,35 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
     dbg(f"[DRAIN] thread exiting pipe_type={pipe_type!r} streamer={streamer!r} total_lines={line_count}")
 
 
+_RESOLUTION_RE = _re.compile(r'(\d+)\s*x\s*(\d+)')
+
+
+def _extract_resolution_height(info: dict) -> Optional[int]:
+    """Extract the vertical resolution (height, in px) a checker
+    (--dump-json) result reports for a live stream.
+    """
+    if not isinstance(info, dict):
+        return None
+
+    res = info.get("resolution")
+    if isinstance(res, str):
+        m = _RESOLUTION_RE.search(res)
+        if m:
+            return int(m.group(2))
+
+    return None
+
+
 def get_live_streamers(streamers: List[str], cfg: dict,
-                       site: Optional["SiteState"] = None) -> List[str]:
+                       site: Optional["SiteState"] = None) -> Dict[str, Optional[int]]:
+    """Run the checker command and return the streamers found to be live.
+
+    Returns a dict mapping each (lower-cased) live streamer username to the
+    best-effort resolution height of their current stream (see
+    _extract_resolution_height), or None if it couldn't be determined.
+    """
     if not streamers:
-        return []
+        return {}
     # NOTE: Do NOT filter out blocked streamers here. We still need to know
     # if a blocked/disabled streamer is live so the dashboard can flash
     # [●Live] ↔ [DIS]. Recording is suppressed downstream in
@@ -1231,7 +1281,7 @@ def get_live_streamers(streamers: List[str], cfg: dict,
             site.add_stdout_line(_CHECKER_STDOUT_PREFIX + _chk_line)
         for _chk_line in result.stderr.splitlines():
             site.add_stderr_line(_CHECKER_STDERR_PREFIX + _chk_line)
-    live = []
+    live: Dict[str, Optional[int]] = {}
     for line in result.stdout.splitlines():
         if not line.strip():
             continue
@@ -1245,7 +1295,7 @@ def get_live_streamers(streamers: List[str], cfg: dict,
                 except Exception:
                     streamer = url.rstrip("/").split("/")[-1].lstrip("@").lower().strip()
                 if streamer:
-                    live.append(streamer)
+                    live[streamer] = _extract_resolution_height(info)
         except Exception:
             pass
     return live
@@ -1835,7 +1885,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     with site.lock:
                         site.currently_recording.discard(streamer)
 
-                    time.sleep(cfg["cooldown_after_recording"])
+                    # Interruptible: wake immediately on shutdown instead of
+                    # blocking the thread (and thus main()'s shutdown join)
+                    # for the full cooldown period.
+                    site._stop_event.wait(timeout=cfg["cooldown_after_recording"])
                     return
 
                 if ffmpeg_error_event.is_set():
@@ -2150,6 +2203,11 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
     finally:
         with site.lock:
             site.currently_recording.discard(streamer)
+            # Clear the UPGRADE_QUALITY baseline along with currently_recording
+            # so the next time this streamer starts recording (fresh or
+            # restarted-for-quality) gets a clean baseline rather than
+            # comparing against a stale resolution from a previous session.
+            site.recording_resolution.pop(streamer, None)
             # Always clean up evicted_streamers here so the set doesn't grow
             # unboundedly over the lifetime of the process.  The eviction flag
             # is only meaningful while the recording thread is alive; once we
@@ -2159,11 +2217,17 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
         site.clear_ad_alert(streamer)
 
-        time.sleep(cfg["cooldown_after_recording"])
+        # Interruptible: on shutdown this returns instantly instead of
+        # keeping the thread (and is_alive()) reporting "active" for up to
+        # cooldown_after_recording seconds after the recording has actually
+        # stopped. This is what was inflating the shutdown count and making
+        # quit take so long.
+        site._stop_event.wait(timeout=cfg["cooldown_after_recording"])
 
 
 def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
-                               show_popup: bool = True, source: str = "poll") -> None:
+                               show_popup: bool = True, source: str = "poll",
+                               resolution_map: Optional[Dict[str, Optional[int]]] = None) -> None:
     with site.lock:
         currently_recording = set(site.currently_recording)
         blocked = set(cfg["blocked"])
@@ -2288,6 +2352,12 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
             with site.lock:
                 site.currently_recording.add(streamer)
                 site.evicted_streamers.discard(streamer)
+                if resolution_map is not None:
+                    _start_height = resolution_map.get(streamer)
+                    if _start_height is not None:
+                        site.recording_resolution[streamer] = _start_height
+                    else:
+                        site.recording_resolution.pop(streamer, None)
                 with site.dash_lock:
                     if streamer not in site.dash_live_since:
                         site.dash_live_since[streamer] = time.time()
@@ -2626,6 +2696,57 @@ def _process_streamer_schedules(site: "SiteState") -> None:
 
 
 
+def _check_quality_upgrades(site: "SiteState",
+                            live_info: Dict[str, Optional[int]]) -> None:
+    """Compare this cycle's checker resolutions against the resolution each
+    currently-recording streamer started at (UPGRADE_QUALITY feature).
+
+    If a streamer's source has switched to a higher resolution since the
+    recording began (e.g. the streamer started at a low res and then fixed
+    their settings), restart that streamer's recording so subsequent output
+    is captured at the new, higher quality. Restart reuses the same
+    kill+evict path as the concurrency-eviction feature: the current
+    record_stream thread notices it's in evicted_streamers, tears itself
+    down cleanly, and start_recording_if_needed picks the streamer back up
+    fresh on (or before) the next poll cycle since it's still live.
+    """
+    with site.lock:
+        active = set(site.currently_recording) - site.evicted_streamers
+
+    dbg(f"[UPGRADE_QUALITY] Checking quality upgrades for {site.label}, active_recordings={active}")
+    for streamer in active:
+        if streamer not in live_info:
+            dbg(f"[UPGRADE_QUALITY] {streamer} not in live_info - skipping")
+            continue
+        new_height = live_info[streamer]
+        if new_height is None:
+            dbg(f"[UPGRADE_QUALITY] {streamer} new_height is None - skipping")
+            continue
+
+        with site.lock:
+            old_height = site.recording_resolution.get(streamer)
+            if old_height is None:
+                # No baseline yet (e.g. recording was started via EventSub,
+                # which doesn't have checker JSON handy) -- establish one now
+                # rather than guessing whether this is an upgrade.
+                dbg(f"[UPGRADE_QUALITY] {streamer} old_height is None, establishing baseline: {new_height}p")
+                site.recording_resolution[streamer] = new_height
+                continue
+            is_upgrade = new_height > old_height
+
+        dbg(f"[UPGRADE_QUALITY] {streamer}: old_height={old_height}p, new_height={new_height}p, is_upgrade={is_upgrade}")
+        if is_upgrade:
+            dbg(f"[UPGRADE_QUALITY] Restarting recording for {streamer} to capture higher quality ({new_height}p > {old_height}p)")
+            site.log_line(
+                f"Quality upgrade detected for {streamer}: "
+                f"{old_height}p -> {new_height}p — restarting recording to capture higher quality"
+            )
+            with site.lock:
+                site.recording_resolution[streamer] = new_height
+                site.evicted_streamers.add(streamer)
+            site.kill_proc_for_streamer(streamer)
+
+
 def monitor_site(site: "SiteState") -> None:
     """Main polling loop for a single site — runs in its own thread."""
     try:
@@ -2681,7 +2802,8 @@ def monitor_site(site: "SiteState") -> None:
         if not streamers:
             site.log_line("ERROR: No streamers configured.")
         else:
-            live_now = get_live_streamers(streamers, cfg, site=site)
+            live_info = get_live_streamers(streamers, cfg, site=site)
+            live_now  = list(live_info.keys())
             cfg = load_config(site.config_path)
 
             with site.dash_lock:
@@ -2693,11 +2815,15 @@ def monitor_site(site: "SiteState") -> None:
                 for s in streamers:
                     if s not in live_set:
                         site.dash_live_since.pop(s, None)
+                        site.popup_shown_session.discard(s)
                     elif s not in site.dash_live_since:
                         site.dash_live_since[s] = time.time()
 
             if live_now:
-                start_recording_if_needed(live_now, cfg, site)
+                start_recording_if_needed(live_now, cfg, site, resolution_map=live_info)
+
+            if cfg.get("upgrade_quality", False):
+                _check_quality_upgrades(site, live_info)
 
         wait_secs = cfg.get("check_interval", 60)
         deadline = time.time() + wait_secs
@@ -3267,7 +3393,8 @@ class JJDlpDashboard:
             blocked      = set(site.dash_blocked)
             next_in      = site.dash_next_check_in
         with site.lock:
-            recording    = set(site.currently_recording)
+            recording     = set(site.currently_recording)
+            recording_res = dict(site.recording_resolution)
 
         # Apply the active sort order to the streamer list.
         all_s = self.sort_manager.get_sorted_streamers(site, all_s, live_since, last_live)
@@ -3332,7 +3459,9 @@ class JJDlpDashboard:
 
             # "Last Live" value for this streamer
             ll_ts = last_live.get(s)
-            if ll_ts is not None:
+            if is_rec and recording_res.get(s) is not None:
+                last_live_str = f"{recording_res.get(s)}p"
+            elif ll_ts is not None:
                 ll_ago = int(now - ll_ts)
                 if ll_ago < 60:
                     last_live_str = f"{ll_ago}s ago"
@@ -3379,7 +3508,8 @@ class JJDlpDashboard:
                 bar_str     = _live_bar(elapsed, bar_w, _bar_max_secs)
                 bar_attr    = curses.color_pair(self.C_LIVE)
                 dur_str     = _fmt_duration(elapsed)
-                last_live_str = ""  # currently live, no "last live"
+                if not (is_rec and recording_res.get(s) is not None):
+                    last_live_str = ""  # currently live, no "last live"
             else:
                 name_attr   = curses.color_pair(self.C_DIM)
                 status_str  = "[○ off]"
@@ -5021,8 +5151,15 @@ def main() -> None:
         active = [t for site in sites for t in site.recording_threads if t.is_alive()]
         if active:
             print(f"Waiting for {len(active)} active recording(s) to finish...")
+            # Join against a single shared deadline rather than giving each
+            # thread its own 15s timeout — otherwise N active recordings
+            # could take up to 15*N seconds to shut down instead of ~15s.
+            deadline = time.time() + 15
             for t in active:
-                t.join(timeout=15)
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                t.join(timeout=remaining)
         print("✓  All done. Goodbye!\n")
 
 
