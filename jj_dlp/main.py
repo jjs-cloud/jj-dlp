@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.21.3"
+__version__ = "1.21.4"
 
 import subprocess
 import time
@@ -1224,25 +1224,8 @@ _RESOLUTION_RE = _re.compile(r'(\d+)\s*x\s*(\d+)')
 
 
 def _extract_resolution_height(info: dict) -> Optional[int]:
-    """Best-effort extraction of the vertical resolution (height, in px) a
-    checker (--dump-json) result reports for a live stream.
-
-    Different extractors populate wildly
-    different subsets of fields, so this falls through several strategies,
-    roughly cheapest/most-reliable first:
-
-      1. Top-level "resolution" string, e.g. "1920x1080".
-      2. Top-level "height" (already an int on most extractors).
-      3. A "WIDTHxHEIGHT" pattern embedded in the top-level "format" string.
-      4. The tallest "height" among "requested_formats" entries that have an
-         actual video track (vcodec != "none") -- these are the formats
-         yt-dlp actually resolved for the current format selector.
-      5. The "formats" list entry whose format_id matches the top-level
-         format_id, using its "height" or "resolution" field.
-
-    Returns None when nothing yields usable info (e.g. some formats report 
-    resolution as null everywhere, such as the
-    "hls-pull - unknown" format).
+    """Extract the vertical resolution (height, in px) a checker
+    (--dump-json) result reports for a live stream.
     """
     if not isinstance(info, dict):
         return None
@@ -1252,60 +1235,6 @@ def _extract_resolution_height(info: dict) -> Optional[int]:
         m = _RESOLUTION_RE.search(res)
         if m:
             return int(m.group(2))
-
-    height = info.get("height")
-    if isinstance(height, (int, float)) and height > 0:
-        return int(height)
-
-    fmt = info.get("format")
-    if isinstance(fmt, str):
-        m = _RESOLUTION_RE.search(fmt)
-        if m:
-            return int(m.group(2))
-
-    requested = info.get("requested_formats")
-    if isinstance(requested, list):
-        heights = [
-            f.get("height") for f in requested
-            if isinstance(f, dict) and f.get("vcodec") not in (None, "none")
-            and isinstance(f.get("height"), (int, float))
-        ]
-        if heights:
-            return int(max(heights))
-
-    format_id = info.get("format_id")
-    formats = info.get("formats")
-    if format_id and isinstance(formats, list):
-        for f in formats:
-            if isinstance(f, dict) and f.get("format_id") == format_id:
-                h = f.get("height")
-                if isinstance(h, (int, float)) and h > 0:
-                    return int(h)
-                f_res = f.get("resolution")
-                if isinstance(f_res, str):
-                    m = _RESOLUTION_RE.search(f_res)
-                    if m:
-                        return int(m.group(2))
-                break
-
-    # 6. Fallback: some extractors (e.g. TikTok live) emit a "formats" entry
-    #    for the selected format_id that is effectively an alias of another
-    #    entry -- same "url", but with no "height"/"resolution" populated on
-    #    it. In that case, scan the rest of the "formats" list for any entry
-    #    sharing the top-level "url" and pull resolution/height from there.
-    top_url = info.get("url")
-    if top_url and isinstance(formats, list):
-        for f in formats:
-            if not isinstance(f, dict) or f.get("url") != top_url:
-                continue
-            h = f.get("height")
-            if isinstance(h, (int, float)) and h > 0:
-                return int(h)
-            f_res = f.get("resolution")
-            if isinstance(f_res, str):
-                m = _RESOLUTION_RE.search(f_res)
-                if m:
-                    return int(m.group(2))
 
     return None
 
