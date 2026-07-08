@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.21.0"
+__version__ = "1.21.1"
 
 import subprocess
 import time
@@ -3439,7 +3439,8 @@ class JJDlpDashboard:
             blocked      = set(site.dash_blocked)
             next_in      = site.dash_next_check_in
         with site.lock:
-            recording    = set(site.currently_recording)
+            recording     = set(site.currently_recording)
+            recording_res = dict(site.recording_resolution)
 
         # Apply the active sort order to the streamer list.
         all_s = self.sort_manager.get_sorted_streamers(site, all_s, live_since, last_live)
@@ -3504,7 +3505,9 @@ class JJDlpDashboard:
 
             # "Last Live" value for this streamer
             ll_ts = last_live.get(s)
-            if ll_ts is not None:
+            if is_rec and recording_res.get(s) is not None:
+                last_live_str = f"{recording_res.get(s)}p"
+            elif ll_ts is not None:
                 ll_ago = int(now - ll_ts)
                 if ll_ago < 60:
                     last_live_str = f"{ll_ago}s ago"
