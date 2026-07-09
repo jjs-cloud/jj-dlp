@@ -16,6 +16,8 @@ Public API
 startup_dbg(msg)                   Write a line to the startup log (if enabled).
 startup_dbg_flush()                Write the opening banner (argv, cwd, python path).
 dbg(msg)                           Write to debug log (filtered by DBG_FILTERS).
+log_dashboard_line(msg)             Mirror a Log-tab line into the debug log
+                                    (unfiltered; only gated on enabled/path).
 log_crash(e)                       Write an unhandled exception to jj-dlp-crash.log.
 configure_debug_log(enabled, path) Atomically update the debug-log config.
 get_debug_log_config()             Return current (enabled, path) debug-log state.
@@ -235,6 +237,27 @@ def _write_debug_log(msg: str) -> None:
             _dashboard_log_ref(err_msg)
             with _debug_cfg_lock:
                 _last_debug_err = err_msg
+
+
+def log_dashboard_line(msg: str, site_name: str = "") -> None:
+    """
+    Mirror a dashboard Log-tab line into the debug log file.
+
+    Unlike dbg(), this always writes when debug logging is enabled —
+    it bypasses the DBG_TAGS filter entirely, since these lines are
+    already the user-facing activity lines shown in the Log tab (e.g.
+    "Recording started: ..."), not internal [TAG]-prefixed traces that
+    are meant to be toggled on/off individually.
+
+    No-op if debug logging is currently disabled.
+    """
+    enabled, path = get_debug_log_config()
+    if not enabled or not path:
+        return
+
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    prefix = f"[{site_name}] " if site_name else ""
+    _write_debug_log(f"[{ts}] {prefix}{msg}")
 
 
 def dbg(msg: str, site_name: str = "") -> None:

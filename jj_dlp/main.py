@@ -737,13 +737,19 @@ class SiteState:
             self._cfg_cache_time = 0.0
 
     def log_line(self, msg: str) -> None:
-        """Append a timestamped line to the site's activity log (capped at 200 lines)."""
+        """Append a timestamped line to the site's activity log (capped at 200 lines).
+
+        If debug logging is currently enabled, the same line is also mirrored
+        into the debug log file (see logger.log_dashboard_line) so the debug
+        file always contains everything visible in the dashboard Log tab.
+        """
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         line = f"[{ts}] {msg}"
         with self.dash_lock:
             self.dash_log_lines.append(line)
             if len(self.dash_log_lines) > 200:
                 self.dash_log_lines = self.dash_log_lines[-200:]
+        _logger.log_dashboard_line(msg)
 
     def add_stdout_line(self, line: str) -> None:
         with self.dash_lock:
