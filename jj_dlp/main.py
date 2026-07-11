@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.21.5"
+__version__ = "1.21.6"
 
 import subprocess
 import time
@@ -3004,6 +3004,10 @@ class JJDlpDashboard:
         self._changelog_lines: List[str] = []
         self._changelog_popup_queued = False   # will be set to True after first frame
 
+        # ── Exit-confirmation popup state ─────────────────────────────────────
+        self._exit_confirm_open      = False
+        self._exit_confirm_sel       = 0   # 0 = Yes (default), 1 = No
+
     # ── Color palette ────────────────────────────────────────────────────────
     # Pair numbers and their meanings — easy to change here
     C_CHROME    = 1   # borders, labels
@@ -4189,6 +4193,10 @@ class JJDlpDashboard:
         if self._changelog_popup_open:
             self.draw_changelog_popup()
 
+        # Exit-confirmation popup — drawn on top of everything else.
+        if self._exit_confirm_open:
+            self.draw_exit_confirm_popup()
+
         self.stdscr.refresh()
 
         # Log timing every 100 frames (~5 seconds at 20fps)
@@ -4202,6 +4210,10 @@ class JJDlpDashboard:
     # ── Input handling ────────────────────────────────────────────────────────
     def handle_key(self, key) -> bool:
         """Returns False to quit."""
+        # Exit-confirmation popup intercepts all keys while open.
+        if self._exit_confirm_open:
+            return self._handle_exit_confirm_key(key)
+
         # Changelog popup intercepts all keys while open.
         if self._changelog_popup_open:
             if key in (ord('q'), ord('Q'), 27,            # Q / Esc → close
@@ -4239,7 +4251,7 @@ class JJDlpDashboard:
                 dbg(f"[CONFIG] main.handle_key() config_editor did not consume key={key}")
 
         if key in (ord('q'), ord('Q'), 27):
-            return False
+            self._open_exit_confirm()
         elif key in (curses.KEY_RIGHT, ord('l')):
             self.selected_tab = (self.selected_tab + 1) % len(self.TABS)
         elif key in (curses.KEY_LEFT, ord('h')):
@@ -4510,6 +4522,75 @@ class JJDlpDashboard:
         self._changelog_scroll = 0
         self._changelog_popup_open = True
         self._mark_changelog_shown()
+
+    def _open_exit_confirm(self) -> None:
+        """Open the 'Are you sure you want to exit?' popup, 'Yes' selected by default."""
+        self._exit_confirm_open = True
+        self._exit_confirm_sel  = 0   # 0 = Yes, 1 = No
+
+    def _handle_exit_confirm_key(self, key) -> bool:
+        """Handle input while the exit-confirmation popup is open.
+
+        Returns False to quit the app, True to keep running.
+        """
+        if key == 27:  # Esc again → same as selecting Yes + Enter
+            return False
+        elif key in (curses.KEY_LEFT, curses.KEY_RIGHT, ord('h'), ord('l'),
+                     curses.KEY_UP, curses.KEY_DOWN, ord('j'), ord('k'), ord('\t')):
+            self._exit_confirm_sel = 1 - self._exit_confirm_sel
+        elif key in (ord('y'), ord('Y')):
+            return False
+        elif key in (ord('n'), ord('N')):
+            self._exit_confirm_open = False
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
+            if self._exit_confirm_sel == 0:   # Yes
+                return False
+            self._exit_confirm_open = False   # No → close popup, keep running
+        return True
+
+    def draw_exit_confirm_popup(self) -> None:
+        """Draw the small 'Are you sure you want to exit?' confirmation box."""
+        if not self._exit_confirm_open:
+            return
+        h, w = self.stdscr.getmaxyx()
+
+        message = "Are you sure you want to exit?"
+        box_w = min(max(len(message) + 6, 34), w - 4)
+        box_h = 5
+        by1 = max(0, (h - box_h) // 2)
+        bx1 = max(0, (w - box_w) // 2)
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        # Fill background
+        for y in range(by1, by2 + 1):
+            self.safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1),
+                        curses.color_pair(self.C_NORMAL))
+
+        self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_WARN)
+        title = " CONFIRM EXIT "
+        self.safe_addstr(self.stdscr, by1, bx1 + 2, title,
+                    curses.color_pair(self.C_WARN) | curses.A_BOLD)
+
+        self.safe_addstr(self.stdscr, by1 + 2, bx1 + max(0, (box_w - len(message)) // 2),
+                    message, curses.color_pair(self.C_NORMAL) | curses.A_BOLD)
+
+        yes_label = " Yes "
+        no_label  = " No "
+        gap = 4
+        buttons_w = len(yes_label) + len(no_label) + gap
+        start_x = bx1 + max(0, (box_w - buttons_w) // 2)
+        yes_attr = (curses.color_pair(self.C_HILIGHT) | curses.A_BOLD) if self._exit_confirm_sel == 0 \
+                   else curses.color_pair(self.C_NORMAL)
+        no_attr  = (curses.color_pair(self.C_HILIGHT) | curses.A_BOLD) if self._exit_confirm_sel == 1 \
+                   else curses.color_pair(self.C_NORMAL)
+        self.safe_addstr(self.stdscr, by1 + 3, start_x, yes_label, yes_attr)
+        self.safe_addstr(self.stdscr, by1 + 3, start_x + len(yes_label) + gap, no_label, no_attr)
+
+        legend = " \u2190/\u2192: Select  Enter: Confirm  Esc: Exit "
+        self.safe_addstr(self.stdscr, by2, bx1 + max(0, (box_w - len(legend)) // 2),
+                    legend[:max(0, box_w - 2)],
+                    curses.color_pair(self.C_INVHEAD))
 
     def draw_changelog_popup(self) -> None:
         """Draw the scrollable changelog popup centred on screen."""

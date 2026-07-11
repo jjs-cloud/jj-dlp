@@ -1,3 +1,5 @@
+- added exit confirmation prompt
+
 v1.21.4
 
 - fixed an issue with popup notifications that displayed popups too often for disabled/lower priority streamers
