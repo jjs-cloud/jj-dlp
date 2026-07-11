@@ -1492,7 +1492,7 @@ class SiteSortManager:
             import configparser as _cp
             from .main import get_global_conf_path
             path   = get_global_conf_path()
-            parser = _cp.ConfigParser(allow_no_value=True, interpolation=None)
+            parser = _cp.ConfigParser(allow_no_value=True, interpolation=None, delimiters=('=',))
             parser.read(path, encoding="utf-8")
             general = parser["General"] if parser.has_section("General") else {}
             val     = general.get("SITE_SORT", SORT_DEFAULT).strip().lower()

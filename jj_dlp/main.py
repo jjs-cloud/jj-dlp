@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.21.10"
+__version__ = "1.21.11"
 
 import subprocess
 import time
@@ -284,7 +284,12 @@ def load_config(config_path: str) -> dict:
         print(f"ERROR: Config file not found at: {config_path}", file=sys.stderr)
         sys.exit(1)
 
-    parser = configparser.ConfigParser(allow_no_value=True, interpolation=None)
+    # delimiters=('=',) — Downloader/Checker/LQ_Downloader lines are raw CLI-arg
+    # strings (e.g. "--downloader-args ffmpeg:...") stored as bare keys. The
+    # default ':' delimiter would misparse the colon in "ffmpeg:..." as a
+    # key/value split, silently truncating the argument. Restricting to '='
+    # avoids that while matching how every value in these configs is written.
+    parser = configparser.ConfigParser(allow_no_value=True, interpolation=None, delimiters=('=',))
     try:
         parser.read(config_path, encoding="utf-8")
     except Exception as _e:
@@ -345,7 +350,7 @@ def load_global_config() -> dict:
         ask_for_browser   – bool
     """
     path = get_global_conf_path()
-    parser = configparser.ConfigParser(allow_no_value=True, interpolation=None)
+    parser = configparser.ConfigParser(allow_no_value=True, interpolation=None, delimiters=('=',))
     try:
         parser.read(path, encoding="utf-8")
     except Exception:
