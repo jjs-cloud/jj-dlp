@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.21.4"
+__version__ = "1.21.5"
 
 import subprocess
 import time
@@ -1375,11 +1375,11 @@ def get_streamer_file_size(output_dir, streamer, cfg=None,
                 stall_detected = True
                 dbg(f"[STALL] TRIGGERED: stalled={stalled:.2f}s >= threshold={stall_timeout}s",
                     site_name=streamer)
-        return size, stall_detected, filename or ""
+        return size, stall_detected, filename or "", False
     except Exception as e:
         dbg(f"[STALL] exception in get_streamer_file_size: {type(e).__name__}: {e}",
             site_name=streamer)
-        return 0, False, ""
+        return 0, False, "", True
 
 def add_segment_suffix_to_tmpl(output_tmpl: str, segment_num: int) -> str:
     """
@@ -1833,7 +1833,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 except Exception as e:
                     dbg(f"[STALL] json fallback failed: {e}", site_name=streamer)
 
-            last_size, _, _ = get_streamer_file_size(
+            last_size, _, _, _ = get_streamer_file_size(
                 output_dir,
                 streamer,
                 cfg=cfg,
@@ -1847,6 +1847,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             stall_timeout        = cfg["stall_timeout"]
             seconds_since_check  = 0
             _split_log_counter   = 0  # throttle periodic split-timer dbg lines
+            # Set once we've already warned the Log tab about a missing/unreadable
+            # recording file, so we don't spam the same warning every stall-check
+            # cycle. Reset whenever the file is found again or a new attempt starts.
+            filename_error_warned = False
             dbg(f"[STALL] init: stall_timeout={stall_timeout}s "
                 f"stall_check_interval={stall_check_interval}s "
                 f"last_size={last_size} last_growth_time={last_growth_time:.2f}",
@@ -2125,7 +2129,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     dbg(f"[STALL] check cycle: elapsed_since_growth="
                         f"{time.time() - last_growth_time:.2f}s",
                         site_name=streamer)
-                    current_size, stall_detected, _ = get_streamer_file_size(
+                    current_size, stall_detected, _, file_error = get_streamer_file_size(
                         output_dir,
                         streamer,
                         cfg=cfg,
@@ -2136,7 +2140,23 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         known_filename=active_file,
                     )
 
-                    if stall_detected:
+                    if file_error:
+                        # We couldn't even locate/read the recording file this
+                        # cycle (e.g. active_file points at a filename that
+                        # doesn't exist). Don't let that masquerade as "no
+                        # growth" — that would show a false "stalled" state on
+                        # the dashboard. Just give up on stall detection for
+                        # this file until it resolves itself.
+                        dbg("[STALL] filename lookup failed — giving up on "
+                            "stall detection for this cycle", site_name=streamer)
+                        site.clear_stall_since(streamer)
+                        if not filename_error_warned:
+                            site.log_line(
+                                f"Warning: stall checker could not locate file for {streamer}"
+                            )
+                            filename_error_warned = True
+
+                    elif stall_detected:
                         site.log_line(f"Stall detected for {streamer} — restarting")
 
                         kill_proc(proc)
@@ -2152,7 +2172,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         time.sleep(5)
                         break
 
-                    if current_size > last_size:
+                    elif current_size > last_size:
+                        filename_error_warned = False
                         dbg(f"[STALL] grew: {last_size} -> {current_size} "
                             f"(+{current_size - last_size} bytes), resetting timer",
                             site_name=streamer)
@@ -2160,6 +2181,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         last_growth_time = time.time()
                         site.clear_stall_since(streamer)
                     else:
+                        filename_error_warned = False
                         dbg(f"[STALL] NO GROWTH: size={current_size} "
                             f"stall_since={time.time() - last_growth_time:.2f}s",
                             site_name=streamer)
