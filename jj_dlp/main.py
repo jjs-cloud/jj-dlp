@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.21.6"
+__version__ = "1.21.7"
 
 import subprocess
 import time
@@ -4533,7 +4533,7 @@ class JJDlpDashboard:
 
         Returns False to quit the app, True to keep running.
         """
-        if key == 27:  # Esc again → same as selecting Yes + Enter
+        if key in (27, ord('q'), ord('Q')):  # Esc/Q again → same as selecting Yes + Enter
             return False
         elif key in (curses.KEY_LEFT, curses.KEY_RIGHT, ord('h'), ord('l'),
                      curses.KEY_UP, curses.KEY_DOWN, ord('j'), ord('k'), ord('\t')):
@@ -4555,7 +4555,8 @@ class JJDlpDashboard:
         h, w = self.stdscr.getmaxyx()
 
         message = "Are you sure you want to exit?"
-        box_w = min(max(len(message) + 6, 34), w - 4)
+        legend  = " \u2190/\u2192: Select  Enter: Confirm  Esc: Exit "
+        box_w = min(max(len(message) + 6, len(legend) + 4, 34), w - 4)
         box_h = 5
         by1 = max(0, (h - box_h) // 2)
         bx1 = max(0, (w - box_w) // 2)
@@ -4587,7 +4588,6 @@ class JJDlpDashboard:
         self.safe_addstr(self.stdscr, by1 + 3, start_x, yes_label, yes_attr)
         self.safe_addstr(self.stdscr, by1 + 3, start_x + len(yes_label) + gap, no_label, no_attr)
 
-        legend = " \u2190/\u2192: Select  Enter: Confirm  Esc: Exit "
         self.safe_addstr(self.stdscr, by2, bx1 + max(0, (box_w - len(legend)) // 2),
                     legend[:max(0, box_w - 2)],
                     curses.color_pair(self.C_INVHEAD))
