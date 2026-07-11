@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.21.11"
+__version__ = "1.21.12"
 
 import subprocess
 import time
@@ -171,14 +171,20 @@ def _parse_checker_and_downloader(parser: configparser.ConfigParser) -> tuple:
         for key, val in parser.items("Downloader"):
             item = (val or key).strip()
             if item:
-                downloader_cmd.extend(shlex.split(item, posix=(sys.platform != "win32")))
+                # NOTE: posix=True (not sys.platform-dependent) is required here.
+                # Non-posix mode does NOT merge a quoted "a b c" into one token —
+                # it still splits on whitespace and leaves stray quote chars in
+                # the pieces, which breaks any value needing embedded spaces
+                # (e.g. --downloader-args ffmpeg:"-fps_mode passthrough ...").
+                # posix=True correctly groups quoted spans and strips the quotes.
+                downloader_cmd.extend(shlex.split(item, posix=True))
 
     lq_downloader_cmd = []
     if parser.has_section("LQ_Downloader"):
         for key, val in parser.items("LQ_Downloader"):
             item = (val or key).strip()
             if item:
-                lq_downloader_cmd.extend(shlex.split(item, posix=(sys.platform != "win32")))
+                lq_downloader_cmd.extend(shlex.split(item, posix=True))
 
     return checker_cmd, downloader_cmd, lq_downloader_cmd
 
