@@ -1492,7 +1492,7 @@ class SiteSortManager:
             import configparser as _cp
             from .main import get_global_conf_path
             path   = get_global_conf_path()
-            parser = _cp.ConfigParser(allow_no_value=True, interpolation=None)
+            parser = _cp.ConfigParser(allow_no_value=True, interpolation=None, delimiters=('=',))
             parser.read(path, encoding="utf-8")
             general = parser["General"] if parser.has_section("General") else {}
             val     = general.get("SITE_SORT", SORT_DEFAULT).strip().lower()
@@ -1621,6 +1621,19 @@ class GlobalConfigEditor:
         self._debug_tags_keys:   list            = []      # ordered tag names
         self._debug_tags_state:  dict[str, bool] = {}      # working copy of tag states
 
+        # ── Per-message filter popup state ──────────────────────────────────────
+        # A third layer, opened with Space on a tag row inside the debug-tags
+        # popup: lists every individual dbg() call site for that one tag, each
+        # toggleable independently, plus a top row mirroring the tag's overall
+        # on/off switch.
+        self.msg_filters_mode:     bool            = False
+        self._msg_filters_tag:     str             = ""
+        self._msg_filters_sel:     int             = 0       # 0=tag switch row, 1+=message rows
+        self._msg_filters_scroll:  int             = 0
+        self._msg_filters_keys:    list            = []      # ordered callsite ids
+        self._msg_filters_labels:  dict[str, str]  = {}      # callsite_id -> label
+        self._msg_filters_state:   dict[str, bool] = {}      # working copy: callsite_id -> enabled
+
     @staticmethod
     def _find_global_conf() -> str:
         """Return the path to global.conf inside the configs/ directory."""
@@ -1746,13 +1759,15 @@ class GlobalConfigEditor:
             self.debug_tags_sel = min(n_rows - 1, self.debug_tags_sel + 1)
             return True
 
-        elif key == ord(' '):                       # Space → toggle selected row
+        elif key == ord(' '):                       # Space → toggle / drill in
             if self.debug_tags_sel == 0:
                 cur = self._debug_tags_bool.lower()
                 self._debug_tags_bool = "false" if cur == "true" else "true"
             else:
-                tag = self._debug_tags_keys[self.debug_tags_sel - 1]
-                self._debug_tags_state[tag] = not self._debug_tags_state.get(tag, False)
+                # Drill into per-message control for this tag rather than
+                # toggling it directly — the tag's own on/off switch now
+                # lives as the top row of that popup.
+                self._open_msg_filters_popup()
             return True
 
         elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):   # Enter → save + close
@@ -1781,6 +1796,164 @@ class GlobalConfigEditor:
                 _save_global_json(gdata)
         except Exception as e:
             _dbg(f"[CONFIG] _save_debug_tags: failed to write global.json: {e}")
+
+    # ── Per-message filter popup (drilled into from a tag row) ────────────────
+
+    def _open_msg_filters_popup(self) -> None:
+        """Switch to the per-message editor for the currently selected tag."""
+        tag = self._debug_tags_keys[self.debug_tags_sel - 1]
+        try:
+            from . import logger as _logger
+        except ImportError:
+            import logger as _logger  # type: ignore[no-redef]
+
+        _logger.rescan_dbg_call_sites()
+        call_sites = _logger.get_dbg_call_sites(tag)          # [(id, label), ...]
+        overrides  = _logger.get_dbg_message_overrides(tag)   # id -> False (explicit only)
+
+        self._msg_filters_tag    = tag
+        self._msg_filters_keys   = [cs_id for cs_id, _ in call_sites]
+        self._msg_filters_labels = {cs_id: label for cs_id, label in call_sites}
+        self._msg_filters_state  = {cs_id: overrides.get(cs_id, True) for cs_id, _ in call_sites}
+        self._msg_filters_sel    = 0
+        self._msg_filters_scroll = 0
+        self.msg_filters_mode    = True
+
+    def _handle_msg_filters_key(self, key) -> bool:
+        """Handle keypresses while the per-message filter popup is open."""
+        n_rows = 1 + len(self._msg_filters_keys)   # row 0 = tag switch, 1+ = messages
+
+        if key == 27:                               # Esc → discard, back to tag list
+            self.msg_filters_mode = False
+            return True
+
+        elif key == curses.KEY_UP:
+            self._msg_filters_sel = max(0, self._msg_filters_sel - 1)
+            return True
+
+        elif key == curses.KEY_DOWN:
+            self._msg_filters_sel = min(n_rows - 1, self._msg_filters_sel + 1)
+            return True
+
+        elif key == ord(' '):                       # Space → toggle selected row
+            if self._msg_filters_sel == 0:
+                tag = self._msg_filters_tag
+                self._debug_tags_state[tag] = not self._debug_tags_state.get(tag, False)
+            elif self._msg_filters_keys:
+                cs_id = self._msg_filters_keys[self._msg_filters_sel - 1]
+                self._msg_filters_state[cs_id] = not self._msg_filters_state.get(cs_id, True)
+            return True
+
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):   # Enter → save + back
+            self._save_msg_filters()
+            self.msg_filters_mode = False
+            return True
+
+        return True   # consume all other keys so they don't leak to the outer popup
+
+    def _save_msg_filters(self) -> None:
+        """Persist this tag's on/off switch and its per-message overrides."""
+        try:
+            from .main import _global_json_lock, _load_global_json, _save_global_json
+        except ImportError:
+            from main import _global_json_lock, _load_global_json, _save_global_json  # type: ignore[no-redef]
+
+        with _global_json_lock:
+            gdata = _load_global_json()
+            gdata["debug_log_tags"] = self._debug_tags_state
+
+            all_filters = gdata.get("debug_log_message_filters", {})
+            # Only persist explicit disables — a callsite absent from the dict
+            # is enabled by default, keeping global.json small over time.
+            tag_overrides = {
+                cs_id: False for cs_id, enabled in self._msg_filters_state.items() if not enabled
+            }
+            if tag_overrides:
+                all_filters[self._msg_filters_tag] = tag_overrides
+            else:
+                all_filters.pop(self._msg_filters_tag, None)
+            gdata["debug_log_message_filters"] = all_filters
+
+            _save_global_json(gdata)
+        _dbg(f"[CONFIG] _save_msg_filters: tag={self._msg_filters_tag!r} "
+             f"disabled={sorted(k for k, v in self._msg_filters_state.items() if not v)}")
+
+    def _draw_msg_filters_popup(self, stdscr) -> None:
+        """Draw the per-message toggle popup for a single tag."""
+        db   = self.dashboard
+        h, w = stdscr.getmaxyx()
+
+        box_w  = min(78, w - 4)
+        n_msgs = len(self._msg_filters_keys)
+
+        # 2 borders + 1 title gap + 1 tag-switch row + 1 blank +
+        # 1 "Messages:" header + n_msgs rows (or 1 "none found" line) + 1 blank + 1 legend
+        min_h = max(n_msgs, 1) + 8
+        box_h = min(min_h, h - 4)
+        by1   = (h - box_h) // 2
+        bx1   = (w - box_w) // 2
+        by2   = by1 + box_h
+        bx2   = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), curses.color_pair(db.C_NORMAL))
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
+        title = f" [{self._msg_filters_tag}] MESSAGES "
+        db.safe_addstr(stdscr, by1, bx1 + 2, title, curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
+
+        row = by1 + 2
+
+        # ── Tag on/off row (selection index 0) ────────────────────────────────
+        is_sel   = (self._msg_filters_sel == 0)
+        prefix   = "> " if is_sel else "  "
+        enabled  = self._debug_tags_state.get(self._msg_filters_tag, False)
+        val_disp = "[ ON]" if enabled else "[OFF]"
+        row_attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
+                    if is_sel else curses.color_pair(db.C_NORMAL))
+        val_attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
+                    if is_sel
+                    else (curses.color_pair(db.C_LIVE) if enabled else curses.color_pair(db.C_WARN)))
+        db.safe_addstr(stdscr, row, bx1 + 2, prefix + f"{'Tag Enabled:':<18}", row_attr)
+        db.safe_addstr(stdscr, row, bx1 + 22, val_disp, val_attr | curses.A_BOLD)
+        row += 2
+
+        db.safe_addstr(stdscr, row, bx1 + 2, "Messages:", curses.color_pair(db.C_DIM))
+        row += 1
+
+        if not self._msg_filters_keys:
+            db.safe_addstr(stdscr, row, bx1 + 2, "(no dbg() calls found for this tag)",
+                           curses.color_pair(db.C_DIM))
+        else:
+            avail_rows = (by2 - row) - 2   # reserve 2 lines for legend at bottom
+            msg_sel = self._msg_filters_sel - 1
+            if msg_sel >= 0:
+                if msg_sel < self._msg_filters_scroll:
+                    self._msg_filters_scroll = msg_sel
+                elif msg_sel >= self._msg_filters_scroll + avail_rows:
+                    self._msg_filters_scroll = msg_sel - avail_rows + 1
+
+            scroll = self._msg_filters_scroll
+            label_w = box_w - 14
+            for i in range(scroll, min(n_msgs, scroll + avail_rows)):
+                cs_id    = self._msg_filters_keys[i]
+                label    = self._msg_filters_labels.get(cs_id, cs_id)
+                msg_on   = self._msg_filters_state.get(cs_id, True)
+                is_sel   = (self._msg_filters_sel == i + 1)
+                prefix   = "> " if is_sel else "  "
+                val_str  = "[ ON]" if msg_on else "[OFF]"
+                row_attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
+                            if is_sel else curses.color_pair(db.C_NORMAL))
+                val_attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
+                            if is_sel
+                            else (curses.color_pair(db.C_LIVE) if msg_on else curses.color_pair(db.C_DIM)))
+                disp = label if len(label) <= label_w else label[:label_w - 1] + "\u25ba"
+                db.safe_addstr(stdscr, row, bx1 + 2, prefix + disp, row_attr)
+                db.safe_addstr(stdscr, row, bx2 - 7, val_str, val_attr | curses.A_BOLD)
+                row += 1
+
+        db.safe_addstr(stdscr, by2, bx1 + 2,
+                       " Space:Toggle  Enter:Save  Esc:Back ",
+                       curses.color_pair(db.C_INVHEAD))
 
     def _draw_debug_tags_popup(self, stdscr) -> None:
         """Draw the combined bool-toggle + per-tag-toggle popup for DEBUG_LOGS."""
@@ -1864,9 +2037,10 @@ class GlobalConfigEditor:
             row += 1
 
         # ── Legend ────────────────────────────────────────────────────────────
-        db.safe_addstr(stdscr, by2, bx1 + 2,
-                       " Space:Toggle  Enter:Save  Esc:Cancel ",
-                       curses.color_pair(db.C_INVHEAD))
+        legend = (" Space:Toggle  Enter:Save  Esc:Cancel "
+                  if self.debug_tags_sel == 0 else
+                  " Space:Messages  Enter:Save  Esc:Cancel ")
+        db.safe_addstr(stdscr, by2, bx1 + 2, legend, curses.color_pair(db.C_INVHEAD))
 
     def save(self):
         """Write self.lines back to global.conf with a backup."""
@@ -1913,7 +2087,11 @@ class GlobalConfigEditor:
         """Handle a keypress in the global editor section. Returns True if consumed."""
         self._ensure_loaded()
 
-        # Debug-tags popup has highest priority — it consumes all keys.
+        # Per-message popup is nested inside the debug-tags popup and takes
+        # priority over it while open; the debug-tags popup itself has
+        # priority over everything else — both consume all keys.
+        if self.msg_filters_mode:
+            return self._handle_msg_filters_key(key)
         if self.debug_tags_mode:
             return self._handle_debug_tags_key(key)
 
@@ -2026,11 +2204,13 @@ class GlobalConfigEditor:
 
         if self.popup_mode and self.editing_item:
             self.draw_popup(stdscr)
-        elif self.debug_tags_mode:
+        elif self.debug_tags_mode or self.msg_filters_mode:
             self.draw_popup(stdscr)
 
     def draw_popup(self, stdscr):
-        if self.debug_tags_mode:
+        if self.msg_filters_mode:
+            self._draw_msg_filters_popup(stdscr)
+        elif self.debug_tags_mode:
             self._draw_debug_tags_popup(stdscr)
         else:
             self._draw_popup(stdscr)
@@ -2335,6 +2515,7 @@ class ConfigEditor:
         if self._focus == "global" and (
             (self.global_editor.popup_mode and self.global_editor.editing_item)
             or self.global_editor.debug_tags_mode
+            or self.global_editor.msg_filters_mode
         ):
             self.global_editor.draw_popup(stdscr)
         elif self._focus == "site" and self.popup_mode and self.editing_item:
@@ -2393,7 +2574,8 @@ class ConfigEditor:
 
         # Tab key cycles focus: site → global → priority → site → …
         # (only when no popup is open in any sub-editor)
-        any_popup = self.global_editor.popup_mode or self.global_editor.debug_tags_mode or self.popup_mode
+        any_popup = (self.global_editor.popup_mode or self.global_editor.debug_tags_mode
+                     or self.global_editor.msg_filters_mode or self.popup_mode)
         if key == ord('\t') and not any_popup:
             _cycle = ["site", "global", "priority"]
             self._focus = _cycle[(_cycle.index(self._focus) + 1) % len(_cycle)]
@@ -2409,10 +2591,13 @@ class ConfigEditor:
 
         if self._focus == "global":
             # Escape in global panel without any popup → exit Config tab.
-            # Must also check debug_tags_mode: when the DEBUG LOGGING popup is
-            # open, ESC should close it (handled inside global_editor.handle_key)
+            # Must also check debug_tags_mode / msg_filters_mode: when the
+            # DEBUG LOGGING popup (or its nested per-message popup) is open,
+            # ESC should close it (handled inside global_editor.handle_key)
             # rather than switching away from the Config tab.
-            if key == 27 and not self.global_editor.popup_mode and not self.global_editor.debug_tags_mode:
+            if (key == 27 and not self.global_editor.popup_mode
+                    and not self.global_editor.debug_tags_mode
+                    and not self.global_editor.msg_filters_mode):
                 self.dashboard.selected_tab = 0
                 return True
             return self.global_editor.handle_key(key)

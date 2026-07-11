@@ -1,3 +1,11 @@
+v1.21.12
+
+- added a workaround that fixes chaturbate audio desync
+- added exit confirmation prompt
+- clean up stall detection logic (removed directory scan)
+- add a safegaurd to split_after when the file cannot be found
+- improved configparser to handle additional arguments
+
 v1.21.4
 
 - fixed an issue with popup notifications that displayed popups too often for disabled/lower priority streamers

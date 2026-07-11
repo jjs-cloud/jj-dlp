@@ -3,4 +3,5 @@
 *.bak
 *.log
 *.txt
+research/
 !docs/*

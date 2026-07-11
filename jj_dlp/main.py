@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.21.4"
+__version__ = "1.21.12"
 
 import subprocess
 import time
@@ -171,14 +171,20 @@ def _parse_checker_and_downloader(parser: configparser.ConfigParser) -> tuple:
         for key, val in parser.items("Downloader"):
             item = (val or key).strip()
             if item:
-                downloader_cmd.extend(shlex.split(item, posix=(sys.platform != "win32")))
+                # NOTE: posix=True (not sys.platform-dependent) is required here.
+                # Non-posix mode does NOT merge a quoted "a b c" into one token —
+                # it still splits on whitespace and leaves stray quote chars in
+                # the pieces, which breaks any value needing embedded spaces
+                # (e.g. --downloader-args ffmpeg:"-fps_mode passthrough ...").
+                # posix=True correctly groups quoted spans and strips the quotes.
+                downloader_cmd.extend(shlex.split(item, posix=True))
 
     lq_downloader_cmd = []
     if parser.has_section("LQ_Downloader"):
         for key, val in parser.items("LQ_Downloader"):
             item = (val or key).strip()
             if item:
-                lq_downloader_cmd.extend(shlex.split(item, posix=(sys.platform != "win32")))
+                lq_downloader_cmd.extend(shlex.split(item, posix=True))
 
     return checker_cmd, downloader_cmd, lq_downloader_cmd
 
@@ -284,7 +290,12 @@ def load_config(config_path: str) -> dict:
         print(f"ERROR: Config file not found at: {config_path}", file=sys.stderr)
         sys.exit(1)
 
-    parser = configparser.ConfigParser(allow_no_value=True, interpolation=None)
+    # delimiters=('=',) — Downloader/Checker/LQ_Downloader lines are raw CLI-arg
+    # strings (e.g. "--downloader-args ffmpeg:...") stored as bare keys. The
+    # default ':' delimiter would misparse the colon in "ffmpeg:..." as a
+    # key/value split, silently truncating the argument. Restricting to '='
+    # avoids that while matching how every value in these configs is written.
+    parser = configparser.ConfigParser(allow_no_value=True, interpolation=None, delimiters=('=',))
     try:
         parser.read(config_path, encoding="utf-8")
     except Exception as _e:
@@ -345,7 +356,7 @@ def load_global_config() -> dict:
         ask_for_browser   – bool
     """
     path = get_global_conf_path()
-    parser = configparser.ConfigParser(allow_no_value=True, interpolation=None)
+    parser = configparser.ConfigParser(allow_no_value=True, interpolation=None, delimiters=('=',))
     try:
         parser.read(path, encoding="utf-8")
     except Exception:
@@ -737,13 +748,19 @@ class SiteState:
             self._cfg_cache_time = 0.0
 
     def log_line(self, msg: str) -> None:
-        """Append a timestamped line to the site's activity log (capped at 200 lines)."""
+        """Append a timestamped line to the site's activity log (capped at 200 lines).
+
+        If debug logging is currently enabled, the same line is also mirrored
+        into the debug log file (see logger.log_dashboard_line) so the debug
+        file always contains everything visible in the dashboard Log tab.
+        """
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         line = f"[{ts}] {msg}"
         with self.dash_lock:
             self.dash_log_lines.append(line)
             if len(self.dash_log_lines) > 200:
                 self.dash_log_lines = self.dash_log_lines[-200:]
+        _logger.log_dashboard_line(msg)
 
     def add_stdout_line(self, line: str) -> None:
         with self.dash_lock:
@@ -1301,59 +1318,12 @@ def get_live_streamers(streamers: List[str], cfg: dict,
     return live
 
 
-def wait_for_streamer_file(output_dir, streamer, proc_start_time, timeout=15.0, interval=2.0):
-    start = time.time()
-    dbg(f"[SPLIT][wait_for_streamer_file] START streamer={streamer!r} output_dir={output_dir!r} "
-        f"proc_start_time={proc_start_time:.3f} timeout={timeout}")
-    while time.time() - start < timeout:
-        if os.path.isdir(output_dir):
-            all_files = os.listdir(output_dir)
-            candidate_files = []
-            skipped_count = 0
-            for f in all_files:
-                fpath = os.path.join(output_dir, f)
-                if not os.path.isfile(fpath):
-                    continue
-                name_match = streamer.lower() in f.lower()
-                mtime = os.path.getmtime(fpath)
-                time_match = proc_start_time is None or mtime >= proc_start_time
-                if name_match and time_match:
-                    candidate_files.append(fpath)
-                elif name_match and not time_match:
-                    skipped_count += 1
-                    dbg(f"[STALL] wait_for_streamer_file SKIP (mtime too old): "
-                        f"file={f!r} mtime={mtime:.3f} proc_start_time={proc_start_time:.3f} "
-                        f"delta={mtime - proc_start_time:.3f}s",
-                        site_name=streamer)
-                elif not name_match:
-                    dbg(f"[STALL] wait_for_streamer_file SKIP (name no match): "
-                        f"file={f!r} streamer={streamer.lower()!r}",
-                        site_name=streamer)
-            if candidate_files:
-                chosen = max(candidate_files, key=os.path.getmtime)
-                dbg(f"[SPLIT][wait_for_streamer_file] FOUND file={chosen!r} "
-                    f"elapsed={time.time()-start:.2f}s candidates={len(candidate_files)}")
-                return chosen
-            else:
-                dbg(f"[SPLIT][wait_for_streamer_file] no match yet "
-                    f"elapsed={time.time()-start:.2f}s total_files={len(all_files)} "
-                    f"skipped_too_old={skipped_count}")
-        else:
-            dbg(f"[SPLIT][wait_for_streamer_file] output_dir does not exist: {output_dir!r}")
-        time.sleep(interval)
-    dbg(f"[SPLIT][wait_for_streamer_file] TIMEOUT after {timeout}s — returning None for streamer={streamer!r}")
-    return None
-
-
 def get_streamer_file_size(output_dir, streamer, cfg=None,
                            last_growth_time=None, stall_timeout=None,
                            stall_check_interval=None, proc_start_time=None,
                            known_filename=None):
     try:
-        if known_filename:
-            filename = known_filename
-        else:
-            filename = wait_for_streamer_file(output_dir, streamer, proc_start_time) if os.path.isdir(output_dir) else None
+        filename = known_filename
         size = os.path.getsize(filename) if filename else 0
         stall_detected = False
         if last_growth_time is not None and stall_timeout is not None:
@@ -1369,11 +1339,11 @@ def get_streamer_file_size(output_dir, streamer, cfg=None,
                 stall_detected = True
                 dbg(f"[STALL] TRIGGERED: stalled={stalled:.2f}s >= threshold={stall_timeout}s",
                     site_name=streamer)
-        return size, stall_detected, filename or ""
+        return size, stall_detected, filename or "", False
     except Exception as e:
         dbg(f"[STALL] exception in get_streamer_file_size: {type(e).__name__}: {e}",
             site_name=streamer)
-        return 0, False, ""
+        return 0, False, "", True
 
 def add_segment_suffix_to_tmpl(output_tmpl: str, segment_num: int) -> str:
     """
@@ -1654,6 +1624,12 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
     proc = None
     close_logs = lambda: None
     segment_num = 1
+    # Backoff for split attempts: after a failed split (e.g. couldn't find/
+    # confirm the new segment file), don't retry every second — wait a bit
+    # so a persistent problem doesn't spawn a fresh yt-dlp probe process
+    # every loop iteration. 0.0 means "no cooldown in effect yet".
+    _split_retry_cooldown_seconds = 60.0
+    next_split_retry_time = 0.0
 
     try:
         while True:
@@ -1754,8 +1730,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
             # ── Resolve active output file ────────────────────────────────
             # Prefer the filename parsed directly from yt-dlp's
-            # "[download] Destination: <path>" line; fall back to the
-            # directory-scan heuristic when the line doesn't appear within
+            # "[download] Destination: <path>" line; fall back to querying
+            # yt-dlp for JSON metadata when the line doesn't appear within
             # the wait window (e.g. the process exits immediately on error).
             _FILENAME_WAIT_TIMEOUT = 15.0
             filename_found = filename_event.wait(timeout=_FILENAME_WAIT_TIMEOUT)
@@ -1784,17 +1760,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 else:
                     dbg(f"[STALL] resolved active_file from yt-dlp output: {active_file!r}",
                         site_name=streamer)
-
-            if not active_file:
-                dbg(f"[STALL] no Destination line or missing file — "
-                    f"falling back to directory scan for streamer={streamer!r}",
-                    site_name=streamer)
-                active_file = wait_for_streamer_file(
-                    output_dir,
-                    streamer,
-                    proc_start_time,
-                    timeout=5.0
-                )
 
             if not active_file:
                 dbg(f"[STALL] falling back to JSON parsing for streamer={streamer!r}",
@@ -1827,7 +1792,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 except Exception as e:
                     dbg(f"[STALL] json fallback failed: {e}", site_name=streamer)
 
-            last_size, _, _ = get_streamer_file_size(
+            last_size, _, _, _ = get_streamer_file_size(
                 output_dir,
                 streamer,
                 cfg=cfg,
@@ -1841,6 +1806,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             stall_timeout        = cfg["stall_timeout"]
             seconds_since_check  = 0
             _split_log_counter   = 0  # throttle periodic split-timer dbg lines
+            # Set once we've already warned the Log tab about a missing/unreadable
+            # recording file, so we don't spam the same warning every stall-check
+            # cycle. Reset whenever the file is found again or a new attempt starts.
+            filename_error_warned = False
             dbg(f"[STALL] init: stall_timeout={stall_timeout}s "
                 f"stall_check_interval={stall_check_interval}s "
                 f"last_size={last_size} last_growth_time={last_growth_time:.2f}",
@@ -1920,7 +1889,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                             f"split_after_seconds={split_after_seconds}s "
                             f"remaining={max(0, split_after_seconds - elapsed):.1f}s")
 
-                    if elapsed >= split_after_seconds:
+                    if elapsed >= split_after_seconds and time.time() >= next_split_retry_time:
                         next_segment_num = segment_num + 1
 
                         next_output_tmpl = add_segment_suffix_to_tmpl(
@@ -2083,6 +2052,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
                                 last_size = 0
                                 last_growth_time = time.time()
+                                next_split_retry_time = 0.0
 
                                 dbg(f"[SPLIT][record_stream] switched to part {segment_num} "
                                     f"pid={proc.pid} active_file={active_file!r} "
@@ -2093,8 +2063,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                             dbg(f"[SPLIT][record_stream] SPLIT FAILED — "
                                 f"next_file={next_file!r} split_success={split_success} — "
                                 f"killing next_proc pid={next_proc.pid} and continuing current segment")
+                            next_split_retry_time = time.time() + _split_retry_cooldown_seconds
                             site.log_line(
-                                f"Split verification FAILED for {streamer} — keeping current recording"
+                                f"Split verification FAILED for {streamer} — keeping current recording "
+                                f"(will retry split in {int(_split_retry_cooldown_seconds)}s)"
                             )
 
                             kill_proc(next_proc)
@@ -2107,8 +2079,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         except Exception as e:
                             dbg(f"[SPLIT][record_stream] EXCEPTION launching next proc: "
                                 f"{type(e).__name__}: {e}")
+                            next_split_retry_time = time.time() + _split_retry_cooldown_seconds
                             site.log_line(
-                                f"Failed to start split recording for {streamer}: {e}"
+                                f"Failed to start split recording for {streamer}: {e} "
+                                f"(will retry split in {int(_split_retry_cooldown_seconds)}s)"
                             )
 
                 time.sleep(1)
@@ -2119,7 +2093,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     dbg(f"[STALL] check cycle: elapsed_since_growth="
                         f"{time.time() - last_growth_time:.2f}s",
                         site_name=streamer)
-                    current_size, stall_detected, _ = get_streamer_file_size(
+                    current_size, stall_detected, _, file_error = get_streamer_file_size(
                         output_dir,
                         streamer,
                         cfg=cfg,
@@ -2130,7 +2104,23 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         known_filename=active_file,
                     )
 
-                    if stall_detected:
+                    if file_error:
+                        # We couldn't even locate/read the recording file this
+                        # cycle (e.g. active_file points at a filename that
+                        # doesn't exist). Don't let that masquerade as "no
+                        # growth" — that would show a false "stalled" state on
+                        # the dashboard. Just give up on stall detection for
+                        # this file until it resolves itself.
+                        dbg("[STALL] filename lookup failed — giving up on "
+                            "stall detection for this cycle", site_name=streamer)
+                        site.clear_stall_since(streamer)
+                        if not filename_error_warned:
+                            site.log_line(
+                                f"Warning: stall checker could not locate file for {streamer}"
+                            )
+                            filename_error_warned = True
+
+                    elif stall_detected:
                         site.log_line(f"Stall detected for {streamer} — restarting")
 
                         kill_proc(proc)
@@ -2146,7 +2136,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         time.sleep(5)
                         break
 
-                    if current_size > last_size:
+                    elif current_size > last_size:
+                        filename_error_warned = False
                         dbg(f"[STALL] grew: {last_size} -> {current_size} "
                             f"(+{current_size - last_size} bytes), resetting timer",
                             site_name=streamer)
@@ -2154,6 +2145,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         last_growth_time = time.time()
                         site.clear_stall_since(streamer)
                     else:
+                        filename_error_warned = False
                         dbg(f"[STALL] NO GROWTH: size={current_size} "
                             f"stall_since={time.time() - last_growth_time:.2f}s",
                             site_name=streamer)
@@ -2975,6 +2967,10 @@ class JJDlpDashboard:
         self._changelog_scroll       = 0   # lines scrolled up from the bottom (0 = top)
         self._changelog_lines: List[str] = []
         self._changelog_popup_queued = False   # will be set to True after first frame
+
+        # ── Exit-confirmation popup state ─────────────────────────────────────
+        self._exit_confirm_open      = False
+        self._exit_confirm_sel       = 0   # 0 = Yes (default), 1 = No
 
     # ── Color palette ────────────────────────────────────────────────────────
     # Pair numbers and their meanings — easy to change here
@@ -4161,6 +4157,10 @@ class JJDlpDashboard:
         if self._changelog_popup_open:
             self.draw_changelog_popup()
 
+        # Exit-confirmation popup — drawn on top of everything else.
+        if self._exit_confirm_open:
+            self.draw_exit_confirm_popup()
+
         self.stdscr.refresh()
 
         # Log timing every 100 frames (~5 seconds at 20fps)
@@ -4174,6 +4174,10 @@ class JJDlpDashboard:
     # ── Input handling ────────────────────────────────────────────────────────
     def handle_key(self, key) -> bool:
         """Returns False to quit."""
+        # Exit-confirmation popup intercepts all keys while open.
+        if self._exit_confirm_open:
+            return self._handle_exit_confirm_key(key)
+
         # Changelog popup intercepts all keys while open.
         if self._changelog_popup_open:
             if key in (ord('q'), ord('Q'), 27,            # Q / Esc → close
@@ -4211,7 +4215,7 @@ class JJDlpDashboard:
                 dbg(f"[CONFIG] main.handle_key() config_editor did not consume key={key}")
 
         if key in (ord('q'), ord('Q'), 27):
-            return False
+            self._open_exit_confirm()
         elif key in (curses.KEY_RIGHT, ord('l')):
             self.selected_tab = (self.selected_tab + 1) % len(self.TABS)
         elif key in (curses.KEY_LEFT, ord('h')):
@@ -4482,6 +4486,75 @@ class JJDlpDashboard:
         self._changelog_scroll = 0
         self._changelog_popup_open = True
         self._mark_changelog_shown()
+
+    def _open_exit_confirm(self) -> None:
+        """Open the 'Are you sure you want to exit?' popup, 'Yes' selected by default."""
+        self._exit_confirm_open = True
+        self._exit_confirm_sel  = 0   # 0 = Yes, 1 = No
+
+    def _handle_exit_confirm_key(self, key) -> bool:
+        """Handle input while the exit-confirmation popup is open.
+
+        Returns False to quit the app, True to keep running.
+        """
+        if key in (27, ord('q'), ord('Q')):  # Esc/Q again → same as selecting Yes + Enter
+            return False
+        elif key in (curses.KEY_LEFT, curses.KEY_RIGHT, ord('h'), ord('l'),
+                     curses.KEY_UP, curses.KEY_DOWN, ord('j'), ord('k'), ord('\t')):
+            self._exit_confirm_sel = 1 - self._exit_confirm_sel
+        elif key in (ord('y'), ord('Y')):
+            return False
+        elif key in (ord('n'), ord('N')):
+            self._exit_confirm_open = False
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
+            if self._exit_confirm_sel == 0:   # Yes
+                return False
+            self._exit_confirm_open = False   # No → close popup, keep running
+        return True
+
+    def draw_exit_confirm_popup(self) -> None:
+        """Draw the small 'Are you sure you want to exit?' confirmation box."""
+        if not self._exit_confirm_open:
+            return
+        h, w = self.stdscr.getmaxyx()
+
+        message = "Are you sure you want to exit?"
+        legend  = " \u2190/\u2192: Select  Enter: Confirm  Esc: Exit "
+        box_w = min(max(len(message) + 6, len(legend) + 4, 34), w - 4)
+        box_h = 5
+        by1 = max(0, (h - box_h) // 2)
+        bx1 = max(0, (w - box_w) // 2)
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        # Fill background
+        for y in range(by1, by2 + 1):
+            self.safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1),
+                        curses.color_pair(self.C_NORMAL))
+
+        self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_WARN)
+        title = " CONFIRM EXIT "
+        self.safe_addstr(self.stdscr, by1, bx1 + 2, title,
+                    curses.color_pair(self.C_WARN) | curses.A_BOLD)
+
+        self.safe_addstr(self.stdscr, by1 + 2, bx1 + max(0, (box_w - len(message)) // 2),
+                    message, curses.color_pair(self.C_NORMAL) | curses.A_BOLD)
+
+        yes_label = " Yes "
+        no_label  = " No "
+        gap = 4
+        buttons_w = len(yes_label) + len(no_label) + gap
+        start_x = bx1 + max(0, (box_w - buttons_w) // 2)
+        yes_attr = (curses.color_pair(self.C_HILIGHT) | curses.A_BOLD) if self._exit_confirm_sel == 0 \
+                   else curses.color_pair(self.C_NORMAL)
+        no_attr  = (curses.color_pair(self.C_HILIGHT) | curses.A_BOLD) if self._exit_confirm_sel == 1 \
+                   else curses.color_pair(self.C_NORMAL)
+        self.safe_addstr(self.stdscr, by1 + 3, start_x, yes_label, yes_attr)
+        self.safe_addstr(self.stdscr, by1 + 3, start_x + len(yes_label) + gap, no_label, no_attr)
+
+        self.safe_addstr(self.stdscr, by2, bx1 + max(0, (box_w - len(legend)) // 2),
+                    legend[:max(0, box_w - 2)],
+                    curses.color_pair(self.C_INVHEAD))
 
     def draw_changelog_popup(self) -> None:
         """Draw the scrollable changelog popup centred on screen."""
