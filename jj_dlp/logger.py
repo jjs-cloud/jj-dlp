@@ -15,13 +15,18 @@ Public API
 ----------
 startup_dbg(msg)                   Write a line to the startup log (if enabled).
 startup_dbg_flush()                Write the opening banner (argv, cwd, python path).
-dbg(msg)                           Write to debug log (filtered by DBG_FILTERS).
+dbg(msg)                           Write to debug log (filtered by DBG_FILTERS, then by
+                                    any per-message overrides for that tag).
 log_dashboard_line(msg)             Mirror a Log-tab line into the debug log
                                     (unfiltered; only gated on enabled/path).
 log_crash(e)                       Write an unhandled exception to jj-dlp-crash.log.
 configure_debug_log(enabled, path) Atomically update the debug-log config.
 get_debug_log_config()             Return current (enabled, path) debug-log state.
 get_dbg_filters()                  Return a snapshot copy of the current tag states.
+rescan_dbg_call_sites()            (Re)scan the package's .py files for dbg() call
+                                    sites, grouped by their leading [TAG].
+get_dbg_call_sites(tag)            Return [(callsite_id, label), ...] for a tag.
+get_dbg_message_overrides(tag)     Return the saved per-message overrides for a tag.
 configure(dashboard_log_fn, ...)   Inject dashboard logger and optional per-line debug
                                    optional per-line debug callback for the Log tab.
 get_debug_log_path(cfg)            Resolve the debug log path from a config dict.
@@ -30,6 +35,7 @@ get_log_file_paths(cfg)            Return (stdout_path, stderr_path) for yt-dlp 
 """
 
 import os
+import re
 import sys
 import threading
 from dataclasses import dataclass
@@ -158,34 +164,135 @@ DBG_TAGS: list[str] = [
 import json
 import time
 
-_tags_cache: dict[str, bool] = {}
-_tags_cache_mtime: float = 0.0
-_tags_cache_lock = threading.Lock()
+_json_cache: dict = {}
+_json_cache_mtime: float = 0.0
+_json_cache_lock = threading.Lock()
 
 # global.json lives inside the jj_dlp/ package directory (same dir as this file)
-_GLOBAL_JSON_PATH: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "global.json")
+_PKG_DIR: str = os.path.dirname(os.path.abspath(__file__))
+_GLOBAL_JSON_PATH: str = os.path.join(_PKG_DIR, "global.json")
 
-def _get_active_tags() -> dict[str, bool]:
-    """Return the currently enabled debug tags from global.json, using an mtime cache."""
-    global _tags_cache, _tags_cache_mtime
+
+def _get_global_json_cache() -> dict:
+    """Return the parsed contents of global.json, using an mtime cache.
+
+    Backs both the per-tag filter (DBG_TAGS) and the finer per-message
+    filter (debug_log_message_filters), so both read paths share one file
+    read / cache-invalidation check.
+    """
+    global _json_cache, _json_cache_mtime
     path = _GLOBAL_JSON_PATH
-    
-    with _tags_cache_lock:
+
+    with _json_cache_lock:
         try:
             mtime = os.path.getmtime(path)
         except Exception:
             mtime = 0.0
 
-        if mtime != _tags_cache_mtime:
+        if mtime != _json_cache_mtime:
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                _tags_cache = data.get("debug_log_tags", {})
-                _tags_cache_mtime = mtime
+                if not isinstance(data, dict):
+                    data = {}
             except Exception:
-                _tags_cache = {}
+                data = {}
+            _json_cache = data
+            _json_cache_mtime = mtime
 
-        return _tags_cache
+        return _json_cache
+
+
+def _get_active_tags() -> dict[str, bool]:
+    """Return the currently enabled debug tags from global.json."""
+    return _get_global_json_cache().get("debug_log_tags", {})
+
+
+def _get_active_msg_filters() -> dict[str, dict[str, bool]]:
+    """Return {tag: {callsite_id: False, ...}} per-message overrides.
+
+    Only explicit disables are ever persisted — a callsite absent from a
+    tag's dict is enabled by default.
+    """
+    return _get_global_json_cache().get("debug_log_message_filters", {})
+
+
+# ── Per-message call-site registry ─────────────────────────────────────────────
+# Powers the "drill into a tag" popup in the config editor: for a given TAG,
+# lists every individual dbg()/_dbg() call site in the codebase that starts
+# with "[TAG]" so each one can be toggled on/off independently. This registry
+# is built by scanning source files — it is never consulted by dbg() itself,
+# only get_dbg_call_sites() (used by the UI). dbg() only ever reads the saved
+# overrides from _get_active_msg_filters().
+_CALL_SITE_RE = re.compile(
+    r'(?<![A-Za-z0-9_])(?:_dbg|dbg)\(\s*f?(["\'])((?:\\.|(?!\1).)*)\1', re.DOTALL
+)
+_TAG_PREFIX_RE = re.compile(r'^\[([A-Za-z_]+)\]')
+_CALL_SITE_SKIP_DIRS = {"__pycache__", ".git", "venv", ".venv", "node_modules", "backups", "configs"}
+
+_call_site_registry: dict[str, list[tuple[str, str]]] = {}
+_call_site_lock = threading.Lock()
+_call_site_scanned = False
+
+
+def rescan_dbg_call_sites() -> None:
+    """(Re)scan every .py file under the package directory for dbg() call
+    sites, grouping them by their leading [TAG]. Cheap enough to call each
+    time the config editor opens the per-tag message popup, so edits made
+    to the source since the last scan show up without a restart.
+    """
+    global _call_site_registry, _call_site_scanned
+    registry: dict[str, list[tuple[str, str]]] = {}
+
+    for dirpath, dirnames, filenames in os.walk(_PKG_DIR):
+        dirnames[:] = [d for d in dirnames if d not in _CALL_SITE_SKIP_DIRS]
+        for fname in filenames:
+            if not fname.endswith(".py"):
+                continue
+            fpath = os.path.join(dirpath, fname)
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                    src = f.read()
+            except Exception:
+                continue
+            rel = os.path.relpath(fpath, _PKG_DIR)
+            for m in _CALL_SITE_RE.finditer(src):
+                literal = m.group(2)
+                tag_m = _TAG_PREFIX_RE.match(literal)
+                if not tag_m:
+                    continue
+                tag = tag_m.group(1)
+                lineno = src.count("\n", 0, m.start()) + 1
+                label = literal.strip()
+                if len(label) > 90:
+                    label = label[:87] + "..."
+                registry.setdefault(tag, []).append((f"{rel}:{lineno}", label))
+
+    for sites in registry.values():
+        sites.sort(key=lambda t: t[0])
+
+    with _call_site_lock:
+        _call_site_registry = registry
+        _call_site_scanned = True
+
+
+def get_dbg_call_sites(tag: str) -> list[tuple[str, str]]:
+    """Return [(callsite_id, label), ...] for every dbg() call site whose
+    message starts with "[TAG]". Triggers a scan on first use.
+    """
+    with _call_site_lock:
+        scanned = _call_site_scanned
+    if not scanned:
+        rescan_dbg_call_sites()
+    with _call_site_lock:
+        return list(_call_site_registry.get(tag, []))
+
+
+def get_dbg_message_overrides(tag: str) -> dict[str, bool]:
+    """Return the saved per-message overrides for a tag (only explicit
+    disables are stored; anything absent from the dict defaults to enabled).
+    """
+    return dict(_get_active_msg_filters().get(tag, {}))
 
 
 # ── Startup log ───────────────────────────────────────────────────────────────
@@ -280,6 +387,23 @@ def dbg(msg: str, site_name: str = "") -> None:
             allowed = tags.get(tag, False)   # unknown tags are dropped
             if not allowed:
                 return
+
+            # ── Per-message filter ──────────────────────────────────────────
+            # Finer-grained than the tag switch above: individual call sites
+            # within an enabled tag can still be silenced. Only pay the cost
+            # of identifying the call site (via the caller's frame) when this
+            # tag actually has overrides configured — the common case has
+            # none, so this is a no-op dict lookup for most dbg() calls.
+            msg_overrides = _get_active_msg_filters().get(tag)
+            if msg_overrides:
+                caller = sys._getframe(1)
+                try:
+                    rel = os.path.relpath(os.path.abspath(caller.f_code.co_filename), _PKG_DIR)
+                except Exception:
+                    rel = caller.f_code.co_filename
+                callsite_id = f"{rel}:{caller.f_lineno}"
+                if msg_overrides.get(callsite_id) is False:
+                    return
 
     ts   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
