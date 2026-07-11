@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.21.7"
+__version__ = "1.21.8"
 
 import subprocess
 import time
@@ -1307,59 +1307,12 @@ def get_live_streamers(streamers: List[str], cfg: dict,
     return live
 
 
-def wait_for_streamer_file(output_dir, streamer, proc_start_time, timeout=15.0, interval=2.0):
-    start = time.time()
-    dbg(f"[SPLIT][wait_for_streamer_file] START streamer={streamer!r} output_dir={output_dir!r} "
-        f"proc_start_time={proc_start_time:.3f} timeout={timeout}")
-    while time.time() - start < timeout:
-        if os.path.isdir(output_dir):
-            all_files = os.listdir(output_dir)
-            candidate_files = []
-            skipped_count = 0
-            for f in all_files:
-                fpath = os.path.join(output_dir, f)
-                if not os.path.isfile(fpath):
-                    continue
-                name_match = streamer.lower() in f.lower()
-                mtime = os.path.getmtime(fpath)
-                time_match = proc_start_time is None or mtime >= proc_start_time
-                if name_match and time_match:
-                    candidate_files.append(fpath)
-                elif name_match and not time_match:
-                    skipped_count += 1
-                    dbg(f"[STALL] wait_for_streamer_file SKIP (mtime too old): "
-                        f"file={f!r} mtime={mtime:.3f} proc_start_time={proc_start_time:.3f} "
-                        f"delta={mtime - proc_start_time:.3f}s",
-                        site_name=streamer)
-                elif not name_match:
-                    dbg(f"[STALL] wait_for_streamer_file SKIP (name no match): "
-                        f"file={f!r} streamer={streamer.lower()!r}",
-                        site_name=streamer)
-            if candidate_files:
-                chosen = max(candidate_files, key=os.path.getmtime)
-                dbg(f"[SPLIT][wait_for_streamer_file] FOUND file={chosen!r} "
-                    f"elapsed={time.time()-start:.2f}s candidates={len(candidate_files)}")
-                return chosen
-            else:
-                dbg(f"[SPLIT][wait_for_streamer_file] no match yet "
-                    f"elapsed={time.time()-start:.2f}s total_files={len(all_files)} "
-                    f"skipped_too_old={skipped_count}")
-        else:
-            dbg(f"[SPLIT][wait_for_streamer_file] output_dir does not exist: {output_dir!r}")
-        time.sleep(interval)
-    dbg(f"[SPLIT][wait_for_streamer_file] TIMEOUT after {timeout}s — returning None for streamer={streamer!r}")
-    return None
-
-
 def get_streamer_file_size(output_dir, streamer, cfg=None,
                            last_growth_time=None, stall_timeout=None,
                            stall_check_interval=None, proc_start_time=None,
                            known_filename=None):
     try:
-        if known_filename:
-            filename = known_filename
-        else:
-            filename = wait_for_streamer_file(output_dir, streamer, proc_start_time) if os.path.isdir(output_dir) else None
+        filename = known_filename
         size = os.path.getsize(filename) if filename else 0
         stall_detected = False
         if last_growth_time is not None and stall_timeout is not None:
@@ -1760,8 +1713,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
             # ── Resolve active output file ────────────────────────────────
             # Prefer the filename parsed directly from yt-dlp's
-            # "[download] Destination: <path>" line; fall back to the
-            # directory-scan heuristic when the line doesn't appear within
+            # "[download] Destination: <path>" line; fall back to querying
+            # yt-dlp for JSON metadata when the line doesn't appear within
             # the wait window (e.g. the process exits immediately on error).
             _FILENAME_WAIT_TIMEOUT = 15.0
             filename_found = filename_event.wait(timeout=_FILENAME_WAIT_TIMEOUT)
@@ -1790,17 +1743,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 else:
                     dbg(f"[STALL] resolved active_file from yt-dlp output: {active_file!r}",
                         site_name=streamer)
-
-            if not active_file:
-                dbg(f"[STALL] no Destination line or missing file — "
-                    f"falling back to directory scan for streamer={streamer!r}",
-                    site_name=streamer)
-                active_file = wait_for_streamer_file(
-                    output_dir,
-                    streamer,
-                    proc_start_time,
-                    timeout=5.0
-                )
 
             if not active_file:
                 dbg(f"[STALL] falling back to JSON parsing for streamer={streamer!r}",
