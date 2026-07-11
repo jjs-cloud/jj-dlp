@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.21.8"
+__version__ = "1.21.9"
 
 import subprocess
 import time
@@ -1613,6 +1613,12 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
     proc = None
     close_logs = lambda: None
     segment_num = 1
+    # Backoff for split attempts: after a failed split (e.g. couldn't find/
+    # confirm the new segment file), don't retry every second — wait a bit
+    # so a persistent problem doesn't spawn a fresh yt-dlp probe process
+    # every loop iteration. 0.0 means "no cooldown in effect yet".
+    _split_retry_cooldown_seconds = 60.0
+    next_split_retry_time = 0.0
 
     try:
         while True:
@@ -1872,7 +1878,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                             f"split_after_seconds={split_after_seconds}s "
                             f"remaining={max(0, split_after_seconds - elapsed):.1f}s")
 
-                    if elapsed >= split_after_seconds:
+                    if elapsed >= split_after_seconds and time.time() >= next_split_retry_time:
                         next_segment_num = segment_num + 1
 
                         next_output_tmpl = add_segment_suffix_to_tmpl(
@@ -2035,6 +2041,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
                                 last_size = 0
                                 last_growth_time = time.time()
+                                next_split_retry_time = 0.0
 
                                 dbg(f"[SPLIT][record_stream] switched to part {segment_num} "
                                     f"pid={proc.pid} active_file={active_file!r} "
@@ -2045,8 +2052,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                             dbg(f"[SPLIT][record_stream] SPLIT FAILED — "
                                 f"next_file={next_file!r} split_success={split_success} — "
                                 f"killing next_proc pid={next_proc.pid} and continuing current segment")
+                            next_split_retry_time = time.time() + _split_retry_cooldown_seconds
                             site.log_line(
-                                f"Split verification FAILED for {streamer} — keeping current recording"
+                                f"Split verification FAILED for {streamer} — keeping current recording "
+                                f"(will retry split in {int(_split_retry_cooldown_seconds)}s)"
                             )
 
                             kill_proc(next_proc)
@@ -2059,8 +2068,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         except Exception as e:
                             dbg(f"[SPLIT][record_stream] EXCEPTION launching next proc: "
                                 f"{type(e).__name__}: {e}")
+                            next_split_retry_time = time.time() + _split_retry_cooldown_seconds
                             site.log_line(
-                                f"Failed to start split recording for {streamer}: {e}"
+                                f"Failed to start split recording for {streamer}: {e} "
+                                f"(will retry split in {int(_split_retry_cooldown_seconds)}s)"
                             )
 
                 time.sleep(1)
