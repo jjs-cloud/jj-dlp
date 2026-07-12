@@ -231,6 +231,15 @@ class PriorityEditor:
         saved_block   = priorities_block.get(self._config_id, {})
         saved_entries = saved_block.get("entries", [])
 
+        if needs_seed:
+            _dbg(
+                f"[CONFIG][DIAG] needs_seed=True for config_id={self._config_id!r} "
+                f"(known priorities keys: {list(priorities_block.keys())}) — "
+                f"about to write DEFAULTS for {len(raw)} streamer(s), which will "
+                f"OVERWRITE any existing priority/bypass ordering for this config_id "
+                f"if it existed under a different key. config_paths={config_paths!r}"
+            )
+
         # Build a lookup: (streamer, site) → saved dict
         saved_map: "dict[tuple,dict]" = {}
         for i, e in enumerate(saved_entries):

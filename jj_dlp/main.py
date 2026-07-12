@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.21.12"
+__version__ = "1.21.13"
 
 import subprocess
 import time
@@ -477,13 +477,28 @@ def _global_json_path() -> str:
 def _load_global_json() -> dict:
     """Load the global.json file.  Returns an empty dict if the file does not
     exist or cannot be parsed."""
+    path = _global_json_path()
     try:
-        with open(_global_json_path(), "r", encoding="utf-8") as f:
-            data = json.load(f)
+        with open(path, "r", encoding="utf-8") as f:
+            raw = f.read()
+        data = json.loads(raw)
         if isinstance(data, dict):
+            n_prio = len(data.get("priorities", {}))
+            dbg(f"[GLOBAL_JSON][DIAG] load OK: path={path!r} size={len(raw)} priorities_keys={n_prio}")
             return data
-    except Exception:
-        pass
+        dbg(f"[GLOBAL_JSON][DIAG] load: parsed JSON was not a dict (type={type(data).__name__}) — returning {{}}")
+    except FileNotFoundError:
+        dbg(f"[GLOBAL_JSON][DIAG] load: file not found at {path!r} — returning {{}}")
+    except Exception as e:
+        # This is the dangerous case: the file exists but failed to parse
+        # (e.g. truncated by a crash/kill mid-write).  Log the raw content
+        # length so we can tell a torn write from a genuinely empty/missing
+        # file after the fact.
+        try:
+            size = os.path.getsize(path)
+        except Exception:
+            size = -1
+        dbg(f"[GLOBAL_JSON][DIAG] load FAILED: path={path!r} on-disk size={size} error={e!r} — returning {{}} (THIS IS LIKELY THE BUG)")
     return {}
 
 
@@ -528,11 +543,24 @@ def _save_global_json(data: dict) -> None:
     been more than 24h since the last backup (see _backup_global_json_if_due).
     """
     _backup_global_json_if_due(data)
+    path = _global_json_path()
+    tmp_path = path + ".tmp"
     try:
-        with open(_global_json_path(), "w", encoding="utf-8") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
-    except Exception:
-        pass
+            f.flush()
+            os.fsync(f.fileno())
+        # os.replace is atomic on both POSIX and Windows — a crash/kill at
+        # any point up to here leaves the original global.json untouched;
+        # a crash after this line leaves the new file fully written.
+        os.replace(tmp_path, path)
+        dbg(f"[GLOBAL_JSON][DIAG] save OK: path={path!r} priorities_keys={len(data.get('priorities', {}))}")
+    except Exception as e:
+        dbg(f"[GLOBAL_JSON][DIAG] save FAILED: path={path!r} error={e!r}")
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
 
 
 def _load_last_live_cache(config_path: str) -> Dict[str, float]:
@@ -4519,7 +4547,7 @@ class JJDlpDashboard:
         h, w = self.stdscr.getmaxyx()
 
         message = "Are you sure you want to exit?"
-        legend  = " \u2190/\u2192: Select  Enter: Confirm  Esc: Exit "
+        legend  = " \u2190/\u2192: Select  Enter: Confirm  Esc/Q: Exit "
         box_w = min(max(len(message) + 6, len(legend) + 4, 34), w - 4)
         box_h = 5
         by1 = max(0, (h - box_h) // 2)
