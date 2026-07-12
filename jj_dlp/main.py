@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.21.13"
+__version__ = "1.22.0"
 
 import subprocess
 import time
@@ -405,6 +405,8 @@ def load_global_config() -> dict:
         "lq_downloader":      _bool("LQ_DOWNLOADER", False),
         "ff_err_thresh":      _int("FF_ERR_THRESH", 200),
         "subfolders":         _bool("SUBFOLDERS", False),
+        "ntfy_topic":         general.get("NTFY_TOPIC", "").strip().strip('"\''),
+        "ntfy_url":           general.get("NTFY_URL", "https://ntfy.sh").strip().strip('"\''),
     }
 
 def _write_global_conf_key(key: str, value: str) -> None:
@@ -1022,10 +1024,81 @@ def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 1
     threading.Thread(target=_run, daemon=True, name=f"popup-{streamer}").start()
 
 
+def _send_ntfy_notification(streamer: str, is_recording: bool, site_label: str) -> None:
+    global_cfg = load_global_config()
+    topic = global_cfg.get("ntfy_topic", "").strip()
+    url = global_cfg.get("ntfy_url", "https://ntfy.sh").strip()
+    
+    if not topic:
+        dbg("[NTFY] No ntfy_topic configured; skipping notification.")
+        return
+        
+    if not url:
+        url = "https://ntfy.sh"
+        
+    if not url.startswith("http://") and not url.startswith("https://"):
+        url = "https://" + url
+    url = url.rstrip("/")
+    
+    full_url = f"{url}/{topic}"
+    title = "jj-dlp: Recording Started"
+    body = f"🔴 {streamer} is LIVE on {site_label} and recording has started."
+    
+    headers = {
+        "Title": title,
+        "Priority": "high",
+        "Tags": "red_circle,record"
+    }
+    
+    def _post():
+        import urllib.request
+        import urllib.error
+        try:
+            req = urllib.request.Request(
+                full_url,
+                data=body.encode("utf-8"),
+                headers=headers,
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=10) as response:
+                res_code = response.getcode()
+                dbg(f"[NTFY] Notification sent successfully for {streamer}. Status: {res_code}")
+        except urllib.error.URLError as e:
+            dbg(f"[NTFY] Failed to send notification for {streamer}: {e}")
+        except Exception as e:
+            dbg(f"[NTFY] Unexpected error sending notification for {streamer}: {e}")
+            
+    threading.Thread(target=_post, daemon=True, name=f"ntfy-{streamer}").start()
+
+
 def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
                            show_popup: bool = True, source: str = "poll",
                            is_recording: bool = True, reason: str = "",
                            warning: str = "") -> None:
+    # Handle ntfy notifications first, independently of popup settings
+    if is_recording:
+        site_label = cfg.get("site_label", os.path.basename(site.config_path))
+        streamer_notif = None
+        try:
+            with _global_json_lock:
+                gdata = _load_global_json()
+            config_id = _get_config_id()
+            entries = gdata.get("priorities", {}).get(config_id, {}).get("entries", [])
+            for e in entries:
+                if e.get("streamer") == streamer and e.get("site") == site_label:
+                    streamer_notif = e.get("notifications_enabled")
+                    break
+        except Exception as ex:
+            dbg(f"[NTFY] Error reading global.json for streamer-level setting: {ex}")
+
+        if streamer_notif is not None:
+            notifications_enabled = streamer_notif
+        else:
+            notifications_enabled = cfg.get("ntfy_notifications", True)
+
+        if notifications_enabled:
+            _send_ntfy_notification(streamer, is_recording, site_label)
+
     if not show_popup or not cfg.get("popup_notifications", True):
         dbg(f"[POPUP] popup skipped for streamer={streamer!r} show_popup={show_popup} popup_notifications={cfg.get('popup_notifications', True)}")
         return

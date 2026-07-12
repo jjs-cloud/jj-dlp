@@ -58,6 +58,8 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("LQ_DOWNLOADER",         "global", "false", True,  "When any recording reaches the ffmpeg error threshold (FF_ERR_THRESH) lower the video quality of the lowest priority streamer, freeing up bandwidth for the remaining streamers."),
     _KeyDef("FF_ERR_THRESH",         "global", "200",   True,  'Restart the download if we see this many ffmpeg errors ("timestamp discontinuity", "Packet corrupt") default: 200'),
     _KeyDef("SUBFOLDERS",            "global", "false", True,  "Save recordings into a subfolder named after the streamer inside OUTPUT_DIR (true/false)."),
+    _KeyDef("NTFY_TOPIC",            "global", "",      True,  "The topic name to use for ntfy.sh notifications. (example: jj-dlp-fj48dh734fk) Refer to docs/ntfy-setup.md for a detailed setup guide. (blank = disabled)"),
+    _KeyDef("NTFY_URL",              "global", "https://ntfy.sh", True, "The URL of the ntfy instance (default: https://ntfy.sh)."),
     _KeyDef("SITE_SORT",             "global", "added_first", True, "The order to display streamers on each site panel.   This can also be adjusted by pressing the S key on the Dashboard tab."),
 
     # ── Site keys (per-site .conf) ────────────────────────────────────────────
@@ -77,6 +79,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("LOG_PATH",              "site",   "",     True,  "Path to save the log file.  Can be an absolute or relative path."),
     _KeyDef("SPLIT_LOGS",            "site",   "false", True, "When LOGGING = true, create 2 separate log files.  One for stdout (yt-dlp) and one for stderr (ffmpeg)."),
     _KeyDef("POPUP_NOTIFICATIONS",   "site",   "true", True,  "Show a popup notification when a streamer goes live."),
+    _KeyDef("NTFY_NOTIFICATIONS",    "site",   "true", True,  "Push a notification to your phone via ntfy.sh when a recording starts. This requires NTFY_TOPIC to be set in the GLOBAL SETTINGS panel. (true/false)"),
     _KeyDef("AD_ALERTS",             "site",   "True", True,  "Show an alert in the system panel when ads are detected in a recording (true/false)."),
     _KeyDef("POPUP_TIMEOUT",         "site",   "15",   True,  "Seconds to show the popup notification when a streamer goes live."),
     _KeyDef("POPUP_COOLDOWN",        "site",   "30",   True,  "Minutes to wait before showing another popup notification for the same streamer."),
@@ -525,11 +528,12 @@ class StreamerSettingsPopup:
         self.entry     = entry
         self.config_id = config_id
 
-        self.options = ["Schedule", "Quality", "Split"]
+        self.options = ["Schedule", "Quality", "Split", "Notifications"]
         self._sel: int = 0
         self._schedule_popup: "Optional[ScheduleSettingsPopup]" = None
         self._quality_popup: "Optional[QualitySettingsPopup]" = None
         self._split_popup: "Optional[SplitSettingsPopup]" = None
+        self._notifications_popup: "Optional[NotificationSettingsPopup]" = None
 
     def handle_key(self, key) -> bool:
         if self._schedule_popup is not None:
@@ -550,6 +554,13 @@ class StreamerSettingsPopup:
             should_close = self._split_popup.handle_key(key)
             if should_close:
                 self._split_popup = None
+                return True
+            return False
+
+        if self._notifications_popup is not None:
+            should_close = self._notifications_popup.handle_key(key)
+            if should_close:
+                self._notifications_popup = None
                 return True
             return False
 
@@ -578,6 +589,12 @@ class StreamerSettingsPopup:
                     self.entry,
                     self.config_id,
                 )
+            elif self.options[self._sel] == "Notifications":
+                self._notifications_popup = NotificationSettingsPopup(
+                    self.dashboard,
+                    self.entry,
+                    self.config_id,
+                )
         return False
 
     def draw(self, stdscr) -> None:
@@ -591,6 +608,10 @@ class StreamerSettingsPopup:
 
         if self._split_popup is not None:
             self._split_popup.draw(stdscr)
+            return
+
+        if self._notifications_popup is not None:
+            self._notifications_popup.draw(stdscr)
             return
 
         db = self.dashboard
@@ -708,6 +729,97 @@ class QualitySettingsPopup:
         val_str = "[x]" if self.lq_enabled else "[ ]"
         db.safe_addstr(stdscr, by1 + 2, bx1 + 2, "> Low Quality Enabled: ", curses.color_pair(db.C_HILIGHT) | curses.A_BOLD)
         db.safe_addstr(stdscr, by1 + 2, bx1 + 25, val_str, curses.color_pair(db.C_HILIGHT) | curses.A_BOLD)
+            
+        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space:Toggle  Esc:Cancel "[:box_w-4], curses.color_pair(db.C_INVHEAD))
+
+
+class NotificationSettingsPopup:
+    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
+        self.dashboard = dashboard
+        self.entry     = entry
+        self.config_id = config_id
+        self.notifications_enabled = True
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            from .main import _global_json_lock, _load_global_json
+            with _global_json_lock:
+                gdata = _load_global_json()
+            entries = (gdata.get("priorities", {})
+                           .get(self.config_id, {})
+                           .get("entries", []))
+            for e in entries:
+                if (e.get("streamer") == self.entry.streamer
+                        and e.get("site") == self.entry.site):
+                    self.notifications_enabled = bool(e.get("notifications_enabled", True))
+                    break
+        except Exception:
+            pass
+
+    def _save(self) -> None:
+        try:
+            from .main import _global_json_lock, _load_global_json, _save_global_json
+            with _global_json_lock:
+                gdata   = _load_global_json()
+                entries = (gdata.get("priorities", {})
+                               .get(self.config_id, {})
+                               .get("entries", []))
+                target = None
+                for e in entries:
+                    if (e.get("streamer") == self.entry.streamer
+                            and e.get("site") == self.entry.site):
+                        target = e
+                        break
+                if target is None:
+                    target = {
+                        "streamer":   self.entry.streamer,
+                        "site":       self.entry.site,
+                        "config_sha": self.entry.config_sha,
+                        "priority":   len(entries),
+                        "bypass":     self.entry.bypass,
+                    }
+                    entries.append(target)
+                target["notifications_enabled"] = self.notifications_enabled
+
+                gdata.setdefault("priorities", {}).setdefault(
+                    self.config_id, {"config_files": [], "entries": []}
+                )["entries"] = entries
+                _save_global_json(gdata)
+        except Exception:
+            pass
+
+    def handle_key(self, key) -> bool:
+        if key == 27:
+            return True
+        elif key == ord(' '):
+            self.notifications_enabled = not self.notifications_enabled
+        elif key in (10, 13, curses.KEY_ENTER, 459):
+            self._save()
+            return True
+        return False
+
+    def draw(self, stdscr) -> None:
+        db = self.dashboard
+        h, w = stdscr.getmaxyx()
+        
+        box_w = min(40, w - 6)
+        box_h = 7
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+        
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), curses.color_pair(db.C_NORMAL))
+            
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
+        title = f" {self.entry.streamer.upper()} SETTINGS "
+        db.safe_addstr(stdscr, by1, bx1 + 2, title, curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
+        
+        val_str = "[x]" if self.notifications_enabled else "[ ]"
+        db.safe_addstr(stdscr, by1 + 2, bx1 + 2, "> Notifications Enabled: ", curses.color_pair(db.C_HILIGHT) | curses.A_BOLD)
+        db.safe_addstr(stdscr, by1 + 2, bx1 + 27, val_str, curses.color_pair(db.C_HILIGHT) | curses.A_BOLD)
             
         db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space:Toggle  Esc:Cancel "[:box_w-4], curses.color_pair(db.C_INVHEAD))
 

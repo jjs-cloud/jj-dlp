@@ -1,3 +1,5 @@
+- added mobile push notifications when a recording starts.  See the ntfy-setup.md file in the docs folder for setup instructions.
+
 v1.21.12
 
 - added a workaround that fixes chaturbate audio desync
