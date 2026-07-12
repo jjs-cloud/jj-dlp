@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.0"
+__version__ = "1.22.1"
 
 import subprocess
 import time
@@ -1025,34 +1025,46 @@ def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 1
 
 
 def _send_ntfy_notification(streamer: str, is_recording: bool, site_label: str) -> None:
+    dbg(f"[NTFY] _send_ntfy_notification called: streamer={streamer!r} "
+        f"is_recording={is_recording} site_label={site_label!r}")
+
     global_cfg = load_global_config()
     topic = global_cfg.get("ntfy_topic", "").strip()
     url = global_cfg.get("ntfy_url", "https://ntfy.sh").strip()
-    
+    dbg(f"[NTFY] resolved global config: ntfy_topic={topic!r} ntfy_url={url!r} "
+        f"(raw global.conf path={get_global_conf_path()!r})")
+
     if not topic:
-        dbg("[NTFY] No ntfy_topic configured; skipping notification.")
+        dbg("[NTFY] No ntfy_topic configured (NTFY_TOPIC blank in global.conf [General]); "
+            "skipping notification.")
         return
-        
+
     if not url:
+        dbg("[NTFY] ntfy_url resolved empty after strip; falling back to default https://ntfy.sh")
         url = "https://ntfy.sh"
-        
+
     if not url.startswith("http://") and not url.startswith("https://"):
+        dbg(f"[NTFY] ntfy_url {url!r} missing scheme; prepending https://")
         url = "https://" + url
     url = url.rstrip("/")
-    
+
     full_url = f"{url}/{topic}"
     title = "jj-dlp: Recording Started"
     body = f"🔴 {streamer} is LIVE on {site_label} and recording has started."
-    
+
     headers = {
         "Title": title,
         "Priority": "high",
         "Tags": "red_circle,record"
     }
-    
+
+    dbg(f"[NTFY] prepared request: url={full_url!r} title={title!r} "
+        f"body={body!r} headers={headers!r}")
+
     def _post():
         import urllib.request
         import urllib.error
+        dbg(f"[NTFY] POST thread started for streamer={streamer!r} -> {full_url!r}")
         try:
             req = urllib.request.Request(
                 full_url,
@@ -1060,14 +1072,31 @@ def _send_ntfy_notification(streamer: str, is_recording: bool, site_label: str) 
                 headers=headers,
                 method="POST"
             )
+            dbg(f"[NTFY] request object built; opening connection (timeout=10s)")
             with urllib.request.urlopen(req, timeout=10) as response:
                 res_code = response.getcode()
-                dbg(f"[NTFY] Notification sent successfully for {streamer}. Status: {res_code}")
+                res_headers = dict(response.getheaders())
+                try:
+                    res_body = response.read().decode("utf-8", errors="replace")
+                except Exception as read_e:
+                    res_body = f"<could not read response body: {read_e}>"
+                dbg(f"[NTFY] Notification sent successfully for {streamer}. "
+                    f"Status: {res_code} response_headers={res_headers!r} body={res_body!r}")
+        except urllib.error.HTTPError as e:
+            try:
+                err_body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                err_body = "<unreadable>"
+            dbg(f"[NTFY] HTTP error sending notification for {streamer}: "
+                f"status={e.code} reason={e.reason!r} body={err_body!r} url={full_url!r}")
         except urllib.error.URLError as e:
-            dbg(f"[NTFY] Failed to send notification for {streamer}: {e}")
+            dbg(f"[NTFY] Failed to send notification for {streamer}: "
+                f"reason={e.reason!r} url={full_url!r}")
         except Exception as e:
-            dbg(f"[NTFY] Unexpected error sending notification for {streamer}: {e}")
-            
+            dbg(f"[NTFY] Unexpected error sending notification for {streamer}: "
+                f"{type(e).__name__}: {e} (url={full_url!r})")
+
+    dbg(f"[NTFY] spawning background send thread 'ntfy-{streamer}'")
     threading.Thread(target=_post, daemon=True, name=f"ntfy-{streamer}").start()
 
 
@@ -1079,25 +1108,38 @@ def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
     if is_recording:
         site_label = cfg.get("site_label", os.path.basename(site.config_path))
         streamer_notif = None
+        dbg(f"[NTFY] evaluating notification eligibility: streamer={streamer!r} "
+            f"site_label={site_label!r} source={source!r} reason={reason!r}")
         try:
             with _global_json_lock:
                 gdata = _load_global_json()
             config_id = _get_config_id()
             entries = gdata.get("priorities", {}).get(config_id, {}).get("entries", [])
+            dbg(f"[NTFY] config_id={config_id!r} found {len(entries)} priority entries "
+                f"for this config set")
             for e in entries:
                 if e.get("streamer") == streamer and e.get("site") == site_label:
                     streamer_notif = e.get("notifications_enabled")
                     break
+            dbg(f"[NTFY] streamer-level override lookup result: {streamer_notif!r} "
+                f"(None means no per-streamer entry / fall back to site config)")
         except Exception as ex:
-            dbg(f"[NTFY] Error reading global.json for streamer-level setting: {ex}")
+            dbg(f"[NTFY] Error reading global.json for streamer-level setting: "
+                f"{type(ex).__name__}: {ex}")
 
         if streamer_notif is not None:
             notifications_enabled = streamer_notif
+            dbg(f"[NTFY] using streamer-level override: notifications_enabled={notifications_enabled}")
         else:
             notifications_enabled = cfg.get("ntfy_notifications", True)
+            dbg(f"[NTFY] no streamer-level override; using site config "
+                f"ntfy_notifications={notifications_enabled}")
 
         if notifications_enabled:
+            dbg(f"[NTFY] notifications enabled for streamer={streamer!r}; dispatching send")
             _send_ntfy_notification(streamer, is_recording, site_label)
+        else:
+            dbg(f"[NTFY] notifications disabled for streamer={streamer!r}; skipping send")
 
     if not show_popup or not cfg.get("popup_notifications", True):
         dbg(f"[POPUP] popup skipped for streamer={streamer!r} show_popup={show_popup} popup_notifications={cfg.get('popup_notifications', True)}")
