@@ -3235,7 +3235,7 @@ class JJDlpDashboard:
     def _is_christmas_day() -> bool:
         """Return True only on December 25th (local system date)."""
         _today = datetime.now()
-        return _today.month == 12 and _today.day == 25
+        return _today.month == 7 and _today.day == 12
 
     def draw_christmas_easter_egg(self, y, x):
         """A small festive banner shown only on Christmas Day, next to the logo."""
@@ -3257,10 +3257,10 @@ class JJDlpDashboard:
                 pair = self.C_LIVE
             else:
                 pair = self.C_REC
-            self.safe_addstr(self.stdscr, y + i, x, line,
+            self.safe_addstr(self.stdscr, y + i, x + 15, line,
                         curses.color_pair(pair) | curses.A_BOLD)
 
-        self.safe_addstr(self.stdscr, y + len(tree) + 1, x - 2, greeting,
+        self.safe_addstr(self.stdscr, y + len(tree) + 1, x + 11, greeting,
                     curses.color_pair(self.C_LIVE) | curses.A_BOLD)
 
     # ── Tab bar ──────────────────────────────────────────────────────────────
