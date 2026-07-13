@@ -911,8 +911,8 @@ class NotificationSettingsPopup:
         db.safe_addstr(stdscr, by1, bx1 + 2, title, curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
 
         state_label = {"inherit": "< Inherit >", "on": "< On >", "off": "< Off >"}[self.state]
-        db.safe_addstr(stdscr, by1 + 2, bx1 + 2, "> Notifications: ", curses.color_pair(db.C_HILIGHT) | curses.A_BOLD)
-        db.safe_addstr(stdscr, by1 + 2, bx1 + 19, state_label, curses.color_pair(db.C_HILIGHT) | curses.A_BOLD)
+        db.safe_addstr(stdscr, by1 + 2, bx1 + 2, "> ntfy Notifications: ", curses.color_pair(db.C_HILIGHT) | curses.A_BOLD)
+        db.safe_addstr(stdscr, by1 + 2, bx1 + 24, state_label, curses.color_pair(db.C_HILIGHT) | curses.A_BOLD)
 
         site_default = self._site_default()
         if self.state == "inherit":
