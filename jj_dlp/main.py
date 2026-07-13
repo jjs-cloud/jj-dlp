@@ -3230,6 +3230,39 @@ class JJDlpDashboard:
             self.safe_addstr(self.stdscr, y + i, x, line,
                         curses.color_pair(self.C_LOGO) | curses.A_BOLD)
 
+    # ── Christmas Day easter egg ────────────────────────────────────────────
+    @staticmethod
+    def _is_christmas_day() -> bool:
+        """Return True only on December 25th (local system date)."""
+        _today = datetime.now()
+        return _today.month == 7 and _today.day == 13
+
+    def draw_christmas_easter_egg(self, y, x):
+        """A small festive banner shown only on Christmas Day, next to the logo."""
+        tree = [
+            "   *   ",
+            "  /_\\  ",
+            " /___\\ ",
+            "/_____\\",
+            "  | |  ",
+        ]
+        greeting = "Merry Christmas!"
+
+        for i, line in enumerate(tree):
+            # Alternate red/green per row for a bit of festive sparkle;
+            # the star on top gets the warm/gold color.
+            if i == 0:
+                pair = self.C_WARN
+            elif i % 2 == 1:
+                pair = self.C_LIVE
+            else:
+                pair = self.C_REC
+            self.safe_addstr(self.stdscr, y + i, x, line,
+                        curses.color_pair(pair) | curses.A_BOLD)
+
+        self.safe_addstr(self.stdscr, y + len(tree) + 1, x - 2, greeting,
+                    curses.color_pair(self.C_LIVE) | curses.A_BOLD)
+
     # ── Tab bar ──────────────────────────────────────────────────────────────
     def draw_tabs(self, y, x):
         for i, tab in enumerate(self.TABS):
@@ -4248,6 +4281,15 @@ class JJDlpDashboard:
 
         # Logo (6 lines tall, starts at row 1)
         self.draw_logo(1, 2)
+
+        # Christmas Day easter egg — only appears on Dec 25th, sitting to the
+        # right of the logo. Skipped entirely if the terminal isn't wide
+        # enough to fit it without colliding with the top-right indicators.
+        if self._is_christmas_day():
+            _logo_w = max(len(_l) for _l in ASCII_LOGO)
+            _egg_x = 2 + _logo_w + 4
+            if w - _egg_x > 30:
+                self.draw_christmas_easter_egg(1, _egg_x)
 
         # System time top-right
         sys_time_str = datetime.now().strftime("%Y-%m-%d  %H:%M:%S")
