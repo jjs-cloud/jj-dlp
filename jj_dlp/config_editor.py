@@ -111,6 +111,19 @@ _KEY_COMMENTS: dict[str, str] = {k.name: k.comment for k in CONFIG_KEYS}
 # Keys that must be preserved across an update (both global and site)
 PRESERVED_KEYS: list[str] = [k.name for k in CONFIG_KEYS if k.preserve]
 
+# Lookup: key name -> preserve flag (used to flag "managed" keys in the edit popup)
+_KEY_PRESERVE: dict[str, bool] = {k.name: k.preserve for k in CONFIG_KEYS}
+
+
+def _managed_key_note(key: str) -> str:
+    """Returns the ' (note: this is a managed key)' suffix for keys with preserve = False.
+
+    Returns an empty string for preserved keys (preserve = True) or unknown keys.
+    """
+    if _KEY_PRESERVE.get(key, True):
+        return ""
+    return " (note: this is a managed key)"
+
 # ── Priority panel ─────────────────────────────────────────────────────────────
 # Width of the PRIORITY panel box (x2 − x1 span), matching the SYSTEM sidebar.
 PRIORITY_PANEL_W: int = 40
@@ -2305,8 +2318,8 @@ class GlobalConfigEditor:
                               if enabled
                               else curses.color_pair(db.C_DIM)))
             db.safe_addstr(stdscr, row, bx1 + 2,
-                           prefix + f"{tag:<10}", row_attr)
-            db.safe_addstr(stdscr, row, bx1 + 14, val_str,
+                           prefix + f"{tag:<18}", row_attr)
+            db.safe_addstr(stdscr, row, bx1 + 22, val_str,
                            val_attr | curses.A_BOLD)
             row += 1
 
@@ -2508,7 +2521,8 @@ class GlobalConfigEditor:
         self.dashboard.safe_addstr(stdscr, by1, bx1 + 2, " EDIT GLOBAL VALUE ",
                     curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
         row = by1 + 2
-        self.dashboard.safe_addstr(stdscr, row, bx1 + 2, f"Key: {self.editing_item.key}",
+        self.dashboard.safe_addstr(stdscr, row, bx1 + 2,
+                    f"Key: {self.editing_item.key}{_managed_key_note(self.editing_item.key)}",
                     curses.color_pair(db.C_CHROME))
         row += 1
         if comment_lines:
@@ -2824,7 +2838,9 @@ class ConfigEditor:
         self.dashboard.safe_addstr(stdscr, by1, bx1 + 2, title, curses.color_pair(self.dashboard.C_WARN) | curses.A_BOLD)
 
         row = by1 + 2
-        self.dashboard.safe_addstr(stdscr, row, bx1 + 2, f"Key: {self.editing_item.key}", curses.color_pair(self.dashboard.C_CHROME))
+        self.dashboard.safe_addstr(stdscr, row, bx1 + 2,
+                    f"Key: {self.editing_item.key}{_managed_key_note(self.editing_item.key)}",
+                    curses.color_pair(self.dashboard.C_CHROME))
         row += 1
 
         if comment_lines:
