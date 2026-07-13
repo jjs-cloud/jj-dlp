@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.1"
+__version__ = "1.22.2"
 
 import subprocess
 import time
@@ -1634,7 +1634,8 @@ def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) ->
         priority_map[key] = {
             "priority":      e.get("priority", 999999),
             "bypass":        e.get("bypass", False),
-            "split_enabled": e.get("split_enabled", False),
+            "split_mode":    e.get("split_mode"),        # None = inherit (or legacy data)
+            "split_enabled": e.get("split_enabled", False),  # legacy fallback
             "split_after":   e.get("split_after", 0),
         }
 
@@ -1710,23 +1711,44 @@ def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) ->
 def _resolve_split_after(cfg: dict, entry_info: dict) -> dict:
     """Return a cfg dict to use for a single streamer, applying that
     streamer's per-streamer Split override (set via the SPLIT settings
-    popup) on top of the site's SPLIT_AFTER config value if enabled.
+    popup) on top of the site's SPLIT_AFTER config value.
 
     entry_info is the priorities[...][entries] dict-like info for the
-    streamer, expected to (optionally) contain "split_enabled" (bool) and
-    "split_after" (int, minutes). When split_enabled is falsy or
-    split_after <= 0, the site's SPLIT_AFTER config is left untouched and
-    the *same* cfg object is returned (no copy needed). The override never
-    affects other streamers sharing the same site config.
+    streamer. Three states, driven by "split_mode":
+      - "inherit" (or key absent) — no override; the site's SPLIT_AFTER is
+        left untouched and the *same* cfg object is returned (no copy).
+      - "on"  — override with entry_info["split_after"] minutes (only
+        applied if > 0).
+      - "off" — force splitting off for this streamer regardless of the
+        site's SPLIT_AFTER.
+    For backward compatibility with data written by the older two-state
+    popup (no "split_mode" key), an entry with "split_enabled": true and a
+    positive "split_after" is treated the same as "on"; anything else is
+    treated as "inherit" (there was no way to force splitting off before).
+
+    The override never affects other streamers sharing the same site config.
     """
     if not entry_info:
         return cfg
     try:
-        split_enabled = bool(entry_info.get("split_enabled", False))
-        split_after   = int(entry_info.get("split_after", 0) or 0)
+        split_after = int(entry_info.get("split_after", 0) or 0)
     except (TypeError, ValueError):
+        split_after = 0
+
+    mode = entry_info.get("split_mode")
+    if mode not in ("on", "off"):
+        # Legacy fallback (pre-tri-state data).
+        legacy_enabled = bool(entry_info.get("split_enabled", False))
+        mode = "on" if (legacy_enabled and split_after > 0) else "inherit"
+
+    if mode == "inherit":
         return cfg
-    if not split_enabled or split_after <= 0:
+    if mode == "off":
+        overridden = dict(cfg)
+        overridden["split_after"] = 0
+        return overridden
+    # mode == "on"
+    if split_after <= 0:
         return cfg
     overridden = dict(cfg)
     overridden["split_after"] = split_after
@@ -2397,7 +2419,8 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
             "priority": e.get("priority", 999999),
             "bypass": e.get("bypass", False),
             "lq_enabled": e.get("lq_enabled", False),
-            "split_enabled": e.get("split_enabled", False),
+            "split_mode": e.get("split_mode"),           # None = inherit (or legacy data)
+            "split_enabled": e.get("split_enabled", False),  # legacy fallback
             "split_after": e.get("split_after", 0),
         }
 

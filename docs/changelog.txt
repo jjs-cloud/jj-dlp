@@ -1,5 +1,6 @@
-- fixed issue with the wrong quality/resolution being displayed on the dashboard for twitch
+- fixed issue with the wrong quality/resolution being displayed on the dashboard for twitch (enabled checker cookies for twitch)
 - added mobile push notifications when a recording starts.  See the ntfy-setup.md file in the docs folder for setup instructions.
+- added an "Inherit" option to the streamer settings to make it clear when/if they are inherited from the site settings
 
 v1.21.12
 
