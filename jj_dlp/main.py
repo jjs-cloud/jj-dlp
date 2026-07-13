@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.21.12"
+__version__ = "1.22.2"
 
 import subprocess
 import time
@@ -405,6 +405,8 @@ def load_global_config() -> dict:
         "lq_downloader":      _bool("LQ_DOWNLOADER", False),
         "ff_err_thresh":      _int("FF_ERR_THRESH", 200),
         "subfolders":         _bool("SUBFOLDERS", False),
+        "ntfy_topic":         general.get("NTFY_TOPIC", "").strip().strip('"\''),
+        "ntfy_url":           general.get("NTFY_URL", "https://ntfy.sh").strip().strip('"\''),
     }
 
 def _write_global_conf_key(key: str, value: str) -> None:
@@ -477,13 +479,28 @@ def _global_json_path() -> str:
 def _load_global_json() -> dict:
     """Load the global.json file.  Returns an empty dict if the file does not
     exist or cannot be parsed."""
+    path = _global_json_path()
     try:
-        with open(_global_json_path(), "r", encoding="utf-8") as f:
-            data = json.load(f)
+        with open(path, "r", encoding="utf-8") as f:
+            raw = f.read()
+        data = json.loads(raw)
         if isinstance(data, dict):
+            n_prio = len(data.get("priorities", {}))
+            dbg(f"[GLOBAL_JSON][DIAG] load OK: path={path!r} size={len(raw)} priorities_keys={n_prio}")
             return data
-    except Exception:
-        pass
+        dbg(f"[GLOBAL_JSON][DIAG] load: parsed JSON was not a dict (type={type(data).__name__}) — returning {{}}")
+    except FileNotFoundError:
+        dbg(f"[GLOBAL_JSON][DIAG] load: file not found at {path!r} — returning {{}}")
+    except Exception as e:
+        # This is the dangerous case: the file exists but failed to parse
+        # (e.g. truncated by a crash/kill mid-write).  Log the raw content
+        # length so we can tell a torn write from a genuinely empty/missing
+        # file after the fact.
+        try:
+            size = os.path.getsize(path)
+        except Exception:
+            size = -1
+        dbg(f"[GLOBAL_JSON][DIAG] load FAILED: path={path!r} on-disk size={size} error={e!r} — returning {{}} (THIS IS LIKELY THE BUG)")
     return {}
 
 
@@ -528,11 +545,24 @@ def _save_global_json(data: dict) -> None:
     been more than 24h since the last backup (see _backup_global_json_if_due).
     """
     _backup_global_json_if_due(data)
+    path = _global_json_path()
+    tmp_path = path + ".tmp"
     try:
-        with open(_global_json_path(), "w", encoding="utf-8") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
-    except Exception:
-        pass
+            f.flush()
+            os.fsync(f.fileno())
+        # os.replace is atomic on both POSIX and Windows — a crash/kill at
+        # any point up to here leaves the original global.json untouched;
+        # a crash after this line leaves the new file fully written.
+        os.replace(tmp_path, path)
+        dbg(f"[GLOBAL_JSON][DIAG] save OK: path={path!r} priorities_keys={len(data.get('priorities', {}))}")
+    except Exception as e:
+        dbg(f"[GLOBAL_JSON][DIAG] save FAILED: path={path!r} error={e!r}")
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
 
 
 def _load_last_live_cache(config_path: str) -> Dict[str, float]:
@@ -994,10 +1024,123 @@ def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 1
     threading.Thread(target=_run, daemon=True, name=f"popup-{streamer}").start()
 
 
+def _send_ntfy_notification(streamer: str, is_recording: bool, site_label: str) -> None:
+    dbg(f"[NTFY] _send_ntfy_notification called: streamer={streamer!r} "
+        f"is_recording={is_recording} site_label={site_label!r}")
+
+    global_cfg = load_global_config()
+    topic = global_cfg.get("ntfy_topic", "").strip()
+    url = global_cfg.get("ntfy_url", "https://ntfy.sh").strip()
+    dbg(f"[NTFY] resolved global config: ntfy_topic={topic!r} ntfy_url={url!r} "
+        f"(raw global.conf path={get_global_conf_path()!r})")
+
+    if not topic:
+        dbg("[NTFY] No ntfy_topic configured (NTFY_TOPIC blank in global.conf [General]); "
+            "skipping notification.")
+        return
+
+    if not url:
+        dbg("[NTFY] ntfy_url resolved empty after strip; falling back to default https://ntfy.sh")
+        url = "https://ntfy.sh"
+
+    if not url.startswith("http://") and not url.startswith("https://"):
+        dbg(f"[NTFY] ntfy_url {url!r} missing scheme; prepending https://")
+        url = "https://" + url
+    url = url.rstrip("/")
+
+    full_url = f"{url}/{topic}"
+    title = "jj-dlp: Recording Started"
+    body = f"🔴 {streamer} is LIVE on {site_label} and recording has started."
+
+    headers = {
+        "Title": title,
+        "Priority": "high",
+        "Tags": "red_circle,record"
+    }
+
+    dbg(f"[NTFY] prepared request: url={full_url!r} title={title!r} "
+        f"body={body!r} headers={headers!r}")
+
+    def _post():
+        import urllib.request
+        import urllib.error
+        dbg(f"[NTFY] POST thread started for streamer={streamer!r} -> {full_url!r}")
+        try:
+            req = urllib.request.Request(
+                full_url,
+                data=body.encode("utf-8"),
+                headers=headers,
+                method="POST"
+            )
+            dbg(f"[NTFY] request object built; opening connection (timeout=10s)")
+            with urllib.request.urlopen(req, timeout=10) as response:
+                res_code = response.getcode()
+                res_headers = dict(response.getheaders())
+                try:
+                    res_body = response.read().decode("utf-8", errors="replace")
+                except Exception as read_e:
+                    res_body = f"<could not read response body: {read_e}>"
+                dbg(f"[NTFY] Notification sent successfully for {streamer}. "
+                    f"Status: {res_code} response_headers={res_headers!r} body={res_body!r}")
+        except urllib.error.HTTPError as e:
+            try:
+                err_body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                err_body = "<unreadable>"
+            dbg(f"[NTFY] HTTP error sending notification for {streamer}: "
+                f"status={e.code} reason={e.reason!r} body={err_body!r} url={full_url!r}")
+        except urllib.error.URLError as e:
+            dbg(f"[NTFY] Failed to send notification for {streamer}: "
+                f"reason={e.reason!r} url={full_url!r}")
+        except Exception as e:
+            dbg(f"[NTFY] Unexpected error sending notification for {streamer}: "
+                f"{type(e).__name__}: {e} (url={full_url!r})")
+
+    dbg(f"[NTFY] spawning background send thread 'ntfy-{streamer}'")
+    threading.Thread(target=_post, daemon=True, name=f"ntfy-{streamer}").start()
+
+
 def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
                            show_popup: bool = True, source: str = "poll",
                            is_recording: bool = True, reason: str = "",
                            warning: str = "") -> None:
+    # Handle ntfy notifications first, independently of popup settings
+    if is_recording:
+        site_label = cfg.get("site_label", os.path.basename(site.config_path))
+        streamer_notif = None
+        dbg(f"[NTFY] evaluating notification eligibility: streamer={streamer!r} "
+            f"site_label={site_label!r} source={source!r} reason={reason!r}")
+        try:
+            with _global_json_lock:
+                gdata = _load_global_json()
+            config_id = _get_config_id()
+            entries = gdata.get("priorities", {}).get(config_id, {}).get("entries", [])
+            dbg(f"[NTFY] config_id={config_id!r} found {len(entries)} priority entries "
+                f"for this config set")
+            for e in entries:
+                if e.get("streamer") == streamer and e.get("site") == site_label:
+                    streamer_notif = e.get("notifications_enabled")
+                    break
+            dbg(f"[NTFY] streamer-level override lookup result: {streamer_notif!r} "
+                f"(None means no per-streamer entry / fall back to site config)")
+        except Exception as ex:
+            dbg(f"[NTFY] Error reading global.json for streamer-level setting: "
+                f"{type(ex).__name__}: {ex}")
+
+        if streamer_notif is not None:
+            notifications_enabled = streamer_notif
+            dbg(f"[NTFY] using streamer-level override: notifications_enabled={notifications_enabled}")
+        else:
+            notifications_enabled = cfg.get("ntfy_notifications", True)
+            dbg(f"[NTFY] no streamer-level override; using site config "
+                f"ntfy_notifications={notifications_enabled}")
+
+        if notifications_enabled:
+            dbg(f"[NTFY] notifications enabled for streamer={streamer!r}; dispatching send")
+            _send_ntfy_notification(streamer, is_recording, site_label)
+        else:
+            dbg(f"[NTFY] notifications disabled for streamer={streamer!r}; skipping send")
+
     if not show_popup or not cfg.get("popup_notifications", True):
         dbg(f"[POPUP] popup skipped for streamer={streamer!r} show_popup={show_popup} popup_notifications={cfg.get('popup_notifications', True)}")
         return
@@ -1491,7 +1634,8 @@ def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) ->
         priority_map[key] = {
             "priority":      e.get("priority", 999999),
             "bypass":        e.get("bypass", False),
-            "split_enabled": e.get("split_enabled", False),
+            "split_mode":    e.get("split_mode"),        # None = inherit (or legacy data)
+            "split_enabled": e.get("split_enabled", False),  # legacy fallback
             "split_after":   e.get("split_after", 0),
         }
 
@@ -1567,23 +1711,44 @@ def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) ->
 def _resolve_split_after(cfg: dict, entry_info: dict) -> dict:
     """Return a cfg dict to use for a single streamer, applying that
     streamer's per-streamer Split override (set via the SPLIT settings
-    popup) on top of the site's SPLIT_AFTER config value if enabled.
+    popup) on top of the site's SPLIT_AFTER config value.
 
     entry_info is the priorities[...][entries] dict-like info for the
-    streamer, expected to (optionally) contain "split_enabled" (bool) and
-    "split_after" (int, minutes). When split_enabled is falsy or
-    split_after <= 0, the site's SPLIT_AFTER config is left untouched and
-    the *same* cfg object is returned (no copy needed). The override never
-    affects other streamers sharing the same site config.
+    streamer. Three states, driven by "split_mode":
+      - "inherit" (or key absent) — no override; the site's SPLIT_AFTER is
+        left untouched and the *same* cfg object is returned (no copy).
+      - "on"  — override with entry_info["split_after"] minutes (only
+        applied if > 0).
+      - "off" — force splitting off for this streamer regardless of the
+        site's SPLIT_AFTER.
+    For backward compatibility with data written by the older two-state
+    popup (no "split_mode" key), an entry with "split_enabled": true and a
+    positive "split_after" is treated the same as "on"; anything else is
+    treated as "inherit" (there was no way to force splitting off before).
+
+    The override never affects other streamers sharing the same site config.
     """
     if not entry_info:
         return cfg
     try:
-        split_enabled = bool(entry_info.get("split_enabled", False))
-        split_after   = int(entry_info.get("split_after", 0) or 0)
+        split_after = int(entry_info.get("split_after", 0) or 0)
     except (TypeError, ValueError):
+        split_after = 0
+
+    mode = entry_info.get("split_mode")
+    if mode not in ("on", "off"):
+        # Legacy fallback (pre-tri-state data).
+        legacy_enabled = bool(entry_info.get("split_enabled", False))
+        mode = "on" if (legacy_enabled and split_after > 0) else "inherit"
+
+    if mode == "inherit":
         return cfg
-    if not split_enabled or split_after <= 0:
+    if mode == "off":
+        overridden = dict(cfg)
+        overridden["split_after"] = 0
+        return overridden
+    # mode == "on"
+    if split_after <= 0:
         return cfg
     overridden = dict(cfg)
     overridden["split_after"] = split_after
@@ -2254,7 +2419,8 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
             "priority": e.get("priority", 999999),
             "bypass": e.get("bypass", False),
             "lq_enabled": e.get("lq_enabled", False),
-            "split_enabled": e.get("split_enabled", False),
+            "split_mode": e.get("split_mode"),           # None = inherit (or legacy data)
+            "split_enabled": e.get("split_enabled", False),  # legacy fallback
             "split_after": e.get("split_after", 0),
         }
 
@@ -3063,6 +3229,39 @@ class JJDlpDashboard:
         for i, line in enumerate(ASCII_LOGO):
             self.safe_addstr(self.stdscr, y + i, x, line,
                         curses.color_pair(self.C_LOGO) | curses.A_BOLD)
+
+    # ── Christmas Day easter egg ────────────────────────────────────────────
+    @staticmethod
+    def _is_christmas_day() -> bool:
+        """Return True only on December 25th (local system date)."""
+        _today = datetime.now()
+        return _today.month == 12 and _today.day == 25
+
+    def draw_christmas_easter_egg(self, y, x):
+        """A small festive banner shown only on Christmas Day, next to the logo."""
+        tree = [
+            "   *   ",
+            "  /_\\  ",
+            " /___\\ ",
+            "/_____\\",
+            "  | |  ",
+        ]
+        greeting = "Merry Christmas!"
+
+        for i, line in enumerate(tree):
+            # Alternate red/green per row for a bit of festive sparkle;
+            # the star on top gets the warm/gold color.
+            if i == 0:
+                pair = self.C_WARN
+            elif i % 2 == 1:
+                pair = self.C_LIVE
+            else:
+                pair = self.C_REC
+            self.safe_addstr(self.stdscr, y + i, x + 15, line,
+                        curses.color_pair(pair) | curses.A_BOLD)
+
+        self.safe_addstr(self.stdscr, y + len(tree) + 1, x + 11, greeting,
+                    curses.color_pair(self.C_LIVE) | curses.A_BOLD)
 
     # ── Tab bar ──────────────────────────────────────────────────────────────
     def draw_tabs(self, y, x):
@@ -4083,6 +4282,15 @@ class JJDlpDashboard:
         # Logo (6 lines tall, starts at row 1)
         self.draw_logo(1, 2)
 
+        # Christmas Day easter egg — only appears on Dec 25th, sitting to the
+        # right of the logo. Skipped entirely if the terminal isn't wide
+        # enough to fit it without colliding with the top-right indicators.
+        if self._is_christmas_day():
+            _logo_w = max(len(_l) for _l in ASCII_LOGO)
+            _egg_x = 2 + _logo_w + 4
+            if w - _egg_x > 30:
+                self.draw_christmas_easter_egg(1, _egg_x)
+
         # System time top-right
         sys_time_str = datetime.now().strftime("%Y-%m-%d  %H:%M:%S")
         self.safe_addstr(self.stdscr, 1, w - len(sys_time_str) - 3, sys_time_str,
@@ -4519,7 +4727,7 @@ class JJDlpDashboard:
         h, w = self.stdscr.getmaxyx()
 
         message = "Are you sure you want to exit?"
-        legend  = " \u2190/\u2192: Select  Enter: Confirm  Esc: Exit "
+        legend  = " \u2190/\u2192: Select  Enter: Confirm  Esc/Q: Exit "
         box_w = min(max(len(message) + 6, len(legend) + 4, 34), w - 4)
         box_h = 5
         by1 = max(0, (h - box_h) // 2)

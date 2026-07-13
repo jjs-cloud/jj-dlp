@@ -58,6 +58,8 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("LQ_DOWNLOADER",         "global", "false", True,  "When any recording reaches the ffmpeg error threshold (FF_ERR_THRESH) lower the video quality of the lowest priority streamer, freeing up bandwidth for the remaining streamers."),
     _KeyDef("FF_ERR_THRESH",         "global", "200",   True,  'Restart the download if we see this many ffmpeg errors ("timestamp discontinuity", "Packet corrupt") default: 200'),
     _KeyDef("SUBFOLDERS",            "global", "false", True,  "Save recordings into a subfolder named after the streamer inside OUTPUT_DIR (true/false)."),
+    _KeyDef("NTFY_TOPIC",            "global", "",      True,  "The topic name to use for ntfy.sh notifications. (example: jj-dlp-fj48dh734fk) Refer to docs/ntfy-setup.md for a detailed setup guide. (blank = disabled)"),
+    _KeyDef("NTFY_URL",              "global", "https://ntfy.sh", True, "The URL of the ntfy instance (default: https://ntfy.sh)."),
     _KeyDef("SITE_SORT",             "global", "added_first", True, "The order to display streamers on each site panel.   This can also be adjusted by pressing the S key on the Dashboard tab."),
 
     # ── Site keys (per-site .conf) ────────────────────────────────────────────
@@ -77,6 +79,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("LOG_PATH",              "site",   "",     True,  "Path to save the log file.  Can be an absolute or relative path."),
     _KeyDef("SPLIT_LOGS",            "site",   "false", True, "When LOGGING = true, create 2 separate log files.  One for stdout (yt-dlp) and one for stderr (ffmpeg)."),
     _KeyDef("POPUP_NOTIFICATIONS",   "site",   "true", True,  "Show a popup notification when a streamer goes live."),
+    _KeyDef("NTFY_NOTIFICATIONS",    "site",   "true", True,  "Push a notification to your phone via ntfy.sh when a recording starts. This requires NTFY_TOPIC to be set in the GLOBAL SETTINGS panel. (true/false)"),
     _KeyDef("AD_ALERTS",             "site",   "True", True,  "Show an alert in the system panel when ads are detected in a recording (true/false)."),
     _KeyDef("POPUP_TIMEOUT",         "site",   "15",   True,  "Seconds to show the popup notification when a streamer goes live."),
     _KeyDef("POPUP_COOLDOWN",        "site",   "30",   True,  "Minutes to wait before showing another popup notification for the same streamer."),
@@ -156,7 +159,29 @@ class PriorityEntry(NamedTuple):
     config_path:      str   # absolute path to the .conf file
     config_sha:       str   # short SHA of that .conf file at last load
     bypass:           bool  # True → always-record (displayed in green, sorted to top)
-    schedule_enabled: bool = False  # True → streamer has an active schedule
+    has_override:     bool = False  # True → streamer has ANY streamer-level override
+                                     # active (Schedule, Split, Notifications, or
+                                     # Quality/LQ) that takes precedence over the
+                                     # site-level equivalent. Drives the "*" marker
+                                     # in the PRIORITY list.
+
+
+def _get_site_default_cfg(dashboard, entry: "PriorityEntry") -> dict:
+    """Return the cached site config dict that owns *entry*.
+
+    Used by the per-streamer settings popups to show the site-level value a
+    setting would inherit if there were no streamer-level override, so the
+    popup can display an accurate "Effective: X" value instead of leaving
+    the precedence between the two levels ambiguous. Returns {} if the
+    owning site can't be found (e.g. sites were reloaded).
+    """
+    try:
+        for site in dashboard.sites:
+            if site.config_path == entry.config_path:
+                return site.get_cached_config()
+    except Exception:
+        pass
+    return {}
 
 
 class PriorityEditor:
@@ -231,14 +256,46 @@ class PriorityEditor:
         saved_block   = priorities_block.get(self._config_id, {})
         saved_entries = saved_block.get("entries", [])
 
+        if needs_seed:
+            _dbg(
+                f"[CONFIG][DIAG] needs_seed=True for config_id={self._config_id!r} "
+                f"(known priorities keys: {list(priorities_block.keys())}) — "
+                f"about to write DEFAULTS for {len(raw)} streamer(s), which will "
+                f"OVERWRITE any existing priority/bypass ordering for this config_id "
+                f"if it existed under a different key. config_paths={config_paths!r}"
+            )
+
         # Build a lookup: (streamer, site) → saved dict
         saved_map: "dict[tuple,dict]" = {}
         for i, e in enumerate(saved_entries):
             key = (e.get("streamer", ""), e.get("site", ""))
+
+            schedule_enabled = bool(e.get("schedule", {}).get("enabled", False))
+
+            # Split: prefer the new tri-state "split_mode" ("on" | "off");
+            # an "inherit" mode is represented by the key being absent.
+            # Fall back to interpreting legacy pre-tri-state data, where the
+            # only overridable state was "enabled with a positive minute
+            # value" — anything else meant inherit (there was no "force off").
+            split_mode = e.get("split_mode")
+            if split_mode is None:
+                legacy_split_enabled = bool(e.get("split_enabled", False))
+                legacy_split_after   = int(e.get("split_after", 0) or 0)
+                has_split_override = legacy_split_enabled and legacy_split_after > 0
+            else:
+                has_split_override = split_mode in ("on", "off")
+
+            # Notifications: presence of the key at all (regardless of
+            # True/False) means an explicit streamer-level choice was made.
+            has_notif_override = e.get("notifications_enabled") is not None
+
+            has_lq_override = bool(e.get("lq_enabled", False))
+
             saved_map[key] = {
-                "bypass":           e.get("bypass", False),
-                "priority":         i,
-                "schedule_enabled": bool(e.get("schedule", {}).get("enabled", False)),
+                "bypass":       e.get("bypass", False),
+                "priority":     i,
+                "has_override": (schedule_enabled or has_split_override
+                                  or has_notif_override or has_lq_override),
             }
 
         # Build enriched list with saved priority / bypass values.
@@ -247,13 +304,13 @@ class PriorityEditor:
             key      = (streamer, site_label)
             saved    = saved_map.get(key, {"bypass": False, "priority": 999999})
             enriched.append({
-                "streamer":        streamer,
-                "site":            site_label,
-                "config_path":     config_path,
-                "config_sha":      config_sha,
-                "bypass":          saved["bypass"],
-                "schedule_enabled": saved.get("schedule_enabled", False),
-                "priority":        saved["priority"],
+                "streamer":     streamer,
+                "site":         site_label,
+                "config_path":  config_path,
+                "config_sha":   config_sha,
+                "bypass":       saved["bypass"],
+                "has_override": saved.get("has_override", False),
+                "priority":     saved["priority"],
             })
 
         # Sort: bypass entries first (by saved order), then normal entries (by saved order).
@@ -262,12 +319,12 @@ class PriorityEditor:
 
         self._entries = [
             PriorityEntry(
-                streamer         = e["streamer"],
-                site             = e["site"],
-                config_path      = e["config_path"],
-                config_sha       = e["config_sha"],
-                bypass           = e["bypass"],
-                schedule_enabled = e["schedule_enabled"],
+                streamer     = e["streamer"],
+                site         = e["site"],
+                config_path  = e["config_path"],
+                config_sha   = e["config_sha"],
+                bypass       = e["bypass"],
+                has_override = e["has_override"],
             )
             for e in (bypass_part + normal_part)
         ]
@@ -319,8 +376,15 @@ class PriorityEditor:
                     "priority":   i,
                     "bypass":     e.bypass,
                 }
-                # Preserve schedule data (and any future extra fields).
-                for extra_key in ("schedule", "lq_enabled"):
+                # Preserve schedule / split / notifications / LQ overrides
+                # (and any future extra fields) so reordering or toggling
+                # bypass never wipes a streamer-level override. This was
+                # previously only done for "schedule" and "lq_enabled",
+                # which silently dropped Split and Notifications overrides
+                # on the next reorder or bypass toggle.
+                for extra_key in ("schedule", "lq_enabled",
+                                  "split_mode", "split_after", "split_enabled",
+                                  "notifications_enabled"):
                     if extra_key in ex:
                         entry_dict[extra_key] = ex[extra_key]
                 entries_data.append(entry_dict)
@@ -365,7 +429,7 @@ class PriorityEditor:
         if not (0 <= idx < len(self._entries)):
             return
         e       = self._entries[idx]
-        new_e   = PriorityEntry(e.streamer, e.site, e.config_path, e.config_sha, not e.bypass, e.schedule_enabled)
+        new_e   = PriorityEntry(e.streamer, e.site, e.config_path, e.config_sha, not e.bypass, e.has_override)
         lst     = list(self._entries)
         lst.pop(idx)
         # Insert at the boundary between bypass and normal sections.
@@ -392,7 +456,7 @@ class PriorityEditor:
             should_close = self._settings_popup.handle_key(key)
             if should_close:
                 self._settings_popup = None
-                self.force_reload()  # Refresh entries so schedule_enabled asterisk updates.
+                self.force_reload()  # Refresh entries so the override "*" marker updates.
             return True
 
         if key == curses.KEY_UP:
@@ -473,7 +537,11 @@ class PriorityEditor:
             entry  = self._entries[i]
             is_sel = is_active and (i == self._selected_idx)
 
-            streamer_display = f"*{entry.streamer}" if entry.schedule_enabled else entry.streamer
+            # "*" marks a streamer with ANY streamer-level override active
+            # (Schedule, Split, Notifications, or Quality/LQ) — i.e. one or
+            # more settings for this streamer take precedence over the
+            # site-level equivalent.
+            streamer_display = f"*{entry.streamer}" if entry.has_override else entry.streamer
             label = f"{streamer_display}:{entry.site}"
             if len(label) > panel_inner_w - 2:
                 label = label[:panel_inner_w - 5] + "..."
@@ -516,11 +584,12 @@ class StreamerSettingsPopup:
         self.entry     = entry
         self.config_id = config_id
 
-        self.options = ["Schedule", "Quality", "Split"]
+        self.options = ["Schedule", "Quality", "Split", "Notifications"]
         self._sel: int = 0
         self._schedule_popup: "Optional[ScheduleSettingsPopup]" = None
         self._quality_popup: "Optional[QualitySettingsPopup]" = None
         self._split_popup: "Optional[SplitSettingsPopup]" = None
+        self._notifications_popup: "Optional[NotificationSettingsPopup]" = None
 
     def handle_key(self, key) -> bool:
         if self._schedule_popup is not None:
@@ -541,6 +610,13 @@ class StreamerSettingsPopup:
             should_close = self._split_popup.handle_key(key)
             if should_close:
                 self._split_popup = None
+                return True
+            return False
+
+        if self._notifications_popup is not None:
+            should_close = self._notifications_popup.handle_key(key)
+            if should_close:
+                self._notifications_popup = None
                 return True
             return False
 
@@ -569,6 +645,12 @@ class StreamerSettingsPopup:
                     self.entry,
                     self.config_id,
                 )
+            elif self.options[self._sel] == "Notifications":
+                self._notifications_popup = NotificationSettingsPopup(
+                    self.dashboard,
+                    self.entry,
+                    self.config_id,
+                )
         return False
 
     def draw(self, stdscr) -> None:
@@ -582,6 +664,10 @@ class StreamerSettingsPopup:
 
         if self._split_popup is not None:
             self._split_popup.draw(stdscr)
+            return
+
+        if self._notifications_popup is not None:
+            self._notifications_popup.draw(stdscr)
             return
 
         db = self.dashboard
@@ -703,6 +789,143 @@ class QualitySettingsPopup:
         db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space:Toggle  Esc:Cancel "[:box_w-4], curses.color_pair(db.C_INVHEAD))
 
 
+class NotificationSettingsPopup:
+    """Per-streamer override for ntfy.sh push notifications.
+
+    Tri-state: "inherit" (default — use the site's NTFY_NOTIFICATIONS
+    value, same as if no streamer-level entry existed at all), "on", or
+    "off". Only "on"/"off" are ever written to global.json; "inherit" is
+    represented by the *absence* of the "notifications_enabled" key, which
+    is exactly what main.py's _maybe_show_live_popup() already checks for
+    (streamer_notif is None → fall back to site config). This popup used to
+    default to True on every load, which meant simply opening it and
+    pressing Enter would silently write an explicit "true" override for a
+    streamer that never had one — that's fixed by defaulting to inherit.
+    """
+
+    _STATES = ("inherit", "on", "off")
+
+    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
+        self.dashboard = dashboard
+        self.entry     = entry
+        self.config_id = config_id
+        self.state: str = "inherit"   # "inherit" | "on" | "off"
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            from .main import _global_json_lock, _load_global_json
+            with _global_json_lock:
+                gdata = _load_global_json()
+            entries = (gdata.get("priorities", {})
+                           .get(self.config_id, {})
+                           .get("entries", []))
+            for e in entries:
+                if (e.get("streamer") == self.entry.streamer
+                        and e.get("site") == self.entry.site):
+                    raw = e.get("notifications_enabled", None)
+                    if raw is None:
+                        self.state = "inherit"
+                    else:
+                        self.state = "on" if bool(raw) else "off"
+                    break
+        except Exception:
+            pass
+
+    def _save(self) -> None:
+        try:
+            from .main import _global_json_lock, _load_global_json, _save_global_json
+            with _global_json_lock:
+                gdata   = _load_global_json()
+                entries = (gdata.get("priorities", {})
+                               .get(self.config_id, {})
+                               .get("entries", []))
+                target = None
+                for e in entries:
+                    if (e.get("streamer") == self.entry.streamer
+                            and e.get("site") == self.entry.site):
+                        target = e
+                        break
+                if self.state == "inherit":
+                    # Nothing to override — remove any prior explicit value
+                    # rather than writing one, so this streamer stops
+                    # showing up as having a Notifications override.
+                    if target is not None:
+                        target.pop("notifications_enabled", None)
+                else:
+                    if target is None:
+                        target = {
+                            "streamer":   self.entry.streamer,
+                            "site":       self.entry.site,
+                            "config_sha": self.entry.config_sha,
+                            "priority":   len(entries),
+                            "bypass":     self.entry.bypass,
+                        }
+                        entries.append(target)
+                    target["notifications_enabled"] = (self.state == "on")
+
+                gdata.setdefault("priorities", {}).setdefault(
+                    self.config_id, {"config_files": [], "entries": []}
+                )["entries"] = entries
+                _save_global_json(gdata)
+        except Exception:
+            pass
+
+    def _site_default(self) -> bool:
+        cfg = _get_site_default_cfg(self.dashboard, self.entry)
+        return bool(cfg.get("ntfy_notifications", True))
+
+    def handle_key(self, key) -> bool:
+        if key == 27:
+            return True
+        elif key == ord(' '):
+            idx = self._STATES.index(self.state)
+            self.state = self._STATES[(idx + 1) % len(self._STATES)]
+        elif key == curses.KEY_LEFT:
+            idx = self._STATES.index(self.state)
+            self.state = self._STATES[(idx - 1) % len(self._STATES)]
+        elif key == curses.KEY_RIGHT:
+            idx = self._STATES.index(self.state)
+            self.state = self._STATES[(idx + 1) % len(self._STATES)]
+        elif key in (10, 13, curses.KEY_ENTER, 459):
+            self._save()
+            return True
+        return False
+
+    def draw(self, stdscr) -> None:
+        db = self.dashboard
+        h, w = stdscr.getmaxyx()
+        
+        box_w = min(46, w - 6)
+        box_h = 7
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+        
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), curses.color_pair(db.C_NORMAL))
+            
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
+        title = f" {self.entry.streamer.upper()} SETTINGS "
+        db.safe_addstr(stdscr, by1, bx1 + 2, title, curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
+
+        state_label = {"inherit": "< Inherit >", "on": "< On >", "off": "< Off >"}[self.state]
+        db.safe_addstr(stdscr, by1 + 2, bx1 + 2, "> ntfy Notifications: ", curses.color_pair(db.C_HILIGHT) | curses.A_BOLD)
+        db.safe_addstr(stdscr, by1 + 2, bx1 + 24, state_label, curses.color_pair(db.C_HILIGHT) | curses.A_BOLD)
+
+        site_default = self._site_default()
+        if self.state == "inherit":
+            effective = site_default
+        else:
+            effective = (self.state == "on")
+        eff_str = "ON" if effective else "OFF"
+        db.safe_addstr(stdscr, by1 + 4, bx1 + 2, "Effective: ", curses.color_pair(db.C_NORMAL))
+        db.safe_addstr(stdscr, by1 + 4, bx1 + 13, eff_str, curses.color_pair(db.C_WARN) | curses.A_BOLD)
+
+        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "[:box_w-4], curses.color_pair(db.C_INVHEAD))
+
+
 class SplitSettingsPopup:
     """Modal popup for per-streamer split-after-X-minutes settings.
 
@@ -711,25 +934,33 @@ class SplitSettingsPopup:
     structure in global.json, alongside lq_enabled/schedule — no new
     top-level key is created.
 
-    When split_enabled is True and split_after is > 0, this value overrides
-    the site's SPLIT_AFTER config setting for this streamer only; every
-    other streamer on the same site continues to use SPLIT_AFTER as
-    configured. See _resolve_split_after() in main.py for the override
-    logic applied at record start.
+    Tri-state "Split" field:
+      - "inherit" (default) — no override; this streamer uses the site's
+        SPLIT_AFTER value, same as if it had no entry at all.
+      - "on"  — override with a custom per-streamer minute value (requires
+        Minutes > 0).
+      - "off" — force splitting OFF for this streamer even if the site has
+        SPLIT_AFTER set to a positive value.
+    "inherit" is represented in global.json by the absence of "split_mode"
+    (and, going forward, "split_enabled"). See _resolve_split_after() in
+    main.py for the resolution logic applied at record start, which also
+    still understands the old pre-tri-state "split_enabled"/"split_after"
+    fields written by earlier versions of this popup.
     """
 
-    _FIELD_ENABLED = "split_enabled"
+    _FIELD_MODE    = "split_mode"
     _FIELD_MINUTES = "split_after"
+    _STATES = ("inherit", "on", "off")
 
     def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
         self.dashboard = dashboard
         self.entry     = entry
         self.config_id = config_id
 
-        self.split_enabled: bool = False
-        self.split_after:   int  = 0
+        self.mode:        str  = "inherit"   # "inherit" | "on" | "off"
+        self.split_after: int  = 0
 
-        self._sel:      int  = 0      # 0 = enabled row, 1 = minutes row
+        self._sel:      int  = 0      # 0 = mode row, 1 = minutes row (when shown)
         self._editing:  bool = False  # text-field edit sub-mode
         self._edit_buf: str  = ""
         self._error:    str  = ""
@@ -749,11 +980,22 @@ class SplitSettingsPopup:
             for e in entries:
                 if (e.get("streamer") == self.entry.streamer
                         and e.get("site") == self.entry.site):
-                    self.split_enabled = bool(e.get("split_enabled", False))
                     try:
                         self.split_after = max(0, int(e.get("split_after", 0) or 0))
                     except (TypeError, ValueError):
                         self.split_after = 0
+
+                    raw_mode = e.get("split_mode")
+                    if raw_mode in ("on", "off"):
+                        self.mode = raw_mode
+                    elif raw_mode is None:
+                        # Legacy data written by the old two-state popup:
+                        # enabled + minutes > 0 meant an override; anything
+                        # else meant inherit (there was no "force off").
+                        legacy_enabled = bool(e.get("split_enabled", False))
+                        self.mode = "on" if (legacy_enabled and self.split_after > 0) else "inherit"
+                    else:
+                        self.mode = "inherit"
                     break
         except Exception:
             pass
@@ -772,17 +1014,26 @@ class SplitSettingsPopup:
                             and e.get("site") == self.entry.site):
                         target = e
                         break
-                if target is None:
-                    target = {
-                        "streamer":   self.entry.streamer,
-                        "site":       self.entry.site,
-                        "config_sha": self.entry.config_sha,
-                        "priority":   len(entries),
-                        "bypass":     self.entry.bypass,
-                    }
-                    entries.append(target)
-                target["split_enabled"] = self.split_enabled
-                target["split_after"]   = self.split_after
+                if self.mode == "inherit":
+                    # Nothing to override — clear any prior explicit value
+                    # (new or legacy) rather than writing one.
+                    if target is not None:
+                        target.pop("split_mode", None)
+                        target.pop("split_enabled", None)
+                        target.pop("split_after", None)
+                else:
+                    if target is None:
+                        target = {
+                            "streamer":   self.entry.streamer,
+                            "site":       self.entry.site,
+                            "config_sha": self.entry.config_sha,
+                            "priority":   len(entries),
+                            "bypass":     self.entry.bypass,
+                        }
+                        entries.append(target)
+                    target["split_mode"] = self.mode
+                    target["split_after"] = self.split_after if self.mode == "on" else 0
+                    target.pop("split_enabled", None)  # fully migrated to split_mode
 
                 gdata.setdefault("priorities", {}).setdefault(
                     self.config_id, {"config_files": [], "entries": []}
@@ -791,24 +1042,32 @@ class SplitSettingsPopup:
         except Exception:
             pass
 
+    def _site_default_minutes(self) -> int:
+        cfg = _get_site_default_cfg(self.dashboard, self.entry)
+        try:
+            return max(0, int(cfg.get("split_after", 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
     # ── Validation ─────────────────────────────────────────────────────────────
 
     def _validate(self) -> "tuple[bool, str]":
-        if self.split_enabled and self.split_after <= 0:
+        if self.mode == "on" and self.split_after <= 0:
             return False, "Enter a split time > 0 minutes"
         return True, ""
 
     # ── Field list ─────────────────────────────────────────────────────────────
 
     def _get_fields(self) -> "list[tuple[str,str,str]]":
-        return [
-            ("Split enabled",
-             "[x]" if self.split_enabled else "[ ]",
-             self._FIELD_ENABLED),
-            ("Split after X minutes",
-             str(self.split_after) if self.split_after else "",
-             self._FIELD_MINUTES),
-        ]
+        mode_label = {"inherit": "< Inherit >", "on": "< On >", "off": "< Off >"}[self.mode]
+        fields = [("Split", mode_label, self._FIELD_MODE)]
+        if self.mode == "on":
+            fields.append((
+                "Split after X minutes",
+                str(self.split_after) if self.split_after else "",
+                self._FIELD_MINUTES,
+            ))
+        return fields
 
     # ── Key handling ───────────────────────────────────────────────────────────
 
@@ -857,11 +1116,14 @@ class SplitSettingsPopup:
             self._sel   = min(len(fields) - 1, self._sel + 1)
             self._error = ""
 
-        elif key == ord(" "):
-            if field_key == self._FIELD_ENABLED:
-                self.split_enabled = not self.split_enabled
+        elif key in (ord(" "), curses.KEY_LEFT, curses.KEY_RIGHT):
+            if field_key == self._FIELD_MODE:
+                idx = self._STATES.index(self.mode)
+                step = -1 if key == curses.KEY_LEFT else 1
+                self.mode = self._STATES[(idx + step) % len(self._STATES)]
+                self._sel = min(self._sel, len(self._get_fields()) - 1)
                 self._error = ""
-            else:
+            elif key == ord(" "):
                 self._edit_buf = str(self.split_after) if self.split_after else ""
                 self._editing  = True
                 self._error    = ""
@@ -882,8 +1144,8 @@ class SplitSettingsPopup:
         h, w   = stdscr.getmaxyx()
         fields = self._get_fields()
 
-        box_w = min(46, w - 6)
-        box_h = 9
+        box_w = min(50, w - 6)
+        box_h = len(fields) * 2 + 5   # + effective line + footer
         by1 = (h - box_h) // 2
         bx1 = (w - box_w) // 2
         by2 = by1 + box_h
@@ -918,11 +1180,23 @@ class SplitSettingsPopup:
 
             row += 2
 
+        # ── Effective value ───────────────────────────────────────────────────
+        site_minutes = self._site_default_minutes()
+        if self.mode == "inherit":
+            effective_str = f"{site_minutes}m" if site_minutes > 0 else "No split"
+        elif self.mode == "off":
+            effective_str = "No split"
+        else:
+            effective_str = f"{self.split_after}m" if self.split_after > 0 else "No split"
+        db.safe_addstr(stdscr, row, bx1 + 2, "Effective: ", curses.color_pair(db.C_NORMAL))
+        db.safe_addstr(stdscr, row, bx1 + 13, effective_str, curses.color_pair(db.C_WARN) | curses.A_BOLD)
+        row += 1
+
         if self._error:
             db.safe_addstr(stdscr, by2 - 1, bx1 + 2, self._error[:box_w - 4],
                            curses.color_pair(db.C_WARN) | curses.A_BOLD)
 
-        footer = " Enter:Save  Space:Toggle/Edit  Esc:Cancel "
+        footer = " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "
         db.safe_addstr(stdscr, by2, bx1 + 2, footer[:box_w - 4], curses.color_pair(db.C_INVHEAD))
 
 

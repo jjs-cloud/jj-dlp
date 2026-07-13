@@ -141,6 +141,8 @@ def configure(dashboard_log_fn=None, dashboard_dbg_fn=None) -> None:
 #   POPUP    — live popup notification creation and suppression
 #   LQ       — low-quality/bandwidth-saving downloader logic
 #   SCHEDULE — per-streamer schedule evaluation on every check interval
+#   GLOBAL_JSON — global.json read/write/backup diagnostics
+#   NTFY     — ntfy.sh push-notifications
 #
 DBG_TAGS: list[str] = [
     "DRAIN",
@@ -159,6 +161,8 @@ DBG_TAGS: list[str] = [
     "LQ",
     "SCHEDULE",
     "UPGRADE_QUALITY",
+    "GLOBAL_JSON",
+    "NTFY",
 ]
 
 import json
