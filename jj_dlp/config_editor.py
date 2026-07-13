@@ -171,9 +171,9 @@ def _get_site_default_cfg(dashboard, entry: "PriorityEntry") -> dict:
 
     Used by the per-streamer settings popups to show the site-level value a
     setting would inherit if there were no streamer-level override, so the
-    popup can display "Effective: X (source: site default)" instead of
-    leaving the precedence between the two levels ambiguous. Returns {} if
-    the owning site can't be found (e.g. sites were reloaded).
+    popup can display an accurate "Effective: X" value instead of leaving
+    the precedence between the two levels ambiguous. Returns {} if the
+    owning site can't be found (e.g. sites were reloaded).
     """
     try:
         for site in dashboard.sites:
@@ -897,7 +897,7 @@ class NotificationSettingsPopup:
         h, w = stdscr.getmaxyx()
         
         box_w = min(46, w - 6)
-        box_h = 9
+        box_h = 7
         by1 = (h - box_h) // 2
         bx1 = (w - box_w) // 2
         by2 = by1 + box_h
@@ -917,16 +917,11 @@ class NotificationSettingsPopup:
         site_default = self._site_default()
         if self.state == "inherit":
             effective = site_default
-            source    = "site default"
         else:
             effective = (self.state == "on")
-            source    = "streamer override"
         eff_str = "ON" if effective else "OFF"
         db.safe_addstr(stdscr, by1 + 4, bx1 + 2, "Effective: ", curses.color_pair(db.C_NORMAL))
         db.safe_addstr(stdscr, by1 + 4, bx1 + 13, eff_str, curses.color_pair(db.C_WARN) | curses.A_BOLD)
-        source_line = f"(source: {source}"
-        source_line += f", site NTFY_NOTIFICATIONS={'true' if site_default else 'false'})" if self.state == "inherit" else ")"
-        db.safe_addstr(stdscr, by1 + 5, bx1 + 2, source_line[:box_w - 4], curses.color_pair(db.C_DIM))
 
         db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "[:box_w-4], curses.color_pair(db.C_INVHEAD))
 
@@ -1150,7 +1145,7 @@ class SplitSettingsPopup:
         fields = self._get_fields()
 
         box_w = min(50, w - 6)
-        box_h = len(fields) * 2 + 6   # + effective/source lines + footer
+        box_h = len(fields) * 2 + 5   # + effective line + footer
         by1 = (h - box_h) // 2
         bx1 = (w - box_w) // 2
         by2 = by1 + box_h
@@ -1185,21 +1180,17 @@ class SplitSettingsPopup:
 
             row += 2
 
-        # ── Effective value + source ─────────────────────────────────────────
+        # ── Effective value ───────────────────────────────────────────────────
         site_minutes = self._site_default_minutes()
         if self.mode == "inherit":
             effective_str = f"{site_minutes}m" if site_minutes > 0 else "No split"
-            source        = f"site default (SPLIT_AFTER={site_minutes})"
         elif self.mode == "off":
             effective_str = "No split"
-            source        = "streamer override — forced off"
         else:
             effective_str = f"{self.split_after}m" if self.split_after > 0 else "No split"
-            source        = "streamer override"
         db.safe_addstr(stdscr, row, bx1 + 2, "Effective: ", curses.color_pair(db.C_NORMAL))
         db.safe_addstr(stdscr, row, bx1 + 13, effective_str, curses.color_pair(db.C_WARN) | curses.A_BOLD)
         row += 1
-        db.safe_addstr(stdscr, row, bx1 + 2, f"(source: {source})"[:box_w - 4], curses.color_pair(db.C_DIM))
 
         if self._error:
             db.safe_addstr(stdscr, by2 - 1, bx1 + 2, self._error[:box_w - 4],
