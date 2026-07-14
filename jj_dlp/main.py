@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.9"
+__version__ = "1.22.6"
 
 import subprocess
 import time
@@ -659,18 +659,18 @@ class SiteState:
         # Log tab: whether to show debug messages inline (off by default — can be very verbose)
         self.show_debug_log: bool = False
 
-        # Last notification *type* shown for each streamer during the
-        # current continuous live session (see _notif_state_key): e.g.
-        # "recording", "not_recording:Disabled", "not_recording:Lower priority".
-        # Cleared when the streamer goes offline so notifications start
-        # fresh next time they go live. Within a session, a repeat of the
-        # SAME type is suppressed (so recording restarts, repeated polls of
-        # a disabled streamer, etc. don't re-notify indefinitely), but a
-        # *different* type always notifies — going from recording to
-        # queued, queued back to recording, disabled to queued, and so on
-        # are all meaningful state changes the user wants to hear about.
-        # Shared by both the popup and ntfy channels.
-        self.notif_last_state: Dict[str, str] = {}
+        # Notification cooldown: streamer -> epoch of last notification shown.
+        # Shared by both the popup (tkinter/notify-send) and ntfy channels so
+        # that they follow the exact same POPUP_COOLDOWN-gated schedule.
+        self.notif_last_shown:    Dict[str, float] = {}
+        # Streamers for whom a "not recording" (disabled / lower-priority)
+        # notification has already been shown during the current continuous
+        # live session. Cleared when the streamer goes offline so the
+        # notification can fire again next time they go live. This prevents
+        # the notification from re-appearing every popup_cooldown minutes for
+        # as long as the streamer stays live. Shared by both the popup and
+        # ntfy channels.
+        self.notif_shown_session: set = set()
 
         # Active yt-dlp subprocesses: streamer -> proc
         # Written by record_stream threads; read by stop() for clean kill.
@@ -978,7 +978,7 @@ def cmd_display_str(cmd: List[str]) -> str:
 # ntfy.sh push notification — represent the exact same "event" (a streamer
 # going live, recording or not, and why). They share:
 #   • the same message content, built once by _format_live_popup()
-#   • the same enable/disable + per-notification-type suppression gate,
+#   • the same enable/disable + cooldown + per-session-suppression gate,
 #     evaluated once by _maybe_show_live_popup()
 # The only thing that differs per channel is whether that channel is enabled
 # (POPUP_NOTIFICATIONS vs. NTFY_NOTIFICATIONS / the per-streamer ntfy
@@ -1200,21 +1200,6 @@ def _resolve_ntfy_enabled(streamer: str, site_label: str, cfg: dict) -> bool:
     return bool(enabled)
 
 
-def _notif_state_key(is_recording: bool, reason: str) -> str:
-    """Return a stable key identifying the *type* of live notification.
-
-    Two calls that represent the same underlying recording state (e.g. two
-    "recording started" events caused by an ffmpeg restart, or two
-    "disabled" pings from consecutive polls) return the same key. A change
-    in recording state — recording -> evicted, evicted -> recording,
-    disabled -> queued, etc. — returns a different key, which is what lets
-    _maybe_show_live_popup treat it as newsworthy rather than a repeat.
-    """
-    if is_recording:
-        return "recording"
-    return f"not_recording:{reason or 'unknown'}"
-
-
 def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
                            show_popup: bool = True, source: str = "poll",
                            is_recording: bool = True, reason: str = "",
@@ -1223,10 +1208,10 @@ def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
 
     Both channels represent the same underlying event, so they follow the
     exact same path here: resolve whether each channel is enabled, then
-    apply one shared per-notification-type suppression check that gates
-    *both* channels identically. Only the per-channel enablement check
-    differs (POPUP_NOTIFICATIONS vs. NTFY_NOTIFICATIONS / its per-streamer
-    override).
+    apply one shared per-session-suppression check and one shared
+    POPUP_COOLDOWN window that gates *both* channels identically. Only the
+    per-channel enablement check differs (POPUP_NOTIFICATIONS vs.
+    NTFY_NOTIFICATIONS / its per-streamer override).
     """
     site_label = cfg.get("site_label", os.path.basename(site.config_path))
 
@@ -1244,29 +1229,24 @@ def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
     # Streamers that are NOT being recorded (disabled / lower-priority) get
     # re-passed to this function on every single poll for as long as they
     # remain live, since nothing else about their state changes to exclude
-    # them from the caller's candidate list. Recording streamers can *also*
-    # re-enter this function multiple times within the same live session —
-    # ffmpeg error-restarts, evictions, and LQ/quality switches all remove
-    # the streamer from currently_recording, so the next poll sees a "new"
-    # recording start even though the stream never went offline.
-    #
-    # We suppress only a repeat of the *same* notification type within a
-    # session (e.g. two "recording started" pings back to back). A genuine
-    # change of type — recording -> queued, queued -> recording, disabled ->
-    # queued, etc. — is always allowed through immediately, since that's
-    # meaningful information the user wants regardless of how recently the
-    # last notification fired. site.notif_last_state is cleared in lockstep
-    # with site.dash_live_since when the streamer is actually detected
-    # offline (see the poll loop), so a brand new live session always
-    # starts with a clean slate. This applies to both channels identically.
-    state_key  = _notif_state_key(is_recording, reason)
-    last_state = site.notif_last_state.get(streamer)
-    if last_state == state_key:
-        dbg(f"[NOTIFY] suppressed - same notification type ({state_key!r}) "
-            f"already shown this live session for streamer={streamer!r}")
+    # them from the caller's candidate list. Relying on the cooldown alone
+    # then means notifications keep re-appearing every popup_cooldown
+    # minutes for the entire time they're live. Instead, only notify once
+    # per continuous live session; site.notif_shown_session is cleared when
+    # the streamer goes offline (see the poll loop). This applies to both
+    # channels identically.
+    if not is_recording and streamer in site.notif_shown_session:
+        dbg(f"[NOTIFY] suppressed - already shown this live session for streamer={streamer!r} reason={reason!r}")
         return
 
-    dbg(f"[NOTIFY] allowed - type={state_key!r} (was {last_state!r}); "
+    cooldown_secs = cfg.get("popup_cooldown", 30) * 60
+    last_shown    = site.notif_last_shown.get(streamer, 0)
+    elapsed       = time.time() - last_shown
+    if elapsed < cooldown_secs:
+        dbg(f"[NOTIFY] suppressed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s required={cooldown_secs}s")
+        return
+
+    dbg(f"[NOTIFY] allowed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s cooldown={cooldown_secs}s; "
         f"dispatching enabled channels (popup={popup_enabled} ntfy={ntfy_enabled})")
 
     if popup_enabled:
@@ -1283,7 +1263,9 @@ def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
                                 reason=reason,
                                 warning=warning)
 
-    site.notif_last_state[streamer] = state_key
+    site.notif_last_shown[streamer] = time.time()
+    if not is_recording:
+        site.notif_shown_session.add(streamer)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1575,12 +1557,12 @@ def get_live_streamers(streamers: List[str], cfg: dict,
 def get_streamer_file_size(output_dir, streamer, cfg=None,
                            last_growth_time=None, stall_timeout=None,
                            stall_check_interval=None, proc_start_time=None,
-                           known_filename=None, growth_seen=False):
+                           known_filename=None):
     try:
         filename = known_filename
         size = os.path.getsize(filename) if filename else 0
         stall_detected = False
-        if growth_seen and last_growth_time is not None and stall_timeout is not None:
+        if last_growth_time is not None and stall_timeout is not None:
             time_now = time.time()
             time_since_growth = time_now - last_growth_time
             stalled = max(0.0, time_since_growth - stall_check_interval)
@@ -2076,8 +2058,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 known_filename=active_file,
             )
 
-            last_growth_time     = None
-            growth_seen          = False
+            last_growth_time     = time.time()
             recording_start_time = time.time()
             stall_check_interval = cfg["stall_check_interval"]
             stall_timeout        = cfg["stall_timeout"]
@@ -2328,8 +2309,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                                 site.clear_stall_since(streamer)
 
                                 last_size = 0
-                                last_growth_time = None
-                                growth_seen = False
+                                last_growth_time = time.time()
                                 next_split_retry_time = 0.0
 
                                 dbg(f"[SPLIT][record_stream] switched to part {segment_num} "
@@ -2380,7 +2360,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         stall_timeout=stall_timeout,
                         stall_check_interval=stall_check_interval,
                         known_filename=active_file,
-                        growth_seen=growth_seen,
                     )
 
                     if file_error:
@@ -2417,7 +2396,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
                     elif current_size > last_size:
                         filename_error_warned = False
-                        growth_seen = True
                         dbg(f"[STALL] grew: {last_size} -> {current_size} "
                             f"(+{current_size - last_size} bytes), resetting timer",
                             site_name=streamer)
@@ -2426,15 +2404,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         site.clear_stall_since(streamer)
                     else:
                         filename_error_warned = False
-                        if growth_seen and last_growth_time is not None:
-                            dbg(f"[STALL] NO GROWTH: size={current_size} "
-                                f"stall_since={time.time() - last_growth_time:.2f}s",
-                                site_name=streamer)
-                            site.set_stall_since(streamer, last_growth_time)
-                        else:
-                            dbg("[STALL] waiting for initial growth before stall tracking",
-                                site_name=streamer)
-                            site.clear_stall_since(streamer)
+                        dbg(f"[STALL] NO GROWTH: size={current_size} "
+                            f"stall_since={time.time() - last_growth_time:.2f}s",
+                            site_name=streamer)
+                        site.set_stall_since(streamer, last_growth_time)
 
             else:
                 site.unregister_proc(streamer)
@@ -3093,7 +3066,7 @@ def monitor_site(site: "SiteState") -> None:
                 for s in streamers:
                     if s not in live_set:
                         site.dash_live_since.pop(s, None)
-                        site.notif_last_state.pop(s, None)
+                        site.notif_shown_session.discard(s)
                     elif s not in site.dash_live_since:
                         site.dash_live_since[s] = time.time()
 

@@ -1,6 +1,5 @@
-- prevented popup/ntfy notification spam during the same livestream session.  Also added additional info to the notifications.
+- ntfy notifications are now subject to the POPUP_COOLDOWN.  Also added additional info to the notifications.
 - fixed dissapearing messages on the log tab
-
 
 v1.22.2
 
