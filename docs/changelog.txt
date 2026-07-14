@@ -1,3 +1,5 @@
+v1.22.8
+
 - Updated ntfy notifications to behave the same as popup notifications.  Also added additional info to the notifications.
 - fixed dissapearing messages on the log tab
 - updated docs/ntfy-setup.md
