@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.5"
+__version__ = "1.22.6"
 
 import subprocess
 import time
@@ -998,7 +998,7 @@ def _format_live_popup(streamer: str, is_recording: bool = True,
     status = "Recording" if is_recording else "Not recording"
     lines = [
         f"{marker} {streamer} is LIVE",
-        f"● {status}",
+        f"{marker} {status}",
     ]
     if site_label:
         lines.append(f"Site: {site_label}")
@@ -1113,7 +1113,7 @@ def _send_ntfy_notification(streamer: str, site_label: str, is_recording: bool =
     # warning/reason when applicable. The "Title" header must stay ASCII —
     # emoji markers live in the body instead, where UTF-8 is safe.
     popup_lines = _format_live_popup(streamer, is_recording, reason, warning, site_label)
-    title = f"jj-dlp: {streamer} is LIVE"
+    title = "jj-dlp"
     body = "\n".join(popup_lines)
 
     headers = {
