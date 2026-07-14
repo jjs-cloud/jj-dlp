@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.7"
+__version__ = "1.22.8"
 
 import subprocess
 import time
@@ -659,21 +659,17 @@ class SiteState:
         # Log tab: whether to show debug messages inline (off by default — can be very verbose)
         self.show_debug_log: bool = False
 
-        # Notification cooldown: streamer -> epoch of last notification shown.
-        # Shared by both the popup (tkinter/notify-send) and ntfy channels so
-        # that they follow the exact same POPUP_COOLDOWN-gated schedule.
-        self.notif_last_shown:    Dict[str, float] = {}
         # Last notification *type* shown for each streamer during the
         # current continuous live session (see _notif_state_key): e.g.
-        # "recording", "not_recording:Disabled", "not_recording:Evicted".
+        # "recording", "not_recording:Disabled", "not_recording:Lower priority".
         # Cleared when the streamer goes offline so notifications start
         # fresh next time they go live. Within a session, a repeat of the
         # SAME type is suppressed (so recording restarts, repeated polls of
-        # a disabled streamer, etc. don't re-notify every popup_cooldown
-        # minutes), but a *different* type always notifies — going from
-        # recording to evicted, evicted back to recording, disabled to
-        # queued, and so on are all meaningful state changes the user wants
-        # to hear about. Shared by both the popup and ntfy channels.
+        # a disabled streamer, etc. don't re-notify indefinitely), but a
+        # *different* type always notifies — going from recording to
+        # queued, queued back to recording, disabled to queued, and so on
+        # are all meaningful state changes the user wants to hear about.
+        # Shared by both the popup and ntfy channels.
         self.notif_last_state: Dict[str, str] = {}
 
         # Active yt-dlp subprocesses: streamer -> proc
@@ -1252,20 +1248,17 @@ def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
     # re-enter this function multiple times within the same live session —
     # ffmpeg error-restarts, evictions, and LQ/quality switches all remove
     # the streamer from currently_recording, so the next poll sees a "new"
-    # recording start even though the stream never went offline. Relying on
-    # the cooldown alone then means notifications keep re-appearing every
-    # popup_cooldown minutes for the entire time they're live.
+    # recording start even though the stream never went offline.
     #
-    # Instead, we suppress only a repeat of the *same* notification type
-    # within a session (e.g. two "recording started" pings back to back).
-    # A genuine change of type — recording -> evicted, evicted -> recording,
-    # disabled -> queued, etc. — is always allowed through immediately,
-    # since that's meaningful information the user wants regardless of how
-    # recently the last notification fired. site.notif_last_state is
-    # cleared in lockstep with site.dash_live_since when the streamer is
-    # actually detected offline (see the poll loop), so a brand new live
-    # session always starts with a clean slate. This applies to both
-    # channels identically.
+    # We suppress only a repeat of the *same* notification type within a
+    # session (e.g. two "recording started" pings back to back). A genuine
+    # change of type — recording -> queued, queued -> recording, disabled ->
+    # queued, etc. — is always allowed through immediately, since that's
+    # meaningful information the user wants regardless of how recently the
+    # last notification fired. site.notif_last_state is cleared in lockstep
+    # with site.dash_live_since when the streamer is actually detected
+    # offline (see the poll loop), so a brand new live session always
+    # starts with a clean slate. This applies to both channels identically.
     state_key  = _notif_state_key(is_recording, reason)
     last_state = site.notif_last_state.get(streamer)
     if last_state == state_key:
@@ -1273,13 +1266,6 @@ def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
             f"already shown this live session for streamer={streamer!r}")
         return
 
-    # A genuine type change is always allowed through immediately, with no
-    # cooldown gate. Gating it would mean a real transition (e.g. getting
-    # evicted two minutes after a "recording started" ping, well inside a
-    # 30-minute cooldown) could get silently swallowed -- exactly the kind
-    # of state change the user wants to hear about regardless of timing.
-    # Same-type repeats are already fully handled by the state-key check
-    # above, so POPUP_COOLDOWN no longer has a job to do in this function.
     dbg(f"[NOTIFY] allowed - type={state_key!r} (was {last_state!r}); "
         f"dispatching enabled channels (popup={popup_enabled} ntfy={ntfy_enabled})")
 
@@ -1297,7 +1283,6 @@ def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
                                 reason=reason,
                                 warning=warning)
 
-    site.notif_last_shown[streamer] = time.time()
     site.notif_last_state[streamer] = state_key
 
 
