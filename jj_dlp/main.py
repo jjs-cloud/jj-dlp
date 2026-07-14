@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.2"
+__version__ = "1.22.8"
 
 import subprocess
 import time
@@ -11,6 +11,7 @@ import os
 import json
 import re as _re
 import threading
+from collections import deque
 from datetime import datetime, timedelta
 from datetime import time as _dt_time
 from typing import List, Set, Tuple, Dict, Optional
@@ -406,7 +407,6 @@ def load_global_config() -> dict:
         "ff_err_thresh":      _int("FF_ERR_THRESH", 200),
         "subfolders":         _bool("SUBFOLDERS", False),
         "ntfy_topic":         general.get("NTFY_TOPIC", "").strip().strip('"\''),
-        "ntfy_url":           general.get("NTFY_URL", "https://ntfy.sh").strip().strip('"\''),
     }
 
 def _write_global_conf_key(key: str, value: str) -> None:
@@ -630,9 +630,16 @@ class SiteState:
         self.dash_next_check_in:  float = 0.0
         self.dash_all_streamers:  List[str] = []
         self.dash_blocked:        Set[str] = set()
-        self.dash_log_lines:      List[str] = []          # recent activity log
-        self.dash_stdout_lines:   List[str] = []          # recent stdout lines
-        self.dash_stderr_lines:   List[str] = []          # recent stderr lines
+        # Activity log lines are stored in their own bounded buffer so that a
+        # noisy/high-frequency debug tag can never evict real activity lines
+        # (recording started/stopped, errors, etc.) — see dash_debug_lines.
+        self.dash_log_lines:      deque = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)   # recent activity log
+        # Debug lines (from logger.dbg()) live in a separate, independently
+        # sized buffer. However chatty a debug tag is, it only ever crowds out
+        # older *debug* lines, never the activity log above.
+        self.dash_debug_lines:    deque = deque(maxlen=DEBUG_LOG_BUFFER_SIZE)      # recent debug-tag log
+        self.dash_stdout_lines:   deque = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)   # recent stdout lines
+        self.dash_stderr_lines:   deque = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)   # recent stderr lines
 
         # Twitch EventSub
         self.eventsub             = None
@@ -651,14 +658,18 @@ class SiteState:
         # Log tab: whether to show debug messages inline (off by default — can be very verbose)
         self.show_debug_log: bool = False
 
-        # Popup cooldown: streamer -> epoch of last popup shown
-        self.popup_last_shown:    Dict[str, float] = {}
-        # Streamers for whom a "not recording" (disabled / lower-priority) popup
-        # has already been shown during the current continuous live session.
-        # Cleared when the streamer goes offline so the popup can fire again
-        # next time they go live. This prevents the popup from re-appearing
-        # every popup_cooldown minutes for as long as the streamer stays live.
-        self.popup_shown_session: set = set()
+        # Notification cooldown: streamer -> epoch of last notification shown.
+        # Shared by both the popup (tkinter/notify-send) and ntfy channels so
+        # that they follow the exact same POPUP_COOLDOWN-gated schedule.
+        self.notif_last_shown:    Dict[str, float] = {}
+        # Streamers for whom a "not recording" (disabled / lower-priority)
+        # notification has already been shown during the current continuous
+        # live session. Cleared when the streamer goes offline so the
+        # notification can fire again next time they go live. This prevents
+        # the notification from re-appearing every popup_cooldown minutes for
+        # as long as the streamer stays live. Shared by both the popup and
+        # ntfy channels.
+        self.notif_shown_session: set = set()
 
         # Active yt-dlp subprocesses: streamer -> proc
         # Written by record_stream threads; read by stop() for clean kill.
@@ -787,22 +798,16 @@ class SiteState:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         line = f"[{ts}] {msg}"
         with self.dash_lock:
-            self.dash_log_lines.append(line)
-            if len(self.dash_log_lines) > 200:
-                self.dash_log_lines = self.dash_log_lines[-200:]
+            self.dash_log_lines.append(line)   # deque(maxlen=...) evicts automatically
         _logger.log_dashboard_line(msg)
 
     def add_stdout_line(self, line: str) -> None:
         with self.dash_lock:
             self.dash_stdout_lines.append(line)
-            if len(self.dash_stdout_lines) > 200:
-                self.dash_stdout_lines = self.dash_stdout_lines[-200:]
 
     def add_stderr_line(self, line: str) -> None:
         with self.dash_lock:
             self.dash_stderr_lines.append(line)
-            if len(self.dash_stderr_lines) > 200:
-                self.dash_stderr_lines = self.dash_stderr_lines[-200:]
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -827,10 +832,42 @@ FFMPEG_ERROR_PATTERNS: List[str] = [
 # and draw_stderr_tab can filter them in/out without separate buffers.
 _CHECKER_STDOUT_PREFIX: str = "\x00checker\x00"
 _CHECKER_STDERR_PREFIX: str = "\x00checker_err\x00"
-# Debug messages routed to the Log tab are stored with this prefix so they can
-# be toggled independently of regular activity messages.
-_DEBUG_LOG_PREFIX: str = "\x00debug\x00"
 FFMPEG_ERROR_RESTART_THRESHOLD: int = 200
+
+# Ring-buffer sizes for the per-site dashboard line buffers (see SiteState).
+# Activity/stdout/stderr buffers hold a fixed number of lines regardless of
+# debug-tag traffic. Debug lines get their own, larger buffer since they are
+# high-volume by nature and already fully retained in the debug log file
+# when debug logging is enabled — losing old ones from the in-memory Log tab
+# view is expected/acceptable, unlike losing real activity lines.
+ACTIVITY_LOG_BUFFER_SIZE: int = 200
+DEBUG_LOG_BUFFER_SIZE:    int = 1000
+
+
+def _merge_lines_by_timestamp(a: List[str], b: List[str]) -> List[str]:
+    """Merge two chronologically-ordered "[YYYY-MM-DD HH:MM:SS] ..." line
+    lists into one combined, still-chronological list.
+
+    Both dash_log_lines and dash_debug_lines are append-only and therefore
+    already individually in time order; this does a standard merge-sort
+    merge step (O(n+m)) rather than re-sorting everything from scratch.
+    """
+    def ts_key(line: str) -> str:
+        # Lines are "[YYYY-MM-DD HH:MM:SS] ...", so the first 20 chars
+        # (including brackets) sort correctly as plain strings.
+        return line[:20] if line[:1] == "[" else ""
+
+    merged: List[str] = []
+    i = j = 0
+    len_a, len_b = len(a), len(b)
+    while i < len_a and j < len_b:
+        if ts_key(a[i]) <= ts_key(b[j]):
+            merged.append(a[i]); i += 1
+        else:
+            merged.append(b[j]); j += 1
+    merged.extend(a[i:])
+    merged.extend(b[j:])
+    return merged
 
 # ── Ad detection patterns (used by _drain_pipe when AD_ALERTS is enabled) ─────
 # Any match updates the per-streamer last-seen timestamp in site.ad_alerts.
@@ -933,17 +970,37 @@ def cmd_display_str(cmd: List[str]) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Popup notification
+# Live notifications (popup + ntfy)
 # ══════════════════════════════════════════════════════════════════════════════
+#
+# Both notification channels — the desktop popup (notify-send/tkinter) and the
+# ntfy.sh push notification — represent the exact same "event" (a streamer
+# going live, recording or not, and why). They share:
+#   • the same message content, built once by _format_live_popup()
+#   • the same enable/disable + cooldown + per-session-suppression gate,
+#     evaluated once by _maybe_show_live_popup()
+# The only thing that differs per channel is whether that channel is enabled
+# (POPUP_NOTIFICATIONS vs. NTFY_NOTIFICATIONS / the per-streamer ntfy
+# override) and how the message gets delivered.
 
 def _format_live_popup(streamer: str, is_recording: bool = True,
-                       reason: str = "", warning: str = "") -> list:
+                       reason: str = "", warning: str = "",
+                       site_label: str = "") -> list:
+    """Build the lines of text shown for a "streamer is live" notification.
+
+    Used to build both the popup body (notify-send/tkinter) and the ntfy.sh
+    push notification body, so the two channels always show identical
+    information: live status (recording / not recording), the site, and —
+    when applicable — the warning and/or the reason recording did not start.
+    """
     marker = "🔴" if is_recording else "🟡"
     status = "Recording" if is_recording else "Not recording"
     lines = [
         f"{marker} {streamer} is LIVE",
-        f"● {status}",
+        f"{marker} {status}",
     ]
+    if site_label:
+        lines.append(f"Site: {site_label}")
     if warning:
         lines.append(f"Warning: {warning}")
     if reason:
@@ -953,10 +1010,10 @@ def _format_live_popup(streamer: str, is_recording: bool = True,
 
 def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 15,
                      is_recording: bool = True, reason: str = "",
-                     warning: str = "") -> None:
+                     warning: str = "", site_label: str = "") -> None:
     dbg(f"[POPUP] enqueue popup streamer={streamer!r} source={source!r} timeout={popup_timeout} is_recording={is_recording} reason={reason!r} warning={warning!r}")
     def _run():
-        popup_lines = _format_live_popup(streamer, is_recording, reason, warning)
+        popup_lines = _format_live_popup(streamer, is_recording, reason, warning, site_label)
         popup_text = "\n".join(popup_lines)
         if sys.platform.startswith("linux"):
             notify_cmd = shutil.which("notify-send")
@@ -1024,13 +1081,14 @@ def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 1
     threading.Thread(target=_run, daemon=True, name=f"popup-{streamer}").start()
 
 
-def _send_ntfy_notification(streamer: str, is_recording: bool, site_label: str) -> None:
+def _send_ntfy_notification(streamer: str, site_label: str, is_recording: bool = True,
+                            reason: str = "", warning: str = "") -> None:
     dbg(f"[NTFY] _send_ntfy_notification called: streamer={streamer!r} "
-        f"is_recording={is_recording} site_label={site_label!r}")
+        f"is_recording={is_recording} site_label={site_label!r} reason={reason!r} warning={warning!r}")
 
     global_cfg = load_global_config()
     topic = global_cfg.get("ntfy_topic", "").strip()
-    url = global_cfg.get("ntfy_url", "https://ntfy.sh").strip()
+    url = "https://ntfy.sh"
     dbg(f"[NTFY] resolved global config: ntfy_topic={topic!r} ntfy_url={url!r} "
         f"(raw global.conf path={get_global_conf_path()!r})")
 
@@ -1039,23 +1097,19 @@ def _send_ntfy_notification(streamer: str, is_recording: bool, site_label: str) 
             "skipping notification.")
         return
 
-    if not url:
-        dbg("[NTFY] ntfy_url resolved empty after strip; falling back to default https://ntfy.sh")
-        url = "https://ntfy.sh"
-
-    if not url.startswith("http://") and not url.startswith("https://"):
-        dbg(f"[NTFY] ntfy_url {url!r} missing scheme; prepending https://")
-        url = "https://" + url
-    url = url.rstrip("/")
-
     full_url = f"{url}/{topic}"
-    title = "jj-dlp: Recording Started"
-    body = f"🔴 {streamer} is LIVE on {site_label} and recording has started."
+
+    # Same content the popup shows: LIVE/recording status, site, and the
+    # warning/reason when applicable. The "Title" header must stay ASCII —
+    # emoji markers live in the body instead, where UTF-8 is safe.
+    popup_lines = _format_live_popup(streamer, is_recording, reason, warning, site_label)
+    title = "jj-dlp"
+    body = "\n".join(popup_lines)
 
     headers = {
         "Title": title,
-        "Priority": "high",
-        "Tags": "red_circle,record"
+        "Priority": "high" if is_recording else "default",
+        "Tags": "red_circle,record" if is_recording else "warning",
     }
 
     dbg(f"[NTFY] prepared request: url={full_url!r} title={title!r} "
@@ -1100,79 +1154,108 @@ def _send_ntfy_notification(streamer: str, is_recording: bool, site_label: str) 
     threading.Thread(target=_post, daemon=True, name=f"ntfy-{streamer}").start()
 
 
+def _resolve_ntfy_enabled(streamer: str, site_label: str, cfg: dict) -> bool:
+    """Resolve whether the ntfy channel is enabled for *streamer*.
+
+    Per-streamer entries in global.json's "priorities" section can override
+    the site's NTFY_NOTIFICATIONS setting on a per-streamer basis (set via
+    the dashboard's NotificationSettingsPopup). Falls back to the site
+    config's ntfy_notifications value when no such override exists.
+    """
+    streamer_notif = None
+    try:
+        with _global_json_lock:
+            gdata = _load_global_json()
+        config_id = _get_config_id()
+        entries = gdata.get("priorities", {}).get(config_id, {}).get("entries", [])
+        dbg(f"[NTFY] config_id={config_id!r} found {len(entries)} priority entries "
+            f"for this config set")
+        for e in entries:
+            if e.get("streamer") == streamer and e.get("site") == site_label:
+                streamer_notif = e.get("notifications_enabled")
+                break
+        dbg(f"[NTFY] streamer-level override lookup result: {streamer_notif!r} "
+            f"(None means no per-streamer entry / fall back to site config)")
+    except Exception as ex:
+        dbg(f"[NTFY] Error reading global.json for streamer-level setting: "
+            f"{type(ex).__name__}: {ex}")
+
+    if streamer_notif is not None:
+        dbg(f"[NTFY] using streamer-level override: notifications_enabled={streamer_notif}")
+        return bool(streamer_notif)
+
+    enabled = cfg.get("ntfy_notifications", True)
+    dbg(f"[NTFY] no streamer-level override; using site config "
+        f"ntfy_notifications={enabled}")
+    return bool(enabled)
+
+
 def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
                            show_popup: bool = True, source: str = "poll",
                            is_recording: bool = True, reason: str = "",
                            warning: str = "") -> None:
-    # Handle ntfy notifications first, independently of popup settings
-    if is_recording:
-        site_label = cfg.get("site_label", os.path.basename(site.config_path))
-        streamer_notif = None
-        dbg(f"[NTFY] evaluating notification eligibility: streamer={streamer!r} "
-            f"site_label={site_label!r} source={source!r} reason={reason!r}")
-        try:
-            with _global_json_lock:
-                gdata = _load_global_json()
-            config_id = _get_config_id()
-            entries = gdata.get("priorities", {}).get(config_id, {}).get("entries", [])
-            dbg(f"[NTFY] config_id={config_id!r} found {len(entries)} priority entries "
-                f"for this config set")
-            for e in entries:
-                if e.get("streamer") == streamer and e.get("site") == site_label:
-                    streamer_notif = e.get("notifications_enabled")
-                    break
-            dbg(f"[NTFY] streamer-level override lookup result: {streamer_notif!r} "
-                f"(None means no per-streamer entry / fall back to site config)")
-        except Exception as ex:
-            dbg(f"[NTFY] Error reading global.json for streamer-level setting: "
-                f"{type(ex).__name__}: {ex}")
+    """Single gatekeeper for both live-notification channels (popup + ntfy).
 
-        if streamer_notif is not None:
-            notifications_enabled = streamer_notif
-            dbg(f"[NTFY] using streamer-level override: notifications_enabled={notifications_enabled}")
-        else:
-            notifications_enabled = cfg.get("ntfy_notifications", True)
-            dbg(f"[NTFY] no streamer-level override; using site config "
-                f"ntfy_notifications={notifications_enabled}")
+    Both channels represent the same underlying event, so they follow the
+    exact same path here: resolve whether each channel is enabled, then
+    apply one shared per-session-suppression check and one shared
+    POPUP_COOLDOWN window that gates *both* channels identically. Only the
+    per-channel enablement check differs (POPUP_NOTIFICATIONS vs.
+    NTFY_NOTIFICATIONS / its per-streamer override).
+    """
+    site_label = cfg.get("site_label", os.path.basename(site.config_path))
 
-        if notifications_enabled:
-            dbg(f"[NTFY] notifications enabled for streamer={streamer!r}; dispatching send")
-            _send_ntfy_notification(streamer, is_recording, site_label)
-        else:
-            dbg(f"[NTFY] notifications disabled for streamer={streamer!r}; skipping send")
+    popup_enabled = show_popup and cfg.get("popup_notifications", True)
+    dbg(f"[NOTIFY] popup channel: show_popup={show_popup} "
+        f"popup_notifications={cfg.get('popup_notifications', True)} -> enabled={popup_enabled}")
 
-    if not show_popup or not cfg.get("popup_notifications", True):
-        dbg(f"[POPUP] popup skipped for streamer={streamer!r} show_popup={show_popup} popup_notifications={cfg.get('popup_notifications', True)}")
+    ntfy_enabled = _resolve_ntfy_enabled(streamer, site_label, cfg)
+    dbg(f"[NOTIFY] ntfy channel: enabled={ntfy_enabled}")
+
+    if not popup_enabled and not ntfy_enabled:
+        dbg(f"[NOTIFY] both channels disabled for streamer={streamer!r}; nothing to do")
         return
 
     # Streamers that are NOT being recorded (disabled / lower-priority) get
     # re-passed to this function on every single poll for as long as they
     # remain live, since nothing else about their state changes to exclude
-    # them from the caller's candidate list. Relying on popup_cooldown alone
-    # then means the popup keeps re-appearing every popup_cooldown minutes
-    # for the entire time they're live. Instead, only show this popup once
-    # per continuous live session; site.popup_shown_session is cleared when
-    # the streamer goes offline (see the poll loop).
-    if not is_recording and streamer in site.popup_shown_session:
-        dbg(f"[POPUP] popup suppressed - already shown this live session for streamer={streamer!r} reason={reason!r}")
+    # them from the caller's candidate list. Relying on the cooldown alone
+    # then means notifications keep re-appearing every popup_cooldown
+    # minutes for the entire time they're live. Instead, only notify once
+    # per continuous live session; site.notif_shown_session is cleared when
+    # the streamer goes offline (see the poll loop). This applies to both
+    # channels identically.
+    if not is_recording and streamer in site.notif_shown_session:
+        dbg(f"[NOTIFY] suppressed - already shown this live session for streamer={streamer!r} reason={reason!r}")
         return
 
-    dbg(f"[POPUP] popup condition check for streamer={streamer!r} show_popup={show_popup} popup_notifications={cfg.get('popup_notifications', True)}")
     cooldown_secs = cfg.get("popup_cooldown", 30) * 60
-    last_shown    = site.popup_last_shown.get(streamer, 0)
+    last_shown    = site.notif_last_shown.get(streamer, 0)
     elapsed       = time.time() - last_shown
-    if elapsed >= cooldown_secs:
-        dbg(f"[POPUP] popup allowed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s cooldown={cooldown_secs}s")
+    if elapsed < cooldown_secs:
+        dbg(f"[NOTIFY] suppressed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s required={cooldown_secs}s")
+        return
+
+    dbg(f"[NOTIFY] allowed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s cooldown={cooldown_secs}s; "
+        f"dispatching enabled channels (popup={popup_enabled} ntfy={ntfy_enabled})")
+
+    if popup_enabled:
         _show_live_popup(streamer, source=source,
                          popup_timeout=cfg.get("popup_timeout", 15),
                          is_recording=is_recording,
                          reason=reason,
-                         warning=warning)
-        site.popup_last_shown[streamer] = time.time()
-        if not is_recording:
-            site.popup_shown_session.add(streamer)
-    else:
-        dbg(f"[POPUP] popup suppressed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s required={cooldown_secs}s")
+                         warning=warning,
+                         site_label=site_label)
+
+    if ntfy_enabled:
+        _send_ntfy_notification(streamer, site_label,
+                                is_recording=is_recording,
+                                reason=reason,
+                                warning=warning)
+
+    site.notif_last_shown[streamer] = time.time()
+    if not is_recording:
+        site.notif_shown_session.add(streamer)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1971,13 +2054,18 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             stall_timeout        = cfg["stall_timeout"]
             seconds_since_check  = 0
             _split_log_counter   = 0  # throttle periodic split-timer dbg lines
+            # Whether we've ever observed this file grow. The stall checker is
+            # only allowed to run (and potentially restart the recording) once
+            # growth has actually been seen at least once.
+            growth_seen = False
             # Set once we've already warned the Log tab about a missing/unreadable
             # recording file, so we don't spam the same warning every stall-check
             # cycle. Reset whenever the file is found again or a new attempt starts.
             filename_error_warned = False
             dbg(f"[STALL] init: stall_timeout={stall_timeout}s "
                 f"stall_check_interval={stall_check_interval}s "
-                f"last_size={last_size} last_growth_time={last_growth_time:.2f}",
+                f"last_size={last_size} last_growth_time={last_growth_time:.2f} "
+                f"growth_seen={growth_seen}",
                 site_name=streamer)
 
             dbg(f"[SPLIT][record_stream] inner loop starting: streamer={streamer!r} "
@@ -2218,6 +2306,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                                 last_size = 0
                                 last_growth_time = time.time()
                                 next_split_retry_time = 0.0
+                                # New segment is a new file — it hasn't grown yet,
+                                # so the stall checker must re-earn the right to run.
+                                growth_seen = False
 
                                 dbg(f"[SPLIT][record_stream] switched to part {segment_num} "
                                     f"pid={proc.pid} active_file={active_file!r} "
@@ -2256,15 +2347,21 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 if seconds_since_check >= stall_check_interval:
                     seconds_since_check = 0
                     dbg(f"[STALL] check cycle: elapsed_since_growth="
-                        f"{time.time() - last_growth_time:.2f}s",
+                        f"{time.time() - last_growth_time:.2f}s growth_seen={growth_seen}",
                         site_name=streamer)
                     current_size, stall_detected, _, file_error = get_streamer_file_size(
                         output_dir,
                         streamer,
                         cfg=cfg,
                         proc_start_time=proc_start_time,
-                        last_growth_time=last_growth_time,
-                        stall_timeout=stall_timeout,
+                        # Only arm the stall checker once this file has grown at
+                        # least once. get_streamer_file_size() only computes
+                        # stall_detected when both last_growth_time and
+                        # stall_timeout are provided, so withholding stall_timeout
+                        # here is what keeps the checker from starting on a file
+                        # that has never shown growth.
+                        last_growth_time=last_growth_time if growth_seen else None,
+                        stall_timeout=stall_timeout if growth_seen else None,
                         stall_check_interval=stall_check_interval,
                         known_filename=active_file,
                     )
@@ -2303,12 +2400,24 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
                     elif current_size > last_size:
                         filename_error_warned = False
+                        if not growth_seen:
+                            growth_seen = True
+                            dbg(f"[STALL] first growth observed for this file — "
+                                f"stall checker is now armed", site_name=streamer)
                         dbg(f"[STALL] grew: {last_size} -> {current_size} "
                             f"(+{current_size - last_size} bytes), resetting timer",
                             site_name=streamer)
                         last_size = current_size
                         last_growth_time = time.time()
                         site.clear_stall_since(streamer)
+                    elif not growth_seen:
+                        # No growth yet and none has ever been seen for this file —
+                        # the stall checker hasn't started, so there's nothing to
+                        # flag as stalled. Just wait for the first sign of growth.
+                        filename_error_warned = False
+                        dbg(f"[STALL] no growth yet, but stall checker not armed "
+                            f"(no growth seen for this file yet) — skipping stall "
+                            f"detection", site_name=streamer)
                     else:
                         filename_error_warned = False
                         dbg(f"[STALL] NO GROWTH: size={current_size} "
@@ -2973,7 +3082,7 @@ def monitor_site(site: "SiteState") -> None:
                 for s in streamers:
                     if s not in live_set:
                         site.dash_live_since.pop(s, None)
-                        site.popup_shown_session.discard(s)
+                        site.notif_shown_session.discard(s)
                     elif s not in site.dash_live_since:
                         site.dash_live_since[s] = time.time()
 
@@ -3881,15 +3990,15 @@ class JJDlpDashboard:
 
         with sel_site.dash_lock:
             raw_lines = list(sel_site.dash_log_lines)
+            raw_debug = list(sel_site.dash_debug_lines) if show_debug else []
 
-        # Filter or strip debug lines depending on the toggle
-        if show_debug:
-            display_lines = [
-                (ln[len(_DEBUG_LOG_PREFIX):] if ln.startswith(_DEBUG_LOG_PREFIX) else ln)
-                for ln in raw_lines
-            ]
-        else:
-            display_lines = [ln for ln in raw_lines if not ln.startswith(_DEBUG_LOG_PREFIX)]
+        # Activity lines are always shown. Debug lines are only pulled in
+        # (and merged back into chronological order) when the toggle is on —
+        # they live in their own buffer so they never displaced activity
+        # lines in the first place.
+        display_lines = (
+            _merge_lines_by_timestamp(raw_lines, raw_debug) if raw_debug else raw_lines
+        )
 
         wrapped = self._wrap_lines(display_lines, line_width)
 
@@ -5373,13 +5482,16 @@ def main() -> None:
             s.log_line(msg)
 
     def _dash_dbg(msg: str):
-        """Route a dbg() line to every site's log buffer with the debug prefix."""
+        """Route a dbg() line to every site's *debug* log buffer.
+
+        This buffer is separate from dash_log_lines (the activity log), so no
+        matter how frequently a debug tag fires, it can only evict older debug
+        lines — it can never push real activity lines (recording
+        started/stopped, errors, etc.) out of the Log tab's history.
+        """
         for s in sites:
-            prefixed = _DEBUG_LOG_PREFIX + msg
             with s.dash_lock:
-                s.dash_log_lines.append(prefixed)
-                if len(s.dash_log_lines) > 200:
-                    s.dash_log_lines = s.dash_log_lines[-200:]
+                s.dash_debug_lines.append(msg)   # deque(maxlen=...) evicts automatically
 
     _logger.configure(_dash_log, _dash_dbg)
 
