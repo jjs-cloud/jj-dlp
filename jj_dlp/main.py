@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.7"
+__version__ = "1.22.8"
 
 import subprocess
 import time
@@ -407,7 +407,6 @@ def load_global_config() -> dict:
         "ff_err_thresh":      _int("FF_ERR_THRESH", 200),
         "subfolders":         _bool("SUBFOLDERS", False),
         "ntfy_topic":         general.get("NTFY_TOPIC", "").strip().strip('"\''),
-        "ntfy_url":           general.get("NTFY_URL", "https://ntfy.sh").strip().strip('"\''),
     }
 
 def _write_global_conf_key(key: str, value: str) -> None:
@@ -1089,7 +1088,7 @@ def _send_ntfy_notification(streamer: str, site_label: str, is_recording: bool =
 
     global_cfg = load_global_config()
     topic = global_cfg.get("ntfy_topic", "").strip()
-    url = global_cfg.get("ntfy_url", "https://ntfy.sh").strip()
+    url = "https://ntfy.sh"
     dbg(f"[NTFY] resolved global config: ntfy_topic={topic!r} ntfy_url={url!r} "
         f"(raw global.conf path={get_global_conf_path()!r})")
 
@@ -1097,15 +1096,6 @@ def _send_ntfy_notification(streamer: str, site_label: str, is_recording: bool =
         dbg("[NTFY] No ntfy_topic configured (NTFY_TOPIC blank in global.conf [General]); "
             "skipping notification.")
         return
-
-    if not url:
-        dbg("[NTFY] ntfy_url resolved empty after strip; falling back to default https://ntfy.sh")
-        url = "https://ntfy.sh"
-
-    if not url.startswith("http://") and not url.startswith("https://"):
-        dbg(f"[NTFY] ntfy_url {url!r} missing scheme; prepending https://")
-        url = "https://" + url
-    url = url.rstrip("/")
 
     full_url = f"{url}/{topic}"
 
