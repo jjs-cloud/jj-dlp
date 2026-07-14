@@ -1,5 +1,6 @@
-- ntfy notifications are now subject to the POPUP_COOLDOWN.  Also added additional info to the notifications.
+- Updated ntfy notifications to behave the same as popup notifications.  Also added additional info to the notifications.
 - fixed dissapearing messages on the log tab
+- updated docs/ntfy-setup.md
 
 v1.22.2
 
