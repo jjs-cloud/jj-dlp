@@ -59,7 +59,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("FF_ERR_THRESH",         "global", "200",   True,  'Restart the download if we see this many ffmpeg errors ("timestamp discontinuity", "Packet corrupt") default: 200'),
     _KeyDef("SUBFOLDERS",            "global", "false", True,  "Save recordings into a subfolder named after the streamer inside OUTPUT_DIR (true/false)."),
     _KeyDef("NTFY_TOPIC",            "global", "",      True,  "The topic name to use for ntfy.sh notifications. (example: jj-dlp-fj48dh734fk) Refer to docs/ntfy-setup.md for a detailed setup guide. (blank = disabled)"),
-    _KeyDef("NTFY_URL",              "global", "https://ntfy.sh", True, "The URL of the ntfy instance (default: https://ntfy.sh)."),
+    _KeyDef("NTFY_URL",              "global", "https://ntfy.sh", False, "The URL of the ntfy instance (default: https://ntfy.sh)."),
     _KeyDef("SITE_SORT",             "global", "added_first", True, "The order to display streamers on each site panel.   This can also be adjusted by pressing the S key on the Dashboard tab."),
 
     # ── Site keys (per-site .conf) ────────────────────────────────────────────
