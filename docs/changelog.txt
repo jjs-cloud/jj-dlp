@@ -1,3 +1,5 @@
+- ntfy notifications are now subject to the POPUP_COOLDOWN.  Also added additional info to the notifications.
+
 v1.22.2
 
 - fixed an issue with the wrong quality/resolution being displayed on the dashboard for twitch (enabled checker cookies for twitch)

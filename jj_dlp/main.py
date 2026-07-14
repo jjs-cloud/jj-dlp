@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.3"
+__version__ = "1.22.4"
 
 import subprocess
 import time
@@ -651,14 +651,18 @@ class SiteState:
         # Log tab: whether to show debug messages inline (off by default — can be very verbose)
         self.show_debug_log: bool = False
 
-        # Popup cooldown: streamer -> epoch of last popup shown
-        self.popup_last_shown:    Dict[str, float] = {}
-        # Streamers for whom a "not recording" (disabled / lower-priority) popup
-        # has already been shown during the current continuous live session.
-        # Cleared when the streamer goes offline so the popup can fire again
-        # next time they go live. This prevents the popup from re-appearing
-        # every popup_cooldown minutes for as long as the streamer stays live.
-        self.popup_shown_session: set = set()
+        # Notification cooldown: streamer -> epoch of last notification shown.
+        # Shared by both the popup (tkinter/notify-send) and ntfy channels so
+        # that they follow the exact same POPUP_COOLDOWN-gated schedule.
+        self.notif_last_shown:    Dict[str, float] = {}
+        # Streamers for whom a "not recording" (disabled / lower-priority)
+        # notification has already been shown during the current continuous
+        # live session. Cleared when the streamer goes offline so the
+        # notification can fire again next time they go live. This prevents
+        # the notification from re-appearing every popup_cooldown minutes for
+        # as long as the streamer stays live. Shared by both the popup and
+        # ntfy channels.
+        self.notif_shown_session: set = set()
 
         # Active yt-dlp subprocesses: streamer -> proc
         # Written by record_stream threads; read by stop() for clean kill.
@@ -933,17 +937,37 @@ def cmd_display_str(cmd: List[str]) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Popup notification
+# Live notifications (popup + ntfy)
 # ══════════════════════════════════════════════════════════════════════════════
+#
+# Both notification channels — the desktop popup (notify-send/tkinter) and the
+# ntfy.sh push notification — represent the exact same "event" (a streamer
+# going live, recording or not, and why). They share:
+#   • the same message content, built once by _format_live_popup()
+#   • the same enable/disable + cooldown + per-session-suppression gate,
+#     evaluated once by _maybe_show_live_popup()
+# The only thing that differs per channel is whether that channel is enabled
+# (POPUP_NOTIFICATIONS vs. NTFY_NOTIFICATIONS / the per-streamer ntfy
+# override) and how the message gets delivered.
 
 def _format_live_popup(streamer: str, is_recording: bool = True,
-                       reason: str = "", warning: str = "") -> list:
+                       reason: str = "", warning: str = "",
+                       site_label: str = "") -> list:
+    """Build the lines of text shown for a "streamer is live" notification.
+
+    Used to build both the popup body (notify-send/tkinter) and the ntfy.sh
+    push notification body, so the two channels always show identical
+    information: live status (recording / not recording), the site, and —
+    when applicable — the warning and/or the reason recording did not start.
+    """
     marker = "🔴" if is_recording else "🟡"
     status = "Recording" if is_recording else "Not recording"
     lines = [
         f"{marker} {streamer} is LIVE",
         f"● {status}",
     ]
+    if site_label:
+        lines.append(f"Site: {site_label}")
     if warning:
         lines.append(f"Warning: {warning}")
     if reason:
@@ -953,10 +977,10 @@ def _format_live_popup(streamer: str, is_recording: bool = True,
 
 def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 15,
                      is_recording: bool = True, reason: str = "",
-                     warning: str = "") -> None:
+                     warning: str = "", site_label: str = "") -> None:
     dbg(f"[POPUP] enqueue popup streamer={streamer!r} source={source!r} timeout={popup_timeout} is_recording={is_recording} reason={reason!r} warning={warning!r}")
     def _run():
-        popup_lines = _format_live_popup(streamer, is_recording, reason, warning)
+        popup_lines = _format_live_popup(streamer, is_recording, reason, warning, site_label)
         popup_text = "\n".join(popup_lines)
         if sys.platform.startswith("linux"):
             notify_cmd = shutil.which("notify-send")
@@ -1024,9 +1048,10 @@ def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 1
     threading.Thread(target=_run, daemon=True, name=f"popup-{streamer}").start()
 
 
-def _send_ntfy_notification(streamer: str, is_recording: bool, site_label: str) -> None:
+def _send_ntfy_notification(streamer: str, site_label: str, is_recording: bool = True,
+                            reason: str = "", warning: str = "") -> None:
     dbg(f"[NTFY] _send_ntfy_notification called: streamer={streamer!r} "
-        f"is_recording={is_recording} site_label={site_label!r}")
+        f"is_recording={is_recording} site_label={site_label!r} reason={reason!r} warning={warning!r}")
 
     global_cfg = load_global_config()
     topic = global_cfg.get("ntfy_topic", "").strip()
@@ -1049,13 +1074,18 @@ def _send_ntfy_notification(streamer: str, is_recording: bool, site_label: str) 
     url = url.rstrip("/")
 
     full_url = f"{url}/{topic}"
-    title = "jj-dlp: Recording Started"
-    body = f"🔴 {streamer} is LIVE on {site_label} and recording has started."
+
+    # Same content the popup shows: LIVE/recording status, site, and the
+    # warning/reason when applicable. The "Title" header must stay ASCII —
+    # emoji markers live in the body instead, where UTF-8 is safe.
+    popup_lines = _format_live_popup(streamer, is_recording, reason, warning, site_label)
+    title = f"jj-dlp: {streamer} is LIVE"
+    body = "\n".join(popup_lines)
 
     headers = {
         "Title": title,
-        "Priority": "high",
-        "Tags": "red_circle,record"
+        "Priority": "high" if is_recording else "default",
+        "Tags": "red_circle,record" if is_recording else "warning",
     }
 
     dbg(f"[NTFY] prepared request: url={full_url!r} title={title!r} "
@@ -1100,79 +1130,108 @@ def _send_ntfy_notification(streamer: str, is_recording: bool, site_label: str) 
     threading.Thread(target=_post, daemon=True, name=f"ntfy-{streamer}").start()
 
 
+def _resolve_ntfy_enabled(streamer: str, site_label: str, cfg: dict) -> bool:
+    """Resolve whether the ntfy channel is enabled for *streamer*.
+
+    Per-streamer entries in global.json's "priorities" section can override
+    the site's NTFY_NOTIFICATIONS setting on a per-streamer basis (set via
+    the dashboard's NotificationSettingsPopup). Falls back to the site
+    config's ntfy_notifications value when no such override exists.
+    """
+    streamer_notif = None
+    try:
+        with _global_json_lock:
+            gdata = _load_global_json()
+        config_id = _get_config_id()
+        entries = gdata.get("priorities", {}).get(config_id, {}).get("entries", [])
+        dbg(f"[NTFY] config_id={config_id!r} found {len(entries)} priority entries "
+            f"for this config set")
+        for e in entries:
+            if e.get("streamer") == streamer and e.get("site") == site_label:
+                streamer_notif = e.get("notifications_enabled")
+                break
+        dbg(f"[NTFY] streamer-level override lookup result: {streamer_notif!r} "
+            f"(None means no per-streamer entry / fall back to site config)")
+    except Exception as ex:
+        dbg(f"[NTFY] Error reading global.json for streamer-level setting: "
+            f"{type(ex).__name__}: {ex}")
+
+    if streamer_notif is not None:
+        dbg(f"[NTFY] using streamer-level override: notifications_enabled={streamer_notif}")
+        return bool(streamer_notif)
+
+    enabled = cfg.get("ntfy_notifications", True)
+    dbg(f"[NTFY] no streamer-level override; using site config "
+        f"ntfy_notifications={enabled}")
+    return bool(enabled)
+
+
 def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
                            show_popup: bool = True, source: str = "poll",
                            is_recording: bool = True, reason: str = "",
                            warning: str = "") -> None:
-    # Handle ntfy notifications first, independently of popup settings
-    if is_recording:
-        site_label = cfg.get("site_label", os.path.basename(site.config_path))
-        streamer_notif = None
-        dbg(f"[NTFY] evaluating notification eligibility: streamer={streamer!r} "
-            f"site_label={site_label!r} source={source!r} reason={reason!r}")
-        try:
-            with _global_json_lock:
-                gdata = _load_global_json()
-            config_id = _get_config_id()
-            entries = gdata.get("priorities", {}).get(config_id, {}).get("entries", [])
-            dbg(f"[NTFY] config_id={config_id!r} found {len(entries)} priority entries "
-                f"for this config set")
-            for e in entries:
-                if e.get("streamer") == streamer and e.get("site") == site_label:
-                    streamer_notif = e.get("notifications_enabled")
-                    break
-            dbg(f"[NTFY] streamer-level override lookup result: {streamer_notif!r} "
-                f"(None means no per-streamer entry / fall back to site config)")
-        except Exception as ex:
-            dbg(f"[NTFY] Error reading global.json for streamer-level setting: "
-                f"{type(ex).__name__}: {ex}")
+    """Single gatekeeper for both live-notification channels (popup + ntfy).
 
-        if streamer_notif is not None:
-            notifications_enabled = streamer_notif
-            dbg(f"[NTFY] using streamer-level override: notifications_enabled={notifications_enabled}")
-        else:
-            notifications_enabled = cfg.get("ntfy_notifications", True)
-            dbg(f"[NTFY] no streamer-level override; using site config "
-                f"ntfy_notifications={notifications_enabled}")
+    Both channels represent the same underlying event, so they follow the
+    exact same path here: resolve whether each channel is enabled, then
+    apply one shared per-session-suppression check and one shared
+    POPUP_COOLDOWN window that gates *both* channels identically. Only the
+    per-channel enablement check differs (POPUP_NOTIFICATIONS vs.
+    NTFY_NOTIFICATIONS / its per-streamer override).
+    """
+    site_label = cfg.get("site_label", os.path.basename(site.config_path))
 
-        if notifications_enabled:
-            dbg(f"[NTFY] notifications enabled for streamer={streamer!r}; dispatching send")
-            _send_ntfy_notification(streamer, is_recording, site_label)
-        else:
-            dbg(f"[NTFY] notifications disabled for streamer={streamer!r}; skipping send")
+    popup_enabled = show_popup and cfg.get("popup_notifications", True)
+    dbg(f"[NOTIFY] popup channel: show_popup={show_popup} "
+        f"popup_notifications={cfg.get('popup_notifications', True)} -> enabled={popup_enabled}")
 
-    if not show_popup or not cfg.get("popup_notifications", True):
-        dbg(f"[POPUP] popup skipped for streamer={streamer!r} show_popup={show_popup} popup_notifications={cfg.get('popup_notifications', True)}")
+    ntfy_enabled = _resolve_ntfy_enabled(streamer, site_label, cfg)
+    dbg(f"[NOTIFY] ntfy channel: enabled={ntfy_enabled}")
+
+    if not popup_enabled and not ntfy_enabled:
+        dbg(f"[NOTIFY] both channels disabled for streamer={streamer!r}; nothing to do")
         return
 
     # Streamers that are NOT being recorded (disabled / lower-priority) get
     # re-passed to this function on every single poll for as long as they
     # remain live, since nothing else about their state changes to exclude
-    # them from the caller's candidate list. Relying on popup_cooldown alone
-    # then means the popup keeps re-appearing every popup_cooldown minutes
-    # for the entire time they're live. Instead, only show this popup once
-    # per continuous live session; site.popup_shown_session is cleared when
-    # the streamer goes offline (see the poll loop).
-    if not is_recording and streamer in site.popup_shown_session:
-        dbg(f"[POPUP] popup suppressed - already shown this live session for streamer={streamer!r} reason={reason!r}")
+    # them from the caller's candidate list. Relying on the cooldown alone
+    # then means notifications keep re-appearing every popup_cooldown
+    # minutes for the entire time they're live. Instead, only notify once
+    # per continuous live session; site.notif_shown_session is cleared when
+    # the streamer goes offline (see the poll loop). This applies to both
+    # channels identically.
+    if not is_recording and streamer in site.notif_shown_session:
+        dbg(f"[NOTIFY] suppressed - already shown this live session for streamer={streamer!r} reason={reason!r}")
         return
 
-    dbg(f"[POPUP] popup condition check for streamer={streamer!r} show_popup={show_popup} popup_notifications={cfg.get('popup_notifications', True)}")
     cooldown_secs = cfg.get("popup_cooldown", 30) * 60
-    last_shown    = site.popup_last_shown.get(streamer, 0)
+    last_shown    = site.notif_last_shown.get(streamer, 0)
     elapsed       = time.time() - last_shown
-    if elapsed >= cooldown_secs:
-        dbg(f"[POPUP] popup allowed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s cooldown={cooldown_secs}s")
+    if elapsed < cooldown_secs:
+        dbg(f"[NOTIFY] suppressed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s required={cooldown_secs}s")
+        return
+
+    dbg(f"[NOTIFY] allowed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s cooldown={cooldown_secs}s; "
+        f"dispatching enabled channels (popup={popup_enabled} ntfy={ntfy_enabled})")
+
+    if popup_enabled:
         _show_live_popup(streamer, source=source,
                          popup_timeout=cfg.get("popup_timeout", 15),
                          is_recording=is_recording,
                          reason=reason,
-                         warning=warning)
-        site.popup_last_shown[streamer] = time.time()
-        if not is_recording:
-            site.popup_shown_session.add(streamer)
-    else:
-        dbg(f"[POPUP] popup suppressed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s required={cooldown_secs}s")
+                         warning=warning,
+                         site_label=site_label)
+
+    if ntfy_enabled:
+        _send_ntfy_notification(streamer, site_label,
+                                is_recording=is_recording,
+                                reason=reason,
+                                warning=warning)
+
+    site.notif_last_shown[streamer] = time.time()
+    if not is_recording:
+        site.notif_shown_session.add(streamer)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2973,7 +3032,7 @@ def monitor_site(site: "SiteState") -> None:
                 for s in streamers:
                     if s not in live_set:
                         site.dash_live_since.pop(s, None)
-                        site.popup_shown_session.discard(s)
+                        site.notif_shown_session.discard(s)
                     elif s not in site.dash_live_since:
                         site.dash_live_since[s] = time.time()
 

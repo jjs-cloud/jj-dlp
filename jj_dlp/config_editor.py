@@ -809,8 +809,9 @@ class NotificationSettingsPopup:
     value, same as if no streamer-level entry existed at all), "on", or
     "off". Only "on"/"off" are ever written to global.json; "inherit" is
     represented by the *absence* of the "notifications_enabled" key, which
-    is exactly what main.py's _maybe_show_live_popup() already checks for
-    (streamer_notif is None → fall back to site config). This popup used to
+    is exactly what main.py's _resolve_ntfy_enabled() (called from
+    _maybe_show_live_popup()) already checks for (streamer_notif is None →
+    fall back to site config). This popup used to
     default to True on every load, which meant simply opening it and
     pressing Enter would silently write an explicit "true" override for a
     streamer that never had one — that's fixed by defaulting to inherit.
