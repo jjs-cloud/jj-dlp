@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.4"
+__version__ = "1.22.5"
 
 import subprocess
 import time
@@ -11,6 +11,7 @@ import os
 import json
 import re as _re
 import threading
+from collections import deque
 from datetime import datetime, timedelta
 from datetime import time as _dt_time
 from typing import List, Set, Tuple, Dict, Optional
@@ -630,9 +631,16 @@ class SiteState:
         self.dash_next_check_in:  float = 0.0
         self.dash_all_streamers:  List[str] = []
         self.dash_blocked:        Set[str] = set()
-        self.dash_log_lines:      List[str] = []          # recent activity log
-        self.dash_stdout_lines:   List[str] = []          # recent stdout lines
-        self.dash_stderr_lines:   List[str] = []          # recent stderr lines
+        # Activity log lines are stored in their own bounded buffer so that a
+        # noisy/high-frequency debug tag can never evict real activity lines
+        # (recording started/stopped, errors, etc.) — see dash_debug_lines.
+        self.dash_log_lines:      deque = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)   # recent activity log
+        # Debug lines (from logger.dbg()) live in a separate, independently
+        # sized buffer. However chatty a debug tag is, it only ever crowds out
+        # older *debug* lines, never the activity log above.
+        self.dash_debug_lines:    deque = deque(maxlen=DEBUG_LOG_BUFFER_SIZE)      # recent debug-tag log
+        self.dash_stdout_lines:   deque = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)   # recent stdout lines
+        self.dash_stderr_lines:   deque = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)   # recent stderr lines
 
         # Twitch EventSub
         self.eventsub             = None
@@ -791,22 +799,16 @@ class SiteState:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         line = f"[{ts}] {msg}"
         with self.dash_lock:
-            self.dash_log_lines.append(line)
-            if len(self.dash_log_lines) > 200:
-                self.dash_log_lines = self.dash_log_lines[-200:]
+            self.dash_log_lines.append(line)   # deque(maxlen=...) evicts automatically
         _logger.log_dashboard_line(msg)
 
     def add_stdout_line(self, line: str) -> None:
         with self.dash_lock:
             self.dash_stdout_lines.append(line)
-            if len(self.dash_stdout_lines) > 200:
-                self.dash_stdout_lines = self.dash_stdout_lines[-200:]
 
     def add_stderr_line(self, line: str) -> None:
         with self.dash_lock:
             self.dash_stderr_lines.append(line)
-            if len(self.dash_stderr_lines) > 200:
-                self.dash_stderr_lines = self.dash_stderr_lines[-200:]
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -831,10 +833,42 @@ FFMPEG_ERROR_PATTERNS: List[str] = [
 # and draw_stderr_tab can filter them in/out without separate buffers.
 _CHECKER_STDOUT_PREFIX: str = "\x00checker\x00"
 _CHECKER_STDERR_PREFIX: str = "\x00checker_err\x00"
-# Debug messages routed to the Log tab are stored with this prefix so they can
-# be toggled independently of regular activity messages.
-_DEBUG_LOG_PREFIX: str = "\x00debug\x00"
 FFMPEG_ERROR_RESTART_THRESHOLD: int = 200
+
+# Ring-buffer sizes for the per-site dashboard line buffers (see SiteState).
+# Activity/stdout/stderr buffers hold a fixed number of lines regardless of
+# debug-tag traffic. Debug lines get their own, larger buffer since they are
+# high-volume by nature and already fully retained in the debug log file
+# when debug logging is enabled — losing old ones from the in-memory Log tab
+# view is expected/acceptable, unlike losing real activity lines.
+ACTIVITY_LOG_BUFFER_SIZE: int = 200
+DEBUG_LOG_BUFFER_SIZE:    int = 1000
+
+
+def _merge_lines_by_timestamp(a: List[str], b: List[str]) -> List[str]:
+    """Merge two chronologically-ordered "[YYYY-MM-DD HH:MM:SS] ..." line
+    lists into one combined, still-chronological list.
+
+    Both dash_log_lines and dash_debug_lines are append-only and therefore
+    already individually in time order; this does a standard merge-sort
+    merge step (O(n+m)) rather than re-sorting everything from scratch.
+    """
+    def ts_key(line: str) -> str:
+        # Lines are "[YYYY-MM-DD HH:MM:SS] ...", so the first 20 chars
+        # (including brackets) sort correctly as plain strings.
+        return line[:20] if line[:1] == "[" else ""
+
+    merged: List[str] = []
+    i = j = 0
+    len_a, len_b = len(a), len(b)
+    while i < len_a and j < len_b:
+        if ts_key(a[i]) <= ts_key(b[j]):
+            merged.append(a[i]); i += 1
+        else:
+            merged.append(b[j]); j += 1
+    merged.extend(a[i:])
+    merged.extend(b[j:])
+    return merged
 
 # ── Ad detection patterns (used by _drain_pipe when AD_ALERTS is enabled) ─────
 # Any match updates the per-streamer last-seen timestamp in site.ad_alerts.
@@ -3940,15 +3974,15 @@ class JJDlpDashboard:
 
         with sel_site.dash_lock:
             raw_lines = list(sel_site.dash_log_lines)
+            raw_debug = list(sel_site.dash_debug_lines) if show_debug else []
 
-        # Filter or strip debug lines depending on the toggle
-        if show_debug:
-            display_lines = [
-                (ln[len(_DEBUG_LOG_PREFIX):] if ln.startswith(_DEBUG_LOG_PREFIX) else ln)
-                for ln in raw_lines
-            ]
-        else:
-            display_lines = [ln for ln in raw_lines if not ln.startswith(_DEBUG_LOG_PREFIX)]
+        # Activity lines are always shown. Debug lines are only pulled in
+        # (and merged back into chronological order) when the toggle is on —
+        # they live in their own buffer so they never displaced activity
+        # lines in the first place.
+        display_lines = (
+            _merge_lines_by_timestamp(raw_lines, raw_debug) if raw_debug else raw_lines
+        )
 
         wrapped = self._wrap_lines(display_lines, line_width)
 
@@ -5432,13 +5466,16 @@ def main() -> None:
             s.log_line(msg)
 
     def _dash_dbg(msg: str):
-        """Route a dbg() line to every site's log buffer with the debug prefix."""
+        """Route a dbg() line to every site's *debug* log buffer.
+
+        This buffer is separate from dash_log_lines (the activity log), so no
+        matter how frequently a debug tag fires, it can only evict older debug
+        lines — it can never push real activity lines (recording
+        started/stopped, errors, etc.) out of the Log tab's history.
+        """
         for s in sites:
-            prefixed = _DEBUG_LOG_PREFIX + msg
             with s.dash_lock:
-                s.dash_log_lines.append(prefixed)
-                if len(s.dash_log_lines) > 200:
-                    s.dash_log_lines = s.dash_log_lines[-200:]
+                s.dash_debug_lines.append(msg)   # deque(maxlen=...) evicts automatically
 
     _logger.configure(_dash_log, _dash_dbg)
 

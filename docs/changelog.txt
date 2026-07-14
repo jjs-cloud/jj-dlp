@@ -1,4 +1,5 @@
 - ntfy notifications are now subject to the POPUP_COOLDOWN.  Also added additional info to the notifications.
+- fixed dissapearing messages on the log tab
 
 v1.22.2
 
