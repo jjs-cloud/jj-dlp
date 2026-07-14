@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.6"
+__version__ = "1.22.7"
 
 import subprocess
 import time
@@ -2064,13 +2064,18 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             stall_timeout        = cfg["stall_timeout"]
             seconds_since_check  = 0
             _split_log_counter   = 0  # throttle periodic split-timer dbg lines
+            # Whether we've ever observed this file grow. The stall checker is
+            # only allowed to run (and potentially restart the recording) once
+            # growth has actually been seen at least once.
+            growth_seen = False
             # Set once we've already warned the Log tab about a missing/unreadable
             # recording file, so we don't spam the same warning every stall-check
             # cycle. Reset whenever the file is found again or a new attempt starts.
             filename_error_warned = False
             dbg(f"[STALL] init: stall_timeout={stall_timeout}s "
                 f"stall_check_interval={stall_check_interval}s "
-                f"last_size={last_size} last_growth_time={last_growth_time:.2f}",
+                f"last_size={last_size} last_growth_time={last_growth_time:.2f} "
+                f"growth_seen={growth_seen}",
                 site_name=streamer)
 
             dbg(f"[SPLIT][record_stream] inner loop starting: streamer={streamer!r} "
@@ -2311,6 +2316,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                                 last_size = 0
                                 last_growth_time = time.time()
                                 next_split_retry_time = 0.0
+                                # New segment is a new file — it hasn't grown yet,
+                                # so the stall checker must re-earn the right to run.
+                                growth_seen = False
 
                                 dbg(f"[SPLIT][record_stream] switched to part {segment_num} "
                                     f"pid={proc.pid} active_file={active_file!r} "
@@ -2349,15 +2357,21 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 if seconds_since_check >= stall_check_interval:
                     seconds_since_check = 0
                     dbg(f"[STALL] check cycle: elapsed_since_growth="
-                        f"{time.time() - last_growth_time:.2f}s",
+                        f"{time.time() - last_growth_time:.2f}s growth_seen={growth_seen}",
                         site_name=streamer)
                     current_size, stall_detected, _, file_error = get_streamer_file_size(
                         output_dir,
                         streamer,
                         cfg=cfg,
                         proc_start_time=proc_start_time,
-                        last_growth_time=last_growth_time,
-                        stall_timeout=stall_timeout,
+                        # Only arm the stall checker once this file has grown at
+                        # least once. get_streamer_file_size() only computes
+                        # stall_detected when both last_growth_time and
+                        # stall_timeout are provided, so withholding stall_timeout
+                        # here is what keeps the checker from starting on a file
+                        # that has never shown growth.
+                        last_growth_time=last_growth_time if growth_seen else None,
+                        stall_timeout=stall_timeout if growth_seen else None,
                         stall_check_interval=stall_check_interval,
                         known_filename=active_file,
                     )
@@ -2396,12 +2410,24 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
                     elif current_size > last_size:
                         filename_error_warned = False
+                        if not growth_seen:
+                            growth_seen = True
+                            dbg(f"[STALL] first growth observed for this file — "
+                                f"stall checker is now armed", site_name=streamer)
                         dbg(f"[STALL] grew: {last_size} -> {current_size} "
                             f"(+{current_size - last_size} bytes), resetting timer",
                             site_name=streamer)
                         last_size = current_size
                         last_growth_time = time.time()
                         site.clear_stall_since(streamer)
+                    elif not growth_seen:
+                        # No growth yet and none has ever been seen for this file —
+                        # the stall checker hasn't started, so there's nothing to
+                        # flag as stalled. Just wait for the first sign of growth.
+                        filename_error_warned = False
+                        dbg(f"[STALL] no growth yet, but stall checker not armed "
+                            f"(no growth seen for this file yet) — skipping stall "
+                            f"detection", site_name=streamer)
                     else:
                         filename_error_warned = False
                         dbg(f"[STALL] NO GROWTH: size={current_size} "
