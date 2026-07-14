@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.8"
+__version__ = "1.22.9"
 
 import subprocess
 import time
@@ -1575,12 +1575,12 @@ def get_live_streamers(streamers: List[str], cfg: dict,
 def get_streamer_file_size(output_dir, streamer, cfg=None,
                            last_growth_time=None, stall_timeout=None,
                            stall_check_interval=None, proc_start_time=None,
-                           known_filename=None):
+                           known_filename=None, growth_seen=False):
     try:
         filename = known_filename
         size = os.path.getsize(filename) if filename else 0
         stall_detected = False
-        if last_growth_time is not None and stall_timeout is not None:
+        if growth_seen and last_growth_time is not None and stall_timeout is not None:
             time_now = time.time()
             time_since_growth = time_now - last_growth_time
             stalled = max(0.0, time_since_growth - stall_check_interval)
@@ -2076,7 +2076,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 known_filename=active_file,
             )
 
-            last_growth_time     = time.time()
+            last_growth_time     = None
+            growth_seen          = False
             recording_start_time = time.time()
             stall_check_interval = cfg["stall_check_interval"]
             stall_timeout        = cfg["stall_timeout"]
@@ -2327,7 +2328,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                                 site.clear_stall_since(streamer)
 
                                 last_size = 0
-                                last_growth_time = time.time()
+                                last_growth_time = None
+                                growth_seen = False
                                 next_split_retry_time = 0.0
 
                                 dbg(f"[SPLIT][record_stream] switched to part {segment_num} "
@@ -2378,6 +2380,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         stall_timeout=stall_timeout,
                         stall_check_interval=stall_check_interval,
                         known_filename=active_file,
+                        growth_seen=growth_seen,
                     )
 
                     if file_error:
@@ -2414,6 +2417,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
                     elif current_size > last_size:
                         filename_error_warned = False
+                        growth_seen = True
                         dbg(f"[STALL] grew: {last_size} -> {current_size} "
                             f"(+{current_size - last_size} bytes), resetting timer",
                             site_name=streamer)
@@ -2422,10 +2426,15 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         site.clear_stall_since(streamer)
                     else:
                         filename_error_warned = False
-                        dbg(f"[STALL] NO GROWTH: size={current_size} "
-                            f"stall_since={time.time() - last_growth_time:.2f}s",
-                            site_name=streamer)
-                        site.set_stall_since(streamer, last_growth_time)
+                        if growth_seen and last_growth_time is not None:
+                            dbg(f"[STALL] NO GROWTH: size={current_size} "
+                                f"stall_since={time.time() - last_growth_time:.2f}s",
+                                site_name=streamer)
+                            site.set_stall_since(streamer, last_growth_time)
+                        else:
+                            dbg("[STALL] waiting for initial growth before stall tracking",
+                                site_name=streamer)
+                            site.clear_stall_since(streamer)
 
             else:
                 site.unregister_proc(streamer)
