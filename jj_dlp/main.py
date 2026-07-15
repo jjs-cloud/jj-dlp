@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.12"
+__version__ = "1.22.13"
 
 import subprocess
 import time
@@ -1992,6 +1992,26 @@ def _resolve_split_after(cfg: dict, entry_info: dict) -> dict:
     return overridden
 
 
+def _resolve_intro_delay(cfg: dict, entry_info: dict) -> dict:
+    """Return a cfg dict to use for a single streamer, applying that
+    streamer's per-streamer Intro Delay override (set via the SETTINGS
+    popup) on top of *cfg*.
+    """
+    if not entry_info or not entry_info.get("intro_delay_enabled", False):
+        return cfg
+    try:
+        minutes = int(entry_info.get("intro_delay_minutes", 0) or 0)
+    except (TypeError, ValueError):
+        minutes = 0
+    if minutes <= 0:
+        return cfg
+    overridden = dict(cfg)
+    overridden["intro_delay_enabled"] = True
+    overridden["intro_delay_minutes"] = minutes
+    overridden["intro_delay_split"] = bool(entry_info.get("intro_delay_split", False))
+    return overridden
+
+
 def record_stream(streamer: str, cfg: dict, site: "SiteState",
                   use_lq: bool = False) -> None:
     channel_url = cfg["site_tmpl"].format(username=streamer)
@@ -2007,6 +2027,41 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
     split_after_minutes = max(0, cfg.get("split_after", 0))
     split_after_seconds = split_after_minutes * 60
+
+    # ── Intro Delay ──────────────────────────────────────────────────────────
+    # Notifications for "streamer is live" already fired in
+    # start_recording_if_needed() before this thread was started, so holding
+    # things up here only ever delays the *recording*, never the notification.
+    intro_delay_enabled = bool(cfg.get("intro_delay_enabled", False))
+    intro_delay_minutes = max(0, cfg.get("intro_delay_minutes", 0))
+    intro_delay_split   = bool(cfg.get("intro_delay_split", False))
+    # Set once the intro-delay-driven split segment is confirmed, so the
+    # SPLIT_AFTER loop below is told to stop splitting for the rest of the
+    # stream instead of continuing to split every intro_delay_minutes.
+    _intro_delay_disable_after_split = False
+
+    if intro_delay_enabled and intro_delay_minutes > 0 and intro_delay_split:
+        # Reuse the SPLIT_AFTER machinery as-is: force the *first* split to
+        # land at the intro-delay boundary, then disable further splitting
+        # once that split is confirmed (see the split_success branch below).
+        split_after_minutes = intro_delay_minutes
+        split_after_seconds = split_after_minutes * 60
+        _intro_delay_disable_after_split = True
+        dbg(f"[INTRO_DELAY] streamer={streamer!r} split mode: first split forced "
+            f"at {intro_delay_minutes}m, further splitting disabled afterward")
+    elif intro_delay_enabled and intro_delay_minutes > 0:
+        dbg(f"[INTRO_DELAY] streamer={streamer!r} delay mode: holding recording "
+            f"start for {intro_delay_minutes}m")
+        _delay_deadline = time.time() + intro_delay_minutes * 60
+        while time.time() < _delay_deadline:
+            if site._stop_event.is_set() or streamer in site.evicted_streamers:
+                dbg(f"[INTRO_DELAY] streamer={streamer!r} aborted during delay "
+                    f"(stop_event or evicted)")
+                with site.lock:
+                    site.currently_recording.discard(streamer)
+                return
+            site._stop_event.wait(timeout=min(1.0, _delay_deadline - time.time()))
+        dbg(f"[INTRO_DELAY] streamer={streamer!r} delay elapsed — starting recording")
 
     dbg(f"[SPLIT][record_stream] ENTER streamer={streamer!r} "
         f"split_after_minutes={split_after_minutes} split_after_seconds={split_after_seconds} "
@@ -2450,6 +2505,12 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                                 recording_start_time = next_proc_start_time
                                 segment_num = next_segment_num
 
+                                if _intro_delay_disable_after_split:
+                                    split_after_seconds = 0
+                                    _intro_delay_disable_after_split = False
+                                    dbg(f"[INTRO_DELAY] streamer={streamer!r} intro split "
+                                        f"confirmed — splitting disabled for remainder of stream")
+
                                 site.register_proc(streamer, proc)
 
                                 ffmpeg_error_counter = [0]
@@ -2707,6 +2768,9 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
             "split_mode": e.get("split_mode"),           # None = inherit (or legacy data)
             "split_enabled": e.get("split_enabled", False),  # legacy fallback
             "split_after": e.get("split_after", 0),
+            "intro_delay_enabled": e.get("intro_delay_enabled", False),
+            "intro_delay_minutes": e.get("intro_delay_minutes", 0),
+            "intro_delay_split": e.get("intro_delay_split", False),
         }
 
     site_label = cfg.get("site_label", os.path.basename(site.config_path))
@@ -2725,6 +2789,7 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
             streamer_prio = streamer_info["priority"]
             is_lq = streamer_info.get("lq_enabled", False)
             streamer_cfg = _resolve_split_after(cfg, streamer_info)
+            streamer_cfg = _resolve_intro_delay(streamer_cfg, streamer_info)
             eviction_warning = ""
 
             # Concurrency enforcement
