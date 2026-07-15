@@ -2464,13 +2464,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                                 # so the stall checker must re-earn the right to run.
                                 growth_seen = False
 
-                                # Intro split mode: after the first split, disable
-                                # further splitting so the remainder records as one file.
-                                if cfg.get("_intro_split_mode"):
-                                    split_after_seconds = 0
-                                    dbg(f"[SPLIT][record_stream] intro split complete — "
-                                        f"disabling further splitting for {streamer}")
-
                                 dbg(f"[SPLIT][record_stream] switched to part {segment_num} "
                                     f"pid={proc.pid} active_file={active_file!r} "
                                     f"recording_start_time reset")
@@ -2714,9 +2707,6 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
             "split_mode": e.get("split_mode"),           # None = inherit (or legacy data)
             "split_enabled": e.get("split_enabled", False),  # legacy fallback
             "split_after": e.get("split_after", 0),
-            "intro_delay_enabled": e.get("intro_delay_enabled", False),
-            "intro_delay_minutes": e.get("intro_delay_minutes", 0),
-            "intro_split_intro": e.get("intro_split_intro", False),
         }
 
     site_label = cfg.get("site_label", os.path.basename(site.config_path))
@@ -2737,32 +2727,7 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
             streamer_cfg = _resolve_split_after(cfg, streamer_info)
             eviction_warning = ""
 
-            # ── Intro Delay handling ────────────────────────────────────────────
-            intro_delay_enabled = bool(streamer_info.get("intro_delay_enabled", False))
-            intro_delay_minutes = 0
-            try:
-                intro_delay_minutes = max(0, int(streamer_info.get("intro_delay_minutes", 0) or 0))
-            except (TypeError, ValueError):
-                pass
-            intro_split_intro = bool(streamer_info.get("intro_split_intro", False))
-
-            if intro_delay_enabled and intro_delay_minutes > 0:
-                if not intro_split_intro:
-                    # Delay mode: don't start recording until X minutes after stream went live
-                    with site.dash_lock:
-                        live_since = site.dash_live_since.get(streamer, 0.0)
-                    elapsed_since_live = time.time() - live_since
-                    delay_seconds = intro_delay_minutes * 60
-                    if elapsed_since_live < delay_seconds:
-                        dbg(f"[INTRO_DELAY] Delaying recording for {streamer}: "
-                            f"elapsed={elapsed_since_live:.0f}s / delay={delay_seconds}s")
-                        continue
-                else:
-                    # Split intro mode: override split_after to intro_delay_minutes
-                    # and mark that this is an intro split (split only once)
-                    streamer_cfg = dict(streamer_cfg)
-                    streamer_cfg["split_after"] = intro_delay_minutes
-                    streamer_cfg["_intro_split_mode"] = True
+            # Concurrency enforcement
             # Lock ordering inside this block:
             #   _recording_start_lock  (already held by the outer `with`)
             #   -> site.lock / s.lock   (acquired below, released before kill)

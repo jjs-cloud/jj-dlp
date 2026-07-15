@@ -164,7 +164,6 @@ DBG_TAGS: list[str] = [
     "GLOBAL_JSON",
     "NTFY",
     "QUALITY",
-    "INTRO_DELAY",
 ]
 
 import json
