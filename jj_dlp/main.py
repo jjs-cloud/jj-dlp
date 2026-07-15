@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.8"
+__version__ = "1.22.9"
 
 import subprocess
 import time
@@ -21,7 +21,7 @@ import shlex
 from urllib.parse import urlparse
 import shutil
 
-from .deps import ensure_curses, plain_ffmpeg_check
+from .deps import ensure_curses, plain_ffmpeg_check, check_ffmpeg
 from . import logger as _logger
 from .logger import (
     startup_dbg, startup_dbg_flush,
@@ -619,6 +619,11 @@ class SiteState:
         # detect when a source switches to a higher resolution mid-recording.
         # Guarded by self.lock. Cleared when the recording ends.
         self.recording_resolution: Dict[str, int] = {}
+        # Resolution (height, in px) actually measured from the on-disk
+        # recording file via ffprobe. Guarded by self.lock. Falls back to
+        # recording_resolution at display time if ffprobe is unavailable. 
+        # Cleared when the recording ends.
+        self.display_resolution: Dict[str, int] = {}
         self.recording_threads:   List[threading.Thread] = []
         self.known_streamers:     Set[str] = set()
         self.trigger_event        = threading.Event()
@@ -1544,6 +1549,81 @@ def get_live_streamers(streamers: List[str], cfg: dict,
     return live
 
 
+# Cached ffprobe binary path, resolved once on first use. `False` means we
+# already looked. `None` means not yet resolved.
+_ffprobe_path_cache: Optional[object] = None
+
+
+def _resolve_ffprobe_path() -> Optional[str]:
+    """Locate the ffprobe binary, reusing ffmpeg's already-verified location."""
+    global _ffprobe_path_cache
+    if _ffprobe_path_cache is not None:
+        return _ffprobe_path_cache or None
+
+    found, ffmpeg_path = check_ffmpeg()
+    if found and ffmpeg_path:
+        ffmpeg_dir = os.path.dirname(ffmpeg_path)
+        ffmpeg_base = os.path.basename(ffmpeg_path)
+        probe_base = ffmpeg_base.replace("ffmpeg", "ffprobe")
+        candidate = os.path.join(ffmpeg_dir, probe_base)
+        if os.path.isfile(candidate):
+            _ffprobe_path_cache = candidate
+            dbg(f"[QUALITY] resolved ffprobe next to ffmpeg: {candidate!r}")
+            return candidate
+
+    which_result = shutil.which("ffprobe")
+    if which_result:
+        _ffprobe_path_cache = which_result
+        dbg(f"[QUALITY] resolved ffprobe via PATH: {which_result!r}")
+        return which_result
+
+    _ffprobe_path_cache = False
+    dbg("[QUALITY] ffprobe not found (checked next to ffmpeg and on PATH)")
+    return None
+
+
+def probe_file_height(filepath: str) -> Optional[int]:
+    """Return the actual video height (px) of *filepath* via ffprobe, or
+    None on any failure (ffprobe missing, file missing, timeout, bad/empty
+    output, etc). Callers should treat None as "couldn't determine it" and
+    simply not display a quality — never raise.
+
+    Only reads the file's stream headers (not the whole file), so this is
+    cheap to call even while the file is actively being written to.
+    """
+    if not filepath or not os.path.isfile(filepath):
+        return None
+
+    ffprobe_path = _resolve_ffprobe_path()
+    if not ffprobe_path:
+        return None
+
+    cmd = [
+        ffprobe_path, "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=height",
+        "-of", "csv=p=0",
+        filepath,
+    ]
+    try:
+        _run_kwargs: dict = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  text=True, timeout=5)
+        if sys.platform == "win32":
+            _run_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        result = subprocess.run(cmd, **_run_kwargs)
+        out = (result.stdout or "").strip()
+        if not out:
+            return None
+        # First line, first field — ffprobe can print multiple lines if the
+        # container somehow has more than one video stream.
+        first_line = out.splitlines()[0].strip()
+        height = int(first_line.split(",")[0])
+        return height if height > 0 else None
+    except Exception as e:
+        dbg(f"[QUALITY] ffprobe probe failed for {filepath!r}: {type(e).__name__}: {e}")
+        return None
+
+
 def get_streamer_file_size(output_dir, streamer, cfg=None,
                            last_growth_time=None, stall_timeout=None,
                            stall_check_interval=None, proc_start_time=None,
@@ -2366,6 +2446,24 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         known_filename=active_file,
                     )
 
+                    # ── Dashboard quality display (independent of stall logic) ──
+                    # Measure the actual on-disk resolution via ffprobe, reusing
+                    # the same active_file the stall checker just used above.
+                    #
+                    # If the file can't be located this cycle (file_error),
+                    # clear the measured value.  If ffprobe
+                    # itself is unavailable, also clear it. 
+                    if file_error:
+                        with site.lock:
+                            site.display_resolution.pop(streamer, None)
+                    else:
+                        _measured_height = probe_file_height(active_file)
+                        with site.lock:
+                            if _measured_height is not None:
+                                site.display_resolution[streamer] = _measured_height
+                            else:
+                                site.display_resolution.pop(streamer, None)
+
                     if file_error:
                         # We couldn't even locate/read the recording file this
                         # cycle (e.g. active_file points at a filename that
@@ -2474,6 +2572,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             # restarted-for-quality) gets a clean baseline rather than
             # comparing against a stale resolution from a previous session.
             site.recording_resolution.pop(streamer, None)
+            # Clear the ffprobe-measured display quality too, for the same
+            # reason
+            site.display_resolution.pop(streamer, None)
             # Always clean up evicted_streamers here so the set doesn't grow
             # unboundedly over the lifetime of the process.  The eviction flag
             # is only meaningful while the recording thread is alive; once we
@@ -3698,7 +3799,10 @@ class JJDlpDashboard:
             next_in      = site.dash_next_check_in
         with site.lock:
             recording     = set(site.currently_recording)
+            # Prefer the ffprobe-measured on-disk resolution, 
+            # fall back to the checker-reported resolution
             recording_res = dict(site.recording_resolution)
+            recording_res.update(site.display_resolution)
 
         # Apply the active sort order to the streamer list.
         all_s = self.sort_manager.get_sorted_streamers(site, all_s, live_since, last_live)
