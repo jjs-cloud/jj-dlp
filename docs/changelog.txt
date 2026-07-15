@@ -1,5 +1,9 @@
 - improved accuracy of reported video resolution.
 - added disk info to notifications
+- added a Streamer Setting called "Intro Delay"  This will either delay the recording by X minutes, or split the recording after X minutes.   This allows you to save space by not recording the intro of a stream.  Steps to use:
+    1. add the streamer in the Dashboard tab
+    2. press enter on the streamer in the Config tab on the STREAMER SETTINGS panel
+    3. configure the Intro Delay settings
 
 ====================
 ====================
