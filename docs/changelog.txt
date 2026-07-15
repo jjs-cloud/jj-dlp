@@ -4,6 +4,7 @@
     1. add the streamer in the Dashboard tab
     2. press enter on the streamer in the Config tab on the STREAMER SETTINGS panel
     3. configure the Intro Delay settings
+- fixed issue with the window not responding on some windows 11 machines (PseudoConsoleWindow)
 
 ====================
 ====================

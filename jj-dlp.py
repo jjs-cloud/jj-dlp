@@ -14,7 +14,14 @@ if __name__ == "__main__":
     if sys.platform == 'win32':
         try:
             import ctypes
-            ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 3)
+            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+            if hwnd:
+                buf = ctypes.create_unicode_buffer(256)
+                ctypes.windll.user32.GetClassNameW(hwnd, buf, 256)
+                # SW_MAXIMIZE (3) on a PseudoConsoleWindow (Windows Terminal /
+                # Windows 11) corrupts window decorations — skip it.
+                if buf.value == "ConsoleWindowClass":
+                    ctypes.windll.user32.ShowWindow(hwnd, 3)
         except Exception:
             pass
 
