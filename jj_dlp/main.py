@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.11"
+__version__ = "1.22.12"
 
 import subprocess
 import time
@@ -1182,7 +1182,7 @@ def _send_ntfy_notification(streamer: str, site_label: str, is_recording: bool =
     headers = {
         "Title": title,
         "Priority": "high" if is_recording else "default",
-        "Tags": "red_circle,record" if is_recording else "warning",
+        "Tags": "red_circle,record" if is_recording else "yellow_circle",
     }
 
     dbg(f"[NTFY] prepared request: url={full_url!r} title={title!r} "
