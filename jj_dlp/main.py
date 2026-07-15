@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.13"
+__version__ = "1.22.14"
 
 import subprocess
 import time
@@ -614,6 +614,12 @@ class SiteState:
         self.lock                 = threading.Lock()
         self.currently_recording: Set[str] = set()
         self.evicted_streamers:   Set[str] = set()
+        # Streamers that have claimed a recording slot (in currently_recording)
+        # but are still holding for their Intro Delay period — no yt-dlp
+        # process has been launched yet. Guarded by self.lock, same as
+        # currently_recording. Used purely so the dashboard can keep showing
+        # [●Live] instead of flashing [► REC] until recording actually starts.
+        self.intro_delay_pending: Set[str] = set()
         # Resolution (height, in px) each currently-recording streamer started
         # at, per the checker's --dump-json output. Used by UPGRADE_QUALITY to
         # detect when a source switches to a higher resolution mid-recording.
@@ -2052,6 +2058,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
     elif intro_delay_enabled and intro_delay_minutes > 0:
         dbg(f"[INTRO_DELAY] streamer={streamer!r} delay mode: holding recording "
             f"start for {intro_delay_minutes}m")
+        with site.lock:
+            site.intro_delay_pending.add(streamer)
         _delay_deadline = time.time() + intro_delay_minutes * 60
         while time.time() < _delay_deadline:
             if site._stop_event.is_set() or streamer in site.evicted_streamers:
@@ -2059,8 +2067,11 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     f"(stop_event or evicted)")
                 with site.lock:
                     site.currently_recording.discard(streamer)
+                    site.intro_delay_pending.discard(streamer)
                 return
             site._stop_event.wait(timeout=min(1.0, _delay_deadline - time.time()))
+        with site.lock:
+            site.intro_delay_pending.discard(streamer)
         dbg(f"[INTRO_DELAY] streamer={streamer!r} delay elapsed — starting recording")
 
     dbg(f"[SPLIT][record_stream] ENTER streamer={streamer!r} "
@@ -3647,6 +3658,7 @@ class JJDlpDashboard:
                 blocked    = set(site.dash_blocked)
             with site.lock:
                 recording  = set(site.currently_recording)
+                intro_delay_pending = set(site.intro_delay_pending)
             try:
                 cfg = site.get_cached_config()
                 site_label = cfg.get("site_label", os.path.basename(site.config_path))
@@ -3655,7 +3667,7 @@ class JJDlpDashboard:
                 pass
             total_streamers += len(all_s)
             live_cnt += sum(1 for s in all_s if s in live_since)
-            rec_cnt  += sum(1 for s in recording)
+            rec_cnt  += sum(1 for s in recording if s not in intro_delay_pending)
             off_cnt  += sum(1 for s in all_s if s not in live_since and s not in blocked)
             dis_cnt  += sum(1 for s in all_s if s in blocked)
 
@@ -3940,6 +3952,7 @@ class JJDlpDashboard:
             next_in      = site.dash_next_check_in
         with site.lock:
             recording     = set(site.currently_recording)
+            intro_delay_pending = set(site.intro_delay_pending)
             # Prefer the ffprobe-measured on-disk resolution
             # fall back to the checker-reported
             recording_res = {
@@ -3964,7 +3977,7 @@ class JJDlpDashboard:
 
         # Counts for header badges
         live_cnt = sum(1 for s in all_s if s in live_since)
-        rec_cnt  = sum(1 for s in recording)
+        rec_cnt  = sum(1 for s in recording if s not in intro_delay_pending)
         off_cnt  = sum(1 for s in all_s if s not in live_since and s not in blocked)
         dis_cnt  = sum(1 for s in all_s if s in blocked)
 
@@ -4009,7 +4022,7 @@ class JJDlpDashboard:
             row_y    = row_start + i
             is_dis   = s in blocked
             since    = live_since.get(s)
-            is_rec   = s in recording
+            is_rec   = s in recording and s not in intro_delay_pending
 
             # "Last Live" value for this streamer
             ll_ts = last_live.get(s)
