@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.11"
+__version__ = "1.22.12"
 
 import subprocess
 import time
@@ -997,15 +997,62 @@ def cmd_display_str(cmd: List[str]) -> str:
 # (POPUP_NOTIFICATIONS vs. NTFY_NOTIFICATIONS / the per-streamer ntfy
 # override) and how the message gets delivered.
 
+def _get_disk_info_string(cfg: dict = None) -> str:
+    """Build a short disk-space summary string, e.g. "data 120.5G, ext 8.2G"."""
+    try:
+        seen_drives: list = []
+        seen_drives_set: set = set()
+
+        global_cfg = load_global_config()
+        global_drives = global_cfg.get("disk_drives", [])
+        for d in global_drives:
+            key = os.path.normcase(d)
+            if key not in seen_drives_set:
+                seen_drives_set.add(key)
+                seen_drives.append(d)
+
+        if cfg:
+            drives_for_site = cfg.get("disk_drives", [])
+            for d in drives_for_site:
+                key = os.path.normcase(d)
+                if key not in seen_drives_set:
+                    seen_drives_set.add(key)
+                    seen_drives.append(d)
+
+        if not seen_drives:
+            fallback_dir = (cfg or {}).get("output_dir", "/")
+            seen_drives = [fallback_dir]
+
+        parts = []
+        for drive in seen_drives:
+            try:
+                usage = shutil.disk_usage(drive)
+            except Exception as _disk_exc:
+                dbg(f"[DISK] shutil.disk_usage({drive!r}) FAILED (notification): "
+                    f"{type(_disk_exc).__name__}: {_disk_exc}")
+                continue
+            free_gb = usage.free / (1024 ** 3)
+            drv_label = os.path.basename(drive.rstrip("/\\")) or drive
+            drv_label = drv_label[:6]
+            parts.append(f"{drv_label} {free_gb:.1f}G")
+
+        return ", ".join(parts)
+    except Exception as _disk_outer_exc:
+        dbg(f"[DISK] exception building disk info string for notification: "
+            f"{type(_disk_outer_exc).__name__}: {_disk_outer_exc}")
+        return ""
+
+
 def _format_live_popup(streamer: str, is_recording: bool = True,
                        reason: str = "", warning: str = "",
-                       site_label: str = "") -> list:
+                       site_label: str = "", disk_info: str = "") -> list:
     """Build the lines of text shown for a "streamer is live" notification.
 
     Used to build both the popup body (notify-send/tkinter) and the ntfy.sh
     push notification body, so the two channels always show identical
-    information: live status (recording / not recording), the site, and —
-    when applicable — the warning and/or the reason recording did not start.
+    information: live status (recording / not recording), the site, disk
+    space remaining, and — when applicable — the warning and/or the reason
+    recording did not start.
     """
     marker = "🔴" if is_recording else "🟡"
     status = "Recording" if is_recording else "Not recording"
@@ -1014,7 +1061,12 @@ def _format_live_popup(streamer: str, is_recording: bool = True,
         f"{marker} {status}",
     ]
     if site_label:
-        lines.append(f"Site: {site_label}")
+        site_line = f"Site: {site_label}"
+        if disk_info:
+            site_line += f"  |  Disk: {disk_info}"
+        lines.append(site_line)
+    elif disk_info:
+        lines.append(f"Disk: {disk_info}")
     if warning:
         lines.append(f"Warning: {warning}")
     if reason:
@@ -1024,10 +1076,10 @@ def _format_live_popup(streamer: str, is_recording: bool = True,
 
 def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 15,
                      is_recording: bool = True, reason: str = "",
-                     warning: str = "", site_label: str = "") -> None:
+                     warning: str = "", site_label: str = "", disk_info: str = "") -> None:
     dbg(f"[POPUP] enqueue popup streamer={streamer!r} source={source!r} timeout={popup_timeout} is_recording={is_recording} reason={reason!r} warning={warning!r}")
     def _run():
-        popup_lines = _format_live_popup(streamer, is_recording, reason, warning, site_label)
+        popup_lines = _format_live_popup(streamer, is_recording, reason, warning, site_label, disk_info)
         popup_text = "\n".join(popup_lines)
         if sys.platform.startswith("linux"):
             notify_cmd = shutil.which("notify-send")
@@ -1096,9 +1148,10 @@ def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 1
 
 
 def _send_ntfy_notification(streamer: str, site_label: str, is_recording: bool = True,
-                            reason: str = "", warning: str = "") -> None:
+                            reason: str = "", warning: str = "", disk_info: str = "") -> None:
     dbg(f"[NTFY] _send_ntfy_notification called: streamer={streamer!r} "
-        f"is_recording={is_recording} site_label={site_label!r} reason={reason!r} warning={warning!r}")
+        f"is_recording={is_recording} site_label={site_label!r} reason={reason!r} warning={warning!r} "
+        f"disk_info={disk_info!r}")
 
     global_cfg = load_global_config()
     topic = global_cfg.get("ntfy_topic", "").strip()
@@ -1113,10 +1166,11 @@ def _send_ntfy_notification(streamer: str, site_label: str, is_recording: bool =
 
     full_url = f"{url}/{topic}"
 
-    # Same content the popup shows: LIVE/recording status, site, and the
-    # warning/reason when applicable. The "Title" header must stay ASCII —
-    # emoji markers live in the body instead, where UTF-8 is safe.
-    popup_lines = _format_live_popup(streamer, is_recording, reason, warning, site_label)
+    # Same content the popup shows: LIVE/recording status, site, disk space
+    # remaining, and the warning/reason when applicable. The "Title" header
+    # must stay ASCII — emoji markers live in the body instead, where UTF-8
+    # is safe.
+    popup_lines = _format_live_popup(streamer, is_recording, reason, warning, site_label, disk_info)
     title = "jj-dlp"
     body = "\n".join(popup_lines)
 
@@ -1253,19 +1307,25 @@ def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
     dbg(f"[NOTIFY] allowed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s cooldown={cooldown_secs}s; "
         f"dispatching enabled channels (popup={popup_enabled} ntfy={ntfy_enabled})")
 
+    # Same disk info shown on the dashboard's system panel, computed once
+    # and shared by both channels.
+    disk_info = _get_disk_info_string(cfg)
+
     if popup_enabled:
         _show_live_popup(streamer, source=source,
                          popup_timeout=cfg.get("popup_timeout", 15),
                          is_recording=is_recording,
                          reason=reason,
                          warning=warning,
-                         site_label=site_label)
+                         site_label=site_label,
+                         disk_info=disk_info)
 
     if ntfy_enabled:
         _send_ntfy_notification(streamer, site_label,
                                 is_recording=is_recording,
                                 reason=reason,
-                                warning=warning)
+                                warning=warning,
+                                disk_info=disk_info)
 
     site.notif_last_shown[streamer] = time.time()
     if not is_recording:
