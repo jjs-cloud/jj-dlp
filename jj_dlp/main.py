@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.10"
+__version__ = "1.22.11"
 
 import subprocess
 import time
@@ -3816,6 +3816,8 @@ class JJDlpDashboard:
                 s: h for s, h in site.recording_resolution.items()
                 if (now - site.recording_attempt_started.get(s, 0)) >= _QUALITY_DISPLAY_GRACE_SECS
             }
+            # Add an asterisk when we use the checker-reported fallback.
+            recording_res_is_fallback = set(recording_res.keys()) - set(site.display_resolution.keys())
             recording_res.update(site.display_resolution)
 
         # Apply the active sort order to the streamer list.
@@ -3882,7 +3884,10 @@ class JJDlpDashboard:
             # "Last Live" value for this streamer
             ll_ts = last_live.get(s)
             if is_rec and recording_res.get(s) is not None:
-                last_live_str = f"{recording_res.get(s)}p"
+                # Asterisk marks a value still coming from the checker-reported
+                # recording_resolution fallback
+                _suffix = "*" if s in recording_res_is_fallback else ""
+                last_live_str = f"{recording_res.get(s)}p{_suffix}"
             elif ll_ts is not None:
                 ll_ago = int(now - ll_ts)
                 if ll_ago < 60:
