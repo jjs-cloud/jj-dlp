@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.9"
+__version__ = "1.22.10"
 
 import subprocess
 import time
@@ -624,6 +624,10 @@ class SiteState:
         # recording_resolution at display time if ffprobe is unavailable. 
         # Cleared when the recording ends.
         self.display_resolution: Dict[str, int] = {}
+        # Epoch when the *current* recording attempt for a streamer began
+        # Used purely to gate the recording_resolution fallback in the
+        # dashboard renderer.
+        self.recording_attempt_started: Dict[str, float] = {}
         self.recording_threads:   List[threading.Thread] = []
         self.known_streamers:     Set[str] = set()
         self.trigger_event        = threading.Event()
@@ -889,6 +893,11 @@ _AD_TWITCH_TAG_RE    = _re.compile(r'#EXT-X-TWITCH-AD|CLASS="twitch-stitched-ad"
 _lq_attempted: Dict[Tuple[str, str], float] = {}
 _lq_attempted_lock: threading.Lock = threading.Lock()
 _LQ_RECENT_WINDOW: float = 30 * 60   # 30 minutes
+
+# ── Dashboard quality-display grace period ───────────────────────────────────
+# How long to wait after a recording attempt starts before falling back to
+# the checker-reported recording_resolution for the dashboard's "Xp" column.
+_QUALITY_DISPLAY_GRACE_SECS: float = 60.0
 
 # ── Keybinds ──
 KEYBIND_ADD       = "a"
@@ -2575,6 +2584,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             # Clear the ffprobe-measured display quality too, for the same
             # reason
             site.display_resolution.pop(streamer, None)
+            site.recording_attempt_started.pop(streamer, None)
             # Always clean up evicted_streamers here so the set doesn't grow
             # unboundedly over the lifetime of the process.  The eviction flag
             # is only meaningful while the recording thread is alive; once we
@@ -2726,6 +2736,7 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                         site.recording_resolution[streamer] = _start_height
                     else:
                         site.recording_resolution.pop(streamer, None)
+                site.recording_attempt_started[streamer] = time.time()
                 with site.dash_lock:
                     if streamer not in site.dash_live_since:
                         site.dash_live_since[streamer] = time.time()
@@ -3799,9 +3810,12 @@ class JJDlpDashboard:
             next_in      = site.dash_next_check_in
         with site.lock:
             recording     = set(site.currently_recording)
-            # Prefer the ffprobe-measured on-disk resolution, 
-            # fall back to the checker-reported resolution
-            recording_res = dict(site.recording_resolution)
+            # Prefer the ffprobe-measured on-disk resolution
+            # fall back to the checker-reported
+            recording_res = {
+                s: h for s, h in site.recording_resolution.items()
+                if (now - site.recording_attempt_started.get(s, 0)) >= _QUALITY_DISPLAY_GRACE_SECS
+            }
             recording_res.update(site.display_resolution)
 
         # Apply the active sort order to the streamer list.
