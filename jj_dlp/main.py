@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.14"
+__version__ = "1.22.15"
 
 import subprocess
 import time
@@ -2073,6 +2073,15 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
         with site.lock:
             site.intro_delay_pending.discard(streamer)
         dbg(f"[INTRO_DELAY] streamer={streamer!r} delay elapsed — starting recording")
+        # The initial "is live" notification was sent as "Not recording /
+        # Reason: Intro Delay" back in start_recording_if_needed(). Now that
+        # the hold is over and the download is about to actually start, send
+        # the real "recording" notification. Reset the cooldown timer first
+        # so a short Intro Delay (less than POPUP_COOLDOWN) can't suppress
+        # this second, distinct notification.
+        site.notif_last_shown[streamer] = 0
+        _maybe_show_live_popup(streamer, cfg, site, show_popup=True,
+                               source="intro_delay", is_recording=True)
 
     dbg(f"[SPLIT][record_stream] ENTER streamer={streamer!r} "
         f"split_after_minutes={split_after_minutes} split_after_seconds={split_after_seconds} "
@@ -2881,10 +2890,13 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                 with site.dash_lock:
                     if streamer not in site.dash_live_since:
                         site.dash_live_since[streamer] = time.time()
+            _intro_delay_holding = (streamer_cfg.get("intro_delay_enabled", False)
+                                     and not streamer_cfg.get("intro_delay_split", False))
             _maybe_show_live_popup(streamer, cfg, site,
                                    show_popup=show_popup,
                                    source=source,
-                                   is_recording=True,
+                                   is_recording=not _intro_delay_holding,
+                                   reason="Intro Delay" if _intro_delay_holding else "",
                                    warning=eviction_warning)
             t = threading.Thread(target=record_stream, args=(streamer, streamer_cfg, site), kwargs={"use_lq": is_lq}, daemon=True)
             t.start()
