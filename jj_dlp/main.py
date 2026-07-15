@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.12"
+__version__ = "1.22.11"
 
 import subprocess
 import time
@@ -998,7 +998,15 @@ def cmd_display_str(cmd: List[str]) -> str:
 # override) and how the message gets delivered.
 
 def _get_disk_info_string(cfg: dict = None) -> str:
-    """Build a short disk-space summary string, e.g. "data 120.5G, ext 8.2G"."""
+    """Build a short disk-space summary string, e.g. "data 120.5G, ext 8.2G".
+
+    Mirrors the drive-resolution logic used by the dashboard's system panel
+    ── Disk ── section (global.conf DISK_DRIVES take precedence, falling
+    back to the site's own disk_drives / output_dir) so the popup/ntfy
+    notifications always report the exact same disk info shown there.
+    Percentage used is intentionally omitted — only free space remains, to
+    keep the notification line short.
+    """
     try:
         seen_drives: list = []
         seen_drives_set: set = set()
@@ -1061,16 +1069,13 @@ def _format_live_popup(streamer: str, is_recording: bool = True,
         f"{marker} {status}",
     ]
     if site_label:
-        site_line = f"Site: {site_label}"
-        if disk_info:
-            site_line += f"  |  Disk: {disk_info}"
-        lines.append(site_line)
-    elif disk_info:
-        lines.append(f"Disk: {disk_info}")
+        lines.append(f"Site: {site_label}")
     if warning:
         lines.append(f"Warning: {warning}")
     if reason:
         lines.append(f"Reason: {reason}")
+    if disk_info:
+        lines.append(f"Disk: {disk_info}")
     return lines
 
 

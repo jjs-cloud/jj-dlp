@@ -1,4 +1,5 @@
 - improved accuracy of reported video resolution.
+- added disk info to notifications
 
 ====================
 ====================
