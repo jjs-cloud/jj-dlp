@@ -303,11 +303,14 @@ class PriorityEditor:
 
             has_lq_override = bool(e.get("lq_enabled", False))
 
+            has_intro_delay_override = bool(e.get("intro_delay_enabled", False))
+
             saved_map[key] = {
                 "bypass":       e.get("bypass", False),
                 "priority":     i,
                 "has_override": (schedule_enabled or has_split_override
-                                  or has_notif_override or has_lq_override),
+                                  or has_notif_override or has_lq_override
+                                  or has_intro_delay_override),
             }
 
         # Build enriched list with saved priority / bypass values.
@@ -396,7 +399,8 @@ class PriorityEditor:
                 # on the next reorder or bypass toggle.
                 for extra_key in ("schedule", "lq_enabled",
                                   "split_mode", "split_after", "split_enabled",
-                                  "notifications_enabled"):
+                                  "notifications_enabled",
+                                  "intro_delay_enabled", "intro_delay_minutes", "intro_delay_split"):
                     if extra_key in ex:
                         entry_dict[extra_key] = ex[extra_key]
                 entries_data.append(entry_dict)
@@ -596,11 +600,12 @@ class StreamerSettingsPopup:
         self.entry     = entry
         self.config_id = config_id
 
-        self.options = ["Schedule", "Quality", "Split", "Notifications"]
+        self.options = ["Schedule", "Quality", "Split", "Intro Delay", "Notifications"]
         self._sel: int = 0
         self._schedule_popup: "Optional[ScheduleSettingsPopup]" = None
         self._quality_popup: "Optional[QualitySettingsPopup]" = None
         self._split_popup: "Optional[SplitSettingsPopup]" = None
+        self._intro_delay_popup: "Optional[IntroDelaySettingsPopup]" = None
         self._notifications_popup: "Optional[NotificationSettingsPopup]" = None
 
     def handle_key(self, key) -> bool:
@@ -622,6 +627,13 @@ class StreamerSettingsPopup:
             should_close = self._split_popup.handle_key(key)
             if should_close:
                 self._split_popup = None
+                return True
+            return False
+
+        if self._intro_delay_popup is not None:
+            should_close = self._intro_delay_popup.handle_key(key)
+            if should_close:
+                self._intro_delay_popup = None
                 return True
             return False
 
@@ -657,6 +669,12 @@ class StreamerSettingsPopup:
                     self.entry,
                     self.config_id,
                 )
+            elif self.options[self._sel] == "Intro Delay":
+                self._intro_delay_popup = IntroDelaySettingsPopup(
+                    self.dashboard,
+                    self.entry,
+                    self.config_id,
+                )
             elif self.options[self._sel] == "Notifications":
                 self._notifications_popup = NotificationSettingsPopup(
                     self.dashboard,
@@ -676,6 +694,10 @@ class StreamerSettingsPopup:
 
         if self._split_popup is not None:
             self._split_popup.draw(stdscr)
+            return
+
+        if self._intro_delay_popup is not None:
+            self._intro_delay_popup.draw(stdscr)
             return
 
         if self._notifications_popup is not None:
@@ -1210,6 +1232,256 @@ class SplitSettingsPopup:
                            curses.color_pair(db.C_WARN) | curses.A_BOLD)
 
         footer = " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "
+        db.safe_addstr(stdscr, by2, bx1 + 2, footer[:box_w - 4], curses.color_pair(db.C_INVHEAD))
+
+
+class IntroDelaySettingsPopup:
+    """Modal popup for per-streamer intro-delay settings.
+
+    Opened by StreamerSettingsPopup when the user presses Enter on Intro
+    Delay. Data is stored inside the existing priorities[config_id][entries]
+    structure in global.json, alongside split/lq/schedule overrides.
+    """
+
+    _FIELD_ENABLED = "intro_delay_enabled"
+    _FIELD_MINUTES = "intro_delay_minutes"
+    _FIELD_SPLIT   = "intro_delay_split"
+
+    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
+        self.dashboard = dashboard
+        self.entry     = entry
+        self.config_id = config_id
+
+        self.enabled: bool = False
+        self.minutes: int  = 0
+        self.split:   bool = False
+
+        self._sel:      int  = 0
+        self._editing:  bool = False  # text-field edit sub-mode (minutes)
+        self._edit_buf: str  = ""
+        self._error:    str  = ""
+
+        self._load()
+
+    # ── Persistence ────────────────────────────────────────────────────────────
+
+    def _load(self) -> None:
+        try:
+            from .main import _global_json_lock, _load_global_json
+            with _global_json_lock:
+                gdata = _load_global_json()
+            entries = (gdata.get("priorities", {})
+                           .get(self.config_id, {})
+                           .get("entries", []))
+            for e in entries:
+                if (e.get("streamer") == self.entry.streamer
+                        and e.get("site") == self.entry.site):
+                    self.enabled = bool(e.get(self._FIELD_ENABLED, False))
+                    try:
+                        self.minutes = max(0, int(e.get(self._FIELD_MINUTES, 0) or 0))
+                    except (TypeError, ValueError):
+                        self.minutes = 0
+                    self.split = bool(e.get(self._FIELD_SPLIT, False))
+                    break
+        except Exception:
+            pass
+
+    def _save(self) -> None:
+        try:
+            from .main import _global_json_lock, _load_global_json, _save_global_json
+            with _global_json_lock:
+                gdata   = _load_global_json()
+                entries = (gdata.get("priorities", {})
+                               .get(self.config_id, {})
+                               .get("entries", []))
+                target = None
+                for e in entries:
+                    if (e.get("streamer") == self.entry.streamer
+                            and e.get("site") == self.entry.site):
+                        target = e
+                        break
+                if not self.enabled:
+                    # Nothing to override — clear any prior explicit values
+                    # rather than writing them.
+                    if target is not None:
+                        target.pop(self._FIELD_ENABLED, None)
+                        target.pop(self._FIELD_MINUTES, None)
+                        target.pop(self._FIELD_SPLIT, None)
+                else:
+                    if target is None:
+                        target = {
+                            "streamer":   self.entry.streamer,
+                            "site":       self.entry.site,
+                            "config_sha": self.entry.config_sha,
+                            "priority":   len(entries),
+                            "bypass":     self.entry.bypass,
+                        }
+                        entries.append(target)
+                    target[self._FIELD_ENABLED] = True
+                    target[self._FIELD_MINUTES] = self.minutes
+                    target[self._FIELD_SPLIT]   = self.split
+
+                gdata.setdefault("priorities", {}).setdefault(
+                    self.config_id, {"config_files": [], "entries": []}
+                )["entries"] = entries
+                _save_global_json(gdata)
+        except Exception:
+            pass
+
+    # ── Validation ─────────────────────────────────────────────────────────────
+
+    def _validate(self) -> "tuple[bool, str]":
+        if self.enabled and self.minutes <= 0:
+            return False, "Enter a delay > 0 minutes"
+        return True, ""
+
+    # ── Field list ─────────────────────────────────────────────────────────────
+
+    def _get_fields(self) -> "list[tuple[str,str,str]]":
+        fields = [
+            ("Intro Delay Enabled", "[x]" if self.enabled else "[ ]", self._FIELD_ENABLED),
+        ]
+        if self.enabled:
+            fields.append((
+                "Delay the recording by X minutes",
+                str(self.minutes) if self.minutes else "",
+                self._FIELD_MINUTES,
+            ))
+            fields.append((
+                "Split intro into a separate file",
+                "[x]" if self.split else "[ ]",
+                self._FIELD_SPLIT,
+            ))
+        return fields
+
+    # ── Key handling ───────────────────────────────────────────────────────────
+
+    def handle_key(self, key) -> bool:
+        """Handle one keypress. Returns True when the popup should close."""
+        fields = self._get_fields()
+        _, _, field_key = fields[self._sel]
+
+        # ── Text-editing sub-mode (minutes field) ───────────────────────────────
+        if self._editing:
+            if key == 27:                               # Esc → cancel edit
+                self._editing  = False
+                self._edit_buf = ""
+                self._error    = ""
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                self._edit_buf = self._edit_buf[:-1]
+                self._error    = ""
+            elif key in (ord("\n"), ord("\r"), curses.KEY_ENTER, 459):
+                val = self._edit_buf.strip()
+                if val == "":
+                    self.minutes = 0
+                    self._editing  = False
+                    self._edit_buf = ""
+                    self._error    = ""
+                elif val.isdigit() and int(val) > 0:
+                    self.minutes = int(val)
+                    self._editing  = False
+                    self._edit_buf = ""
+                    self._error    = ""
+                else:
+                    self._error = "Enter a whole number of minutes"
+            elif 48 <= key <= 57:                        # digits only
+                self._edit_buf += chr(key)
+                self._error     = ""
+            return False
+
+        # ── Normal navigation ─────────────────────────────────────────────────
+        if key == 27:                                   # Esc → close without saving
+            return True
+
+        elif key == curses.KEY_UP:
+            self._sel   = max(0, self._sel - 1)
+            self._error = ""
+
+        elif key == curses.KEY_DOWN:
+            self._sel   = min(len(fields) - 1, self._sel + 1)
+            self._error = ""
+
+        elif key in (ord(" "), curses.KEY_LEFT, curses.KEY_RIGHT):
+            if field_key == self._FIELD_ENABLED:
+                self.enabled = not self.enabled
+                self._sel = min(self._sel, len(self._get_fields()) - 1)
+                self._error = ""
+            elif field_key == self._FIELD_SPLIT:
+                self.split = not self.split
+                self._error = ""
+            elif field_key == self._FIELD_MINUTES and key == ord(" "):
+                self._edit_buf = str(self.minutes) if self.minutes else ""
+                self._editing  = True
+                self._error    = ""
+
+        elif key in (ord("\n"), ord("\r"), curses.KEY_ENTER, 459):
+            valid, err = self._validate()
+            if valid:
+                self._save()
+                return True
+            self._error = err
+
+        return False
+
+    # ── Drawing ────────────────────────────────────────────────────────────────
+
+    def draw(self, stdscr) -> None:
+        db     = self.dashboard
+        h, w   = stdscr.getmaxyx()
+        fields = self._get_fields()
+
+        box_w = min(52, w - 6)
+        box_h = len(fields) * 2 + 5   # + effective line + footer
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), curses.color_pair(db.C_NORMAL))
+
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
+        title = f" {self.entry.streamer.upper()} SETTINGS "
+        db.safe_addstr(stdscr, by1, bx1 + 2, title, curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
+
+        row = by1 + 2
+        for i, (label, val_str, field_key) in enumerate(fields):
+            is_sel     = (i == self._sel)
+            prefix     = "> " if is_sel else "  "
+            label_attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
+                          if is_sel else curses.color_pair(db.C_WARN) | curses.A_BOLD)
+            val_attr   = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
+                          if is_sel else curses.color_pair(db.C_NORMAL))
+
+            full_label = f"{prefix}{label}: "
+            db.safe_addstr(stdscr, row, bx1 + 2, full_label, label_attr)
+
+            if field_key == self._FIELD_MINUTES and self._editing and is_sel:
+                shown = self._edit_buf + "_"
+            else:
+                shown = val_str
+            val_x   = bx1 + 2 + len(full_label)
+            max_len = max(1, bx2 - val_x - 1)
+            db.safe_addstr(stdscr, row, val_x, shown[:max_len], val_attr)
+
+            row += 2
+
+        # ── Effective value ───────────────────────────────────────────────────
+        if not self.enabled:
+            effective_str = "Off"
+        elif self.split:
+            effective_str = f"Delay {self.minutes}m, split into separate file"
+        else:
+            effective_str = f"Delay {self.minutes}m, no split"
+        db.safe_addstr(stdscr, row, bx1 + 2, "Effective: ", curses.color_pair(db.C_NORMAL))
+        db.safe_addstr(stdscr, row, bx1 + 13, effective_str[:box_w - 15], curses.color_pair(db.C_WARN) | curses.A_BOLD)
+        row += 1
+
+        if self._error:
+            db.safe_addstr(stdscr, by2 - 1, bx1 + 2, self._error[:box_w - 4],
+                           curses.color_pair(db.C_WARN) | curses.A_BOLD)
+
+        footer = " Enter:Save  Space:Toggle/Edit  Esc:Cancel "
         db.safe_addstr(stdscr, by2, bx1 + 2, footer[:box_w - 4], curses.color_pair(db.C_INVHEAD))
 
 

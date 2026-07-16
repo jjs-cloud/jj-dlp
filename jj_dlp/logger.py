@@ -143,6 +143,7 @@ def configure(dashboard_log_fn=None, dashboard_dbg_fn=None) -> None:
 #   SCHEDULE — per-streamer schedule evaluation on every check interval
 #   GLOBAL_JSON — global.json read/write/backup diagnostics
 #   NTFY     — ntfy.sh push-notifications
+#   INTRO_DELAY — per-streamer intro-delay hold/split logic
 #
 DBG_TAGS: list[str] = [
     "DRAIN",
@@ -163,6 +164,8 @@ DBG_TAGS: list[str] = [
     "UPGRADE_QUALITY",
     "GLOBAL_JSON",
     "NTFY",
+    "QUALITY",
+    "INTRO_DELAY",
 ]
 
 import json

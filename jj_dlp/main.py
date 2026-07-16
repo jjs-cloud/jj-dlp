@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.8"
+__version__ = "1.22.16"
 
 import subprocess
 import time
@@ -21,7 +21,7 @@ import shlex
 from urllib.parse import urlparse
 import shutil
 
-from .deps import ensure_curses, plain_ffmpeg_check
+from .deps import ensure_curses, plain_ffmpeg_check, check_ffmpeg
 from . import logger as _logger
 from .logger import (
     startup_dbg, startup_dbg_flush,
@@ -614,11 +614,26 @@ class SiteState:
         self.lock                 = threading.Lock()
         self.currently_recording: Set[str] = set()
         self.evicted_streamers:   Set[str] = set()
+        # Streamers that have claimed a recording slot (in currently_recording)
+        # but are still holding for their Intro Delay period — no yt-dlp
+        # process has been launched yet. Guarded by self.lock, same as
+        # currently_recording. Used purely so the dashboard can keep showing
+        # [●Live] instead of flashing [► REC] until recording actually starts.
+        self.intro_delay_pending: Set[str] = set()
         # Resolution (height, in px) each currently-recording streamer started
         # at, per the checker's --dump-json output. Used by UPGRADE_QUALITY to
         # detect when a source switches to a higher resolution mid-recording.
         # Guarded by self.lock. Cleared when the recording ends.
         self.recording_resolution: Dict[str, int] = {}
+        # Resolution (height, in px) actually measured from the on-disk
+        # recording file via ffprobe. Guarded by self.lock. Falls back to
+        # recording_resolution at display time if ffprobe is unavailable. 
+        # Cleared when the recording ends.
+        self.display_resolution: Dict[str, int] = {}
+        # Epoch when the *current* recording attempt for a streamer began
+        # Used purely to gate the recording_resolution fallback in the
+        # dashboard renderer.
+        self.recording_attempt_started: Dict[str, float] = {}
         self.recording_threads:   List[threading.Thread] = []
         self.known_streamers:     Set[str] = set()
         self.trigger_event        = threading.Event()
@@ -885,6 +900,11 @@ _lq_attempted: Dict[Tuple[str, str], float] = {}
 _lq_attempted_lock: threading.Lock = threading.Lock()
 _LQ_RECENT_WINDOW: float = 30 * 60   # 30 minutes
 
+# ── Dashboard quality-display grace period ───────────────────────────────────
+# How long to wait after a recording attempt starts before falling back to
+# the checker-reported recording_resolution for the dashboard's "Xp" column.
+_QUALITY_DISPLAY_GRACE_SECS: float = 60.0
+
 # ── Keybinds ──
 KEYBIND_ADD       = "a"
 KEYBIND_REMOVE    = "r"
@@ -983,15 +1003,70 @@ def cmd_display_str(cmd: List[str]) -> str:
 # (POPUP_NOTIFICATIONS vs. NTFY_NOTIFICATIONS / the per-streamer ntfy
 # override) and how the message gets delivered.
 
+def _get_disk_info_string(cfg: dict = None) -> str:
+    """Build a short disk-space summary string, e.g. "data 120.5G, ext 8.2G".
+
+    Mirrors the drive-resolution logic used by the dashboard's system panel
+    ── Disk ── section (global.conf DISK_DRIVES take precedence, falling
+    back to the site's own disk_drives / output_dir) so the popup/ntfy
+    notifications always report the exact same disk info shown there.
+    Percentage used is intentionally omitted — only free space remains, to
+    keep the notification line short.
+    """
+    try:
+        seen_drives: list = []
+        seen_drives_set: set = set()
+
+        global_cfg = load_global_config()
+        global_drives = global_cfg.get("disk_drives", [])
+        for d in global_drives:
+            key = os.path.normcase(d)
+            if key not in seen_drives_set:
+                seen_drives_set.add(key)
+                seen_drives.append(d)
+
+        if cfg:
+            drives_for_site = cfg.get("disk_drives", [])
+            for d in drives_for_site:
+                key = os.path.normcase(d)
+                if key not in seen_drives_set:
+                    seen_drives_set.add(key)
+                    seen_drives.append(d)
+
+        if not seen_drives:
+            fallback_dir = (cfg or {}).get("output_dir", "/")
+            seen_drives = [fallback_dir]
+
+        parts = []
+        for drive in seen_drives:
+            try:
+                usage = shutil.disk_usage(drive)
+            except Exception as _disk_exc:
+                dbg(f"[DISK] shutil.disk_usage({drive!r}) FAILED (notification): "
+                    f"{type(_disk_exc).__name__}: {_disk_exc}")
+                continue
+            free_gb = usage.free / (1024 ** 3)
+            drv_label = os.path.basename(drive.rstrip("/\\")) or drive
+            drv_label = drv_label[:6]
+            parts.append(f"{drv_label} {free_gb:.1f}G")
+
+        return ", ".join(parts)
+    except Exception as _disk_outer_exc:
+        dbg(f"[DISK] exception building disk info string for notification: "
+            f"{type(_disk_outer_exc).__name__}: {_disk_outer_exc}")
+        return ""
+
+
 def _format_live_popup(streamer: str, is_recording: bool = True,
                        reason: str = "", warning: str = "",
-                       site_label: str = "") -> list:
+                       site_label: str = "", disk_info: str = "") -> list:
     """Build the lines of text shown for a "streamer is live" notification.
 
     Used to build both the popup body (notify-send/tkinter) and the ntfy.sh
     push notification body, so the two channels always show identical
-    information: live status (recording / not recording), the site, and —
-    when applicable — the warning and/or the reason recording did not start.
+    information: live status (recording / not recording), the site, disk
+    space remaining, and — when applicable — the warning and/or the reason
+    recording did not start.
     """
     marker = "🔴" if is_recording else "🟡"
     status = "Recording" if is_recording else "Not recording"
@@ -1005,15 +1080,17 @@ def _format_live_popup(streamer: str, is_recording: bool = True,
         lines.append(f"Warning: {warning}")
     if reason:
         lines.append(f"Reason: {reason}")
+    if disk_info:
+        lines.append(f"Disk: {disk_info}")
     return lines
 
 
 def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 15,
                      is_recording: bool = True, reason: str = "",
-                     warning: str = "", site_label: str = "") -> None:
+                     warning: str = "", site_label: str = "", disk_info: str = "") -> None:
     dbg(f"[POPUP] enqueue popup streamer={streamer!r} source={source!r} timeout={popup_timeout} is_recording={is_recording} reason={reason!r} warning={warning!r}")
     def _run():
-        popup_lines = _format_live_popup(streamer, is_recording, reason, warning, site_label)
+        popup_lines = _format_live_popup(streamer, is_recording, reason, warning, site_label, disk_info)
         popup_text = "\n".join(popup_lines)
         if sys.platform.startswith("linux"):
             notify_cmd = shutil.which("notify-send")
@@ -1082,9 +1159,10 @@ def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 1
 
 
 def _send_ntfy_notification(streamer: str, site_label: str, is_recording: bool = True,
-                            reason: str = "", warning: str = "") -> None:
+                            reason: str = "", warning: str = "", disk_info: str = "") -> None:
     dbg(f"[NTFY] _send_ntfy_notification called: streamer={streamer!r} "
-        f"is_recording={is_recording} site_label={site_label!r} reason={reason!r} warning={warning!r}")
+        f"is_recording={is_recording} site_label={site_label!r} reason={reason!r} warning={warning!r} "
+        f"disk_info={disk_info!r}")
 
     global_cfg = load_global_config()
     topic = global_cfg.get("ntfy_topic", "").strip()
@@ -1099,17 +1177,18 @@ def _send_ntfy_notification(streamer: str, site_label: str, is_recording: bool =
 
     full_url = f"{url}/{topic}"
 
-    # Same content the popup shows: LIVE/recording status, site, and the
-    # warning/reason when applicable. The "Title" header must stay ASCII —
-    # emoji markers live in the body instead, where UTF-8 is safe.
-    popup_lines = _format_live_popup(streamer, is_recording, reason, warning, site_label)
+    # Same content the popup shows: LIVE/recording status, site, disk space
+    # remaining, and the warning/reason when applicable. The "Title" header
+    # must stay ASCII — emoji markers live in the body instead, where UTF-8
+    # is safe.
+    popup_lines = _format_live_popup(streamer, is_recording, reason, warning, site_label, disk_info)
     title = "jj-dlp"
     body = "\n".join(popup_lines)
 
     headers = {
         "Title": title,
         "Priority": "high" if is_recording else "default",
-        "Tags": "red_circle,record" if is_recording else "warning",
+        "Tags": "red_circle,record" if is_recording else "yellow_circle",
     }
 
     dbg(f"[NTFY] prepared request: url={full_url!r} title={title!r} "
@@ -1239,19 +1318,25 @@ def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
     dbg(f"[NOTIFY] allowed by cooldown for streamer={streamer!r} elapsed={elapsed:.1f}s cooldown={cooldown_secs}s; "
         f"dispatching enabled channels (popup={popup_enabled} ntfy={ntfy_enabled})")
 
+    # Same disk info shown on the dashboard's system panel, computed once
+    # and shared by both channels.
+    disk_info = _get_disk_info_string(cfg)
+
     if popup_enabled:
         _show_live_popup(streamer, source=source,
                          popup_timeout=cfg.get("popup_timeout", 15),
                          is_recording=is_recording,
                          reason=reason,
                          warning=warning,
-                         site_label=site_label)
+                         site_label=site_label,
+                         disk_info=disk_info)
 
     if ntfy_enabled:
         _send_ntfy_notification(streamer, site_label,
                                 is_recording=is_recording,
                                 reason=reason,
-                                warning=warning)
+                                warning=warning,
+                                disk_info=disk_info)
 
     site.notif_last_shown[streamer] = time.time()
     if not is_recording:
@@ -1542,6 +1627,81 @@ def get_live_streamers(streamers: List[str], cfg: dict,
         except Exception:
             pass
     return live
+
+
+# Cached ffprobe binary path, resolved once on first use. `False` means we
+# already looked. `None` means not yet resolved.
+_ffprobe_path_cache: Optional[object] = None
+
+
+def _resolve_ffprobe_path() -> Optional[str]:
+    """Locate the ffprobe binary, reusing ffmpeg's already-verified location."""
+    global _ffprobe_path_cache
+    if _ffprobe_path_cache is not None:
+        return _ffprobe_path_cache or None
+
+    found, ffmpeg_path = check_ffmpeg()
+    if found and ffmpeg_path:
+        ffmpeg_dir = os.path.dirname(ffmpeg_path)
+        ffmpeg_base = os.path.basename(ffmpeg_path)
+        probe_base = ffmpeg_base.replace("ffmpeg", "ffprobe")
+        candidate = os.path.join(ffmpeg_dir, probe_base)
+        if os.path.isfile(candidate):
+            _ffprobe_path_cache = candidate
+            dbg(f"[QUALITY] resolved ffprobe next to ffmpeg: {candidate!r}")
+            return candidate
+
+    which_result = shutil.which("ffprobe")
+    if which_result:
+        _ffprobe_path_cache = which_result
+        dbg(f"[QUALITY] resolved ffprobe via PATH: {which_result!r}")
+        return which_result
+
+    _ffprobe_path_cache = False
+    dbg("[QUALITY] ffprobe not found (checked next to ffmpeg and on PATH)")
+    return None
+
+
+def probe_file_height(filepath: str) -> Optional[int]:
+    """Return the actual video height (px) of *filepath* via ffprobe, or
+    None on any failure (ffprobe missing, file missing, timeout, bad/empty
+    output, etc). Callers should treat None as "couldn't determine it" and
+    simply not display a quality — never raise.
+
+    Only reads the file's stream headers (not the whole file), so this is
+    cheap to call even while the file is actively being written to.
+    """
+    if not filepath or not os.path.isfile(filepath):
+        return None
+
+    ffprobe_path = _resolve_ffprobe_path()
+    if not ffprobe_path:
+        return None
+
+    cmd = [
+        ffprobe_path, "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=height",
+        "-of", "csv=p=0",
+        filepath,
+    ]
+    try:
+        _run_kwargs: dict = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  text=True, timeout=5)
+        if sys.platform == "win32":
+            _run_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        result = subprocess.run(cmd, **_run_kwargs)
+        out = (result.stdout or "").strip()
+        if not out:
+            return None
+        # First line, first field — ffprobe can print multiple lines if the
+        # container somehow has more than one video stream.
+        first_line = out.splitlines()[0].strip()
+        height = int(first_line.split(",")[0])
+        return height if height > 0 else None
+    except Exception as e:
+        dbg(f"[QUALITY] ffprobe probe failed for {filepath!r}: {type(e).__name__}: {e}")
+        return None
 
 
 def get_streamer_file_size(output_dir, streamer, cfg=None,
@@ -1838,6 +1998,26 @@ def _resolve_split_after(cfg: dict, entry_info: dict) -> dict:
     return overridden
 
 
+def _resolve_intro_delay(cfg: dict, entry_info: dict) -> dict:
+    """Return a cfg dict to use for a single streamer, applying that
+    streamer's per-streamer Intro Delay override (set via the SETTINGS
+    popup) on top of *cfg*.
+    """
+    if not entry_info or not entry_info.get("intro_delay_enabled", False):
+        return cfg
+    try:
+        minutes = int(entry_info.get("intro_delay_minutes", 0) or 0)
+    except (TypeError, ValueError):
+        minutes = 0
+    if minutes <= 0:
+        return cfg
+    overridden = dict(cfg)
+    overridden["intro_delay_enabled"] = True
+    overridden["intro_delay_minutes"] = minutes
+    overridden["intro_delay_split"] = bool(entry_info.get("intro_delay_split", False))
+    return overridden
+
+
 def record_stream(streamer: str, cfg: dict, site: "SiteState",
                   use_lq: bool = False) -> None:
     channel_url = cfg["site_tmpl"].format(username=streamer)
@@ -1853,6 +2033,55 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
     split_after_minutes = max(0, cfg.get("split_after", 0))
     split_after_seconds = split_after_minutes * 60
+
+    # ── Intro Delay ──────────────────────────────────────────────────────────
+    # Notifications for "streamer is live" already fired in
+    # start_recording_if_needed() before this thread was started, so holding
+    # things up here only ever delays the *recording*, never the notification.
+    intro_delay_enabled = bool(cfg.get("intro_delay_enabled", False))
+    intro_delay_minutes = max(0, cfg.get("intro_delay_minutes", 0))
+    intro_delay_split   = bool(cfg.get("intro_delay_split", False))
+    # Set once the intro-delay-driven split segment is confirmed, so the
+    # SPLIT_AFTER loop below is told to stop splitting for the rest of the
+    # stream instead of continuing to split every intro_delay_minutes.
+    _intro_delay_disable_after_split = False
+
+    if intro_delay_enabled and intro_delay_minutes > 0 and intro_delay_split:
+        # Reuse the SPLIT_AFTER machinery as-is: force the *first* split to
+        # land at the intro-delay boundary, then disable further splitting
+        # once that split is confirmed (see the split_success branch below).
+        split_after_minutes = intro_delay_minutes
+        split_after_seconds = split_after_minutes * 60
+        _intro_delay_disable_after_split = True
+        dbg(f"[INTRO_DELAY] streamer={streamer!r} split mode: first split forced "
+            f"at {intro_delay_minutes}m, further splitting disabled afterward")
+    elif intro_delay_enabled and intro_delay_minutes > 0:
+        dbg(f"[INTRO_DELAY] streamer={streamer!r} delay mode: holding recording "
+            f"start for {intro_delay_minutes}m")
+        with site.lock:
+            site.intro_delay_pending.add(streamer)
+        _delay_deadline = time.time() + intro_delay_minutes * 60
+        while time.time() < _delay_deadline:
+            if site._stop_event.is_set() or streamer in site.evicted_streamers:
+                dbg(f"[INTRO_DELAY] streamer={streamer!r} aborted during delay "
+                    f"(stop_event or evicted)")
+                with site.lock:
+                    site.currently_recording.discard(streamer)
+                    site.intro_delay_pending.discard(streamer)
+                return
+            site._stop_event.wait(timeout=min(1.0, _delay_deadline - time.time()))
+        with site.lock:
+            site.intro_delay_pending.discard(streamer)
+        dbg(f"[INTRO_DELAY] streamer={streamer!r} delay elapsed — starting recording")
+        # The initial "is live" notification was sent as "Not recording /
+        # Reason: Intro Delay" back in start_recording_if_needed(). Now that
+        # the hold is over and the download is about to actually start, send
+        # the real "recording" notification. Reset the cooldown timer first
+        # so a short Intro Delay (less than POPUP_COOLDOWN) can't suppress
+        # this second, distinct notification.
+        site.notif_last_shown[streamer] = 0
+        _maybe_show_live_popup(streamer, cfg, site, show_popup=True,
+                               source="intro_delay", is_recording=True)
 
     dbg(f"[SPLIT][record_stream] ENTER streamer={streamer!r} "
         f"split_after_minutes={split_after_minutes} split_after_seconds={split_after_seconds} "
@@ -2296,6 +2525,12 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                                 recording_start_time = next_proc_start_time
                                 segment_num = next_segment_num
 
+                                if _intro_delay_disable_after_split:
+                                    split_after_seconds = 0
+                                    _intro_delay_disable_after_split = False
+                                    dbg(f"[INTRO_DELAY] streamer={streamer!r} intro split "
+                                        f"confirmed — splitting disabled for remainder of stream")
+
                                 site.register_proc(streamer, proc)
 
                                 ffmpeg_error_counter = [0]
@@ -2365,6 +2600,24 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         stall_check_interval=stall_check_interval,
                         known_filename=active_file,
                     )
+
+                    # ── Dashboard quality display (independent of stall logic) ──
+                    # Measure the actual on-disk resolution via ffprobe, reusing
+                    # the same active_file the stall checker just used above.
+                    #
+                    # If the file can't be located this cycle (file_error),
+                    # clear the measured value.  If ffprobe
+                    # itself is unavailable, also clear it. 
+                    if file_error:
+                        with site.lock:
+                            site.display_resolution.pop(streamer, None)
+                    else:
+                        _measured_height = probe_file_height(active_file)
+                        with site.lock:
+                            if _measured_height is not None:
+                                site.display_resolution[streamer] = _measured_height
+                            else:
+                                site.display_resolution.pop(streamer, None)
 
                     if file_error:
                         # We couldn't even locate/read the recording file this
@@ -2474,6 +2727,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             # restarted-for-quality) gets a clean baseline rather than
             # comparing against a stale resolution from a previous session.
             site.recording_resolution.pop(streamer, None)
+            # Clear the ffprobe-measured display quality too, for the same
+            # reason
+            site.display_resolution.pop(streamer, None)
+            site.recording_attempt_started.pop(streamer, None)
             # Always clean up evicted_streamers here so the set doesn't grow
             # unboundedly over the lifetime of the process.  The eviction flag
             # is only meaningful while the recording thread is alive; once we
@@ -2531,6 +2788,9 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
             "split_mode": e.get("split_mode"),           # None = inherit (or legacy data)
             "split_enabled": e.get("split_enabled", False),  # legacy fallback
             "split_after": e.get("split_after", 0),
+            "intro_delay_enabled": e.get("intro_delay_enabled", False),
+            "intro_delay_minutes": e.get("intro_delay_minutes", 0),
+            "intro_delay_split": e.get("intro_delay_split", False),
         }
 
     site_label = cfg.get("site_label", os.path.basename(site.config_path))
@@ -2549,6 +2809,7 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
             streamer_prio = streamer_info["priority"]
             is_lq = streamer_info.get("lq_enabled", False)
             streamer_cfg = _resolve_split_after(cfg, streamer_info)
+            streamer_cfg = _resolve_intro_delay(streamer_cfg, streamer_info)
             eviction_warning = ""
 
             # Concurrency enforcement
@@ -2625,13 +2886,17 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                         site.recording_resolution[streamer] = _start_height
                     else:
                         site.recording_resolution.pop(streamer, None)
+                site.recording_attempt_started[streamer] = time.time()
                 with site.dash_lock:
                     if streamer not in site.dash_live_since:
                         site.dash_live_since[streamer] = time.time()
+            _intro_delay_holding = (streamer_cfg.get("intro_delay_enabled", False)
+                                     and not streamer_cfg.get("intro_delay_split", False))
             _maybe_show_live_popup(streamer, cfg, site,
                                    show_popup=show_popup,
                                    source=source,
-                                   is_recording=True,
+                                   is_recording=not _intro_delay_holding,
+                                   reason="Intro Delay" if _intro_delay_holding else "",
                                    warning=eviction_warning)
             t = threading.Thread(target=record_stream, args=(streamer, streamer_cfg, site), kwargs={"use_lq": is_lq}, daemon=True)
             t.start()
@@ -3405,6 +3670,7 @@ class JJDlpDashboard:
                 blocked    = set(site.dash_blocked)
             with site.lock:
                 recording  = set(site.currently_recording)
+                intro_delay_pending = set(site.intro_delay_pending)
             try:
                 cfg = site.get_cached_config()
                 site_label = cfg.get("site_label", os.path.basename(site.config_path))
@@ -3413,7 +3679,7 @@ class JJDlpDashboard:
                 pass
             total_streamers += len(all_s)
             live_cnt += sum(1 for s in all_s if s in live_since)
-            rec_cnt  += sum(1 for s in recording)
+            rec_cnt  += sum(1 for s in recording if s not in intro_delay_pending)
             off_cnt  += sum(1 for s in all_s if s not in live_since and s not in blocked)
             dis_cnt  += sum(1 for s in all_s if s in blocked)
 
@@ -3698,7 +3964,16 @@ class JJDlpDashboard:
             next_in      = site.dash_next_check_in
         with site.lock:
             recording     = set(site.currently_recording)
-            recording_res = dict(site.recording_resolution)
+            intro_delay_pending = set(site.intro_delay_pending)
+            # Prefer the ffprobe-measured on-disk resolution
+            # fall back to the checker-reported
+            recording_res = {
+                s: h for s, h in site.recording_resolution.items()
+                if (now - site.recording_attempt_started.get(s, 0)) >= _QUALITY_DISPLAY_GRACE_SECS
+            }
+            # Add an asterisk when we use the checker-reported fallback.
+            recording_res_is_fallback = set(recording_res.keys()) - set(site.display_resolution.keys())
+            recording_res.update(site.display_resolution)
 
         # Apply the active sort order to the streamer list.
         all_s = self.sort_manager.get_sorted_streamers(site, all_s, live_since, last_live)
@@ -3714,7 +3989,7 @@ class JJDlpDashboard:
 
         # Counts for header badges
         live_cnt = sum(1 for s in all_s if s in live_since)
-        rec_cnt  = sum(1 for s in recording)
+        rec_cnt  = sum(1 for s in recording if s not in intro_delay_pending)
         off_cnt  = sum(1 for s in all_s if s not in live_since and s not in blocked)
         dis_cnt  = sum(1 for s in all_s if s in blocked)
 
@@ -3759,12 +4034,15 @@ class JJDlpDashboard:
             row_y    = row_start + i
             is_dis   = s in blocked
             since    = live_since.get(s)
-            is_rec   = s in recording
+            is_rec   = s in recording and s not in intro_delay_pending
 
             # "Last Live" value for this streamer
             ll_ts = last_live.get(s)
             if is_rec and recording_res.get(s) is not None:
-                last_live_str = f"{recording_res.get(s)}p"
+                # Asterisk marks a value still coming from the checker-reported
+                # recording_resolution fallback
+                _suffix = "*" if s in recording_res_is_fallback else ""
+                last_live_str = f"{recording_res.get(s)}p{_suffix}"
             elif ll_ts is not None:
                 ll_ago = int(now - ll_ts)
                 if ll_ago < 60:

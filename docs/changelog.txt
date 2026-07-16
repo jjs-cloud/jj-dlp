@@ -1,8 +1,24 @@
+v1.22.16
+
+- improved accuracy of reported video resolution.
+- added disk info to notifications
+- added a Streamer Setting called "Intro Delay"  This will either delay the recording by X minutes, or split the recording after X minutes.   This allows you to save space by not recording the intro of a stream.  Steps to use:
+    1. add the streamer in the Dashboard tab
+    2. press enter on the streamer in the Config tab on the STREAMER SETTINGS panel
+    3. configure the Intro Delay settings
+- fixed issue with the window not responding on some windows 11 machines
+
+====================
+====================
+
 v1.22.8
 
 - Updated ntfy notifications to behave the same as popup notifications.  Also added additional info to the notifications.
 - fixed dissapearing messages on the log tab
 - updated docs/ntfy-setup.md
+
+====================
+====================
 
 v1.22.2
 
