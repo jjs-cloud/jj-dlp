@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.16"
+__version__ = "1.22.17"
 
 import subprocess
 import time
@@ -3860,34 +3860,51 @@ class JJDlpDashboard:
             if now - self._disk_cache_time >= 10.0:
                 # Rebuild the drives list
                 seen_drives: list = []
-                seen_drives_set: set = set()
-                fallback_dir = None
+                seen_drives_set: set = set()      # dedupe key -> resolved filesystem (st_dev), falls back to normcased path
+                seen_fallback_dirs: set = set()    # dedupe key -> resolved filesystem, for output_dir fallbacks specifically
+
+                def _dedupe_key(path: str) -> str:
+                    # Prefer deduping by the actual filesystem/mount (st_dev) so that two
+                    # different paths on the same drive don't produce duplicate rows, and
+                    # so a typo'd/missing path doesn't silently merge with an unrelated one.
+                    try:
+                        return f"dev:{os.stat(path).st_dev}"
+                    except Exception:
+                        return f"path:{os.path.normcase(path)}"
 
                 # 1. Global drives (from global.conf) — shown first if configured
                 global_drives = self.global_cfg.get("disk_drives", [])
                 for d in global_drives:
-                    key = os.path.normcase(d)
+                    key = _dedupe_key(d)
                     if key not in seen_drives_set:
                         seen_drives_set.add(key)
                         seen_drives.append(d)
 
-                # 2. Per-site drives (merged in, deduped)
+                # 2. Per-site drives (merged in, deduped) — explicit disk_drives take
+                #    precedence per-site; otherwise fall back to that site's own
+                #    output_dir so EVERY site's actual output filesystem is represented,
+                #    not just the first site encountered.
                 for _site in self.sites:
                     try:
                         _cfg = _site.get_cached_config()
                         drives_for_site = _cfg.get("disk_drives", [])
                         if drives_for_site:
                             for d in drives_for_site:
-                                key = os.path.normcase(d)
+                                key = _dedupe_key(d)
                                 if key not in seen_drives_set:
                                     seen_drives_set.add(key)
                                     seen_drives.append(d)
-                        elif fallback_dir is None:
-                            fallback_dir = _cfg.get("output_dir", "/")
+                        else:
+                            out_dir = _cfg.get("output_dir", "/")
+                            key = _dedupe_key(out_dir)
+                            if key not in seen_drives_set and key not in seen_fallback_dirs:
+                                seen_fallback_dirs.add(key)
+                                seen_drives_set.add(key)
+                                seen_drives.append(out_dir)
                     except Exception as _disk_site_exc:
                         dbg(f"[DISK] exception reading site config: {_disk_site_exc!r}")
 
-                drives = seen_drives if seen_drives else ([fallback_dir] if fallback_dir else ["/"])
+                drives = seen_drives if seen_drives else ["/"]
                 dbg(f"[DISK] refreshing cache — drives={drives!r}")
 
                 self._disk_cache_time = now  # update immediately to prevent multiple threads
