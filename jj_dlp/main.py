@@ -3943,8 +3943,8 @@ class JJDlpDashboard:
                 free_gb = usage.free / (1024**3)
                 # Short label: last component or drive letter
                 drv_label = os.path.basename(drive.rstrip("/\\")) or drive
-                drv_label = drv_label[:6]
-                disk_str  = f"{drv_label:<6} {free_gb:>4.1f}G {pct:>3.0f}%"
+                drv_label = drv_label[:10]
+                disk_str  = f"{drv_label:<10} {free_gb:>4.1f}G {pct:>3.0f}%"
                 color = self.C_LIVE if pct < 80 else (self.C_WARN if pct < 95 else self.C_REC)
                 self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
                             disk_str[:inner_w],
