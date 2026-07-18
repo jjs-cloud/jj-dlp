@@ -1,3 +1,8 @@
+- improved accuracy of drive space reporting on linux
+
+====================
+====================
+
 v1.22.16
 
 - improved accuracy of reported video resolution.

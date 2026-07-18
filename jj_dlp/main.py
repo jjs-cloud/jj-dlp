@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.17"
+__version__ = "1.22.18"
 
 import subprocess
 import time
@@ -1003,6 +1003,64 @@ def cmd_display_str(cmd: List[str]) -> str:
 # (POPUP_NOTIFICATIONS vs. NTFY_NOTIFICATIONS / the per-streamer ntfy
 # override) and how the message gets delivered.
 
+def _resolve_mount_point(path: str) -> str:
+    """Resolve *path* to its actual mount point on Linux.
+    """
+    if sys.platform != "linux":
+        return path
+
+    try:
+        real = os.path.realpath(path)
+    except Exception:
+        real = path
+
+    best = None
+    best_len = 0
+
+    try:
+        with open("/proc/self/mountinfo") as fh:
+            for line in fh:
+                # Fields (space-separated):
+                #  0  mount-id  1  parent-id  2  major:minor  3  root
+                #  4  mount-point  5  mount-options  ...  dash  fs-type  source  super-opts
+                parts = line.split()
+                if len(parts) < 5:
+                    continue
+                mount_point = parts[4]
+                # Require a real path-boundary match, not just a string
+                # prefix — otherwise "/mnt/data2" would incorrectly match
+                # a mount point of "/mnt/data".
+                if (real == mount_point
+                        or real.startswith(mount_point.rstrip("/") + "/")) \
+                        and len(mount_point) > best_len:
+                    best = mount_point
+                    best_len = len(mount_point)
+    except Exception:
+        # /proc not available (non-Linux) — return the original path
+        return path
+
+    return best if best else path
+
+
+def _safe_disk_usage(path: str):
+    """Return ``shutil.disk_usage()`` results for *path*, working around
+    the automount / statvfs mismatch on Linux.
+    """
+    if sys.platform != "linux":
+        return shutil.disk_usage(path)
+
+    mount = _resolve_mount_point(path)
+    try:
+        st = os.statvfs(mount)
+        total = st.f_frsize * st.f_blocks
+        free  = st.f_frsize * st.f_bfree
+        used  = total - free
+        return shutil._ntuple_diskusage(total, used, free)
+    except Exception:
+        # Last resort — let shutil try the original path
+        return shutil.disk_usage(path)
+
+
 def _get_disk_info_string(cfg: dict = None) -> str:
     """Build a short disk-space summary string, e.g. "data 120.5G, ext 8.2G".
 
@@ -1040,9 +1098,9 @@ def _get_disk_info_string(cfg: dict = None) -> str:
         parts = []
         for drive in seen_drives:
             try:
-                usage = shutil.disk_usage(drive)
+                usage = _safe_disk_usage(drive)
             except Exception as _disk_exc:
-                dbg(f"[DISK] shutil.disk_usage({drive!r}) FAILED (notification): "
+                dbg(f"[DISK] _safe_disk_usage({drive!r}) FAILED (notification): "
                     f"{type(_disk_exc).__name__}: {_disk_exc}")
                 continue
             free_gb = usage.free / (1024 ** 3)
@@ -3916,12 +3974,12 @@ class JJDlpDashboard:
                     results = []
                     for drive in drives_to_check:
                         try:
-                            usage = shutil.disk_usage(drive)
+                            usage = _safe_disk_usage(drive)
                             results.append((drive, usage))
                             dbg(f"[DISK] {drive!r} → free={usage.free/(1024**3):.1f}G")
                         except Exception as _disk_exc:
                             results.append((drive, None))
-                            dbg(f"[DISK] shutil.disk_usage({drive!r}) FAILED: {type(_disk_exc).__name__}: {_disk_exc}")
+                            dbg(f"[DISK] _safe_disk_usage({drive!r}) FAILED: {type(_disk_exc).__name__}: {_disk_exc}")
                     
                     self._disk_cache_results = results
                     self._disk_cache_drives  = drives_to_check
