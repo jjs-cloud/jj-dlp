@@ -5,3 +5,4 @@
 *.txt
 research/
 !docs/*
+CLAUDE.md
