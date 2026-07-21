@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.18"
+__version__ = "1.23.0"
 
 import subprocess
 import time
@@ -407,6 +407,7 @@ def load_global_config() -> dict:
         "ff_err_thresh":      _int("FF_ERR_THRESH", 200),
         "subfolders":         _bool("SUBFOLDERS", False),
         "ntfy_topic":         general.get("NTFY_TOPIC", "").strip().strip('"\''),
+        "notify_confirm_file":_bool("NOTIFY_CONFIRM_FILE", True),
     }
 
 def _write_global_conf_key(key: str, value: str) -> None:
@@ -2077,7 +2078,8 @@ def _resolve_intro_delay(cfg: dict, entry_info: dict) -> dict:
 
 
 def record_stream(streamer: str, cfg: dict, site: "SiteState",
-                  use_lq: bool = False) -> None:
+                  use_lq: bool = False, show_popup: bool = True,
+                  eviction_warning: str = "") -> None:
     channel_url = cfg["site_tmpl"].format(username=streamer)
     output_dir  = cfg["output_dir"]
 
@@ -2091,6 +2093,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
     split_after_minutes = max(0, cfg.get("split_after", 0))
     split_after_seconds = split_after_minutes * 60
+
+    _global_cfg_nc = load_global_config()
+    notify_confirm_file = _global_cfg_nc.get("notify_confirm_file", True)
+    initial_notification_sent = not notify_confirm_file
 
     # ── Intro Delay ──────────────────────────────────────────────────────────
     # Notifications for "streamer is live" already fired in
@@ -2138,8 +2144,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
         # so a short Intro Delay (less than POPUP_COOLDOWN) can't suppress
         # this second, distinct notification.
         site.notif_last_shown[streamer] = 0
-        _maybe_show_live_popup(streamer, cfg, site, show_popup=True,
-                               source="intro_delay", is_recording=True)
+        if not notify_confirm_file:
+            _maybe_show_live_popup(streamer, cfg, site, show_popup=show_popup,
+                                   source="intro_delay", is_recording=True,
+                                   warning=eviction_warning)
 
     dbg(f"[SPLIT][record_stream] ENTER streamer={streamer!r} "
         f"split_after_minutes={split_after_minutes} split_after_seconds={split_after_seconds} "
@@ -2715,6 +2723,11 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                             growth_seen = True
                             dbg(f"[STALL] first growth observed for this file — "
                                 f"stall checker is now armed", site_name=streamer)
+                            if not initial_notification_sent:
+                                _maybe_show_live_popup(streamer, cfg, site, show_popup=show_popup,
+                                                       source="confirm_file", is_recording=True,
+                                                       warning=eviction_warning)
+                                initial_notification_sent = True
                         dbg(f"[STALL] grew: {last_size} -> {current_size} "
                             f"(+{current_size - last_size} bytes), resetting timer",
                             site_name=streamer)
@@ -2950,13 +2963,16 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                         site.dash_live_since[streamer] = time.time()
             _intro_delay_holding = (streamer_cfg.get("intro_delay_enabled", False)
                                      and not streamer_cfg.get("intro_delay_split", False))
-            _maybe_show_live_popup(streamer, cfg, site,
-                                   show_popup=show_popup,
-                                   source=source,
-                                   is_recording=not _intro_delay_holding,
-                                   reason="Intro Delay" if _intro_delay_holding else "",
-                                   warning=eviction_warning)
-            t = threading.Thread(target=record_stream, args=(streamer, streamer_cfg, site), kwargs={"use_lq": is_lq}, daemon=True)
+            if global_cfg.get("notify_confirm_file", True) and not _intro_delay_holding:
+                pass
+            else:
+                _maybe_show_live_popup(streamer, cfg, site,
+                                       show_popup=show_popup,
+                                       source=source,
+                                       is_recording=not _intro_delay_holding,
+                                       reason="Intro Delay" if _intro_delay_holding else "",
+                                       warning=eviction_warning)
+            t = threading.Thread(target=record_stream, args=(streamer, streamer_cfg, site), kwargs={"use_lq": is_lq, "show_popup": show_popup, "eviction_warning": eviction_warning}, daemon=True)
             t.start()
             site.recording_threads.append(t)
             

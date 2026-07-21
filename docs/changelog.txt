@@ -1,5 +1,6 @@
 - improved accuracy of drive space reporting on linux
 - modify yt-dlp tiktok extractor to make recordings more stable (-live_start_index -1)
+- Added a new global setting called NOTIFY_CONFIRM_FILE.  When this is enabled, the notification for a live stream will not be sent until the recording has actually started and file growth has been confirmed.
 
 ====================
 ====================
