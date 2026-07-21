@@ -1118,7 +1118,8 @@ def _get_disk_info_string(cfg: dict = None) -> str:
 
 def _format_live_popup(streamer: str, is_recording: bool = True,
                        reason: str = "", warning: str = "",
-                       site_label: str = "", disk_info: str = "") -> list:
+                       site_label: str = "", disk_info: str = "",
+                       confirmed: bool = False) -> list:
     """Build the lines of text shown for a "streamer is live" notification.
 
     Used to build both the popup body (notify-send/tkinter) and the ntfy.sh
@@ -1126,9 +1127,15 @@ def _format_live_popup(streamer: str, is_recording: bool = True,
     information: live status (recording / not recording), the site, disk
     space remaining, and — when applicable — the warning and/or the reason
     recording did not start.
+
+    *confirmed* is only meaningful when *is_recording* is True. It marks
+    that this notification was held until NOTIFY_CONFIRM_FILE actually
+    observed the recording file growing on disk.
     """
     marker = "🔴" if is_recording else "🟡"
     status = "Recording" if is_recording else "Not recording"
+    if is_recording and confirmed:
+        status += " (confirmed)"
     lines = [
         f"{marker} {streamer} is LIVE",
         f"{marker} {status}",
@@ -1146,10 +1153,11 @@ def _format_live_popup(streamer: str, is_recording: bool = True,
 
 def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 15,
                      is_recording: bool = True, reason: str = "",
-                     warning: str = "", site_label: str = "", disk_info: str = "") -> None:
-    dbg(f"[POPUP] enqueue popup streamer={streamer!r} source={source!r} timeout={popup_timeout} is_recording={is_recording} reason={reason!r} warning={warning!r}")
+                     warning: str = "", site_label: str = "", disk_info: str = "",
+                     confirmed: bool = False) -> None:
+    dbg(f"[POPUP] enqueue popup streamer={streamer!r} source={source!r} timeout={popup_timeout} is_recording={is_recording} reason={reason!r} warning={warning!r} confirmed={confirmed}")
     def _run():
-        popup_lines = _format_live_popup(streamer, is_recording, reason, warning, site_label, disk_info)
+        popup_lines = _format_live_popup(streamer, is_recording, reason, warning, site_label, disk_info, confirmed=confirmed)
         popup_text = "\n".join(popup_lines)
         if sys.platform.startswith("linux"):
             notify_cmd = shutil.which("notify-send")
@@ -1218,10 +1226,11 @@ def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 1
 
 
 def _send_ntfy_notification(streamer: str, site_label: str, is_recording: bool = True,
-                            reason: str = "", warning: str = "", disk_info: str = "") -> None:
+                            reason: str = "", warning: str = "", disk_info: str = "",
+                            confirmed: bool = False) -> None:
     dbg(f"[NTFY] _send_ntfy_notification called: streamer={streamer!r} "
         f"is_recording={is_recording} site_label={site_label!r} reason={reason!r} warning={warning!r} "
-        f"disk_info={disk_info!r}")
+        f"disk_info={disk_info!r} confirmed={confirmed}")
 
     global_cfg = load_global_config()
     topic = global_cfg.get("ntfy_topic", "").strip()
@@ -1240,7 +1249,8 @@ def _send_ntfy_notification(streamer: str, site_label: str, is_recording: bool =
     # remaining, and the warning/reason when applicable. The "Title" header
     # must stay ASCII — emoji markers live in the body instead, where UTF-8
     # is safe.
-    popup_lines = _format_live_popup(streamer, is_recording, reason, warning, site_label, disk_info)
+    popup_lines = _format_live_popup(streamer, is_recording, reason, warning, site_label, disk_info,
+                                     confirmed=confirmed)
     title = "jj-dlp"
     body = "\n".join(popup_lines)
 
@@ -1331,7 +1341,7 @@ def _resolve_ntfy_enabled(streamer: str, site_label: str, cfg: dict) -> bool:
 def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
                            show_popup: bool = True, source: str = "poll",
                            is_recording: bool = True, reason: str = "",
-                           warning: str = "") -> None:
+                           warning: str = "", confirmed: bool = False) -> None:
     """Single gatekeeper for both live-notification channels (popup + ntfy).
 
     Both channels represent the same underlying event, so they follow the
@@ -1342,6 +1352,9 @@ def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
     NTFY_NOTIFICATIONS / its per-streamer override).
     """
     site_label = cfg.get("site_label", os.path.basename(site.config_path))
+
+    dbg(f"[NOTIFY] source={source!r} streamer={streamer!r} is_recording={is_recording} "
+        f"confirmed={confirmed} (NOTIFY_CONFIRM_FILE gate: {'confirmed-file notification' if confirmed else 'not a confirm_file notification'})")
 
     popup_enabled = show_popup and cfg.get("popup_notifications", True)
     dbg(f"[NOTIFY] popup channel: show_popup={show_popup} "
@@ -1388,14 +1401,16 @@ def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
                          reason=reason,
                          warning=warning,
                          site_label=site_label,
-                         disk_info=disk_info)
+                         disk_info=disk_info,
+                         confirmed=confirmed)
 
     if ntfy_enabled:
         _send_ntfy_notification(streamer, site_label,
                                 is_recording=is_recording,
                                 reason=reason,
                                 warning=warning,
-                                disk_info=disk_info)
+                                disk_info=disk_info,
+                                confirmed=confirmed)
 
     site.notif_last_shown[streamer] = time.time()
     if not is_recording:
@@ -2097,6 +2112,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
     _global_cfg_nc = load_global_config()
     notify_confirm_file = _global_cfg_nc.get("notify_confirm_file", True)
     initial_notification_sent = not notify_confirm_file
+    dbg(f"[NOTIFY] NOTIFY_CONFIRM_FILE={notify_confirm_file} for streamer={streamer!r} — "
+        f"initial_notification_sent={initial_notification_sent} "
+        f"({'live notification already fired, nothing held back' if initial_notification_sent else 'live notification held until file growth is confirmed'})",
+        site_name=streamer)
 
     # ── Intro Delay ──────────────────────────────────────────────────────────
     # Notifications for "streamer is live" already fired in
@@ -2724,9 +2743,12 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                             dbg(f"[STALL] first growth observed for this file — "
                                 f"stall checker is now armed", site_name=streamer)
                             if not initial_notification_sent:
+                                dbg(f"[NOTIFY] NOTIFY_CONFIRM_FILE: file growth confirmed for "
+                                    f"streamer={streamer!r} — sending held-back live notification",
+                                    site_name=streamer)
                                 _maybe_show_live_popup(streamer, cfg, site, show_popup=show_popup,
                                                        source="confirm_file", is_recording=True,
-                                                       warning=eviction_warning)
+                                                       warning=eviction_warning, confirmed=True)
                                 initial_notification_sent = True
                         dbg(f"[STALL] grew: {last_size} -> {current_size} "
                             f"(+{current_size - last_size} bytes), resetting timer",
@@ -2964,7 +2986,8 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
             _intro_delay_holding = (streamer_cfg.get("intro_delay_enabled", False)
                                      and not streamer_cfg.get("intro_delay_split", False))
             if global_cfg.get("notify_confirm_file", True) and not _intro_delay_holding:
-                pass
+                dbg(f"[NOTIFY] NOTIFY_CONFIRM_FILE enabled — deferring live notification for "
+                    f"streamer={streamer!r} until record_stream() confirms file growth")
             else:
                 _maybe_show_live_popup(streamer, cfg, site,
                                        show_popup=show_popup,

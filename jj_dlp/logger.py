@@ -144,6 +144,10 @@ def configure(dashboard_log_fn=None, dashboard_dbg_fn=None) -> None:
 #   GLOBAL_JSON — global.json read/write/backup diagnostics
 #   NTFY     — ntfy.sh push-notifications
 #   INTRO_DELAY — per-streamer intro-delay hold/split logic
+#   NOTIFY   — shared live-notification gatekeeper
+#   CONCURRENCY — MAX_CONCURRENT eviction logic
+#   SYSTEM   — dashboard system-panel background section exception guards
+#   CHANGELOG — changelog-shown-on-update bookkeeping
 #
 DBG_TAGS: list[str] = [
     "DRAIN",
@@ -166,6 +170,10 @@ DBG_TAGS: list[str] = [
     "NTFY",
     "QUALITY",
     "INTRO_DELAY",
+    "NOTIFY",
+    "CONCURRENCY",
+    "SYSTEM",
+    "CHANGELOG",
 ]
 
 import json
