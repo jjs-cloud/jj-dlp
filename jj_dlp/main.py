@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.22.16"
+__version__ = "1.23.0"
 
 import subprocess
 import time
@@ -407,6 +407,7 @@ def load_global_config() -> dict:
         "ff_err_thresh":      _int("FF_ERR_THRESH", 200),
         "subfolders":         _bool("SUBFOLDERS", False),
         "ntfy_topic":         general.get("NTFY_TOPIC", "").strip().strip('"\''),
+        "notify_confirm_file":_bool("NOTIFY_CONFIRM_FILE", True),
     }
 
 def _write_global_conf_key(key: str, value: str) -> None:
@@ -1003,6 +1004,64 @@ def cmd_display_str(cmd: List[str]) -> str:
 # (POPUP_NOTIFICATIONS vs. NTFY_NOTIFICATIONS / the per-streamer ntfy
 # override) and how the message gets delivered.
 
+def _resolve_mount_point(path: str) -> str:
+    """Resolve *path* to its actual mount point on Linux.
+    """
+    if sys.platform != "linux":
+        return path
+
+    try:
+        real = os.path.realpath(path)
+    except Exception:
+        real = path
+
+    best = None
+    best_len = 0
+
+    try:
+        with open("/proc/self/mountinfo") as fh:
+            for line in fh:
+                # Fields (space-separated):
+                #  0  mount-id  1  parent-id  2  major:minor  3  root
+                #  4  mount-point  5  mount-options  ...  dash  fs-type  source  super-opts
+                parts = line.split()
+                if len(parts) < 5:
+                    continue
+                mount_point = parts[4]
+                # Require a real path-boundary match, not just a string
+                # prefix — otherwise "/mnt/data2" would incorrectly match
+                # a mount point of "/mnt/data".
+                if (real == mount_point
+                        or real.startswith(mount_point.rstrip("/") + "/")) \
+                        and len(mount_point) > best_len:
+                    best = mount_point
+                    best_len = len(mount_point)
+    except Exception:
+        # /proc not available (non-Linux) — return the original path
+        return path
+
+    return best if best else path
+
+
+def _safe_disk_usage(path: str):
+    """Return ``shutil.disk_usage()`` results for *path*, working around
+    the automount / statvfs mismatch on Linux.
+    """
+    if sys.platform != "linux":
+        return shutil.disk_usage(path)
+
+    mount = _resolve_mount_point(path)
+    try:
+        st = os.statvfs(mount)
+        total = st.f_frsize * st.f_blocks
+        free  = st.f_frsize * st.f_bfree
+        used  = total - free
+        return shutil._ntuple_diskusage(total, used, free)
+    except Exception:
+        # Last resort — let shutil try the original path
+        return shutil.disk_usage(path)
+
+
 def _get_disk_info_string(cfg: dict = None) -> str:
     """Build a short disk-space summary string, e.g. "data 120.5G, ext 8.2G".
 
@@ -1040,9 +1099,9 @@ def _get_disk_info_string(cfg: dict = None) -> str:
         parts = []
         for drive in seen_drives:
             try:
-                usage = shutil.disk_usage(drive)
+                usage = _safe_disk_usage(drive)
             except Exception as _disk_exc:
-                dbg(f"[DISK] shutil.disk_usage({drive!r}) FAILED (notification): "
+                dbg(f"[DISK] _safe_disk_usage({drive!r}) FAILED (notification): "
                     f"{type(_disk_exc).__name__}: {_disk_exc}")
                 continue
             free_gb = usage.free / (1024 ** 3)
@@ -1059,7 +1118,8 @@ def _get_disk_info_string(cfg: dict = None) -> str:
 
 def _format_live_popup(streamer: str, is_recording: bool = True,
                        reason: str = "", warning: str = "",
-                       site_label: str = "", disk_info: str = "") -> list:
+                       site_label: str = "", disk_info: str = "",
+                       confirmed: bool = False) -> list:
     """Build the lines of text shown for a "streamer is live" notification.
 
     Used to build both the popup body (notify-send/tkinter) and the ntfy.sh
@@ -1067,9 +1127,15 @@ def _format_live_popup(streamer: str, is_recording: bool = True,
     information: live status (recording / not recording), the site, disk
     space remaining, and — when applicable — the warning and/or the reason
     recording did not start.
+
+    *confirmed* is only meaningful when *is_recording* is True. It marks
+    that this notification was held until NOTIFY_CONFIRM_FILE actually
+    observed the recording file growing on disk.
     """
     marker = "🔴" if is_recording else "🟡"
     status = "Recording" if is_recording else "Not recording"
+    if is_recording and confirmed:
+        status += " (confirmed)"
     lines = [
         f"{marker} {streamer} is LIVE",
         f"{marker} {status}",
@@ -1087,10 +1153,11 @@ def _format_live_popup(streamer: str, is_recording: bool = True,
 
 def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 15,
                      is_recording: bool = True, reason: str = "",
-                     warning: str = "", site_label: str = "", disk_info: str = "") -> None:
-    dbg(f"[POPUP] enqueue popup streamer={streamer!r} source={source!r} timeout={popup_timeout} is_recording={is_recording} reason={reason!r} warning={warning!r}")
+                     warning: str = "", site_label: str = "", disk_info: str = "",
+                     confirmed: bool = False) -> None:
+    dbg(f"[POPUP] enqueue popup streamer={streamer!r} source={source!r} timeout={popup_timeout} is_recording={is_recording} reason={reason!r} warning={warning!r} confirmed={confirmed}")
     def _run():
-        popup_lines = _format_live_popup(streamer, is_recording, reason, warning, site_label, disk_info)
+        popup_lines = _format_live_popup(streamer, is_recording, reason, warning, site_label, disk_info, confirmed=confirmed)
         popup_text = "\n".join(popup_lines)
         if sys.platform.startswith("linux"):
             notify_cmd = shutil.which("notify-send")
@@ -1159,10 +1226,11 @@ def _show_live_popup(streamer: str, source: str = "poll", popup_timeout: int = 1
 
 
 def _send_ntfy_notification(streamer: str, site_label: str, is_recording: bool = True,
-                            reason: str = "", warning: str = "", disk_info: str = "") -> None:
+                            reason: str = "", warning: str = "", disk_info: str = "",
+                            confirmed: bool = False) -> None:
     dbg(f"[NTFY] _send_ntfy_notification called: streamer={streamer!r} "
         f"is_recording={is_recording} site_label={site_label!r} reason={reason!r} warning={warning!r} "
-        f"disk_info={disk_info!r}")
+        f"disk_info={disk_info!r} confirmed={confirmed}")
 
     global_cfg = load_global_config()
     topic = global_cfg.get("ntfy_topic", "").strip()
@@ -1181,7 +1249,8 @@ def _send_ntfy_notification(streamer: str, site_label: str, is_recording: bool =
     # remaining, and the warning/reason when applicable. The "Title" header
     # must stay ASCII — emoji markers live in the body instead, where UTF-8
     # is safe.
-    popup_lines = _format_live_popup(streamer, is_recording, reason, warning, site_label, disk_info)
+    popup_lines = _format_live_popup(streamer, is_recording, reason, warning, site_label, disk_info,
+                                     confirmed=confirmed)
     title = "jj-dlp"
     body = "\n".join(popup_lines)
 
@@ -1272,7 +1341,7 @@ def _resolve_ntfy_enabled(streamer: str, site_label: str, cfg: dict) -> bool:
 def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
                            show_popup: bool = True, source: str = "poll",
                            is_recording: bool = True, reason: str = "",
-                           warning: str = "") -> None:
+                           warning: str = "", confirmed: bool = False) -> None:
     """Single gatekeeper for both live-notification channels (popup + ntfy).
 
     Both channels represent the same underlying event, so they follow the
@@ -1283,6 +1352,9 @@ def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
     NTFY_NOTIFICATIONS / its per-streamer override).
     """
     site_label = cfg.get("site_label", os.path.basename(site.config_path))
+
+    dbg(f"[NOTIFY] source={source!r} streamer={streamer!r} is_recording={is_recording} "
+        f"confirmed={confirmed} (NOTIFY_CONFIRM_FILE gate: {'confirmed-file notification' if confirmed else 'not a confirm_file notification'})")
 
     popup_enabled = show_popup and cfg.get("popup_notifications", True)
     dbg(f"[NOTIFY] popup channel: show_popup={show_popup} "
@@ -1329,14 +1401,16 @@ def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
                          reason=reason,
                          warning=warning,
                          site_label=site_label,
-                         disk_info=disk_info)
+                         disk_info=disk_info,
+                         confirmed=confirmed)
 
     if ntfy_enabled:
         _send_ntfy_notification(streamer, site_label,
                                 is_recording=is_recording,
                                 reason=reason,
                                 warning=warning,
-                                disk_info=disk_info)
+                                disk_info=disk_info,
+                                confirmed=confirmed)
 
     site.notif_last_shown[streamer] = time.time()
     if not is_recording:
@@ -2019,7 +2093,8 @@ def _resolve_intro_delay(cfg: dict, entry_info: dict) -> dict:
 
 
 def record_stream(streamer: str, cfg: dict, site: "SiteState",
-                  use_lq: bool = False) -> None:
+                  use_lq: bool = False, show_popup: bool = True,
+                  eviction_warning: str = "") -> None:
     channel_url = cfg["site_tmpl"].format(username=streamer)
     output_dir  = cfg["output_dir"]
 
@@ -2033,6 +2108,14 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
     split_after_minutes = max(0, cfg.get("split_after", 0))
     split_after_seconds = split_after_minutes * 60
+
+    _global_cfg_nc = load_global_config()
+    notify_confirm_file = _global_cfg_nc.get("notify_confirm_file", True)
+    initial_notification_sent = not notify_confirm_file
+    dbg(f"[NOTIFY] NOTIFY_CONFIRM_FILE={notify_confirm_file} for streamer={streamer!r} — "
+        f"initial_notification_sent={initial_notification_sent} "
+        f"({'live notification already fired, nothing held back' if initial_notification_sent else 'live notification held until file growth is confirmed'})",
+        site_name=streamer)
 
     # ── Intro Delay ──────────────────────────────────────────────────────────
     # Notifications for "streamer is live" already fired in
@@ -2080,8 +2163,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
         # so a short Intro Delay (less than POPUP_COOLDOWN) can't suppress
         # this second, distinct notification.
         site.notif_last_shown[streamer] = 0
-        _maybe_show_live_popup(streamer, cfg, site, show_popup=True,
-                               source="intro_delay", is_recording=True)
+        if not notify_confirm_file:
+            _maybe_show_live_popup(streamer, cfg, site, show_popup=show_popup,
+                                   source="intro_delay", is_recording=True,
+                                   warning=eviction_warning)
 
     dbg(f"[SPLIT][record_stream] ENTER streamer={streamer!r} "
         f"split_after_minutes={split_after_minutes} split_after_seconds={split_after_seconds} "
@@ -2657,6 +2742,14 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                             growth_seen = True
                             dbg(f"[STALL] first growth observed for this file — "
                                 f"stall checker is now armed", site_name=streamer)
+                            if not initial_notification_sent:
+                                dbg(f"[NOTIFY] NOTIFY_CONFIRM_FILE: file growth confirmed for "
+                                    f"streamer={streamer!r} — sending held-back live notification",
+                                    site_name=streamer)
+                                _maybe_show_live_popup(streamer, cfg, site, show_popup=show_popup,
+                                                       source="confirm_file", is_recording=True,
+                                                       warning=eviction_warning, confirmed=True)
+                                initial_notification_sent = True
                         dbg(f"[STALL] grew: {last_size} -> {current_size} "
                             f"(+{current_size - last_size} bytes), resetting timer",
                             site_name=streamer)
@@ -2892,13 +2985,17 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                         site.dash_live_since[streamer] = time.time()
             _intro_delay_holding = (streamer_cfg.get("intro_delay_enabled", False)
                                      and not streamer_cfg.get("intro_delay_split", False))
-            _maybe_show_live_popup(streamer, cfg, site,
-                                   show_popup=show_popup,
-                                   source=source,
-                                   is_recording=not _intro_delay_holding,
-                                   reason="Intro Delay" if _intro_delay_holding else "",
-                                   warning=eviction_warning)
-            t = threading.Thread(target=record_stream, args=(streamer, streamer_cfg, site), kwargs={"use_lq": is_lq}, daemon=True)
+            if global_cfg.get("notify_confirm_file", True) and not _intro_delay_holding:
+                dbg(f"[NOTIFY] NOTIFY_CONFIRM_FILE enabled — deferring live notification for "
+                    f"streamer={streamer!r} until record_stream() confirms file growth")
+            else:
+                _maybe_show_live_popup(streamer, cfg, site,
+                                       show_popup=show_popup,
+                                       source=source,
+                                       is_recording=not _intro_delay_holding,
+                                       reason="Intro Delay" if _intro_delay_holding else "",
+                                       warning=eviction_warning)
+            t = threading.Thread(target=record_stream, args=(streamer, streamer_cfg, site), kwargs={"use_lq": is_lq, "show_popup": show_popup, "eviction_warning": eviction_warning}, daemon=True)
             t.start()
             site.recording_threads.append(t)
             
@@ -3860,34 +3957,51 @@ class JJDlpDashboard:
             if now - self._disk_cache_time >= 10.0:
                 # Rebuild the drives list
                 seen_drives: list = []
-                seen_drives_set: set = set()
-                fallback_dir = None
+                seen_drives_set: set = set()      # dedupe key -> resolved filesystem (st_dev), falls back to normcased path
+                seen_fallback_dirs: set = set()    # dedupe key -> resolved filesystem, for output_dir fallbacks specifically
+
+                def _dedupe_key(path: str) -> str:
+                    # Prefer deduping by the actual filesystem/mount (st_dev) so that two
+                    # different paths on the same drive don't produce duplicate rows, and
+                    # so a typo'd/missing path doesn't silently merge with an unrelated one.
+                    try:
+                        return f"dev:{os.stat(path).st_dev}"
+                    except Exception:
+                        return f"path:{os.path.normcase(path)}"
 
                 # 1. Global drives (from global.conf) — shown first if configured
                 global_drives = self.global_cfg.get("disk_drives", [])
                 for d in global_drives:
-                    key = os.path.normcase(d)
+                    key = _dedupe_key(d)
                     if key not in seen_drives_set:
                         seen_drives_set.add(key)
                         seen_drives.append(d)
 
-                # 2. Per-site drives (merged in, deduped)
+                # 2. Per-site drives (merged in, deduped) — explicit disk_drives take
+                #    precedence per-site; otherwise fall back to that site's own
+                #    output_dir so EVERY site's actual output filesystem is represented,
+                #    not just the first site encountered.
                 for _site in self.sites:
                     try:
                         _cfg = _site.get_cached_config()
                         drives_for_site = _cfg.get("disk_drives", [])
                         if drives_for_site:
                             for d in drives_for_site:
-                                key = os.path.normcase(d)
+                                key = _dedupe_key(d)
                                 if key not in seen_drives_set:
                                     seen_drives_set.add(key)
                                     seen_drives.append(d)
-                        elif fallback_dir is None:
-                            fallback_dir = _cfg.get("output_dir", "/")
+                        else:
+                            out_dir = _cfg.get("output_dir", "/")
+                            key = _dedupe_key(out_dir)
+                            if key not in seen_drives_set and key not in seen_fallback_dirs:
+                                seen_fallback_dirs.add(key)
+                                seen_drives_set.add(key)
+                                seen_drives.append(out_dir)
                     except Exception as _disk_site_exc:
                         dbg(f"[DISK] exception reading site config: {_disk_site_exc!r}")
 
-                drives = seen_drives if seen_drives else ([fallback_dir] if fallback_dir else ["/"])
+                drives = seen_drives if seen_drives else ["/"]
                 dbg(f"[DISK] refreshing cache — drives={drives!r}")
 
                 self._disk_cache_time = now  # update immediately to prevent multiple threads
@@ -3899,12 +4013,12 @@ class JJDlpDashboard:
                     results = []
                     for drive in drives_to_check:
                         try:
-                            usage = shutil.disk_usage(drive)
+                            usage = _safe_disk_usage(drive)
                             results.append((drive, usage))
                             dbg(f"[DISK] {drive!r} → free={usage.free/(1024**3):.1f}G")
                         except Exception as _disk_exc:
                             results.append((drive, None))
-                            dbg(f"[DISK] shutil.disk_usage({drive!r}) FAILED: {type(_disk_exc).__name__}: {_disk_exc}")
+                            dbg(f"[DISK] _safe_disk_usage({drive!r}) FAILED: {type(_disk_exc).__name__}: {_disk_exc}")
                     
                     self._disk_cache_results = results
                     self._disk_cache_drives  = drives_to_check
@@ -3926,8 +4040,8 @@ class JJDlpDashboard:
                 free_gb = usage.free / (1024**3)
                 # Short label: last component or drive letter
                 drv_label = os.path.basename(drive.rstrip("/\\")) or drive
-                drv_label = drv_label[:6]
-                disk_str  = f"{drv_label:<6} {free_gb:>4.1f}G {pct:>3.0f}%"
+                drv_label = drv_label[:10]
+                disk_str  = f"{drv_label:<10} {free_gb:>4.1f}G {pct:>3.0f}%"
                 color = self.C_LIVE if pct < 80 else (self.C_WARN if pct < 95 else self.C_REC)
                 self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
                             disk_str[:inner_w],
