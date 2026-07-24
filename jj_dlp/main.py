@@ -4339,23 +4339,31 @@ class JJDlpDashboard:
 
         total_rows = max(max(col_heights), 1)
         panel_w = total_w // cols
-        panel_h = total_h // total_rows
+        # Per-column height: a column with fewer stacked spans (e.g. one
+        # span-2 panel alone) fills the FULL available height rather than
+        # being sized against whichever column has the most stacked spans.
+        # Using one global panel_h = total_h // total_rows left shorter
+        # columns with dead space at the bottom and made their panels look
+        # the same size as squeezed panels in the taller column.
+        col_panel_h = [total_h // max(1, col_heights[c]) for c in range(cols)]
 
         if self.tick % 100 == 0:
             dbg(f"[PANEL_RESIZE] layout: n={n} cols={cols} base_rows={base_rows} "
                 f"base_panel_h={base_panel_h} base_max_streamers={base_max_streamers} "
                 f"site_zones={site_zones} col_heights={col_heights} "
-                f"total_rows={total_rows} panel_h={panel_h}")
+                f"total_rows={total_rows} col_panel_h={col_panel_h}")
 
         for idx, site in enumerate(self.sites):
             col, start_row, span = site_positions[idx]
+            panel_h = col_panel_h[col]
+            col_total = col_heights[col]
 
             px1 = x1 + col * panel_w
             px2 = px1 + panel_w - (0 if col == cols - 1 else 1)
             py1 = y1 + start_row * panel_h
             
             end_row = start_row + span
-            py2 = py1 + span * panel_h - (0 if end_row == total_rows else 1)
+            py2 = py1 + span * panel_h - (0 if end_row == col_total else 1)
 
             # Keep panels within bounds
             px2 = min(px2, x2)
