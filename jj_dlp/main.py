@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.23.1"
+__version__ = "1.23.2"
 
 import subprocess
 import time
@@ -4133,7 +4133,7 @@ class JJDlpDashboard:
         # ── Streamer rows ──
         panel_width  = x2 - x1 - 2   # usable inner width
         row_start    = y1 + 3
-        max_rows     = y2 - row_start - 2   # leave 2 rows at bottom for countdown
+        max_rows     = y2 - row_start - 1   # leave 1 row at bottom for countdown
 
         # Resolve COMPACT_VIEW mode
         _compact_cfg = self.global_cfg.get("compact_view", "auto")
