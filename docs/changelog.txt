@@ -1,3 +1,8 @@
+- added scrolling to the site panels when there are too many streamers to fit
+
+====================
+====================
+
 v1.23.0
 - improved accuracy of drive space reporting on linux
 - modify yt-dlp tiktok extractor to make recordings more stable ("live_start_index -1" and deprioritize hls-pull)

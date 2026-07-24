@@ -4319,6 +4319,11 @@ class JJDlpDashboard:
             else:
                 site_zones.append(1)
 
+            if self.tick % 100 == 0:
+                dbg(f"[PANEL_RESIZE] site={os.path.basename(site.config_path)!r} "
+                    f"panel_resize={panel_resize} num_streamers={num_streamers} "
+                    f"base_max_streamers={base_max_streamers} -> span={site_zones[-1]}")
+
         col_heights = [0] * cols
         site_positions = []
         
@@ -4335,6 +4340,12 @@ class JJDlpDashboard:
         total_rows = max(max(col_heights), 1)
         panel_w = total_w // cols
         panel_h = total_h // total_rows
+
+        if self.tick % 100 == 0:
+            dbg(f"[PANEL_RESIZE] layout: n={n} cols={cols} base_rows={base_rows} "
+                f"base_panel_h={base_panel_h} base_max_streamers={base_max_streamers} "
+                f"site_zones={site_zones} col_heights={col_heights} "
+                f"total_rows={total_rows} panel_h={panel_h}")
 
         for idx, site in enumerate(self.sites):
             col, start_row, span = site_positions[idx]
@@ -4627,6 +4638,7 @@ class JJDlpDashboard:
                 sort_lbl = self.sort_manager.current_sort_label
                 hints = (f"  LEFT/RIGHT: switch tabs"
                          f"  [: prev site  ]: next site"
+                         f"  UP/DOWN: scroll selected panel"
                          f"  A: add/enable streamer R: remove streamer D: disable streamer"
                          f"  S: Sort"
                          f"  C: colors  Q: quit  ")
