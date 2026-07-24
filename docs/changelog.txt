@@ -1,5 +1,4 @@
-- added a new site key called "COMPACT_VIEW".  When set to "auto", the panel will change into compact view automatically, which omits the progress bar and shows 2 columns instead of 1.
-
+- added a new site key called "COMPACT_VIEW".  When set to "auto", the site panel will change into compact view automatically when there are too many streamers to display
 
 ====================
 ====================
