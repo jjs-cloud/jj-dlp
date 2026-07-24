@@ -174,7 +174,6 @@ DBG_TAGS: list[str] = [
     "CONCURRENCY",
     "SYSTEM",
     "CHANGELOG",
-    "PANEL_RESIZE",
 ]
 
 import json

@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.23.1"
+__version__ = "1.23.0"
 
 import subprocess
 import time
@@ -3587,12 +3587,6 @@ class JJDlpDashboard:
         self._stdout_scroll = 0
         self._stderr_scroll = 0
 
-        # Per-site scroll offset for the Dashboard tab's streamer list, keyed
-        # by site.config_path. 0 = top of the list. Lets a panel with more
-        # streamers than it has room for be scrolled instead of silently
-        # cutting streamers off (independent of PANEL_RESIZE/layout height).
-        self._panel_scroll: Dict[str, int] = {}
-
         # Disk usage cache — refreshed at most once every 10 seconds
         self._disk_cache_time: float = 0.0
         self._disk_cache_drives: list = []
@@ -4148,20 +4142,10 @@ class JJDlpDashboard:
         _fixed_cols = name_w + 1 + 7 + 1 + 1 + 9 + 1 + last_live_w  # everything except bar
         bar_w       = max(4, min(_bar_cfg_w, panel_width - _fixed_cols))
 
-        # ── Scroll window ──
-        # Clamp this panel's stored scroll offset to the current entry count
-        # every frame (entries can shrink/grow between polls), then draw only
-        # the streamers that fall inside [scroll, scroll+max_rows) instead of
-        # cutting the list off at max_rows.
-        scroll_key = site.config_path
-        max_scroll = max(0, len(all_s) - max_rows)
-        scroll     = max(0, min(self._panel_scroll.get(scroll_key, 0), max_scroll))
-        self._panel_scroll[scroll_key] = scroll
-        window_end = min(len(all_s), scroll + max_rows)
-
-        for i in range(scroll, window_end):
-            s        = all_s[i]
-            row_y    = row_start + (i - scroll)
+        for i, s in enumerate(all_s):
+            if i >= max_rows:
+                break
+            row_y    = row_start + i
             is_dis   = s in blocked
             since    = live_since.get(s)
             is_rec   = s in recording and s not in intro_delay_pending
@@ -4257,15 +4241,6 @@ class JJDlpDashboard:
                             last_live_str[:last_live_w],
                             ll_attr)
 
-            # Scroll indicator triangles — same placement/glyphs/color as the
-            # Config tab's PRIORITY panel (x2-2, C_LIVE, bold).
-            if i == scroll and scroll > 0:
-                self.safe_addstr(self.stdscr, row_y, x2 - 2, "\u25b2",
-                            curses.color_pair(self.C_LIVE) | curses.A_BOLD)
-            if i == window_end - 1 and window_end < len(all_s):
-                self.safe_addstr(self.stdscr, row_y, x2 - 2, "\u25bc",
-                            curses.color_pair(self.C_LIVE) | curses.A_BOLD)
-
         # ── Countdown ──
         nxt = max(0.0, next_in)
         if nxt <= 0:
@@ -4319,11 +4294,6 @@ class JJDlpDashboard:
             else:
                 site_zones.append(1)
 
-            if self.tick % 100 == 0:
-                dbg(f"[PANEL_RESIZE] site={os.path.basename(site.config_path)!r} "
-                    f"panel_resize={panel_resize} num_streamers={num_streamers} "
-                    f"base_max_streamers={base_max_streamers} -> span={site_zones[-1]}")
-
         col_heights = [0] * cols
         site_positions = []
         
@@ -4339,31 +4309,17 @@ class JJDlpDashboard:
 
         total_rows = max(max(col_heights), 1)
         panel_w = total_w // cols
-        # Per-column height: a column with fewer stacked spans (e.g. one
-        # span-2 panel alone) fills the FULL available height rather than
-        # being sized against whichever column has the most stacked spans.
-        # Using one global panel_h = total_h // total_rows left shorter
-        # columns with dead space at the bottom and made their panels look
-        # the same size as squeezed panels in the taller column.
-        col_panel_h = [total_h // max(1, col_heights[c]) for c in range(cols)]
-
-        if self.tick % 100 == 0:
-            dbg(f"[PANEL_RESIZE] layout: n={n} cols={cols} base_rows={base_rows} "
-                f"base_panel_h={base_panel_h} base_max_streamers={base_max_streamers} "
-                f"site_zones={site_zones} col_heights={col_heights} "
-                f"total_rows={total_rows} col_panel_h={col_panel_h}")
+        panel_h = total_h // total_rows
 
         for idx, site in enumerate(self.sites):
             col, start_row, span = site_positions[idx]
-            panel_h = col_panel_h[col]
-            col_total = col_heights[col]
 
             px1 = x1 + col * panel_w
             px2 = px1 + panel_w - (0 if col == cols - 1 else 1)
             py1 = y1 + start_row * panel_h
             
             end_row = start_row + span
-            py2 = py1 + span * panel_h - (0 if end_row == col_total else 1)
+            py2 = py1 + span * panel_h - (0 if end_row == total_rows else 1)
 
             # Keep panels within bounds
             px2 = min(px2, x2)
@@ -4646,7 +4602,6 @@ class JJDlpDashboard:
                 sort_lbl = self.sort_manager.current_sort_label
                 hints = (f"  LEFT/RIGHT: switch tabs"
                          f"  [: prev site  ]: next site"
-                         f"  UP/DOWN: scroll selected panel"
                          f"  A: add/enable streamer R: remove streamer D: disable streamer"
                          f"  S: Sort"
                          f"  C: colors  Q: quit  ")
@@ -4992,9 +4947,6 @@ class JJDlpDashboard:
                 self._stdout_scroll += 1
             elif tab == "Stderr":
                 self._stderr_scroll += 1
-            elif tab == "Dashboard" and self.sites:
-                key_ = self.sites[self.selected_site_idx].config_path
-                self._panel_scroll[key_] = self._panel_scroll.get(key_, 0) - 1
         elif key in (curses.KEY_DOWN, ord('j')):
             tab = self.TABS[self.selected_tab]
             if tab == "Log":
@@ -5003,9 +4955,6 @@ class JJDlpDashboard:
                 self._stdout_scroll = max(0, self._stdout_scroll - 1)
             elif tab == "Stderr":
                 self._stderr_scroll = max(0, self._stderr_scroll - 1)
-            elif tab == "Dashboard" and self.sites:
-                key_ = self.sites[self.selected_site_idx].config_path
-                self._panel_scroll[key_] = self._panel_scroll.get(key_, 0) + 1
         elif key in (ord('a'), ord('A')):
             if current_tab_name == "Log" and self.sites:
                 sel = self.sites[self.selected_site_idx]
