@@ -61,6 +61,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("NTFY_TOPIC",            "global", "",      True,  "The topic name to use for ntfy.sh notifications. (example: jj-dlp-fj48dh734fk) Refer to docs/ntfy-setup.md for a detailed setup guide. (blank = disabled)"),
     _KeyDef("NOTIFY_CONFIRM_FILE",   "global", "true",  True,  "Confirm the recording has actually started before sending a live notification.  Note: When enabled, the notifications will be delayed by a few seconds until the file has been confirmed."),
     _KeyDef("SITE_SORT",             "global", "added_first", True, "The order to display streamers on each site panel.   This can also be adjusted by pressing the S key on the Dashboard tab."),
+    _KeyDef("COMPACT_VIEW",          "global", "auto",  True,  "When streamers overflow the panel, compact view shows them in 2 columns without progress bars. (auto/true/false)"),
 
     # ── Site keys (per-site .conf) ────────────────────────────────────────────
     _KeyDef("SITE_LABEL",            "site",   "",      True,  "The name of this site."),
@@ -86,7 +87,6 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("YT_DLP_PATH_WINDOWS",   "site",   "",     True, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
     _KeyDef("YT_DLP_PATH_MAC",       "site",   "",     True, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
     _KeyDef("YT_DLP_PATH_LINUX",     "site",   "",     True, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
-    _KeyDef("COMPACT_VIEW",          "global","auto",  True,  "When streamers overflow the panel, compact view shows them in 2 columns without progress bars. (auto/true/false)"),
     _KeyDef("PROGRESS_BAR_MAX_HOURS","site",   "10",    True,  "Duration of the progress bar in the site panel of the dashboard. (in hours)"),
     _KeyDef("PROGRESS_BAR_WIDTH",    "site",   "58",   True,  "Width of the progress bar in the site panel of the dashboard. (in characters)"),
     _KeyDef("DOWNLOADER_COOKIES",    "site",   "true", False, "Whether to write the --cookies-from-browser flag to this config file's [Downloader] section when a browser is selected at startup."),

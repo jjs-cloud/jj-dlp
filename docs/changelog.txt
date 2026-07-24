@@ -1,4 +1,4 @@
-- added a new site key called "COMPACT_VIEW".  When set to "auto", the site panel will change into compact view automatically when there are too many streamers to display
+- added a new global key called "COMPACT_VIEW".  When set to "auto", the site panel will change into compact view automatically when there are too many streamers to display
 
 ====================
 ====================
