@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.23.2"
+__version__ = "1.23.3"
 
 import subprocess
 import time
@@ -4148,8 +4148,16 @@ class JJDlpDashboard:
             # Compact: 2 columns, no progress bar, no duration, shows last_live
             half_w = max(20, (panel_width - 2) // 2)
             last_live_w_compact = 7
-            name_w_compact = max(6, half_w - 16)
+            # Size the name column to the longest actual name (capped), so short
+            # names don't leave a big gap before the status tag.
+            _max_name_len = max((len(s) for s in all_s), default=6)
+            name_w_compact = max(6, min(_max_name_len + 1, half_w - 16))
             _col_gap = 2
+            _sep_col = x1 + 2 + half_w + (_col_gap // 2)
+            _rows_used = min(max_rows, (len(all_s) + 1) // 2)
+            for _sy in range(row_start, row_start + _rows_used):
+                self.safe_addstr(self.stdscr, _sy, _sep_col, "│",
+                            curses.color_pair(self.C_CHROME))
             for i, s in enumerate(all_s):
                 row_idx = i // 2
                 col_idx = i % 2
