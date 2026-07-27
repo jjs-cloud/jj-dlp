@@ -1,9 +1,9 @@
 """
-deps.py  —  dependency detection & installation for jj-dlp
+deps.py  --  dependency detection & installation for jj-dlp
 
 Covers:
-  • curses  (windows-curses on Windows, OS package on Linux/macOS)
-  • ffmpeg  (winget on Windows, brew on macOS, distro PM on Linux)
+  * curses  (windows-curses on Windows, OS package on Linux/macOS)
+  * ffmpeg  (winget on Windows, brew on macOS, distro PM on Linux)
 
 Public API
 ----------
@@ -36,9 +36,9 @@ def _is_root() -> bool:
     return getattr(os, "geteuid", lambda: -1)() == 0
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ============================================================================
 # curses detection & installation
-# ══════════════════════════════════════════════════════════════════════════════
+# ============================================================================
 
 def check_curses_available() -> bool:
     """Return True if the curses module can be imported."""
@@ -160,9 +160,9 @@ def ensure_curses() -> None:
     RESET = "\033[0m"
 
     print()
-    print(f"{BOLD}{RED}┌─ MISSING DEPENDENCY ───────────────────────────────┐{RESET}")
-    print(f"{BOLD}{RED}│  curses  is not available in this Python install.   │{RESET}")
-    print(f"{BOLD}{RED}└─────────────────────────────────────────────────────┘{RESET}")
+    print(f"{BOLD}{RED}+- MISSING DEPENDENCY -------------------------------+{RESET}")
+    print(f"{BOLD}{RED}|  curses  is not available in this Python install.   |{RESET}")
+    print(f"{BOLD}{RED}+----------------------------------------------------+{RESET}")
     print()
 
     if sys.platform == "win32":
@@ -187,7 +187,7 @@ def ensure_curses() -> None:
         success, message = install_curses_auto(progress_cb=lambda l: print(f"  {l}"))
         print()
         if success:
-            print(f"{GRN}✓  {message}{RESET}")
+            print(f"{GRN}+  {message}{RESET}")
             print(f"{GRN}Curses has been successfully installed.  Please restart the script.{RESET}\n")
             try:
                 input("Press Enter to exit...")
@@ -195,7 +195,7 @@ def ensure_curses() -> None:
                 pass
             sys.exit(0)
         else:
-            print(f"{RED}✗  Installation failed:{RESET}")
+            print(f"{RED}x  Installation failed:{RESET}")
             print(f"   {message}")
             print()
             try:
@@ -214,9 +214,9 @@ def ensure_curses() -> None:
             sys.exit(1)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ============================================================================
 # ffmpeg detection & installation
-# ══════════════════════════════════════════════════════════════════════════════
+# ============================================================================
 
 def check_ffmpeg() -> tuple:
     """
@@ -371,8 +371,8 @@ def plain_ffmpeg_check() -> bool:
     """
     Plain-terminal ffmpeg presence check run before the main curses dashboard.
 
-    • If ffmpeg is found  → brief confirmation, auto-continue after 1 s.
-    • If ffmpeg is missing → prompt Y/N to attempt auto-install.
+    * If ffmpeg is found  -> brief confirmation, auto-continue after 1 s.
+    * If ffmpeg is missing -> prompt Y/N to attempt auto-install.
       - Y: run installer, stream output line-by-line to the terminal.
       - N: warn and continue (yt-dlp may still work without ffmpeg for
            some formats, but the user is informed).
@@ -388,18 +388,18 @@ def plain_ffmpeg_check() -> bool:
     CYN   = "\033[96m"
     RESET = "\033[0m"
 
-    # ── Phase 1: Detection ────────────────────────────────────────────────────
+    # -- Phase 1: Detection ---------------------------------------------------
     found, ffmpeg_path = check_ffmpeg()
 
     if found:
         print()
-        print(f"{GRN}{BOLD}✔  ffmpeg found:{RESET}")
+        print(f"{GRN}{BOLD}  ffmpeg found:{RESET}")
         print(f"   {ffmpeg_path}")
-        print(f"{YEL}Continuing in 0.3 seconds…{RESET}")
+        print(f"{YEL}Continuing in 0.3 seconds...{RESET}")
         time.sleep(0.3)
         return True
 
-    # ── Phase 2: Missing — prompt ─────────────────────────────────────────────
+    # -- Phase 2: Missing -- prompt --------------------------------------------
     if sys.platform == "win32":
         winget_available = False
         try:
@@ -411,11 +411,11 @@ def plain_ffmpeg_check() -> bool:
         except FileNotFoundError:
             winget_available = False
         install_hint = ("Will run: winget install Gyan.FFmpeg" if winget_available
-                        else "winget not found — manual install required.")
+                        else "winget not found -- manual install required.")
     elif sys.platform == "darwin":
         brew = shutil.which("brew")
         install_hint = ("Will run: brew install ffmpeg" if brew
-                        else "Homebrew not found — manual install required.")
+                        else "Homebrew not found -- manual install required.")
     else:
         pm_name, _ = _detect_linux_package_manager()
         install_hint = (f"Will run: sudo {pm_name} install ffmpeg" if pm_name
@@ -429,9 +429,9 @@ def plain_ffmpeg_check() -> bool:
         can_auto = bool(_detect_linux_package_manager()[0])
 
     print()
-    print(f"{BOLD}{RED}┌─ DEPENDENCY CHECK — ffmpeg ─────────────────────────┐{RESET}")
-    print(f"{BOLD}{RED}│  ffmpeg not found in PATH or common locations.       │{RESET}")
-    print(f"{BOLD}{RED}└─────────────────────────────────────────────────────-┘{RESET}")
+    print(f"{BOLD}{RED}+- DEPENDENCY CHECK -- ffmpeg ------------------------+{RESET}")
+    print(f"{BOLD}{RED}|  ffmpeg not found in PATH or common locations.       |{RESET}")
+    print(f"{BOLD}{RED}+-----------------------------------------------------+{RESET}")
     print()
     print(f"{YEL}{install_hint}{RESET}")
     print()
@@ -452,28 +452,28 @@ def plain_ffmpeg_check() -> bool:
 
     if answer in ("n", "no") or (not can_auto and answer not in ("y", "yes", "")):
         print()
-        print(f"{YEL}⚠  Continuing without ffmpeg.{RESET}")
+        print(f"{YEL}  Continuing without ffmpeg.{RESET}")
         print(f"{YEL}   Some formats / remuxing may fail.{RESET}")
         print()
         return True
 
     if not can_auto:
         print()
-        print(f"{YEL}⚠  Continuing without ffmpeg.{RESET}")
+        print(f"{YEL}  Continuing without ffmpeg.{RESET}")
         print(f"{YEL}   Some formats / remuxing may fail.{RESET}")
         print()
         return True
 
-    # ── Phase 3: Install ──────────────────────────────────────────────────────
+    # -- Phase 3: Install -----------------------------------------------------
     print()
-    print(f"{CYN}Installing ffmpeg — please wait…{RESET}")
+    print(f"{CYN}Installing ffmpeg -- please wait...{RESET}")
     print()
 
     success, msg = install_ffmpeg_auto(progress_cb=lambda line: print(f"  {line}"))
 
     print()
     if success:
-        print(f"{GRN}{BOLD}✔  Installation complete.{RESET}")
+        print(f"{GRN}{BOLD}  Installation complete.{RESET}")
         print(f"   {msg}")
         if sys.platform == "win32":
             print()
@@ -485,7 +485,7 @@ def plain_ffmpeg_check() -> bool:
         print()
         return True
     else:
-        print(f"{RED}{BOLD}✘  Installation failed.{RESET}")
+        print(f"{RED}{BOLD}  Installation failed.{RESET}")
         print(f"   {msg}")
         print()
         try:
@@ -494,7 +494,7 @@ def plain_ffmpeg_check() -> bool:
             cont = "q"
         if cont in ("y", "yes", "n", "no"):
             print()
-            print(f"{YEL}⚠  Continuing without ffmpeg.{RESET}")
+            print(f"{YEL}  Continuing without ffmpeg.{RESET}")
             print(f"{YEL}   Some formats / remuxing may fail.{RESET}")
             print()
             return True
