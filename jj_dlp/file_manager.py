@@ -250,6 +250,7 @@ class FileManagerTab:
 
         self._selected_path = None
         self._scroll = 0
+        self._at_top = False
         self._last_poll = 0.0
 
         self._status_msg = ""
@@ -440,9 +441,13 @@ class FileManagerTab:
 
         if key in (curses.KEY_UP,):
             self.move_selection(-1)
+            file_indices = [i for i, r in enumerate(self._rows) if r[0] == "file"]
+            if file_indices and self._selected_path == self._rows[file_indices[0]][1]:
+                self._at_top = True
             return True
         if key in (curses.KEY_DOWN,):
             self.move_selection(1)
+            self._at_top = False
             return True
         if key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
             if self._selected_path:
@@ -645,7 +650,16 @@ class FileManagerTab:
                 self._scroll = sel_row
             elif sel_row >= self._scroll + visible:
                 self._scroll = sel_row - visible + 1
-        self._scroll = max(0, min(self._scroll, max(0, len(self._rows) - visible)))
+        # Allow scroll to include a header row above the first file when
+        # the user reached the top via the UP arrow.
+        first_file = next((i for i, r in enumerate(self._rows) if r[0] == "file"), None)
+        has_header_above = (first_file is not None and first_file > 0
+                            and self._rows[0][0] == "header")
+        if self._at_top and has_header_above:
+            min_scroll = min(0, first_file - 1)
+        else:
+            min_scroll = 0
+        self._scroll = max(min_scroll, min(self._scroll, max(0, len(self._rows) - visible)))
 
         row_y = list_y1
         for i in range(self._scroll, min(len(self._rows), self._scroll + visible)):
