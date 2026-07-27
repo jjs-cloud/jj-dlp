@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.23.3"
+__version__ = "1.23.4"
 
 import subprocess
 import time
@@ -18,6 +18,7 @@ from typing import List, Set, Tuple, Dict, Optional
 import configparser
 import argparse
 import shlex
+import uuid
 from urllib.parse import urlparse
 import shutil
 
@@ -2218,10 +2219,23 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 else:
                     dbg(f"[LQ] use_lq=True but lq_downloader_cmd is empty — falling back to normal downloader for {streamer}")
 
+            # yt-dlp writes the fully-resolved destination path into this
+            # sidecar file itself (in UTF-8) via --print-to-file, so we never
+            # have to reconstruct the filename from possibly-mangled stdout
+            # text (e.g. emoji/CJK characters getting corrupted by console
+            # code-page issues on Windows). One unique file per attempt,
+            # written to OUTPUT_DIR, deleted as soon as we've read it.
+            _sidecar_token = _re.sub(r"[^A-Za-z0-9_.-]", "_", streamer) or "streamer"
+            _sidecar_path = os.path.join(
+                output_dir, f".jjdlp_filename_{_sidecar_token}_{uuid.uuid4().hex}.tmp"
+            )
+
             cmd = build_yt_dlp_command(
                 cfg["yt_dlp_path"],
                 _active_dl_cmd,
-                ["-o", output_path, channel_url]
+                ["-o", output_path,
+                 "--print-to-file", "before_dl:%(filepath)s", _sidecar_path,
+                 channel_url]
             )
 
             out_target, err_target, close_logs, log_out_fp, log_err_fp = open_log_streams(cfg)
@@ -2248,11 +2262,11 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 site.clear_ffmpeg_error_count(streamer)
                 site.clear_stall_since(streamer)
 
-                # Shared container for the filename parsed from yt-dlp output.
-                # Both drain threads write here; the event is set on first hit.
-                filename_holder: List[str] = []
-                filename_event  = threading.Event()
-
+                # NOTE: the active filename is no longer parsed from stdout —
+                # see _sidecar_path / the "Resolve active output file" block
+                # below, which reads it straight from the UTF-8 file yt-dlp
+                # writes via --print-to-file. The drain threads below now
+                # only handle logging / ffmpeg-error / ad-alert detection.
                 threading.Thread(
                     target=_drain_pipe,
                     args=(proc.stdout, log_out_fp, "stdout"),
@@ -2261,8 +2275,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         "ffmpeg_error_event": ffmpeg_error_event,
                         "streamer": streamer,
                         "site": site,
-                        "filename_holder": filename_holder,
-                        "filename_event": filename_event,
                         "ad_alerts_enabled": cfg.get("ad_alerts", False),
                     },
                     daemon=True
@@ -2276,8 +2288,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         "ffmpeg_error_event": ffmpeg_error_event,
                         "streamer": streamer,
                         "site": site,
-                        "filename_holder": filename_holder,
-                        "filename_event": filename_event,
                         "ad_alerts_enabled": cfg.get("ad_alerts", False),
                     },
                     daemon=True
@@ -2292,37 +2302,70 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 break
 
             # ── Resolve active output file ────────────────────────────────
-            # Prefer the filename parsed directly from yt-dlp's
-            # "[download] Destination: <path>" line; fall back to querying
-            # yt-dlp for JSON metadata when the line doesn't appear within
-            # the wait window (e.g. the process exits immediately on error).
+            # yt-dlp resolves the final destination path and writes it to
+            # _sidecar_path itself (in UTF-8, via --print-to-file on the
+            # "before_dl" hook) as soon as it picks a filename. This avoids
+            # ever having to reconstruct the filename from stdout/console
+            # text, which can get mangled on Windows for emoji/CJK titles.
+            # Fall back to querying yt-dlp for JSON metadata if the sidecar
+            # never appears within the wait window (e.g. the process exits
+            # immediately on error, or an old yt-dlp build predates
+            # --print-to-file support).
             _FILENAME_WAIT_TIMEOUT = 15.0
-            filename_found = filename_event.wait(timeout=_FILENAME_WAIT_TIMEOUT)
             active_file = None
-            if filename_found and filename_holder:
-                raw_dest = filename_holder[0]
-                # yt-dlp may emit a bare filename or a full path depending on
-                # how -o was specified.  Normalise to an absolute path.
-                if not os.path.isabs(raw_dest):
-                    active_file = os.path.join(output_dir, raw_dest)
-                else:
-                    active_file = raw_dest
-                
-                # Check if the file actually exists. If yt-dlp outputs garbage characters
-                # for the filename (like missing Chinese characters on Windows), active_file
-                # might be wrong. Wait briefly just in case it's still being written.
-                _chk_start = time.time()
-                while time.time() - _chk_start < 2.0:
-                    if os.path.exists(active_file):
-                        break
-                    time.sleep(0.5)
+            _sidecar_deadline = time.time() + _FILENAME_WAIT_TIMEOUT
+            while time.time() < _sidecar_deadline:
+                if os.path.isfile(_sidecar_path):
+                    try:
+                        with open(_sidecar_path, "r", encoding="utf-8") as _sf:
+                            # --print-to-file appends rather than overwrites, so
+                            # if the event fired more than once (retries, format
+                            # re-selection, etc.) take the most recent line.
+                            _sc_lines = [ln.strip() for ln in _sf.read().splitlines() if ln.strip()]
+                        raw_dest = _sc_lines[-1] if _sc_lines else ""
+                    except Exception as _sc_read_err:
+                        dbg(f"[STALL] error reading filename sidecar {_sidecar_path!r}: "
+                            f"{_sc_read_err!r}", site_name=streamer)
+                        raw_dest = ""
+                    # The sidecar has served its purpose the moment we've read
+                    # it — remove it right away rather than waiting for
+                    # end-of-recording cleanup.
+                    try:
+                        os.remove(_sidecar_path)
+                    except OSError:
+                        pass
 
-                if not os.path.exists(active_file):
-                    dbg(f"[STALL] active_file {active_file!r} from Destination line does not exist, discarding.", site_name=streamer)
-                    active_file = None
-                else:
-                    dbg(f"[STALL] resolved active_file from yt-dlp output: {active_file!r}",
-                        site_name=streamer)
+                    if raw_dest:
+                        candidate = raw_dest if os.path.isabs(raw_dest) else os.path.join(output_dir, raw_dest)
+                        if os.path.exists(candidate):
+                            active_file = candidate
+                            dbg(f"[STALL] resolved active_file from filename sidecar: "
+                                f"{active_file!r}", site_name=streamer)
+                        else:
+                            dbg(f"[STALL] sidecar active_file {candidate!r} does not exist, "
+                                f"discarding.", site_name=streamer)
+                    break
+
+                if proc.poll() is not None:
+                    # Process already exited without ever writing the sidecar —
+                    # no point waiting out the rest of the timeout.
+                    dbg(f"[STALL] proc exited before writing filename sidecar "
+                        f"(returncode={proc.returncode})", site_name=streamer)
+                    break
+
+                time.sleep(0.25)
+            else:
+                dbg(f"[STALL] timed out after {_FILENAME_WAIT_TIMEOUT}s waiting for "
+                    f"filename sidecar {_sidecar_path!r}", site_name=streamer)
+
+            # Best-effort cleanup: if we broke out early (timeout / proc exit)
+            # before the sidecar ever appeared, make sure nothing is left behind.
+            if not active_file:
+                try:
+                    if os.path.isfile(_sidecar_path):
+                        os.remove(_sidecar_path)
+                except OSError:
+                    pass
 
             if not active_file:
                 dbg(f"[STALL] falling back to JSON parsing for streamer={streamer!r}",
