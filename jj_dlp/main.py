@@ -638,6 +638,10 @@ class SiteState:
         # Used purely to gate the recording_resolution fallback in the
         # dashboard renderer.
         self.recording_attempt_started: Dict[str, float] = {}
+        # Streamers that have already been quality-upgraded during the
+        # current live stream session. Cleared when the streamer goes
+        # offline (alongside dash_live_since).
+        self.quality_upgraded_streamers: Set[str] = set()
         self.recording_threads:   List[threading.Thread] = []
         self.known_streamers:     Set[str] = set()
         self.trigger_event        = threading.Event()
@@ -3480,6 +3484,8 @@ def _check_quality_upgrades(site: "SiteState",
     """
     with site.lock:
         active = set(site.currently_recording) - site.evicted_streamers
+        # Skip streamers that have already been upgraded once.
+        active -= site.quality_upgraded_streamers
 
     dbg(f"[UPGRADE_QUALITY] Checking quality upgrades for {site.label}, active_recordings={active}")
     for streamer in active:
@@ -3511,6 +3517,7 @@ def _check_quality_upgrades(site: "SiteState",
             )
             with site.lock:
                 site.recording_resolution[streamer] = new_height
+                site.quality_upgraded_streamers.add(streamer)
                 site.evicted_streamers.add(streamer)
             site.kill_proc_for_streamer(streamer)
 
@@ -3586,6 +3593,11 @@ def monitor_site(site: "SiteState") -> None:
                         site.notif_shown_session.discard(s)
                     elif s not in site.dash_live_since:
                         site.dash_live_since[s] = time.time()
+
+            with site.lock:
+                for s in streamers:
+                    if s not in live_set:
+                        site.quality_upgraded_streamers.discard(s)
 
             if live_now:
                 start_recording_if_needed(live_now, cfg, site, resolution_map=live_info)
