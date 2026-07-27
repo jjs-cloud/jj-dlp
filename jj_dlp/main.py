@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.23.0"
+__version__ = "1.24.0"
 
 import subprocess
 import time
@@ -17,7 +17,9 @@ from datetime import time as _dt_time
 from typing import List, Set, Tuple, Dict, Optional
 import configparser
 import argparse
+import locale
 import shlex
+import uuid
 from urllib.parse import urlparse
 import shutil
 
@@ -39,6 +41,7 @@ from .browser_config import (
     _write_ask_for_browser_to_config,
 )
 from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS, _compute_config_id, SiteSortManager, SORT_OPTIONS, _SORT_LABELS
+from .file_manager import FileManagerTab
 
 import curses  # noqa: E402
 
@@ -408,6 +411,7 @@ def load_global_config() -> dict:
         "subfolders":         _bool("SUBFOLDERS", False),
         "ntfy_topic":         general.get("NTFY_TOPIC", "").strip().strip('"\''),
         "notify_confirm_file":_bool("NOTIFY_CONFIRM_FILE", True),
+        "compact_view": general.get("COMPACT_VIEW", "auto").strip().strip('"\'') or "auto",
     }
 
 def _write_global_conf_key(key: str, value: str) -> None:
@@ -635,6 +639,10 @@ class SiteState:
         # Used purely to gate the recording_resolution fallback in the
         # dashboard renderer.
         self.recording_attempt_started: Dict[str, float] = {}
+        # Streamers that have already been quality-upgraded during the
+        # current live stream session. Cleared when the streamer goes
+        # offline (alongside dash_live_since).
+        self.quality_upgraded_streamers: Set[str] = set()
         self.recording_threads:   List[threading.Thread] = []
         self.known_streamers:     Set[str] = set()
         self.trigger_event        = threading.Event()
@@ -1569,7 +1577,13 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
     line_count = 0
     try:
         for raw in pipe:
-            line = raw.decode(errors="replace").rstrip("\n")
+            # On Windows, yt-dlp.exe writes stdout in the active code page
+            # (e.g. cp1252), not UTF-8.  Use the locale encoding so that
+            # cp1252-representable non-ASCII characters (accents, etc.)
+            # survive; emoji/CJK that can't be represented are already
+            # replaced with '?' by yt-dlp itself and are unrecoverable
+            # from stdout — the sidecar technique handles those.
+            line = raw.decode(encoding=locale.getpreferredencoding(), errors="replace").rstrip("\n")
             line_count += 1
             if line_count <= 3:
                 dbg(f"[DRAIN] pipe_type={pipe_type!r} streamer={streamer!r} line#{line_count}: {line[:200]!r}")
@@ -2217,10 +2231,34 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 else:
                     dbg(f"[LQ] use_lq=True but lq_downloader_cmd is empty — falling back to normal downloader for {streamer}")
 
+            # yt-dlp writes the resolved filename into this sidecar file (in
+            # UTF-8) via --print-to-file, so we never have to reconstruct the
+            # filename from possibly-mangled stdout text (e.g. emoji/CJK
+            # characters getting corrupted by console code-page issues on
+            # Windows).  One unique file per attempt, written to OUTPUT_DIR,
+            # deleted as soon as we've read it.
+            #
+            # Two templates are written:
+            #   1. %(filepath)s  → full path (some extractors return "NA")
+            #   2. the raw output template → filename-only (works for
+            #      extractors like TikTok live where %(filepath)s is "NA"
+            #      but individual fields like %(title)s are resolvable).
+            # The sidecar reading code below picks the last non-"NA" line and
+            # applies Windows filename sanitisation when the value is a plain
+            # filename (not an absolute path).
+            _sidecar_token = _re.sub(r"[^A-Za-z0-9_.-]", "_", streamer) or "streamer"
+            _sidecar_path = os.path.join(
+                output_dir, f".jjdlp_filename_{_sidecar_token}_{uuid.uuid4().hex}.tmp"
+            )
+
             cmd = build_yt_dlp_command(
                 cfg["yt_dlp_path"],
                 _active_dl_cmd,
-                ["-o", output_path, channel_url]
+                ["-o", output_path,
+                 "--print-to-file", "before_dl:%(filepath)s", _sidecar_path,
+                 "--print-to-file", "%(filepath)s", _sidecar_path,
+                 "--print-to-file", current_output_tmpl, _sidecar_path,
+                 channel_url]
             )
 
             out_target, err_target, close_logs, log_out_fp, log_err_fp = open_log_streams(cfg)
@@ -2247,8 +2285,12 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 site.clear_ffmpeg_error_count(streamer)
                 site.clear_stall_since(streamer)
 
-                # Shared container for the filename parsed from yt-dlp output.
-                # Both drain threads write here; the event is set on first hit.
+                # Shared container for the filename parsed from yt-dlp's
+                # stdout/stderr "[download] Destination: ..." line. This is
+                # the 2nd-tier fallback (after the sidecar file, before the
+                # --dump-json fallback) — some extractors never populate 
+                # %(filepath)s at the "before_dl" hook the sidecar relies on,
+                # so we still want this as a backstop.
                 filename_holder: List[str] = []
                 filename_event  = threading.Event()
 
@@ -2291,37 +2333,139 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 break
 
             # ── Resolve active output file ────────────────────────────────
-            # Prefer the filename parsed directly from yt-dlp's
-            # "[download] Destination: <path>" line; fall back to querying
-            # yt-dlp for JSON metadata when the line doesn't appear within
-            # the wait window (e.g. the process exits immediately on error).
+            # 3-tier fallback chain:
+            #   1. Sidecar file written by yt-dlp itself (--print-to-file on
+            #      "before_dl"), read in UTF-8 — avoids any console/stdout
+            #      encoding issues (e.g. mangled emoji/CJK titles on Windows).
+            #   2. yt-dlp's "[download] Destination: ..." stdout/stderr line,
+            #      parsed live by _drain_pipe — covers extractors where
+            #      %(filepath)s isn't resolvable yet at "before_dl", 
+            #      which writes "NA" to the sidecar).
+            #   3. Re-running yt-dlp with --dump-json to ask it directly for
+            #      the filename it would use — slowest, and can, in principle,
+            #      compute a slightly different name if anything in the
+            #      template is time-sensitive, but is the most tolerant of
+            #      extractor quirks.
             _FILENAME_WAIT_TIMEOUT = 15.0
-            filename_found = filename_event.wait(timeout=_FILENAME_WAIT_TIMEOUT)
             active_file = None
-            if filename_found and filename_holder:
+            _sidecar_deadline = time.time() + _FILENAME_WAIT_TIMEOUT
+            while time.time() < _sidecar_deadline:
+                if os.path.isfile(_sidecar_path):
+                    try:
+                        with open(_sidecar_path, "r", encoding="utf-8") as _sf:
+                            # --print-to-file appends rather than overwrites, so
+                            # the sidecar may have multiple lines (retries,
+                            # format re-selection, and/or multiple timings).
+                            # Scan from bottom to top, preferring absolute
+                            # paths (%(filepath)s result) over relative ones
+                            # (raw output-template result).
+                            _sc_lines = [ln.strip() for ln in _sf.read().splitlines() if ln.strip()]
+                        raw_abs = None
+                        raw_rel = ""
+                        for ln in reversed(_sc_lines):
+                            if not ln or ln == "NA":
+                                continue
+                            if os.path.isabs(ln):
+                                raw_abs = ln  # prefer absolute (%(filepath)s)
+                            else:
+                                if not raw_rel:
+                                    raw_rel = ln  # keep first (last) relative
+                        raw_dest = raw_abs if raw_abs is not None else raw_rel
+                    except Exception as _sc_read_err:
+                        dbg(f"[STALL] error reading filename sidecar {_sidecar_path!r}: "
+                            f"{_sc_read_err!r}", site_name=streamer)
+                        raw_dest = ""
+                    # The sidecar has served its purpose the moment we've read
+                    # it — remove it right away rather than waiting for
+                    # end-of-recording cleanup.
+                    try:
+                        os.remove(_sidecar_path)
+                    except OSError:
+                        pass
+
+                    if raw_dest:
+                        if os.path.isabs(raw_dest):
+                            candidate = raw_dest
+                        else:
+                            # This is the raw output template result (e.g.
+                            # from "%(uploader)s %(title)s ...").  yt-dlp
+                            # resolves the template but does NOT apply
+                            # filesystem sanitization — that happens later
+                            # when the file is created.  Replicate the
+                            # Windows sanitization here so the candidate
+                            # path matches the actual file on disk.
+                            _sanitized = _re.sub(r'[<>:"/\\|?*]', '_', raw_dest)
+                            _sanitized = _re.sub(r'[\x00-\x1f\x7f]', '', _sanitized)
+                            _sanitized = _sanitized.strip(' .')
+                            candidate = os.path.join(output_dir, _sanitized)
+                        # The sidecar is written at before_dl, but the actual
+                        # output file may not exist yet (yt-dlp opens it
+                        # slightly after the hook fires).  Wait a few seconds
+                        # for the file to appear before giving up.
+                        _file_deadline = time.time() + 5.0
+                        while time.time() < _file_deadline:
+                            if os.path.exists(candidate):
+                                active_file = candidate
+                                dbg(f"[STALL] resolved active_file from filename sidecar: "
+                                    f"{active_file!r}", site_name=streamer)
+                                break
+                            if proc.poll() is not None:
+                                break
+                            time.sleep(0.25)
+                        if not active_file:
+                            dbg(f"[STALL] sidecar candidate {candidate!r} (from {raw_dest!r}) "
+                                f"does not exist after 5s, discarding.", site_name=streamer)
+                    break
+
+                if proc.poll() is not None:
+                    # Process already exited without ever writing the sidecar —
+                    # no point waiting out the rest of the timeout.
+                    dbg(f"[STALL] proc exited before writing filename sidecar "
+                        f"(returncode={proc.returncode})", site_name=streamer)
+                    break
+
+                time.sleep(0.25)
+            else:
+                dbg(f"[STALL] timed out after {_FILENAME_WAIT_TIMEOUT}s waiting for "
+                    f"filename sidecar {_sidecar_path!r}", site_name=streamer)
+
+            # Best-effort cleanup: if we broke out early (timeout / proc exit)
+            # before the sidecar ever appeared, make sure nothing is left behind.
+            if not active_file:
+                try:
+                    if os.path.isfile(_sidecar_path):
+                        os.remove(_sidecar_path)
+                except OSError:
+                    pass
+
+            # ── Tier 2 fallback: yt-dlp's own "[download] Destination: ..."
+            # stdout/stderr line, parsed live by _drain_pipe into
+            # filename_holder/filename_event. Some extractors never populate 
+            # %(filepath)s at the "before_dl" hook the sidecar relies on,
+            # so the sidecar comes back empty/"NA" —
+            # this catches those. The drain threads have been running the
+            # whole time the sidecar loop above was waiting, so the event is
+            # usually already set here; the short wait just covers the case
+            # where the process exited (or the sidecar timed out) slightly
+            # before the Destination line made it through.
+            if not active_file and filename_event.wait(timeout=2.0) and filename_holder:
                 raw_dest = filename_holder[0]
-                # yt-dlp may emit a bare filename or a full path depending on
-                # how -o was specified.  Normalise to an absolute path.
-                if not os.path.isabs(raw_dest):
-                    active_file = os.path.join(output_dir, raw_dest)
-                else:
-                    active_file = raw_dest
-                
-                # Check if the file actually exists. If yt-dlp outputs garbage characters
-                # for the filename (like missing Chinese characters on Windows), active_file
-                # might be wrong. Wait briefly just in case it's still being written.
+                candidate = raw_dest if os.path.isabs(raw_dest) else os.path.join(output_dir, raw_dest)
+
+                # Wait briefly in case it's still being written to disk.
                 _chk_start = time.time()
                 while time.time() - _chk_start < 2.0:
-                    if os.path.exists(active_file):
+                    if os.path.exists(candidate):
                         break
                     time.sleep(0.5)
 
-                if not os.path.exists(active_file):
-                    dbg(f"[STALL] active_file {active_file!r} from Destination line does not exist, discarding.", site_name=streamer)
-                    active_file = None
+                if os.path.exists(candidate):
+                    active_file = candidate
+                    dbg(f"[STALL] resolved active_file from Destination line "
+                        f"(tier-2 fallback): {active_file!r}", site_name=streamer)
                 else:
-                    dbg(f"[STALL] resolved active_file from yt-dlp output: {active_file!r}",
-                        site_name=streamer)
+                    dbg(f"[STALL] active_file {candidate!r} from Destination line "
+                        f"does not exist, discarding.", site_name=streamer)
 
             if not active_file:
                 dbg(f"[STALL] falling back to JSON parsing for streamer={streamer!r}",
@@ -3341,6 +3485,8 @@ def _check_quality_upgrades(site: "SiteState",
     """
     with site.lock:
         active = set(site.currently_recording) - site.evicted_streamers
+        # Skip streamers that have already been upgraded once.
+        active -= site.quality_upgraded_streamers
 
     dbg(f"[UPGRADE_QUALITY] Checking quality upgrades for {site.label}, active_recordings={active}")
     for streamer in active:
@@ -3372,6 +3518,7 @@ def _check_quality_upgrades(site: "SiteState",
             )
             with site.lock:
                 site.recording_resolution[streamer] = new_height
+                site.quality_upgraded_streamers.add(streamer)
                 site.evicted_streamers.add(streamer)
             site.kill_proc_for_streamer(streamer)
 
@@ -3447,6 +3594,11 @@ def monitor_site(site: "SiteState") -> None:
                         site.notif_shown_session.discard(s)
                     elif s not in site.dash_live_since:
                         site.dash_live_since[s] = time.time()
+
+            with site.lock:
+                for s in streamers:
+                    if s not in live_set:
+                        site.quality_upgraded_streamers.discard(s)
 
             if live_now:
                 start_recording_if_needed(live_now, cfg, site, resolution_map=live_info)
@@ -3568,7 +3720,8 @@ class JJDlpDashboard:
         if any_eventsub:
             self.TABS.append("EventSub")
 
-        self.TABS.append("Config")  # Config tab is always last
+        self.TABS.append("Config")  # Config tab is second-to-last
+        self.TABS.append("File Manager")  # File Manager tab is always last
         # --------------------------
 
         self.selected_tab = 0
@@ -3597,6 +3750,9 @@ class JJDlpDashboard:
 
         # Sort manager — controls streamer ordering in site panels
         self.sort_manager = SiteSortManager(self)
+
+        # File Manager tab — watches OUTPUT_DIRs for the current set of sites
+        self.file_manager = FileManagerTab(self)
 
         # ── Changelog popup state ─────────────────────────────────────────────
         # Shown once after startup when update_available=false & changelog_shown=false.
@@ -4132,114 +4288,209 @@ class JJDlpDashboard:
         # ── Streamer rows ──
         panel_width  = x2 - x1 - 2   # usable inner width
         row_start    = y1 + 3
-        max_rows     = y2 - row_start - 2   # leave 2 rows at bottom for countdown
+        max_rows     = y2 - row_start - 1   # leave 1 row at bottom for countdown
 
-        # Column widths — bar_w honours PROGRESS_BAR_WIDTH but won't overflow the row.
-        # Row layout: [name_w] 1 [status=7] 1 [bar_w] 1 [dur=9] 1 [last_live_w]
-        # So the actual space available for the bar is what's left after the fixed columns.
-        name_w      = max(10, min(18, panel_width // 4))
-        last_live_w = 12   # "Last Live" column
-        _fixed_cols = name_w + 1 + 7 + 1 + 1 + 9 + 1 + last_live_w  # everything except bar
-        bar_w       = max(4, min(_bar_cfg_w, panel_width - _fixed_cols))
+        # Resolve COMPACT_VIEW mode
+        _compact_cfg = self.global_cfg.get("compact_view", "auto")
+        _compact_forced = (_compact_cfg == "true")
+        _compact_disabled = (_compact_cfg == "false")
+        _compact_auto = (not _compact_forced and not _compact_disabled)
+        # In normal view, 1 streamer per row. In compact, 2 per row.
+        num_streamers = len(all_s)
+        _use_compact = _compact_forced or (_compact_auto and num_streamers > max_rows)
 
-        for i, s in enumerate(all_s):
-            if i >= max_rows:
-                break
-            row_y    = row_start + i
-            is_dis   = s in blocked
-            since    = live_since.get(s)
-            is_rec   = s in recording and s not in intro_delay_pending
+        if _use_compact:
+            # Compact: 2 columns, no progress bar, no duration, shows last_live
+            half_w = max(20, (panel_width - 2) // 2)
+            last_live_w_compact = 7
+            # Size the name column to the longest actual name (capped), so short
+            # names don't leave a big gap before the status tag.
+            _max_name_len = max((len(s) for s in all_s), default=6)
+            name_w_compact = max(6, min(_max_name_len + 1, half_w - 16))
+            _col_gap = 2
+            _sep_col = x1 + 2 + half_w + (_col_gap // 2)
+            _rows_used = min(max_rows, (len(all_s) + 1) // 2)
+            for _sy in range(row_start, row_start + _rows_used):
+                self.safe_addstr(self.stdscr, _sy, _sep_col, "│",
+                            curses.color_pair(self.C_CHROME))
+            for i, s in enumerate(all_s):
+                row_idx = i // 2
+                col_idx = i % 2
+                if row_idx >= max_rows:
+                    break
+                row_y = row_start + row_idx
+                is_dis = s in blocked
+                since = live_since.get(s)
+                is_rec = s in recording and s not in intro_delay_pending
 
-            # "Last Live" value for this streamer
-            ll_ts = last_live.get(s)
-            if is_rec and recording_res.get(s) is not None:
-                # Asterisk marks a value still coming from the checker-reported
-                # recording_resolution fallback
-                _suffix = "*" if s in recording_res_is_fallback else ""
-                last_live_str = f"{recording_res.get(s)}p{_suffix}"
-            elif ll_ts is not None:
-                ll_ago = int(now - ll_ts)
-                if ll_ago < 60:
-                    last_live_str = f"{ll_ago}s ago"
-                elif ll_ago < 3600:
-                    last_live_str = f"{ll_ago//60}m ago"
-                elif ll_ago < 86400:
-                    last_live_str = f"{ll_ago//3600}h ago"
+                # "Last Live" value for this streamer
+                ll_ts = last_live.get(s)
+                if is_rec and recording_res.get(s) is not None:
+                    _suffix = "*" if s in recording_res_is_fallback else ""
+                    last_live_str = f"{recording_res.get(s)}p{_suffix}"
+                elif ll_ts is not None:
+                    ll_ago = int(now - ll_ts)
+                    if ll_ago < 60:
+                        last_live_str = f"{ll_ago}s ago"
+                    elif ll_ago < 3600:
+                        last_live_str = f"{ll_ago//60}m ago"
+                    elif ll_ago < 86400:
+                        last_live_str = f"{ll_ago//3600}h ago"
+                    else:
+                        last_live_str = f"{ll_ago//86400}d ago"
                 else:
-                    last_live_str = f"{ll_ago//86400}d ago"
-            else:
-                last_live_str = ""
+                    last_live_str = ""
 
-            if is_dis:
-                name_attr   = curses.color_pair(self.C_DISABLED)
-                bar_str     = "─" * bar_w
-                bar_attr    = curses.color_pair(self.C_DISABLED)
-                dur_str     = ""
-                if since is not None:
-                    # Disabled but currently live — flash [●Live] ↔ [x DIS]
-                    if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
-                        status_str  = "[●Live]"
-                        status_attr = curses.color_pair(self.C_DISABLED) | curses.A_BOLD
+                if is_dis:
+                    name_attr = curses.color_pair(self.C_DISABLED)
+                    if since is not None:
+                        if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
+                            status_str = "[●Live]"
+                            status_attr = curses.color_pair(self.C_DISABLED) | curses.A_BOLD
+                        else:
+                            status_str = "[x DIS]"
+                            status_attr = curses.color_pair(self.C_DISABLED)
+                    else:
+                        status_str = "[x DIS]"
+                        status_attr = curses.color_pair(self.C_DISABLED)
+                elif since is not None:
+                    name_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
+                    if is_rec:
+                        if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
+                            status_str = "[●Live]"
+                            status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
+                        else:
+                            status_str = "[► REC] "
+                            status_attr = curses.color_pair(self.C_REC) | curses.A_BOLD
+                    else:
+                        status_str = "[●Live]"
+                        status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
+                    if not (is_rec and recording_res.get(s) is not None):
+                        last_live_str = ""  # currently live, no "last live"
+                else:
+                    name_attr = curses.color_pair(self.C_DIM)
+                    status_str = "[○ off]"
+                    status_attr = curses.color_pair(self.C_DIM)
+
+                col = x1 + 2 + col_idx * (half_w + _col_gap)
+                self.safe_addstr(self.stdscr, row_y, col,
+                            s[:name_w_compact].ljust(name_w_compact), name_attr)
+                col += name_w_compact + 1
+                self.safe_addstr(self.stdscr, row_y, col,
+                            status_str[:7].ljust(7), status_attr)
+                col += 8
+                if last_live_str:
+                    if (ll_ts is not None
+                            and _last_live_highlight_days > 0
+                            and (now - ll_ts) <= _last_live_highlight_days * 86400):
+                        ll_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
+                    else:
+                        ll_attr = curses.color_pair(self.C_DIM)
+                    self.safe_addstr(self.stdscr, row_y, col,
+                                last_live_str[:last_live_w_compact],
+                                ll_attr)
+        else:
+            # Normal: 1 column with progress bar, duration, last_live
+            # Column widths — bar_w honours PROGRESS_BAR_WIDTH but won't overflow the row.
+            # Row layout: [name_w] 1 [status=7] 1 [bar_w] 1 [dur=9] 1 [last_live_w]
+            # So the actual space available for the bar is what's left after the fixed columns.
+            name_w      = max(10, min(18, panel_width // 4))
+            last_live_w = 12   # "Last Live" column
+            _fixed_cols = name_w + 1 + 7 + 1 + 1 + 9 + 1 + last_live_w  # everything except bar
+            bar_w       = max(4, min(_bar_cfg_w, panel_width - _fixed_cols))
+
+            for i, s in enumerate(all_s):
+                if i >= max_rows:
+                    break
+                row_y    = row_start + i
+                is_dis   = s in blocked
+                since    = live_since.get(s)
+                is_rec   = s in recording and s not in intro_delay_pending
+
+                # "Last Live" value for this streamer
+                ll_ts = last_live.get(s)
+                if is_rec and recording_res.get(s) is not None:
+                    _suffix = "*" if s in recording_res_is_fallback else ""
+                    last_live_str = f"{recording_res.get(s)}p{_suffix}"
+                elif ll_ts is not None:
+                    ll_ago = int(now - ll_ts)
+                    if ll_ago < 60:
+                        last_live_str = f"{ll_ago}s ago"
+                    elif ll_ago < 3600:
+                        last_live_str = f"{ll_ago//60}m ago"
+                    elif ll_ago < 86400:
+                        last_live_str = f"{ll_ago//3600}h ago"
+                    else:
+                        last_live_str = f"{ll_ago//86400}d ago"
+                else:
+                    last_live_str = ""
+
+                if is_dis:
+                    name_attr   = curses.color_pair(self.C_DISABLED)
+                    bar_str     = "─" * bar_w
+                    bar_attr    = curses.color_pair(self.C_DISABLED)
+                    dur_str     = ""
+                    if since is not None:
+                        if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
+                            status_str  = "[●Live]"
+                            status_attr = curses.color_pair(self.C_DISABLED) | curses.A_BOLD
+                        else:
+                            status_str  = "[x DIS]"
+                            status_attr = curses.color_pair(self.C_DISABLED)
                     else:
                         status_str  = "[x DIS]"
                         status_attr = curses.color_pair(self.C_DISABLED)
-                else:
-                    # Disabled and offline — steady [x DIS]
-                    status_str  = "[x DIS]"
-                    status_attr = curses.color_pair(self.C_DISABLED)
-            elif since is not None:
-                elapsed     = now - since
-                name_attr   = curses.color_pair(self.C_LIVE) | curses.A_BOLD
-                # Flash between "Live" and "REC" for recording streamers
-                if is_rec:
-                    if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
+                elif since is not None:
+                    elapsed     = now - since
+                    name_attr   = curses.color_pair(self.C_LIVE) | curses.A_BOLD
+                    if is_rec:
+                        if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
+                            status_str  = "[●Live]"
+                            status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
+                        else:
+                            status_str  = "[► REC] "
+                            status_attr = curses.color_pair(self.C_REC) | curses.A_BOLD
+                    else:
                         status_str  = "[●Live]"
                         status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
-                    else:
-                        status_str  = "[► REC] "
-                        status_attr = curses.color_pair(self.C_REC) | curses.A_BOLD
+                    bar_str     = _live_bar(elapsed, bar_w, _bar_max_secs)
+                    bar_attr    = curses.color_pair(self.C_LIVE)
+                    dur_str     = _fmt_duration(elapsed)
+                    if not (is_rec and recording_res.get(s) is not None):
+                        last_live_str = ""  # currently live, no "last live"
                 else:
-                    status_str  = "[●Live]"
-                    status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
-                bar_str     = _live_bar(elapsed, bar_w, _bar_max_secs)
-                bar_attr    = curses.color_pair(self.C_LIVE)
-                dur_str     = _fmt_duration(elapsed)
-                if not (is_rec and recording_res.get(s) is not None):
-                    last_live_str = ""  # currently live, no "last live"
-            else:
-                name_attr   = curses.color_pair(self.C_DIM)
-                status_str  = "[○ off]"
-                status_attr = curses.color_pair(self.C_DIM)
-                bar_str     = "─" * bar_w
-                bar_attr    = curses.color_pair(self.C_DIM)
-                dur_str     = ""
+                    name_attr   = curses.color_pair(self.C_DIM)
+                    status_str  = "[○ off]"
+                    status_attr = curses.color_pair(self.C_DIM)
+                    bar_str     = "─" * bar_w
+                    bar_attr    = curses.color_pair(self.C_DIM)
+                    dur_str     = ""
 
-            col = x1 + 2
-            self.safe_addstr(self.stdscr, row_y, col,
-                        s[:name_w].ljust(name_w), name_attr)
-            col += name_w + 1
-            self.safe_addstr(self.stdscr, row_y, col,
-                        status_str[:7].ljust(7), status_attr)
-            col += 8
-            self.safe_addstr(self.stdscr, row_y, col, bar_str, bar_attr)
-            col += bar_w + 1
-            if dur_str:
+                col = x1 + 2
                 self.safe_addstr(self.stdscr, row_y, col,
-                            dur_str[:9].ljust(9), curses.color_pair(self.C_CHROME))
-            else:
-                self.safe_addstr(self.stdscr, row_y, col, " " * 9, 0)
-            col += 10
-            if last_live_str:
-                # Highlight in C_LIVE if streamer was live within LAST_LIVE_HIGHLIGHT days
-                if (ll_ts is not None
-                        and _last_live_highlight_days > 0
-                        and (now - ll_ts) <= _last_live_highlight_days * 86400):
-                    ll_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
+                            s[:name_w].ljust(name_w), name_attr)
+                col += name_w + 1
+                self.safe_addstr(self.stdscr, row_y, col,
+                            status_str[:7].ljust(7), status_attr)
+                col += 8
+                self.safe_addstr(self.stdscr, row_y, col, bar_str, bar_attr)
+                col += bar_w + 1
+                if dur_str:
+                    self.safe_addstr(self.stdscr, row_y, col,
+                                dur_str[:9].ljust(9), curses.color_pair(self.C_CHROME))
                 else:
-                    ll_attr = curses.color_pair(self.C_DIM)
-                self.safe_addstr(self.stdscr, row_y, col,
-                            last_live_str[:last_live_w],
-                            ll_attr)
+                    self.safe_addstr(self.stdscr, row_y, col, " " * 9, 0)
+                col += 10
+                if last_live_str:
+                    if (ll_ts is not None
+                            and _last_live_highlight_days > 0
+                            and (now - ll_ts) <= _last_live_highlight_days * 86400):
+                        ll_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
+                    else:
+                        ll_attr = curses.color_pair(self.C_DIM)
+                    self.safe_addstr(self.stdscr, row_y, col,
+                                last_live_str[:last_live_w],
+                                ll_attr)
 
         # ── Countdown ──
         nxt = max(0.0, next_in)
@@ -4605,6 +4856,18 @@ class JJDlpDashboard:
                          f"  A: add/enable streamer R: remove streamer D: disable streamer"
                          f"  S: Sort"
                          f"  C: colors  Q: quit  ")
+            elif current_tab == "Config":
+                hints = (f"  LEFT/RIGHT: switch tabs"
+                         f"  [: prev site  ]: next site"
+                         f"  Tab: Next Panel"
+                         f"  G: Changelog"
+                         f"  C: colors  Q: quit  ")
+            elif current_tab == "File Manager":
+                hints = (f"  LEFT/RIGHT: switch tabs"
+                         f"  [: prev site  ]: next site"
+                         f"  \u2191\u2193: select  Enter: open  Space: show folder"
+                         f"  DEL: delete  S: sort  T: toggle trash"
+                         f"  C: colors  Q: quit  ")
             else:
                 hints = (f"  LEFT/RIGHT: switch tabs"
                          f"  [: prev site  ]: next site"
@@ -4851,6 +5114,9 @@ class JJDlpDashboard:
             self.draw_eventsub_tab(content_y1, 1, content_y2, content_x2)
         elif current_tab_name == "Config":
             self.draw_config_tab(content_y1, 1, content_y2, content_x2)
+        elif current_tab_name == "File Manager":
+            self.file_manager.maybe_poll()
+            self.file_manager.draw(self.stdscr, content_y1, 1, content_y2, content_x2)
         _t_main_tab = time.time() - _t0
 
         self.draw_footer()
@@ -4861,6 +5127,10 @@ class JJDlpDashboard:
         # Sort popup — drawn on top of everything else.
         if self.sort_manager.popup_open:
             self.sort_manager.draw_popup(self.stdscr)
+
+        # File Manager sort popup — drawn on top when active.
+        if hasattr(self, 'file_manager') and self.file_manager.popup_open:
+            self.file_manager.draw_popup(self.stdscr)
 
         # Changelog popup — drawn on top of sort popup if both somehow open.
         if self._changelog_popup_open:
@@ -4923,6 +5193,13 @@ class JJDlpDashboard:
                     return True
                 dbg(f"[CONFIG] main.handle_key() config_editor did not consume key={key}")
 
+        if current_tab_name == "File Manager":
+            # Pass keys to FileManagerTab first. Still allow global tab/site switching.
+            if key not in (ord(']'), curses.KEY_NPAGE, ord('['), curses.KEY_PPAGE,
+                           curses.KEY_LEFT, ord('h'), curses.KEY_RIGHT, ord('l')):
+                if self.file_manager.handle_key(key):
+                    return True
+
         if key in (ord('q'), ord('Q'), 27):
             self._open_exit_confirm()
         elif key in (curses.KEY_RIGHT, ord('l')):
@@ -4979,6 +5256,8 @@ class JJDlpDashboard:
         elif key in (ord('s'), ord('S')):
             if current_tab_name == "Dashboard":
                 self.sort_manager.open_popup()
+        elif key in (ord('g'), ord('G')):
+            self.open_changelog_popup()
         return True
 
     def _start_mgmt(self, action: str):
