@@ -611,23 +611,25 @@ class FileManagerTab:
             return
 
         avail_w = (x2 - x1) - 3
-        name_w = max(20, avail_w - 44)
+        status_w = 8
+        mod_w    = 16
+        size_w   = 8
+        rate_w   = 9
+        fixed_cols = 2 + 1 + status_w + 1 + mod_w + 1 + size_w + 1 + rate_w
+        name_w = max(12, avail_w - fixed_cols)
+
         col_status_x = x1 + 2 + name_w + 1
-        col_mod_x    = col_status_x + 9
-        col_size_x   = col_mod_x + 20
-        col_rate_x   = col_size_x + 10
+        col_mod_x    = col_status_x + status_w + 1
+        col_size_x   = col_mod_x + mod_w + 1
+        col_rate_x   = col_size_x + size_w + 1
 
         header_y = y1 + 1
-        db.safe_addstr(stdscr, header_y, x1 + 2, "File".ljust(name_w)[:name_w],
-                       curses.color_pair(db.C_INVHEAD) | curses.A_BOLD)
-        db.safe_addstr(stdscr, header_y, col_status_x, "Status",
-                       curses.color_pair(db.C_INVHEAD) | curses.A_BOLD)
-        db.safe_addstr(stdscr, header_y, col_mod_x, "Date Modified",
-                       curses.color_pair(db.C_INVHEAD) | curses.A_BOLD)
-        db.safe_addstr(stdscr, header_y, col_size_x, "Size",
-                       curses.color_pair(db.C_INVHEAD) | curses.A_BOLD)
-        db.safe_addstr(stdscr, header_y, col_rate_x, "Rate",
-                       curses.color_pair(db.C_INVHEAD) | curses.A_BOLD)
+        header_attr = curses.color_pair(db.C_NORMAL) | curses.A_BOLD
+        db.safe_addstr(stdscr, header_y, x1 + 2, "File".ljust(name_w)[:name_w], header_attr)
+        db.safe_addstr(stdscr, header_y, col_status_x, "Status".ljust(status_w)[:status_w], header_attr)
+        db.safe_addstr(stdscr, header_y, col_mod_x, "Date Modified".ljust(mod_w)[:mod_w], header_attr)
+        db.safe_addstr(stdscr, header_y, col_size_x, "Size".ljust(size_w)[:size_w], header_attr)
+        db.safe_addstr(stdscr, header_y, col_rate_x, "Rate".ljust(rate_w)[:rate_w], header_attr)
 
         list_y1 = header_y + 1
         list_y2 = y2 - 1                 # leave the last row for status/help
@@ -672,13 +674,11 @@ class FileManagerTab:
                 else:
                     row_attr = curses.color_pair(db.C_DIM)
 
-                # Pad the whole row width so the selection highlight reads as
-                # a full bar rather than just covering the filename text.
                 db.safe_addstr(stdscr, row_y, x1 + 2, name.ljust(name_w)[:name_w], row_attr)
-                db.safe_addstr(stdscr, row_y, col_status_x, status.ljust(8)[:8], row_attr)
-                db.safe_addstr(stdscr, row_y, col_mod_x, mod_txt.ljust(19)[:19], row_attr)
-                db.safe_addstr(stdscr, row_y, col_size_x, size_txt.rjust(9)[:9], row_attr)
-                db.safe_addstr(stdscr, row_y, col_rate_x, rate_txt.rjust(10)[:10], row_attr)
+                db.safe_addstr(stdscr, row_y, col_status_x, status.ljust(status_w)[:status_w], row_attr)
+                db.safe_addstr(stdscr, row_y, col_mod_x, mod_txt.ljust(mod_w)[:mod_w], row_attr)
+                db.safe_addstr(stdscr, row_y, col_size_x, size_txt.rjust(size_w)[:size_w], row_attr)
+                db.safe_addstr(stdscr, row_y, col_rate_x, rate_txt.rjust(rate_w)[:rate_w], row_attr)
             row_y += 1
 
         delete_lbl = "Trash" if self._delete_mode == DELETE_MODE_TRASH else "Permanent Delete"
