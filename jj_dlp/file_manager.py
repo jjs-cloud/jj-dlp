@@ -631,7 +631,7 @@ class FileManagerTab:
         db.safe_addstr(stdscr, header_y, col_size_x, "Size".ljust(size_w)[:size_w], header_attr)
         db.safe_addstr(stdscr, header_y, col_rate_x, "Rate".ljust(rate_w)[:rate_w], header_attr)
 
-        list_y1 = header_y + 1
+        list_y1 = header_y + 2           # leave row header_y+1 for status messages
         list_y2 = y2 - 1                 # leave the last row for status/help
         visible = max(1, list_y2 - list_y1)
 
