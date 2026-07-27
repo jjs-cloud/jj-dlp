@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.23.4"
+__version__ = "1.23.5"
 
 import subprocess
 import time
@@ -2262,11 +2262,15 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 site.clear_ffmpeg_error_count(streamer)
                 site.clear_stall_since(streamer)
 
-                # NOTE: the active filename is no longer parsed from stdout —
-                # see _sidecar_path / the "Resolve active output file" block
-                # below, which reads it straight from the UTF-8 file yt-dlp
-                # writes via --print-to-file. The drain threads below now
-                # only handle logging / ffmpeg-error / ad-alert detection.
+                # Shared container for the filename parsed from yt-dlp's
+                # stdout/stderr "[download] Destination: ..." line. This is
+                # the 2nd-tier fallback (after the sidecar file, before the
+                # --dump-json fallback) — some extractors never populate 
+                # %(filepath)s at the "before_dl" hook the sidecar relies on,
+                # so we still want this as a backstop.
+                filename_holder: List[str] = []
+                filename_event  = threading.Event()
+
                 threading.Thread(
                     target=_drain_pipe,
                     args=(proc.stdout, log_out_fp, "stdout"),
@@ -2275,6 +2279,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         "ffmpeg_error_event": ffmpeg_error_event,
                         "streamer": streamer,
                         "site": site,
+                        "filename_holder": filename_holder,
+                        "filename_event": filename_event,
                         "ad_alerts_enabled": cfg.get("ad_alerts", False),
                     },
                     daemon=True
@@ -2288,6 +2294,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         "ffmpeg_error_event": ffmpeg_error_event,
                         "streamer": streamer,
                         "site": site,
+                        "filename_holder": filename_holder,
+                        "filename_event": filename_event,
                         "ad_alerts_enabled": cfg.get("ad_alerts", False),
                     },
                     daemon=True
@@ -2302,15 +2310,19 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 break
 
             # ── Resolve active output file ────────────────────────────────
-            # yt-dlp resolves the final destination path and writes it to
-            # _sidecar_path itself (in UTF-8, via --print-to-file on the
-            # "before_dl" hook) as soon as it picks a filename. This avoids
-            # ever having to reconstruct the filename from stdout/console
-            # text, which can get mangled on Windows for emoji/CJK titles.
-            # Fall back to querying yt-dlp for JSON metadata if the sidecar
-            # never appears within the wait window (e.g. the process exits
-            # immediately on error, or an old yt-dlp build predates
-            # --print-to-file support).
+            # 3-tier fallback chain:
+            #   1. Sidecar file written by yt-dlp itself (--print-to-file on
+            #      "before_dl"), read in UTF-8 — avoids any console/stdout
+            #      encoding issues (e.g. mangled emoji/CJK titles on Windows).
+            #   2. yt-dlp's "[download] Destination: ..." stdout/stderr line,
+            #      parsed live by _drain_pipe — covers extractors where
+            #      %(filepath)s isn't resolvable yet at "before_dl", 
+            #      which writes "NA" to the sidecar).
+            #   3. Re-running yt-dlp with --dump-json to ask it directly for
+            #      the filename it would use — slowest, and can, in principle,
+            #      compute a slightly different name if anything in the
+            #      template is time-sensitive, but is the most tolerant of
+            #      extractor quirks.
             _FILENAME_WAIT_TIMEOUT = 15.0
             active_file = None
             _sidecar_deadline = time.time() + _FILENAME_WAIT_TIMEOUT
@@ -2366,6 +2378,35 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         os.remove(_sidecar_path)
                 except OSError:
                     pass
+
+            # ── Tier 2 fallback: yt-dlp's own "[download] Destination: ..."
+            # stdout/stderr line, parsed live by _drain_pipe into
+            # filename_holder/filename_event. Some extractors never populate 
+            # %(filepath)s at the "before_dl" hook the sidecar relies on,
+            # so the sidecar comes back empty/"NA" —
+            # this catches those. The drain threads have been running the
+            # whole time the sidecar loop above was waiting, so the event is
+            # usually already set here; the short wait just covers the case
+            # where the process exited (or the sidecar timed out) slightly
+            # before the Destination line made it through.
+            if not active_file and filename_event.wait(timeout=2.0) and filename_holder:
+                raw_dest = filename_holder[0]
+                candidate = raw_dest if os.path.isabs(raw_dest) else os.path.join(output_dir, raw_dest)
+
+                # Wait briefly in case it's still being written to disk.
+                _chk_start = time.time()
+                while time.time() - _chk_start < 2.0:
+                    if os.path.exists(candidate):
+                        break
+                    time.sleep(0.5)
+
+                if os.path.exists(candidate):
+                    active_file = candidate
+                    dbg(f"[STALL] resolved active_file from Destination line "
+                        f"(tier-2 fallback): {active_file!r}", site_name=streamer)
+                else:
+                    dbg(f"[STALL] active_file {candidate!r} from Destination line "
+                        f"does not exist, discarding.", site_name=streamer)
 
             if not active_file:
                 dbg(f"[STALL] falling back to JSON parsing for streamer={streamer!r}",
