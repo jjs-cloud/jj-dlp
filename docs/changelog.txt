@@ -1,4 +1,6 @@
-- added a new global key called "COMPACT_VIEW".  When set to "auto", the site panel will change into compact view automatically when there are too many streamers to display
+- added a new global key called "COMPACT_VIEW".  When set to "auto", the site panel(s) will change into compact view automatically when there are too many streamers to display in the normal view
+- fixed issue with handling filenames with special characters (yt-dlp --print-to-file)
+- you can now open this changelog at any time with the G key
 
 ====================
 ====================
