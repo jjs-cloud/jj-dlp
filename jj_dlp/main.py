@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.23.6"
+__version__ = "1.24.0"
 
 import subprocess
 import time
@@ -41,6 +41,7 @@ from .browser_config import (
     _write_ask_for_browser_to_config,
 )
 from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS, _compute_config_id, SiteSortManager, SORT_OPTIONS, _SORT_LABELS
+from .file_manager import FileManagerTab
 
 import curses  # noqa: E402
 
@@ -3719,7 +3720,8 @@ class JJDlpDashboard:
         if any_eventsub:
             self.TABS.append("EventSub")
 
-        self.TABS.append("Config")  # Config tab is always last
+        self.TABS.append("Config")  # Config tab is second-to-last
+        self.TABS.append("File Manager")  # File Manager tab is always last
         # --------------------------
 
         self.selected_tab = 0
@@ -3748,6 +3750,9 @@ class JJDlpDashboard:
 
         # Sort manager — controls streamer ordering in site panels
         self.sort_manager = SiteSortManager(self)
+
+        # File Manager tab — watches OUTPUT_DIRs for the current set of sites
+        self.file_manager = FileManagerTab(self)
 
         # ── Changelog popup state ─────────────────────────────────────────────
         # Shown once after startup when update_available=false & changelog_shown=false.
@@ -4857,6 +4862,12 @@ class JJDlpDashboard:
                          f"  Tab: Next Panel"
                          f"  G: Changelog"
                          f"  C: colors  Q: quit  ")
+            elif current_tab == "File Manager":
+                hints = (f"  LEFT/RIGHT: switch tabs"
+                         f"  [: prev site  ]: next site"
+                         f"  \u2191\u2193: select  Enter: open  Space: show folder"
+                         f"  DEL: delete  S: sort  T: toggle trash"
+                         f"  C: colors  Q: quit  ")
             else:
                 hints = (f"  LEFT/RIGHT: switch tabs"
                          f"  [: prev site  ]: next site"
@@ -5103,6 +5114,9 @@ class JJDlpDashboard:
             self.draw_eventsub_tab(content_y1, 1, content_y2, content_x2)
         elif current_tab_name == "Config":
             self.draw_config_tab(content_y1, 1, content_y2, content_x2)
+        elif current_tab_name == "File Manager":
+            self.file_manager.maybe_poll()
+            self.file_manager.draw(self.stdscr, content_y1, 1, content_y2, content_x2)
         _t_main_tab = time.time() - _t0
 
         self.draw_footer()
@@ -5113,6 +5127,10 @@ class JJDlpDashboard:
         # Sort popup — drawn on top of everything else.
         if self.sort_manager.popup_open:
             self.sort_manager.draw_popup(self.stdscr)
+
+        # File Manager sort popup — drawn on top when active.
+        if hasattr(self, 'file_manager') and self.file_manager.popup_open:
+            self.file_manager.draw_popup(self.stdscr)
 
         # Changelog popup — drawn on top of sort popup if both somehow open.
         if self._changelog_popup_open:
@@ -5174,6 +5192,13 @@ class JJDlpDashboard:
                     dbg(f"[CONFIG] main.handle_key() config_editor consumed key={key}")
                     return True
                 dbg(f"[CONFIG] main.handle_key() config_editor did not consume key={key}")
+
+        if current_tab_name == "File Manager":
+            # Pass keys to FileManagerTab first. Still allow global tab/site switching.
+            if key not in (ord(']'), curses.KEY_NPAGE, ord('['), curses.KEY_PPAGE,
+                           curses.KEY_LEFT, ord('h'), curses.KEY_RIGHT, ord('l')):
+                if self.file_manager.handle_key(key):
+                    return True
 
         if key in (ord('q'), ord('Q'), 27):
             self._open_exit_confirm()
