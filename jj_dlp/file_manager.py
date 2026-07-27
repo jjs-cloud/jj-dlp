@@ -363,7 +363,7 @@ class FileManagerTab:
                 rec["size"] = size
                 rec["last_change"] = now
             else:
-                rec["rate"] = 0.0
+                pass  # keep last known rate; cleared naturally via IDLE status after ~3s
             rec["last_poll"] = now
             try:
                 rec["mtime"] = os.path.getmtime(path)
