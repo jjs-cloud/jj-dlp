@@ -1033,7 +1033,8 @@ class FileManagerTab:
         delete_lbl = "Trash" if self._delete_mode == DELETE_MODE_TRASH else "Permanent Delete"
         info = (f" Delete mode: {delete_lbl} (T to toggle)   "
                 f"Sort: {_FM_SORT_LABELS.get(self._sort_key, self._sort_key)} ")
-        db.safe_addstr(stdscr, y2, x1 + 2, info[:avail_w], curses.color_pair(db.C_DIM))
+        info_attr = curses.color_pair(db.C_DELETE) | curses.A_BOLD if self._delete_mode == DELETE_MODE_PERMANENT else curses.color_pair(db.C_DIM)
+        db.safe_addstr(stdscr, y2, x1 + 2, info[:avail_w], info_attr)
 
         if self._status_msg and (time.time() - self._status_msg_ts) < STATUS_MSG_TTL_S:
             db.safe_addstr(stdscr, y1 + 2, x1 + 2, self._status_msg[:avail_w],

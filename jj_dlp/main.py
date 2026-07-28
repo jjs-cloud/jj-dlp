@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.24.2"
+__version__ = "1.24.3"
 
 import subprocess
 import time
@@ -3779,6 +3779,7 @@ class JJDlpDashboard:
     C_NORMAL    = 10  # normal text
     C_DISABLED  = 11  # disabled/blocked
     C_SYSTEM    = 12  # system panel header/border
+    C_DELETE    = 13  # permanent delete warning (white on red)
 
     # Color schemes: list of (chrome_fg, hilight_fg, hilight_bg, warn_fg, live_fg,
     #                          invhead_fg, invhead_bg, logo_fg, rec_fg, dim_fg,
@@ -3844,6 +3845,7 @@ class JJDlpDashboard:
         curses.init_pair(self.C_NORMAL,    normal_fg,    curses.COLOR_BLACK)
         curses.init_pair(self.C_DISABLED,  disabled_fg,  curses.COLOR_BLACK)
         curses.init_pair(self.C_SYSTEM,    system_fg,    curses.COLOR_BLACK)
+        curses.init_pair(self.C_DELETE,   curses.COLOR_WHITE, curses.COLOR_RED)
 
     def setup_colors(self):
         curses.start_color()
