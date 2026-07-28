@@ -2499,17 +2499,22 @@ class GlobalConfigEditor:
         db   = self.dashboard
         h, w = stdscr.getmaxyx()
 
-        box_w  = min(66, w - 4)
-        n_dest = len(self._destinations_list)
+        box_w      = min(66, w - 4)
+        inner_w    = box_w - 4
+        n_dest     = len(self._destinations_list)
+        comment    = self.editing_item.comment if self.editing_item else ""
+        comment_lines = _wrap_text(comment, inner_w) if comment else []
 
         # 2 borders + 1 title gap + 1 "Paths:" header + n_dest rows (or 1
         # "none yet" line) + 1 blank + 1 input row + 1 legend
-        min_h  = max(n_dest, 1) + 7
-        box_h  = min(min_h, h - 4)
-        by1    = (h - box_h) // 2
-        bx1    = (w - box_w) // 2
-        by2    = by1 + box_h
-        bx2    = bx1 + box_w
+        # + comment rows (if any) + 1 blank separator after comment
+        comment_h  = len(comment_lines) + (1 if comment_lines else 0)
+        min_h      = max(n_dest, 1) + 7 + comment_h
+        box_h      = min(min_h, h - 4)
+        by1        = (h - box_h) // 2
+        bx1        = (w - box_w) // 2
+        by2        = by1 + box_h
+        bx2        = bx1 + box_w
 
         for y in range(by1, by2 + 1):
             db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), curses.color_pair(db.C_NORMAL))
@@ -2518,6 +2523,12 @@ class GlobalConfigEditor:
                        curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
 
         row = by1 + 1
+        if comment_lines:
+            for cl in comment_lines:
+                db.safe_addstr(stdscr, row, bx1 + 2, cl, curses.color_pair(db.C_DIM))
+                row += 1
+            row += 1  # blank separator
+
         db.safe_addstr(stdscr, row, bx1 + 2, "Paths:", curses.color_pair(db.C_DIM))
         row += 1
 
