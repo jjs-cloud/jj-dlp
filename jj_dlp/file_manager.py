@@ -33,7 +33,7 @@ File Options
 Pressing M on a selected file opens a small "File Options" menu. Selecting
 "Fixup" opens a second popup with two checkboxes:
 
-    [ ] Delete original file
+    [ ] Delete original file after fixup
     [ ] Convert to MP4
 
 Fixup itself mirrors yt-dlp's fixup remux: it stream-copies (no re-encode)
@@ -112,7 +112,7 @@ FILE_MENU_OPTIONS = [
 
 # ── "Fixup" checkbox popup ──────────────────────────────────────────────────
 FIXUP_CHECK_ITEMS = [
-    ("delete_original", "Delete original file"),
+    ("delete_original", "Delete original file after fixup"),
     ("convert_mp4",     "Convert to MP4 (no re-encode)"),
 ]
 
