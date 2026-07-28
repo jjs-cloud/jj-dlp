@@ -26,6 +26,23 @@ Keybinds (active only while the "File Manager" tab is selected)
     S             - open the sort-order popup (persisted to global.json)
     T             - toggle delete mode between Trash and Permanent Delete
                     (persisted to global.json)
+    M             - open the "File Options" popup for the selected file
+
+File Options
+---------------------
+Pressing M on a selected file opens a small "File Options" menu. Selecting
+"Fixup" opens a second popup with two checkboxes:
+
+    [ ] Delete original file
+    [ ] Convert to MP4
+
+Fixup itself mirrors yt-dlp's fixup remux: it stream-copies (no re-encode)
+the file through ffmpeg to repair broken/discontinuous timestamps, the
+same class of problem yt-dlp's own fixup postprocessors patch up after a
+download. "Convert to MP4" only changes the output container - it is still
+a stream-copy remux, not a transcode. The new file's "date modified" is
+always set to match the original file's, and Fixup runs in a background
+thread so the UI doesn't freeze while ffmpeg works.
 
 Delete mode
 -----------
@@ -48,8 +65,11 @@ import os
 import time
 import platform
 import subprocess
+import threading
 
 import curses
+
+from .deps import check_ffmpeg
 
 try:
     from send2trash import send2trash as _send2trash
@@ -83,6 +103,18 @@ SORT_OPTIONS_FM = [
 _FM_SORT_KEYS = [k for k, _ in SORT_OPTIONS_FM]
 _FM_SORT_LABELS = {k: lbl for k, lbl in SORT_OPTIONS_FM}
 FM_SORT_DEFAULT = "name_asc"
+
+# ── "File Options" popup (M key) ────────────────────────────────────────────
+# One row per action. Only "Fixup" exists today; more get appended here.
+FILE_MENU_OPTIONS = [
+    ("fixup", "Fixup"),
+]
+
+# ── "Fixup" checkbox popup ──────────────────────────────────────────────────
+FIXUP_CHECK_ITEMS = [
+    ("delete_original", "Delete original file"),
+    ("convert_mp4",     "Convert to MP4 (no re-encode)"),
+]
 
 # Sort keys for which the underlying comparison needs to be reversed to
 # achieve the labeled order (e.g. "Newest first" means reverse=True on mtime).
@@ -262,6 +294,18 @@ class FileManagerTab:
         self._popup_sel = self._sort_idx(self._sort_key)
         self._popup_scroll = 0
 
+        # "File Options" menu popup (M key)
+        self._menu_open = False
+        self._menu_sel = 0
+
+        # "Fixup" checkbox popup + background job state
+        self._fixup_open = False
+        self._fixup_cursor = 0
+        self._fixup_target = None
+        self._fixup_checks = {"delete_original": False, "convert_mp4": False}
+        self._fixup_busy = False
+        self._fixup_lock = threading.Lock()
+
     # ── Settings persistence (global.json) ─────────────────────────────────
 
     @staticmethod
@@ -438,6 +482,10 @@ class FileManagerTab:
         """Returns True if the key was consumed by the File Manager tab."""
         if self.popup_open:
             return self._handle_popup_key(key)
+        if self._fixup_open:
+            return self._handle_fixup_popup_key(key)
+        if self._menu_open:
+            return self._handle_menu_popup_key(key)
 
         if key in (curses.KEY_UP,):
             self.move_selection(-1)
@@ -469,6 +517,10 @@ class FileManagerTab:
             return True
         if key in (ord('t'), ord('T')):
             self._toggle_delete_mode()
+            return True
+        if key in (ord('m'), ord('M')):
+            if self._selected_path:
+                self.open_menu_popup()
             return True
         return False
 
@@ -599,6 +651,289 @@ class FileManagerTab:
                 attr = curses.color_pair(db.C_NORMAL)
             db.safe_addstr(stdscr, row_y, bx1 + 2,
                            (prefix + label)[:box_w - 4], attr)
+
+    # ── "File Options" popup (M key) ────────────────────────────────────────
+
+    def any_popup_open(self) -> bool:
+        """True if any of this tab's popups (sort / menu / fixup) is open."""
+        return self.popup_open or self._menu_open or self._fixup_open
+
+    def draw_popups(self, stdscr) -> None:
+        """Draw whichever of this tab's popups is currently open."""
+        if self.popup_open:
+            self.draw_popup(stdscr)
+        elif self._menu_open:
+            self.draw_menu_popup(stdscr)
+        elif self._fixup_open:
+            self.draw_fixup_popup(stdscr)
+
+    def open_menu_popup(self):
+        self._menu_sel = 0
+        self._menu_open = True
+
+    def close_menu_popup(self):
+        self._menu_open = False
+
+    def _handle_menu_popup_key(self, key) -> bool:
+        n = len(FILE_MENU_OPTIONS)
+        if key == 27:  # Esc -> cancel
+            self.close_menu_popup()
+        elif key == curses.KEY_UP:
+            self._menu_sel = max(0, self._menu_sel - 1)
+        elif key == curses.KEY_DOWN:
+            self._menu_sel = min(n - 1, self._menu_sel + 1)
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459, ord(' ')):
+            action_key, _label = FILE_MENU_OPTIONS[self._menu_sel]
+            self.close_menu_popup()
+            if action_key == "fixup":
+                self.open_fixup_popup()
+        # All other keys are consumed so nothing leaks to the dashboard.
+        return True
+
+    def draw_menu_popup(self, stdscr) -> None:
+        db = self.dashboard
+        h, w = stdscr.getmaxyx()
+        n = len(FILE_MENU_OPTIONS)
+
+        box_w = min(36, w - 4)
+        box_h = min(n + 3, h - 4)
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1),
+                           curses.color_pair(db.C_NORMAL))
+
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_CHROME)
+        db.safe_addstr(stdscr, by1, bx1 + 2, " FILE OPTIONS ",
+                       curses.color_pair(db.C_CHROME) | curses.A_BOLD)
+        db.safe_addstr(stdscr, by2, bx1 + 2,
+                       " Enter: Select  Esc: Cancel ",
+                       curses.color_pair(db.C_INVHEAD))
+
+        for i, (_action_key, label) in enumerate(FILE_MENU_OPTIONS):
+            row_y = by1 + 1 + i
+            is_sel = (i == self._menu_sel)
+            prefix = "> " if is_sel else "  "
+            attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD) if is_sel \
+                else curses.color_pair(db.C_NORMAL)
+            db.safe_addstr(stdscr, row_y, bx1 + 2,
+                           (prefix + label)[:box_w - 4], attr)
+
+    # ── "Fixup" checkbox popup ───────────────────────────────────────────────
+
+    def open_fixup_popup(self):
+        if not self._selected_path:
+            return
+        self._fixup_target = self._selected_path
+        self._fixup_checks = {"delete_original": False, "convert_mp4": False}
+        self._fixup_cursor = 0
+        self._fixup_open = True
+
+    def close_fixup_popup(self):
+        self._fixup_open = False
+        self._fixup_target = None
+
+    def _handle_fixup_popup_key(self, key) -> bool:
+        n = len(FIXUP_CHECK_ITEMS)
+        if key == 27:  # Esc -> cancel, discard checkbox state
+            self.close_fixup_popup()
+        elif key == curses.KEY_UP:
+            self._fixup_cursor = max(0, self._fixup_cursor - 1)
+        elif key == curses.KEY_DOWN:
+            self._fixup_cursor = min(n - 1, self._fixup_cursor + 1)
+        elif key == ord(' '):
+            check_key, _label = FIXUP_CHECK_ITEMS[self._fixup_cursor]
+            self._fixup_checks[check_key] = not self._fixup_checks[check_key]
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
+            target = self._fixup_target
+            delete_original = self._fixup_checks["delete_original"]
+            convert_mp4 = self._fixup_checks["convert_mp4"]
+            self.close_fixup_popup()
+            self._start_fixup(target, delete_original, convert_mp4)
+        # All other keys are consumed so nothing leaks to the dashboard.
+        return True
+
+    def draw_fixup_popup(self, stdscr) -> None:
+        db = self.dashboard
+        h, w = stdscr.getmaxyx()
+        n = len(FIXUP_CHECK_ITEMS)
+
+        box_w = min(52, w - 4)
+        box_h = min(n + 5, h - 4)
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1),
+                           curses.color_pair(db.C_NORMAL))
+
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_CHROME)
+        db.safe_addstr(stdscr, by1, bx1 + 2, " FIXUP ",
+                       curses.color_pair(db.C_CHROME) | curses.A_BOLD)
+        db.safe_addstr(stdscr, by2, bx1 + 2,
+                       " Space: Toggle  Enter: Run  Esc: Cancel ",
+                       curses.color_pair(db.C_INVHEAD))
+
+        target_name = os.path.basename(self._fixup_target or "")
+        db.safe_addstr(stdscr, by1 + 1, bx1 + 2,
+                       target_name[:box_w - 4],
+                       curses.color_pair(db.C_DIM))
+
+        for i, (check_key, label) in enumerate(FIXUP_CHECK_ITEMS):
+            row_y = by1 + 3 + i
+            is_sel = (i == self._fixup_cursor)
+            checked = self._fixup_checks.get(check_key, False)
+            box = "[x]" if checked else "[ ]"
+            prefix = "> " if is_sel else "  "
+            attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD) if is_sel \
+                else curses.color_pair(db.C_NORMAL)
+            db.safe_addstr(stdscr, row_y, bx1 + 2,
+                           f"{prefix}{box} {label}"[:box_w - 4], attr)
+
+    # ── Fixup job (runs ffmpeg on a background thread) ──────────────────────
+
+    def _start_fixup(self, path, delete_original, convert_mp4):
+        if not path or not os.path.isfile(path):
+            self._set_status("Fixup failed: file no longer exists")
+            return
+        with self._fixup_lock:
+            if self._fixup_busy:
+                self._set_status("A Fixup is already running - please wait")
+                return
+            self._fixup_busy = True
+        self._set_status(f"Fixup started: {os.path.basename(path)}")
+        t = threading.Thread(
+            target=self._fixup_worker,
+            args=(path, delete_original, convert_mp4),
+            daemon=True,
+        )
+        t.start()
+
+    def _fixup_worker(self, path, delete_original, convert_mp4):
+        try:
+            _ok, msg = self._do_fixup(path, delete_original, convert_mp4)
+            self._set_status(msg)
+        except Exception as exc:
+            self._set_status(f"Fixup failed: {exc}")
+        finally:
+            with self._fixup_lock:
+                self._fixup_busy = False
+
+    @staticmethod
+    def _unique_path(path):
+        """Return *path*, or a "(2)"/"(3)"/... suffixed variant if it exists."""
+        if not os.path.exists(path):
+            return path
+        base, ext = os.path.splitext(path)
+        n = 2
+        while True:
+            candidate = f"{base} ({n}){ext}"
+            if not os.path.exists(candidate):
+                return candidate
+            n += 1
+
+    @staticmethod
+    def _build_fixup_cmd(ffmpeg_path, input_path, output_path):
+        """Stream-copy remux mirroring yt-dlp's fixup postprocessors: fix
+        broken/discontinuous timestamps without re-encoding anything."""
+        cmd = [
+            ffmpeg_path, "-y",
+            "-err_detect", "ignore_err",
+            "-fflags", "+genpts",
+            "-i", input_path,
+            "-map", "0", "-c", "copy",
+            "-avoid_negative_ts", "make_zero",
+        ]
+        in_ext = os.path.splitext(input_path)[1].lower()
+        out_ext = os.path.splitext(output_path)[1].lower()
+        if in_ext == ".ts" and out_ext in (".mp4", ".m4a", ".mov", ".m4v"):
+            # Raw ADTS AAC (typical of HLS/.ts captures) needs its headers
+            # converted for an mp4-family container - same fix yt-dlp's
+            # m3u8 fixup applies when remuxing.
+            cmd += ["-bsf:a", "aac_adtstoasc"]
+        cmd.append(output_path)
+        return cmd
+
+    def _do_fixup(self, path, delete_original, convert_mp4):
+        """Runs on a background thread. Returns (ok, status_message)."""
+        found, ffmpeg_path = check_ffmpeg()
+        if not found or not ffmpeg_path:
+            return False, "Fixup failed: ffmpeg not found"
+
+        src_base, src_ext = os.path.splitext(path)
+        out_ext = ".mp4" if convert_mp4 else src_ext
+        same_ext = out_ext.lower() == src_ext.lower()
+
+        try:
+            st = os.stat(path)
+            orig_atime, orig_mtime = st.st_atime, st.st_mtime
+        except OSError as exc:
+            return False, f"Fixup failed: could not read source file ({exc})"
+
+        if delete_original and same_ext:
+            # The original still occupies the final name, so remux into a
+            # scratch file first and only claim the real name once the
+            # original is gone.
+            work_path = self._unique_path(src_base + ".fixup_tmp" + src_ext)
+            final_path = src_base + src_ext
+        else:
+            # Either the container is changing (so the name is already
+            # distinct from the original) or we're keeping the original
+            # (so we need a distinct name too).
+            suffix = out_ext if not same_ext else ("_fixed" + src_ext)
+            work_path = self._unique_path(src_base + suffix)
+            final_path = work_path
+
+        cmd = self._build_fixup_cmd(ffmpeg_path, path, work_path)
+        run_kwargs = {"capture_output": True, "text": True}
+        if IS_WINDOWS:
+            run_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+        try:
+            result = subprocess.run(cmd, **run_kwargs)
+        except Exception as exc:
+            return False, f"Fixup failed: could not run ffmpeg ({exc})"
+
+        if (result.returncode != 0 or not os.path.isfile(work_path)
+                or os.path.getsize(work_path) == 0):
+            try:
+                if os.path.isfile(work_path):
+                    os.remove(work_path)
+            except OSError:
+                pass
+            stderr_lines = (result.stderr or "").strip().splitlines()
+            detail = stderr_lines[-1] if stderr_lines else f"ffmpeg exited {result.returncode}"
+            return False, f"Fixup failed: {detail}"
+
+        # Carry the original file's date modified (and accessed) time over
+        # to the new file.
+        try:
+            os.utime(work_path, (orig_atime, orig_mtime))
+        except OSError:
+            pass
+
+        if delete_original:
+            if self._delete_mode == DELETE_MODE_PERMANENT:
+                ok, err = permanent_delete(path)
+            else:
+                ok, err = move_to_trash(path)
+            if not ok:
+                return False, (f"Fixup completed but could not delete original "
+                                f"({err}); kept as {os.path.basename(work_path)}")
+            if work_path != final_path:
+                try:
+                    os.rename(work_path, final_path)
+                except OSError as exc:
+                    return False, (f"Fixup completed and original deleted, but "
+                                    f"rename failed ({exc}); output is at "
+                                    f"{os.path.basename(work_path)}")
+
+        return True, f"Fixup complete: {os.path.basename(final_path)}"
 
     # ── Drawing ──────────────────────────────────────────────────────────────
 

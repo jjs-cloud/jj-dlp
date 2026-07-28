@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.24.1"
+__version__ = "1.24.2"
 
 import subprocess
 import time
@@ -5126,9 +5126,9 @@ class JJDlpDashboard:
         if self.sort_manager.popup_open:
             self.sort_manager.draw_popup(self.stdscr)
 
-        # File Manager sort popup — drawn on top when active.
-        if hasattr(self, 'file_manager') and self.file_manager.popup_open:
-            self.file_manager.draw_popup(self.stdscr)
+        # File Manager popups (sort / File Options / Fixup) — drawn on top when active.
+        if hasattr(self, 'file_manager') and self.file_manager.any_popup_open():
+            self.file_manager.draw_popups(self.stdscr)
 
         # Changelog popup — drawn on top of sort popup if both somehow open.
         if self._changelog_popup_open:
