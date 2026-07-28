@@ -329,6 +329,7 @@ class FileManagerTab:
         self._move_filename_streamer = ""
 
         self._move_busy = False
+        self._move_busy_path = None
         self._move_lock = threading.Lock()
 
     # ── Settings persistence (global.json) ─────────────────────────────────
@@ -1066,6 +1067,7 @@ class FileManagerTab:
                 self._set_status("A Move is already running - please wait")
                 return
             self._move_busy = True
+            self._move_busy_path = path
         self._set_status(f"Move started: {os.path.basename(path)}")
         t = threading.Thread(
             target=self._move_worker,
@@ -1083,6 +1085,7 @@ class FileManagerTab:
         finally:
             with self._move_lock:
                 self._move_busy = False
+                self._move_busy_path = None
 
     def _do_move(self, path, dest_root, filename, do_subfolder, do_fixup):
         """Runs on a background thread. Returns (ok, status_message)."""
@@ -1395,7 +1398,9 @@ class FileManagerTab:
                 else:
                     row_attr = curses.color_pair(db.C_DIM)
 
-                db.safe_addstr(stdscr, row_y, x1 + 2, name.ljust(name_w)[:name_w], row_attr)
+                is_moving = self._move_busy and self._move_busy_path == path
+                name_lbl = name if not is_moving else name + " Moving..."
+                db.safe_addstr(stdscr, row_y, x1 + 2, name_lbl.ljust(name_w)[:name_w], row_attr)
                 db.safe_addstr(stdscr, row_y, col_status_x, status.ljust(status_w)[:status_w], row_attr)
                 db.safe_addstr(stdscr, row_y, col_mod_x, mod_txt.ljust(mod_w)[:mod_w], row_attr)
                 db.safe_addstr(stdscr, row_y, col_size_x, size_txt.rjust(size_w)[:size_w], row_attr)
@@ -1407,10 +1412,6 @@ class FileManagerTab:
                 f"Sort: {_FM_SORT_LABELS.get(self._sort_key, self._sort_key)} ")
         info_attr = curses.color_pair(db.C_DELETE) | curses.A_BOLD if self._delete_mode == DELETE_MODE_PERMANENT else curses.color_pair(db.C_DIM)
         db.safe_addstr(stdscr, y2, x1 + 2, info[:avail_w], info_attr)
-        if self._move_busy:
-            busy_info = "  Moving..."
-            busy_attr = curses.color_pair(db.C_LIVE) | curses.A_BOLD
-            db.safe_addstr(stdscr, y2, x1 + 2 + len(info), busy_info[:avail_w - len(info)], busy_attr)
 
         if self._status_msg and (time.time() - self._status_msg_ts) < STATUS_MSG_TTL_S:
             db.safe_addstr(stdscr, y1 + 2, x1 + 2, self._status_msg[:avail_w],
