@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.24.3"
+__version__ = "1.24.4"
 
 import subprocess
 import time
@@ -3783,44 +3783,51 @@ class JJDlpDashboard:
 
     # Color schemes: list of (chrome_fg, hilight_fg, hilight_bg, warn_fg, live_fg,
     #                          invhead_fg, invhead_bg, logo_fg, rec_fg, dim_fg,
-    #                          livebadge_fg, livebadge_bg, normal_fg, disabled_fg, system_fg)
+    #                          livebadge_fg, livebadge_bg, normal_fg, disabled_fg, system_fg,
+    #                          delete_fg, delete_bg)
     COLOR_SCHEMES = [
         # 0: Default (cyan/blue/green/magenta)
         (curses.COLOR_CYAN,    curses.COLOR_WHITE,   curses.COLOR_BLUE,
          curses.COLOR_YELLOW,  curses.COLOR_GREEN,   curses.COLOR_BLACK,
          curses.COLOR_CYAN,    curses.COLOR_MAGENTA, curses.COLOR_RED,
          curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
-         curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_YELLOW),
+         curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_YELLOW,
+         curses.COLOR_WHITE,   curses.COLOR_RED),
         # 1: Amber terminal
         (curses.COLOR_YELLOW,  curses.COLOR_WHITE,   curses.COLOR_YELLOW,
          curses.COLOR_WHITE,   curses.COLOR_GREEN,   curses.COLOR_BLACK,
          curses.COLOR_YELLOW,  curses.COLOR_YELLOW,  curses.COLOR_RED,
          curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
-         curses.COLOR_WHITE,   curses.COLOR_WHITE,   curses.COLOR_CYAN),
+         curses.COLOR_WHITE,   curses.COLOR_WHITE,   curses.COLOR_CYAN,
+         curses.COLOR_WHITE,   curses.COLOR_RED),
         # 2: Green phosphor
         (curses.COLOR_GREEN,   curses.COLOR_WHITE,   curses.COLOR_GREEN,
          curses.COLOR_CYAN,    curses.COLOR_WHITE,   curses.COLOR_BLACK,
          curses.COLOR_GREEN,   curses.COLOR_GREEN,   curses.COLOR_RED,
          curses.COLOR_GREEN,   curses.COLOR_BLACK,   curses.COLOR_WHITE,
-         curses.COLOR_WHITE,   curses.COLOR_CYAN,    curses.COLOR_YELLOW),
+         curses.COLOR_WHITE,   curses.COLOR_CYAN,    curses.COLOR_YELLOW,
+         curses.COLOR_WHITE,   curses.COLOR_RED),
         # 3: Red alert
         (curses.COLOR_RED,     curses.COLOR_WHITE,   curses.COLOR_RED,
          curses.COLOR_YELLOW,  curses.COLOR_GREEN,   curses.COLOR_BLACK,
          curses.COLOR_RED,     curses.COLOR_RED,     curses.COLOR_MAGENTA,
          curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
-         curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_CYAN),
+         curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_CYAN,
+         curses.COLOR_WHITE,   curses.COLOR_MAGENTA),
         # 4: Magenta/purple
         (curses.COLOR_MAGENTA, curses.COLOR_WHITE,   curses.COLOR_MAGENTA,
          curses.COLOR_CYAN,    curses.COLOR_GREEN,   curses.COLOR_BLACK,
          curses.COLOR_MAGENTA, curses.COLOR_CYAN,    curses.COLOR_RED,
          curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
-         curses.COLOR_WHITE,   curses.COLOR_CYAN,    curses.COLOR_YELLOW),
+         curses.COLOR_WHITE,   curses.COLOR_CYAN,    curses.COLOR_YELLOW,
+         curses.COLOR_WHITE,   curses.COLOR_RED),
         # 5: Ice blue
         (curses.COLOR_CYAN,    curses.COLOR_WHITE,   curses.COLOR_CYAN,
          curses.COLOR_WHITE,   curses.COLOR_GREEN,   curses.COLOR_BLACK,
          curses.COLOR_WHITE,   curses.COLOR_BLUE,    curses.COLOR_RED,
          curses.COLOR_CYAN,    curses.COLOR_BLACK,   curses.COLOR_GREEN,
-         curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_MAGENTA),
+         curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_MAGENTA,
+         curses.COLOR_WHITE,   curses.COLOR_RED),
     ]
 
     def randomize_colors(self):
@@ -3832,7 +3839,8 @@ class JJDlpDashboard:
         s = self.COLOR_SCHEMES[self._color_scheme_idx]
         (chrome_fg, hilight_fg, hilight_bg, warn_fg, live_fg,
          invhead_fg, invhead_bg, logo_fg, rec_fg, dim_fg,
-         livebadge_fg, livebadge_bg, normal_fg, disabled_fg, system_fg) = s
+         livebadge_fg, livebadge_bg, normal_fg, disabled_fg, system_fg,
+         delete_fg, delete_bg) = s
         curses.init_pair(self.C_CHROME,    chrome_fg,    curses.COLOR_BLACK)
         curses.init_pair(self.C_HILIGHT,   hilight_fg,   hilight_bg)
         curses.init_pair(self.C_WARN,      warn_fg,      curses.COLOR_BLACK)
@@ -3845,7 +3853,7 @@ class JJDlpDashboard:
         curses.init_pair(self.C_NORMAL,    normal_fg,    curses.COLOR_BLACK)
         curses.init_pair(self.C_DISABLED,  disabled_fg,  curses.COLOR_BLACK)
         curses.init_pair(self.C_SYSTEM,    system_fg,    curses.COLOR_BLACK)
-        curses.init_pair(self.C_DELETE,   curses.COLOR_WHITE, curses.COLOR_RED)
+        curses.init_pair(self.C_DELETE,   delete_fg,   delete_bg)
 
     def setup_colors(self):
         curses.start_color()
