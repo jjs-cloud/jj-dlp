@@ -302,7 +302,7 @@ class FileManagerTab:
         self._fixup_open = False
         self._fixup_cursor = 0
         self._fixup_target = None
-        self._fixup_checks = {"delete_original": False, "convert_mp4": False}
+        self._fixup_checks = {"delete_original": True, "convert_mp4": True}
         self._fixup_busy = False
         self._fixup_lock = threading.Lock()
 
@@ -728,7 +728,7 @@ class FileManagerTab:
         if not self._selected_path:
             return
         self._fixup_target = self._selected_path
-        self._fixup_checks = {"delete_original": False, "convert_mp4": False}
+        self._fixup_checks = {"delete_original": True, "convert_mp4": True}
         self._fixup_cursor = 0
         self._fixup_open = True
 
