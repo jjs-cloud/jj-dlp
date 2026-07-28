@@ -990,6 +990,10 @@ class FileManagerTab:
                 self._move_filename_buf = \
                     self._move_filename_buf[:cur - 1] + self._move_filename_buf[cur:]
                 self._move_filename_cursor = cur - 1
+        elif key in (curses.KEY_DC,):
+            if cur < len(self._move_filename_buf):
+                self._move_filename_buf = \
+                    self._move_filename_buf[:cur] + self._move_filename_buf[cur + 1:]
         elif key in (curses.KEY_LEFT,):
             if cur > 0:
                 self._move_filename_cursor = cur - 1
