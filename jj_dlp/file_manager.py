@@ -62,6 +62,7 @@ Press T inside the File Manager tab to flip between the two at any time.
 """
 
 import os
+import shutil
 import time
 import platform
 import subprocess
@@ -105,15 +106,22 @@ _FM_SORT_LABELS = {k: lbl for k, lbl in SORT_OPTIONS_FM}
 FM_SORT_DEFAULT = "name_asc"
 
 # ── "File Options" popup (M key) ────────────────────────────────────────────
-# One row per action. Only "Fixup" exists today; more get appended here.
+# One row per action.
 FILE_MENU_OPTIONS = [
     ("fixup", "Fixup"),
+    ("move",  "Move"),
 ]
 
 # ── "Fixup" checkbox popup ──────────────────────────────────────────────────
 FIXUP_CHECK_ITEMS = [
     ("delete_original", "Delete original file after fixup is completed"),
     ("convert_mp4",     "Convert to MP4 (no re-encode)"),
+]
+
+# ── "Move" checkbox popup ────────────────────────────────────────────────────
+MOVE_CHECK_ITEMS = [
+    ("subfolder", "Move recording into a subfolder named after the streamer"),
+    ("fixup",     "Fixup the recording during the move"),
 ]
 
 # Sort keys for which the underlying comparison needs to be reversed to
@@ -306,6 +314,21 @@ class FileManagerTab:
         self._fixup_busy = False
         self._fixup_lock = threading.Lock()
 
+        # "Move" destination-picker popup (step 1: destination + checkboxes)
+        self._move_open = False
+        self._move_cursor = 0
+        self._move_checks = {"subfolder": True, "fixup": True}
+        self._move_target = None
+        self._move_destinations = []
+
+        # "Move" filename popup (step 2)
+        self._move_filename_open = False
+        self._move_filename_buf = ""
+        self._move_filename_dest = None
+
+        self._move_busy = False
+        self._move_lock = threading.Lock()
+
     # ── Settings persistence (global.json) ─────────────────────────────────
 
     @staticmethod
@@ -484,6 +507,10 @@ class FileManagerTab:
             return self._handle_popup_key(key)
         if self._fixup_open:
             return self._handle_fixup_popup_key(key)
+        if self._move_filename_open:
+            return self._handle_move_filename_popup_key(key)
+        if self._move_open:
+            return self._handle_move_popup_key(key)
         if self._menu_open:
             return self._handle_menu_popup_key(key)
 
@@ -655,8 +682,9 @@ class FileManagerTab:
     # ── "File Options" popup (M key) ────────────────────────────────────────
 
     def any_popup_open(self) -> bool:
-        """True if any of this tab's popups (sort / menu / fixup) is open."""
-        return self.popup_open or self._menu_open or self._fixup_open
+        """True if any of this tab's popups (sort / menu / fixup / move) is open."""
+        return (self.popup_open or self._menu_open or self._fixup_open
+                or self._move_open or self._move_filename_open)
 
     def draw_popups(self, stdscr) -> None:
         """Draw whichever of this tab's popups is currently open."""
@@ -666,6 +694,10 @@ class FileManagerTab:
             self.draw_menu_popup(stdscr)
         elif self._fixup_open:
             self.draw_fixup_popup(stdscr)
+        elif self._move_filename_open:
+            self.draw_move_filename_popup(stdscr)
+        elif self._move_open:
+            self.draw_move_popup(stdscr)
 
     def open_menu_popup(self):
         self._menu_sel = 0
@@ -687,6 +719,8 @@ class FileManagerTab:
             self.close_menu_popup()
             if action_key == "fixup":
                 self.open_fixup_popup()
+            elif action_key == "move":
+                self.open_move_popup()
         # All other keys are consumed so nothing leaks to the dashboard.
         return True
 
@@ -794,6 +828,310 @@ class FileManagerTab:
                 else curses.color_pair(db.C_NORMAL)
             db.safe_addstr(stdscr, row_y, bx1 + 2,
                            f"{prefix}{box} {label}"[:box_w - 4], attr)
+
+    # ── "Move" destination-picker popup ──────────────────────────────────────
+
+    @staticmethod
+    def _get_destinations():
+        """Configured DESTINATIONS paths (global.conf), in order."""
+        try:
+            from .main import load_global_config
+            return list(load_global_config().get("destinations", []))
+        except Exception:
+            return []
+
+    def open_move_popup(self):
+        if not self._selected_path:
+            return
+        self._move_target = self._selected_path
+        self._move_destinations = self._get_destinations()
+        self._move_checks = {"subfolder": True, "fixup": True}
+        self._move_cursor = 0
+        self._move_open = True
+
+    def close_move_popup(self):
+        """Fully cancel the Move flow."""
+        self._move_open = False
+        self._move_target = None
+
+    def _handle_move_popup_key(self, key) -> bool:
+        n_dest = len(self._move_destinations)
+        n_checks = len(MOVE_CHECK_ITEMS)
+        configure_idx = n_dest
+        total = n_dest + 1 + n_checks
+
+        if key == 27:  # Esc -> cancel the whole Move
+            self.close_move_popup()
+        elif key == curses.KEY_UP:
+            self._move_cursor = max(0, self._move_cursor - 1)
+        elif key == curses.KEY_DOWN:
+            self._move_cursor = min(total - 1, self._move_cursor + 1)
+        elif key == ord(' ') and self._move_cursor > configure_idx:
+            check_key, _label = MOVE_CHECK_ITEMS[self._move_cursor - configure_idx - 1]
+            self._move_checks[check_key] = not self._move_checks[check_key]
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
+            if self._move_cursor < n_dest:
+                dest = self._move_destinations[self._move_cursor]
+                self._move_open = False   # keep _move_target alive for step 2
+                self.open_move_filename_popup(dest)
+            elif self._move_cursor == configure_idx:
+                self._open_configure_destination()
+            else:
+                check_key, _label = MOVE_CHECK_ITEMS[self._move_cursor - configure_idx - 1]
+                self._move_checks[check_key] = not self._move_checks[check_key]
+        # All other keys are consumed so nothing leaks to the dashboard.
+        return True
+
+    def _open_configure_destination(self):
+        """Abandon the in-progress Move and jump to the Config tab's
+        DESTINATIONS editor so the user can add a destination, then press
+        M again on the file to retry the move."""
+        self.close_move_popup()
+        db = self.dashboard
+        try:
+            ce = db.config_editor
+            ge = ce.global_editor
+            ge._ensure_loaded()
+            for i, item in enumerate(ge.items):
+                if item.key == "DESTINATIONS":
+                    ge.selected_idx = i
+                    ge.editing_item = item
+                    ge._open_destinations_popup()
+                    break
+            ce._focus = "global"
+            db.selected_tab = db.TABS.index("Config")
+        except Exception:
+            pass
+
+    def draw_move_popup(self, stdscr) -> None:
+        db = self.dashboard
+        h, w = stdscr.getmaxyx()
+        n_dest = len(self._move_destinations)
+        n_checks = len(MOVE_CHECK_ITEMS)
+
+        box_w = min(64, w - 4)
+        # 1 "Select a destination:" + n_dest rows + 1 "Configure a new
+        # destination" row + 1 blank + n_checks checkbox rows
+        inner_rows = 1 + n_dest + 1 + 1 + n_checks
+        box_h = min(inner_rows + 4, h - 4)
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), curses.color_pair(db.C_NORMAL))
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_CHROME)
+        db.safe_addstr(stdscr, by1, bx1 + 2, " MOVE ",
+                       curses.color_pair(db.C_CHROME) | curses.A_BOLD)
+        db.safe_addstr(stdscr, by2, bx1 + 2,
+                       " Enter: Select  Space: Toggle  Esc: Cancel ",
+                       curses.color_pair(db.C_INVHEAD))
+
+        row = by1 + 1
+        db.safe_addstr(stdscr, row, bx1 + 2, "Select a destination:",
+                       curses.color_pair(db.C_DIM))
+        row += 1
+
+        configure_idx = n_dest
+        for i in range(n_dest):
+            is_sel = (self._move_cursor == i)
+            prefix = "> " if is_sel else "  "
+            attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD) if is_sel \
+                else curses.color_pair(db.C_NORMAL)
+            label = self._move_destinations[i]
+            db.safe_addstr(stdscr, row, bx1 + 2, (prefix + label)[:box_w - 4], attr)
+            row += 1
+
+        is_sel = (self._move_cursor == configure_idx)
+        prefix = "> " if is_sel else "  "
+        attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD) if is_sel \
+            else curses.color_pair(db.C_SYSTEM)
+        db.safe_addstr(stdscr, row, bx1 + 2,
+                       (prefix + "Configure a new destination")[:box_w - 4], attr)
+        row += 2
+
+        for i, (check_key, label) in enumerate(MOVE_CHECK_ITEMS):
+            idx = configure_idx + 1 + i
+            is_sel = (self._move_cursor == idx)
+            checked = self._move_checks.get(check_key, False)
+            box = "[x]" if checked else "[ ]"
+            prefix = "> " if is_sel else "  "
+            attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD) if is_sel \
+                else curses.color_pair(db.C_NORMAL)
+            db.safe_addstr(stdscr, row, bx1 + 2,
+                           f"{prefix}{box} {label}"[:box_w - 4], attr)
+            row += 1
+
+    # ── "Move" filename popup (step 2, opened after picking a destination) ──
+
+    def open_move_filename_popup(self, dest):
+        self._move_filename_dest = dest
+        self._move_filename_buf = os.path.basename(self._move_target or "")
+        self._move_filename_open = True
+
+    def close_move_filename_popup(self):
+        self._move_filename_open = False
+        self._move_filename_dest = None
+        self._move_target = None
+
+    def _handle_move_filename_popup_key(self, key) -> bool:
+        if key == 27:  # Esc -> cancel the whole Move
+            self.close_move_filename_popup()
+        elif key in (curses.KEY_BACKSPACE, 127, 8):
+            self._move_filename_buf = self._move_filename_buf[:-1]
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
+            filename = self._move_filename_buf.strip()
+            target = self._move_target
+            dest = self._move_filename_dest
+            do_subfolder = self._move_checks.get("subfolder", True)
+            do_fixup = self._move_checks.get("fixup", True)
+            self.close_move_filename_popup()
+            if filename and target and dest:
+                self._start_move(target, dest, filename, do_subfolder, do_fixup)
+        elif 32 <= key < 127:
+            self._move_filename_buf += chr(key)
+        # All other keys are consumed so nothing leaks to the dashboard.
+        return True
+
+    def draw_move_filename_popup(self, stdscr) -> None:
+        db = self.dashboard
+        h, w = stdscr.getmaxyx()
+
+        box_w = min(66, w - 4)
+        box_h = min(6, h - 4)
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), curses.color_pair(db.C_NORMAL))
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_CHROME)
+        db.safe_addstr(stdscr, by1, bx1 + 2, " MOVE ",
+                       curses.color_pair(db.C_CHROME) | curses.A_BOLD)
+        db.safe_addstr(stdscr, by2, bx1 + 2,
+                       " Enter: Start Move  Esc: Cancel ",
+                       curses.color_pair(db.C_INVHEAD))
+
+        row = by1 + 2
+        db.safe_addstr(stdscr, row, bx1 + 2, "Filename:",
+                       curses.color_pair(db.C_WARN) | curses.A_BOLD)
+        row += 1
+        db.safe_addstr(stdscr, row, bx1 + 2,
+                       (self._move_filename_buf + "_")[:box_w - 4],
+                       curses.color_pair(db.C_NORMAL) | curses.A_BOLD)
+
+    # ── Move job (runs on a background thread; mirrors the Fixup job) ───────
+
+    def _start_move(self, path, dest_root, filename, do_subfolder, do_fixup):
+        if not path or not os.path.isfile(path):
+            self._set_status("Move failed: file no longer exists")
+            return
+        with self._move_lock:
+            if self._move_busy:
+                self._set_status("A Move is already running - please wait")
+                return
+            self._move_busy = True
+        self._set_status(f"Move started: {os.path.basename(path)}")
+        t = threading.Thread(
+            target=self._move_worker,
+            args=(path, dest_root, filename, do_subfolder, do_fixup),
+            daemon=True,
+        )
+        t.start()
+
+    def _move_worker(self, path, dest_root, filename, do_subfolder, do_fixup):
+        try:
+            _ok, msg = self._do_move(path, dest_root, filename, do_subfolder, do_fixup)
+            self._set_status(msg)
+        except Exception as exc:
+            self._set_status(f"Move failed: {exc}")
+        finally:
+            with self._move_lock:
+                self._move_busy = False
+
+    def _do_move(self, path, dest_root, filename, do_subfolder, do_fixup):
+        """Runs on a background thread. Returns (ok, status_message)."""
+        rec = self._records.get(path, {})
+        group_path = rec.get("group_path")
+
+        dest_dir = dest_root
+        if do_subfolder:
+            streamer = self._derive_streamer_name(path, group_path)
+            dest_dir = os.path.join(dest_root, streamer)
+
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+        except OSError as exc:
+            return False, f"Move failed: could not create destination folder ({exc})"
+
+        final_path = self._unique_path(os.path.join(dest_dir, filename))
+
+        if do_fixup:
+            found, ffmpeg_path = check_ffmpeg()
+            if not found or not ffmpeg_path:
+                return False, "Move failed: ffmpeg not found (Fixup was requested)"
+
+            try:
+                st = os.stat(path)
+                orig_atime, orig_mtime = st.st_atime, st.st_mtime
+            except OSError as exc:
+                return False, f"Move failed: could not read source file ({exc})"
+
+            cmd = self._build_fixup_cmd(ffmpeg_path, path, final_path)
+            run_kwargs = {"capture_output": True, "text": True}
+            if IS_WINDOWS:
+                run_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+            try:
+                result = subprocess.run(cmd, **run_kwargs)
+            except Exception as exc:
+                return False, f"Move failed: could not run ffmpeg ({exc})"
+
+            if (result.returncode != 0 or not os.path.isfile(final_path)
+                    or os.path.getsize(final_path) == 0):
+                try:
+                    if os.path.isfile(final_path):
+                        os.remove(final_path)
+                except OSError:
+                    pass
+                stderr_lines = (result.stderr or "").strip().splitlines()
+                detail = stderr_lines[-1] if stderr_lines else f"ffmpeg exited {result.returncode}"
+                return False, f"Move failed: {detail}"
+
+            try:
+                os.utime(final_path, (orig_atime, orig_mtime))
+            except OSError:
+                pass
+
+            try:
+                os.remove(path)
+            except OSError as exc:
+                return False, (f"Move completed but could not delete original "
+                                f"({exc}); new file is at {final_path}")
+        else:
+            try:
+                shutil.move(path, final_path)
+            except OSError as exc:
+                return False, f"Move failed: {exc}"
+
+        return True, f"Move complete: {final_path}"
+
+    @staticmethod
+    def _derive_streamer_name(path, group_path):
+        """Best-effort guess at the streamer name for *path*, for use when
+        building the per-streamer subfolder (mirrors what the SUBFOLDERS
+        global key does at record time). The File Manager only tracks
+        files by OUTPUT_DIR, not by streamer, so: if the file already
+        lives inside a subfolder beneath its tracked OUTPUT_DIR (e.g.
+        because SUBFOLDERS was already on when it was recorded), that
+        subfolder's name is reused. Otherwise this falls back to the
+        file's own name (without extension)."""
+        parent = os.path.dirname(path)
+        if group_path and os.path.abspath(parent) != os.path.abspath(group_path):
+            return os.path.basename(parent)
+        return os.path.splitext(os.path.basename(path))[0]
 
     # ── Fixup job (runs ffmpeg on a background thread) ──────────────────────
 

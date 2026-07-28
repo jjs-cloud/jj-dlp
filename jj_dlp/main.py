@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.24.4"
+__version__ = "1.24.5"
 
 import subprocess
 import time
@@ -352,6 +352,7 @@ def load_global_config() -> dict:
     Returns a dict with the following keys (with safe defaults if the file does
     not exist or a key is absent):
         disk_drives       – list[str]
+        destinations      – list[str]  (paths offered in File Options - Move)
         debug_logs        – bool
         debug_log_path    – str
         check_for_updates – bool
@@ -378,6 +379,9 @@ def load_global_config() -> dict:
 
     disk_drives_raw = general.get("DISK_DRIVES", "").strip().strip('"\'')
     disk_drives = [d.strip() for d in disk_drives_raw.split(",") if d.strip()] if disk_drives_raw else []
+
+    destinations_raw = general.get("DESTINATIONS", "").strip().strip('"\'')
+    destinations = [d.strip() for d in destinations_raw.split(",") if d.strip()] if destinations_raw else []
 
     def _int(key: str, default: int) -> int:
         raw = general.get(key, "").strip()
@@ -409,6 +413,7 @@ def load_global_config() -> dict:
         "lq_downloader":      _bool("LQ_DOWNLOADER", False),
         "ff_err_thresh":      _int("FF_ERR_THRESH", 200),
         "subfolders":         _bool("SUBFOLDERS", False),
+        "destinations":       destinations,
         "ntfy_topic":         general.get("NTFY_TOPIC", "").strip().strip('"\''),
         "notify_confirm_file":_bool("NOTIFY_CONFIRM_FILE", True),
         "compact_view": general.get("COMPACT_VIEW", "auto").strip().strip('"\'') or "auto",
