@@ -617,7 +617,7 @@ class FileManagerTab:
 
         avail_w = (x2 - x1) - 3
         status_w = 8
-        mod_w    = 16
+        mod_w    = 20
         size_w   = 8
         rate_w   = 9
         fixed_cols = 2 + 1 + status_w + 1 + mod_w + 1 + size_w + 1 + rate_w
