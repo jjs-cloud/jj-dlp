@@ -120,8 +120,8 @@ FIXUP_CHECK_ITEMS = [
 
 # ── "Move" checkbox popup ────────────────────────────────────────────────────
 MOVE_CHECK_ITEMS = [
-    ("subfolder", "Move recording into a subfolder named after the streamer"),
-    ("fixup",     "Fixup the recording during the move"),
+    ("subfolder", "Move file into a subfolder named after the streamer"),
+    ("fixup",     "Fixup the file during the move"),
 ]
 
 # Sort keys for which the underlying comparison needs to be reversed to
@@ -325,6 +325,7 @@ class FileManagerTab:
         self._move_filename_open = False
         self._move_filename_buf = ""
         self._move_filename_dest = None
+        self._move_filename_streamer = ""
 
         self._move_busy = False
         self._move_lock = threading.Lock()
@@ -968,6 +969,9 @@ class FileManagerTab:
     def open_move_filename_popup(self, dest):
         self._move_filename_dest = dest
         self._move_filename_buf = os.path.basename(self._move_target or "")
+        path = self._move_target or ""
+        group_path = self._records.get(path, {}).get("group_path")
+        self._move_filename_streamer = self._derive_streamer_name(path, group_path)
         self._move_filename_open = True
 
     def close_move_filename_popup(self):
@@ -1014,7 +1018,11 @@ class FileManagerTab:
                        " Enter: Start Move  Esc: Cancel ",
                        curses.color_pair(db.C_INVHEAD))
 
-        row = by1 + 2
+        row = by1 + 1
+        db.safe_addstr(stdscr, row, bx1 + 2,
+                       f"Streamer: {self._move_filename_streamer}",
+                       curses.color_pair(db.C_DIM))
+        row += 2
         db.safe_addstr(stdscr, row, bx1 + 2, "Filename:",
                        curses.color_pair(db.C_WARN) | curses.A_BOLD)
         row += 1
@@ -1131,7 +1139,8 @@ class FileManagerTab:
         parent = os.path.dirname(path)
         if group_path and os.path.abspath(parent) != os.path.abspath(group_path):
             return os.path.basename(parent)
-        return os.path.splitext(os.path.basename(path))[0]
+        stem = os.path.splitext(os.path.basename(path))[0]
+        return stem.split()[0] if stem else ""
 
     # ── Fixup job (runs ffmpeg on a background thread) ──────────────────────
 
