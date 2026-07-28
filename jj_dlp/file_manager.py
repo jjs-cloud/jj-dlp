@@ -324,6 +324,7 @@ class FileManagerTab:
         # "Move" filename popup (step 2)
         self._move_filename_open = False
         self._move_filename_buf = ""
+        self._move_filename_cursor = 0
         self._move_filename_dest = None
         self._move_filename_streamer = ""
 
@@ -969,6 +970,7 @@ class FileManagerTab:
     def open_move_filename_popup(self, dest):
         self._move_filename_dest = dest
         self._move_filename_buf = os.path.basename(self._move_target or "")
+        self._move_filename_cursor = len(self._move_filename_buf)
         path = self._move_target or ""
         group_path = self._records.get(path, {}).get("group_path")
         self._move_filename_streamer = self._derive_streamer_name(path, group_path)
@@ -980,10 +982,24 @@ class FileManagerTab:
         self._move_target = None
 
     def _handle_move_filename_popup_key(self, key) -> bool:
+        cur = self._move_filename_cursor
         if key == 27:  # Esc -> cancel the whole Move
             self.close_move_filename_popup()
         elif key in (curses.KEY_BACKSPACE, 127, 8):
-            self._move_filename_buf = self._move_filename_buf[:-1]
+            if cur > 0:
+                self._move_filename_buf = \
+                    self._move_filename_buf[:cur - 1] + self._move_filename_buf[cur:]
+                self._move_filename_cursor = cur - 1
+        elif key in (curses.KEY_LEFT,):
+            if cur > 0:
+                self._move_filename_cursor = cur - 1
+        elif key in (curses.KEY_RIGHT,):
+            if cur < len(self._move_filename_buf):
+                self._move_filename_cursor = cur + 1
+        elif key in (curses.KEY_HOME,):
+            self._move_filename_cursor = 0
+        elif key in (curses.KEY_END,):
+            self._move_filename_cursor = len(self._move_filename_buf)
         elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
             filename = self._move_filename_buf.strip()
             target = self._move_target
@@ -994,7 +1010,9 @@ class FileManagerTab:
             if filename and target and dest:
                 self._start_move(target, dest, filename, do_subfolder, do_fixup)
         elif 32 <= key < 127:
-            self._move_filename_buf += chr(key)
+            self._move_filename_buf = \
+                self._move_filename_buf[:cur] + chr(key) + self._move_filename_buf[cur:]
+            self._move_filename_cursor = cur + 1
         # All other keys are consumed so nothing leaks to the dashboard.
         return True
 
@@ -1026,8 +1044,11 @@ class FileManagerTab:
         db.safe_addstr(stdscr, row, bx1 + 2, "Filename:",
                        curses.color_pair(db.C_WARN) | curses.A_BOLD)
         row += 1
+        buf = self._move_filename_buf
+        cur = self._move_filename_cursor
+        display = buf[:cur] + "_" + buf[cur:]
         db.safe_addstr(stdscr, row, bx1 + 2,
-                       (self._move_filename_buf + "_")[:box_w - 4],
+                       display[:box_w - 4],
                        curses.color_pair(db.C_NORMAL) | curses.A_BOLD)
 
     # ── Move job (runs on a background thread; mirrors the Fixup job) ───────
