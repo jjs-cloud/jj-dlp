@@ -2873,7 +2873,9 @@ class GlobalConfigEditor:
             # columns between value start and right border (reduced by 2 to leave space for arrows)
             max_val_w = max(0, (x2 - x1) - 26 - 3)
             
-            if len(val_str) > max_val_w > 0:
+            if max_val_w == 0:
+                val_str = ""
+            elif len(val_str) > max_val_w:
                 val_str = val_str[:max_val_w - 1] + "\u25ba"
             self.dashboard.safe_addstr(stdscr, row_y, x1 + 26, val_str, val_attr)
             
@@ -3185,7 +3187,9 @@ class ConfigEditor:
                         # columns between value start and right border (reduced by 2 to leave space for arrows)
                         max_val_w = max(0, (site_x2 - site_x1) - 29 - 3)
                         
-                        if len(val_str) > max_val_w > 0:
+                        if max_val_w == 0:
+                            val_str = ""
+                        elif len(val_str) > max_val_w:
                             val_str = val_str[:max_val_w - 1] + "\u25ba"
                         self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 29, val_str, val_attr)
                 
