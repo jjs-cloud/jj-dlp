@@ -44,6 +44,19 @@ a stream-copy remux, not a transcode. The new file's "date modified" is
 always set to match the original file's, and Fixup runs in a background
 thread so the UI doesn't freeze while ffmpeg works.
 
+Selecting "Trim" opens a popup asking for a start and end time (each
+entered as HH:MM:SS) plus one checkbox:
+
+    Start: 00:00:00
+    End:   00:00:00
+    [ ] Delete original file
+
+ffmpeg stream-copies (no re-encode) the span between Start and End into a
+new "<name>_trimmed<ext>" file. Trim runs in a background thread so the
+UI doesn't freeze while ffmpeg works, and the original is only removed
+(via the current Delete mode) once the trimmed file has been written
+successfully.
+
 Delete mode
 -----------
 Controlled by the ``file_manager.delete_mode`` key in global.json, one of:
@@ -62,6 +75,7 @@ Press T inside the File Manager tab to flip between the two at any time.
 """
 
 import os
+import re
 import shutil
 import time
 import platform
@@ -110,6 +124,7 @@ FM_SORT_DEFAULT = "name_asc"
 FILE_MENU_OPTIONS = [
     ("fixup", "Fixup"),
     ("move",  "Move"),
+    ("trim",  "Trim"),
 ]
 
 # ── "Fixup" checkbox popup ──────────────────────────────────────────────────
@@ -332,6 +347,17 @@ class FileManagerTab:
         self._move_busy_path = None
         self._move_lock = threading.Lock()
 
+        # "Trim" popup (start/end time entry + "Delete original" checkbox)
+        self._trim_open = False
+        self._trim_target = None
+        self._trim_cursor = 0            # 0=start field, 1=end field, 2=checkbox
+        self._trim_field_cursor = 0      # cursor position within the active field
+        self._trim_start_buf = "00:00:00"
+        self._trim_end_buf = "00:00:00"
+        self._trim_delete_original = False
+        self._trim_busy = False
+        self._trim_lock = threading.Lock()
+
     # ── Settings persistence (global.json) ─────────────────────────────────
 
     @staticmethod
@@ -514,6 +540,8 @@ class FileManagerTab:
             return self._handle_move_filename_popup_key(key)
         if self._move_open:
             return self._handle_move_popup_key(key)
+        if self._trim_open:
+            return self._handle_trim_popup_key(key)
         if self._menu_open:
             return self._handle_menu_popup_key(key)
 
@@ -687,7 +715,8 @@ class FileManagerTab:
     def any_popup_open(self) -> bool:
         """True if any of this tab's popups (sort / menu / fixup / move) is open."""
         return (self.popup_open or self._menu_open or self._fixup_open
-                or self._move_open or self._move_filename_open)
+                or self._move_open or self._move_filename_open
+                or self._trim_open)
 
     def draw_popups(self, stdscr) -> None:
         """Draw whichever of this tab's popups is currently open."""
@@ -701,6 +730,8 @@ class FileManagerTab:
             self.draw_move_filename_popup(stdscr)
         elif self._move_open:
             self.draw_move_popup(stdscr)
+        elif self._trim_open:
+            self.draw_trim_popup(stdscr)
 
     def open_menu_popup(self):
         self._menu_sel = 0
@@ -724,6 +755,8 @@ class FileManagerTab:
                 self.open_fixup_popup()
             elif action_key == "move":
                 self.open_move_popup()
+            elif action_key == "trim":
+                self.open_trim_popup()
         # All other keys are consumed so nothing leaks to the dashboard.
         return True
 
@@ -1309,6 +1342,242 @@ class FileManagerTab:
                                     f"{os.path.basename(work_path)}")
 
         return True, f"Fixup complete: {os.path.basename(final_path)}"
+
+    # ── "Trim" popup ─────────────────────────────────────────────────────────
+
+    _HMS_RE = re.compile(r"^\d{1,2}:[0-5]\d:[0-5]\d$")
+
+    def open_trim_popup(self):
+        if not self._selected_path:
+            return
+        self._trim_target = self._selected_path
+        self._trim_start_buf = "00:00:00"
+        self._trim_end_buf = "00:00:00"
+        self._trim_delete_original = False
+        self._trim_cursor = 0
+        self._trim_field_cursor = len(self._trim_start_buf)
+        self._trim_open = True
+
+    def close_trim_popup(self):
+        self._trim_open = False
+        self._trim_target = None
+
+    def _trim_active_buf(self):
+        """Return (buf, setter) for whichever text field currently has focus,
+        or (None, None) if the checkbox row is focused instead."""
+        if self._trim_cursor == 0:
+            return self._trim_start_buf, "_trim_start_buf"
+        if self._trim_cursor == 1:
+            return self._trim_end_buf, "_trim_end_buf"
+        return None, None
+
+    def _handle_trim_popup_key(self, key) -> bool:
+        if key == 27:  # Esc -> cancel
+            self.close_trim_popup()
+            return True
+        if key == curses.KEY_UP:
+            self._trim_cursor = max(0, self._trim_cursor - 1)
+            buf, _ = self._trim_active_buf()
+            self._trim_field_cursor = len(buf) if buf is not None else 0
+            return True
+        if key == curses.KEY_DOWN:
+            self._trim_cursor = min(2, self._trim_cursor + 1)
+            buf, _ = self._trim_active_buf()
+            self._trim_field_cursor = len(buf) if buf is not None else 0
+            return True
+
+        buf, attr_name = self._trim_active_buf()
+
+        if key == ord(' '):
+            if attr_name is None:
+                self._trim_delete_original = not self._trim_delete_original
+            else:
+                # Typing a literal space inside a time field is meaningless;
+                # ignore it there.
+                pass
+            return True
+        if key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
+            self._submit_trim_popup()
+            return True
+
+        if attr_name is not None:
+            cur = self._trim_field_cursor
+            if key in (curses.KEY_BACKSPACE, 127, 8):
+                if cur > 0:
+                    buf = buf[:cur - 1] + buf[cur:]
+                    self._trim_field_cursor = cur - 1
+                    setattr(self, attr_name, buf)
+            elif key == curses.KEY_DC:
+                if cur < len(buf):
+                    buf = buf[:cur] + buf[cur + 1:]
+                    setattr(self, attr_name, buf)
+            elif key == curses.KEY_LEFT:
+                if cur > 0:
+                    self._trim_field_cursor = cur - 1
+            elif key == curses.KEY_RIGHT:
+                if cur < len(buf):
+                    self._trim_field_cursor = cur + 1
+            elif key == curses.KEY_HOME:
+                self._trim_field_cursor = 0
+            elif key == curses.KEY_END:
+                self._trim_field_cursor = len(buf)
+            elif (48 <= key <= 57) or key == ord(':'):
+                buf = buf[:cur] + chr(key) + buf[cur:]
+                self._trim_field_cursor = cur + 1
+                setattr(self, attr_name, buf)
+        # All other keys are consumed so nothing leaks to the dashboard.
+        return True
+
+    def _submit_trim_popup(self):
+        start = self._trim_start_buf.strip()
+        end = self._trim_end_buf.strip()
+        if not self._HMS_RE.match(start) or not self._HMS_RE.match(end):
+            self._set_status("Trim failed: times must be in HH:MM:SS format")
+            return
+        if self._to_seconds(end) <= self._to_seconds(start):
+            self._set_status("Trim failed: End must be after Start")
+            return
+        target = self._trim_target
+        delete_original = self._trim_delete_original
+        self.close_trim_popup()
+        self._start_trim(target, start, end, delete_original)
+
+    @staticmethod
+    def _to_seconds(hms: str) -> int:
+        h, m, s = (int(p) for p in hms.split(":"))
+        return h * 3600 + m * 60 + s
+
+    def draw_trim_popup(self, stdscr) -> None:
+        db = self.dashboard
+        h, w = stdscr.getmaxyx()
+
+        box_w = min(50, w - 4)
+        box_h = min(8, h - 4)
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1),
+                           curses.color_pair(db.C_NORMAL))
+
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_CHROME)
+        db.safe_addstr(stdscr, by1, bx1 + 2, " TRIM ",
+                       curses.color_pair(db.C_CHROME) | curses.A_BOLD)
+        db.safe_addstr(stdscr, by2, bx1 + 2,
+                       " Enter: Trim  Space: Toggle  Esc: Cancel ",
+                       curses.color_pair(db.C_INVHEAD))
+
+        target_name = os.path.basename(self._trim_target or "")
+        db.safe_addstr(stdscr, by1 + 1, bx1 + 2,
+                       target_name[:box_w - 4],
+                       curses.color_pair(db.C_DIM))
+
+        rows = [
+            ("Start:", self._trim_start_buf),
+            ("End:  ", self._trim_end_buf),
+        ]
+        for i, (label, buf) in enumerate(rows):
+            row_y = by1 + 3 + i
+            is_sel = (self._trim_cursor == i)
+            prefix = "> " if is_sel else "  "
+            attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD) if is_sel \
+                else curses.color_pair(db.C_NORMAL)
+            if is_sel:
+                cur = self._trim_field_cursor
+                display = buf[:cur] + "_" + buf[cur:]
+            else:
+                display = buf
+            db.safe_addstr(stdscr, row_y, bx1 + 2,
+                           f"{prefix}{label} {display}"[:box_w - 4], attr)
+
+        check_row = by1 + 3 + len(rows) + 1
+        is_sel = (self._trim_cursor == 2)
+        checked = self._trim_delete_original
+        box = "[x]" if checked else "[ ]"
+        prefix = "> " if is_sel else "  "
+        attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD) if is_sel \
+            else curses.color_pair(db.C_NORMAL)
+        db.safe_addstr(stdscr, check_row, bx1 + 2,
+                       f"{prefix}{box} Delete original file"[:box_w - 4], attr)
+
+    # ── Trim job (runs ffmpeg on a background thread) ───────────────────────
+
+    def _start_trim(self, path, start, end, delete_original):
+        if not path or not os.path.isfile(path):
+            self._set_status("Trim failed: file no longer exists")
+            return
+        with self._trim_lock:
+            if self._trim_busy:
+                self._set_status("A Trim is already running - please wait")
+                return
+            self._trim_busy = True
+        self._set_status(f"Trim started: {os.path.basename(path)}")
+        t = threading.Thread(
+            target=self._trim_worker,
+            args=(path, start, end, delete_original),
+            daemon=True,
+        )
+        t.start()
+
+    def _trim_worker(self, path, start, end, delete_original):
+        try:
+            _ok, msg = self._do_trim(path, start, end, delete_original)
+            self._set_status(msg)
+        except Exception as exc:
+            self._set_status(f"Trim failed: {exc}")
+        finally:
+            with self._trim_lock:
+                self._trim_busy = False
+
+    def _do_trim(self, path, start, end, delete_original):
+        """Runs on a background thread. Returns (ok, status_message)."""
+        found, ffmpeg_path = check_ffmpeg()
+        if not found or not ffmpeg_path:
+            return False, "Trim failed: ffmpeg not found"
+
+        src_base, src_ext = os.path.splitext(path)
+        work_path = self._unique_path(src_base + "_trimmed" + src_ext)
+
+        cmd = [
+            ffmpeg_path, "-y",
+            "-i", path,
+            "-ss", start, "-to", end,
+            "-map", "0", "-c", "copy",
+            "-avoid_negative_ts", "make_zero",
+            work_path,
+        ]
+        run_kwargs = {"capture_output": True, "text": True}
+        if IS_WINDOWS:
+            run_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+        try:
+            result = subprocess.run(cmd, **run_kwargs)
+        except Exception as exc:
+            return False, f"Trim failed: could not run ffmpeg ({exc})"
+
+        if (result.returncode != 0 or not os.path.isfile(work_path)
+                or os.path.getsize(work_path) == 0):
+            try:
+                if os.path.isfile(work_path):
+                    os.remove(work_path)
+            except OSError:
+                pass
+            stderr_lines = (result.stderr or "").strip().splitlines()
+            detail = stderr_lines[-1] if stderr_lines else f"ffmpeg exited {result.returncode}"
+            return False, f"Trim failed: {detail}"
+
+        if delete_original:
+            if self._delete_mode == DELETE_MODE_PERMANENT:
+                ok, err = permanent_delete(path)
+            else:
+                ok, err = move_to_trash(path)
+            if not ok:
+                return False, (f"Trim completed but could not delete original "
+                                f"({err}); kept as {os.path.basename(work_path)}")
+
+        return True, f"Trim complete: {os.path.basename(work_path)}"
 
     # ── Drawing ──────────────────────────────────────────────────────────────
 

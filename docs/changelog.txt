@@ -5,6 +5,7 @@
     - you can add "DESTINATIONS" in Config > GLOBAL SETTINGS > DESTINATIONS
     - the file can optionally be moved into a subfolder named after the streamer
     - the file can optionally go through the "fixup" procedure during the move process
+- added the "Trim" option in the "File Options" menu
 
 ====================
 ====================
