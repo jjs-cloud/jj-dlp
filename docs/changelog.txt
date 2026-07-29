@@ -1,4 +1,4 @@
-- minor color and label changes (file manager hints)
+- minor visual changes (file manager hints, window size truncation)
 - minor compatability fixes (unicode)
 - added the "Move" option in the "File Options" menu   
     - allows you to easily move a file to it's final destination  

@@ -130,7 +130,7 @@ FILE_MENU_OPTIONS = [
 
 # ── "Fixup" checkbox popup ──────────────────────────────────────────────────
 FIXUP_CHECK_ITEMS = [
-    ("delete_original", "Delete original file after fixup is completed"),
+    ("delete_original", "Delete original file when finished"),
     ("convert_mp4",     "Convert to MP4 (no re-encode)"),
 ]
 
