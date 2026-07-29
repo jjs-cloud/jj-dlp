@@ -45,17 +45,18 @@ always set to match the original file's, and Fixup runs in a background
 thread so the UI doesn't freeze while ffmpeg works.
 
 Selecting "Trim" opens a popup asking for a start and end time (each
-entered as HH:MM:SS) plus one checkbox:
+entered as HH:MM:SS) plus two checkboxes:
 
     Start: 00:00:00
     End:   00:00:00
     [ ] Delete original file
+    [ ] Convert to MP4 (no re-encode)
 
 ffmpeg stream-copies (no re-encode) the span between Start and End into a
-new "<name>_trimmed<ext>" file. Trim runs in a background thread so the
-UI doesn't freeze while ffmpeg works, and the original is only removed
-(via the current Delete mode) once the trimmed file has been written
-successfully.
+new "<name>_trimmed<ext>" file (or "<name>_trimmed.mp4" when "Convert to
+MP4" is checked). Trim runs in a background thread so the UI doesn't
+freeze while ffmpeg works, and the original is only removed (via the
+current Delete mode) once the trimmed file has been written successfully.
 
 Delete mode
 -----------
@@ -355,14 +356,16 @@ class FileManagerTab:
         self._move_dest_path = None
         self._moving_records = {}
 
-        # "Trim" popup (start/end time entry + "Delete original" checkbox)
+        # "Trim" popup (start/end time entry + "Delete original"/"Convert to
+        # MP4" checkboxes)
         self._trim_open = False
         self._trim_target = None
-        self._trim_cursor = 0            # 0=start field, 1=end field, 2=checkbox
+        self._trim_cursor = 0            # 0=start, 1=end, 2=delete cb, 3=mp4 cb
         self._trim_field_cursor = 0      # cursor position within the active field
         self._trim_start_buf = "00:00:00"
         self._trim_end_buf = "00:00:00"
         self._trim_delete_original = False
+        self._trim_convert_mp4 = False
         self._trim_busy = False
         self._trim_lock = threading.Lock()
 
@@ -1430,6 +1433,7 @@ class FileManagerTab:
         self._trim_start_buf = "00:00:00"
         self._trim_end_buf = "00:00:00"
         self._trim_delete_original = False
+        self._trim_convert_mp4 = False
         self._trim_cursor = 0
         self._trim_field_cursor = len(self._trim_start_buf)
         self._trim_open = True
@@ -1440,7 +1444,7 @@ class FileManagerTab:
 
     def _trim_active_buf(self):
         """Return (buf, setter) for whichever text field currently has focus,
-        or (None, None) if the checkbox row is focused instead."""
+        or (None, None) if a checkbox row is focused instead."""
         if self._trim_cursor == 0:
             return self._trim_start_buf, "_trim_start_buf"
         if self._trim_cursor == 1:
@@ -1457,7 +1461,7 @@ class FileManagerTab:
             self._trim_field_cursor = len(buf) if buf is not None else 0
             return True
         if key == curses.KEY_DOWN:
-            self._trim_cursor = min(2, self._trim_cursor + 1)
+            self._trim_cursor = min(3, self._trim_cursor + 1)
             buf, _ = self._trim_active_buf()
             self._trim_field_cursor = len(buf) if buf is not None else 0
             return True
@@ -1465,8 +1469,10 @@ class FileManagerTab:
         buf, attr_name = self._trim_active_buf()
 
         if key == ord(' '):
-            if attr_name is None:
+            if self._trim_cursor == 2:
                 self._trim_delete_original = not self._trim_delete_original
+            elif self._trim_cursor == 3:
+                self._trim_convert_mp4 = not self._trim_convert_mp4
             else:
                 # Typing a literal space inside a time field is meaningless;
                 # ignore it there.
@@ -1515,8 +1521,9 @@ class FileManagerTab:
             return
         target = self._trim_target
         delete_original = self._trim_delete_original
+        convert_mp4 = self._trim_convert_mp4
         self.close_trim_popup()
-        self._start_trim(target, start, end, delete_original)
+        self._start_trim(target, start, end, delete_original, convert_mp4)
 
     @staticmethod
     def _to_seconds(hms: str) -> int:
@@ -1528,7 +1535,7 @@ class FileManagerTab:
         h, w = stdscr.getmaxyx()
 
         box_w = min(50, w - 4)
-        box_h = min(8, h - 4)
+        box_h = min(9, h - 4)
         by1 = (h - box_h) // 2
         bx1 = (w - box_w) // 2
         by2 = by1 + box_h
@@ -1568,19 +1575,26 @@ class FileManagerTab:
             db.safe_addstr(stdscr, row_y, bx1 + 2,
                            f"{prefix}{label} {display}"[:box_w - 4], attr)
 
-        check_row = by1 + 3 + len(rows) + 1
-        is_sel = (self._trim_cursor == 2)
-        checked = self._trim_delete_original
-        box = "[x]" if checked else "[ ]"
-        prefix = "> " if is_sel else "  "
-        attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD) if is_sel \
-            else curses.color_pair(db.C_NORMAL)
-        db.safe_addstr(stdscr, check_row, bx1 + 2,
-                       f"{prefix}{box} Delete original file"[:box_w - 4], attr)
+        checkboxes = [
+            ("_trim_delete_original", "Delete original file"),
+            ("_trim_convert_mp4",     "Convert to MP4 (no re-encode)"),
+        ]
+        check_row0 = by1 + 3 + len(rows) + 1
+        for j, (attr_name, label) in enumerate(checkboxes):
+            check_row = check_row0 + j
+            cursor_idx = len(rows) + j
+            is_sel = (self._trim_cursor == cursor_idx)
+            checked = getattr(self, attr_name)
+            box = "[x]" if checked else "[ ]"
+            prefix = "> " if is_sel else "  "
+            attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD) if is_sel \
+                else curses.color_pair(db.C_NORMAL)
+            db.safe_addstr(stdscr, check_row, bx1 + 2,
+                           f"{prefix}{box} {label}"[:box_w - 4], attr)
 
     # ── Trim job (runs ffmpeg on a background thread) ───────────────────────
 
-    def _start_trim(self, path, start, end, delete_original):
+    def _start_trim(self, path, start, end, delete_original, convert_mp4):
         if not path or not os.path.isfile(path):
             self._set_status("Trim failed: file no longer exists")
             return
@@ -1592,14 +1606,14 @@ class FileManagerTab:
         self._set_status(f"Trim started: {os.path.basename(path)}")
         t = threading.Thread(
             target=self._trim_worker,
-            args=(path, start, end, delete_original),
+            args=(path, start, end, delete_original, convert_mp4),
             daemon=True,
         )
         t.start()
 
-    def _trim_worker(self, path, start, end, delete_original):
+    def _trim_worker(self, path, start, end, delete_original, convert_mp4):
         try:
-            _ok, msg = self._do_trim(path, start, end, delete_original)
+            _ok, msg = self._do_trim(path, start, end, delete_original, convert_mp4)
             self._set_status(msg)
         except Exception as exc:
             self._set_status(f"Trim failed: {exc}")
@@ -1607,14 +1621,15 @@ class FileManagerTab:
             with self._trim_lock:
                 self._trim_busy = False
 
-    def _do_trim(self, path, start, end, delete_original):
+    def _do_trim(self, path, start, end, delete_original, convert_mp4):
         """Runs on a background thread. Returns (ok, status_message)."""
         found, ffmpeg_path = check_ffmpeg()
         if not found or not ffmpeg_path:
             return False, "Trim failed: ffmpeg not found"
 
         src_base, src_ext = os.path.splitext(path)
-        work_path = self._unique_path(src_base + "_trimmed" + src_ext)
+        out_ext = ".mp4" if convert_mp4 else src_ext
+        work_path = self._unique_path(src_base + "_trimmed" + out_ext)
 
         cmd = [
             ffmpeg_path, "-y",
@@ -1622,8 +1637,13 @@ class FileManagerTab:
             "-ss", start, "-to", end,
             "-map", "0", "-c", "copy",
             "-avoid_negative_ts", "make_zero",
-            work_path,
         ]
+        if src_ext.lower() == ".ts" and out_ext.lower() in (".mp4", ".m4a", ".mov", ".m4v"):
+            # Raw ADTS AAC (typical of HLS/.ts captures) needs its headers
+            # converted for an mp4-family container - same fix Fixup's
+            # "Convert to MP4" option applies.
+            cmd += ["-bsf:a", "aac_adtstoasc"]
+        cmd.append(work_path)
         run_kwargs = {"capture_output": True, "text": True}
         if IS_WINDOWS:
             run_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
