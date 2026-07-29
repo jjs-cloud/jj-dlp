@@ -347,6 +347,14 @@ class FileManagerTab:
         self._move_busy_path = None
         self._move_lock = threading.Lock()
 
+        # Transient tracking for the Move OUTPUT file: while a Move is in
+        # progress, the destination file is temporarily added to the File
+        # Manager (under its own "Moving" section) so the user can watch
+        # its Size/Rate/Status grow in real time. Removed the moment the
+        # move finishes (success or failure).
+        self._move_dest_path = None
+        self._moving_records = {}
+
         # "Trim" popup (start/end time entry + "Delete original" checkbox)
         self._trim_open = False
         self._trim_target = None
@@ -426,14 +434,24 @@ class FileManagerTab:
         dirs = self._get_output_dirs()
         dir_label_map = {os.path.abspath(folder): label for label, folder in dirs}
 
+        with self._move_lock:
+            move_dest_path = self._move_dest_path
+
         current_paths = set()
         for _label, folder in dirs:
             try:
                 with os.scandir(folder) as it:
                     for entry in it:
                         try:
-                            if entry.is_file(follow_symlinks=False):
-                                current_paths.add(entry.path)
+                            if not entry.is_file(follow_symlinks=False):
+                                continue
+                            # The Move destination file is tracked separately
+                            # (see below) so it isn't double-listed if a
+                            # DESTINATIONS folder happens to overlap with a
+                            # watched OUTPUT_DIR.
+                            if move_dest_path and os.path.abspath(entry.path) == move_dest_path:
+                                continue
+                            current_paths.add(entry.path)
                         except OSError:
                             continue
             except OSError:
@@ -471,6 +489,27 @@ class FileManagerTab:
             rec["group_label"] = dir_label_map.get(folder_abs, os.path.basename(folder_abs) or folder_abs)
             rec["status"] = "WRITING" if (now - rec["last_change"]) < IDLE_THRESHOLD_S else "IDLE"
 
+        # Update the transient "Moving" record (the Move destination file),
+        # if a Move is currently in progress.
+        if move_dest_path:
+            rec = self._moving_records.get(move_dest_path)
+            if rec is not None:
+                try:
+                    size = os.path.getsize(move_dest_path)
+                except OSError:
+                    size = rec.get("size", 0)
+                if size != rec["size"]:
+                    dt = max(now - rec.get("last_poll", now - POLL_INTERVAL_S), 0.001)
+                    rec["rate"] = (size - rec["size"]) / dt
+                    rec["size"] = size
+                    rec["last_change"] = now
+                rec["last_poll"] = now
+                try:
+                    rec["mtime"] = os.path.getmtime(move_dest_path)
+                except OSError:
+                    pass
+                rec["status"] = "WRITING"
+
         self._rebuild_rows(dirs)
 
     # ── Sorting / row layout ────────────────────────────────────────────────
@@ -504,6 +543,16 @@ class FileManagerTab:
                 rows.append(("file", p, self._records[p]))
             if multi and not files:
                 rows.append(("empty", "  (no files)", None))
+
+        # Transient "Moving" section: only present while a Move is actively
+        # writing its output file. Always shown as its own section (with a
+        # header), independent of how many OUTPUT_DIRs are configured, and
+        # disappears the instant the move finishes.
+        if self._moving_records:
+            rows.append(("header", "Moving", None))
+            for p, rec in self._moving_records.items():
+                rows.append(("file", p, rec))
+
         self._rows = rows
 
         # Keep selection valid; default to the first file if none/invalid.
@@ -1091,37 +1140,11 @@ class FileManagerTab:
 
     # ── Move job (runs on a background thread; mirrors the Fixup job) ───────
 
-    def _start_move(self, path, dest_root, filename, do_subfolder, do_fixup):
-        if not path or not os.path.isfile(path):
-            self._set_status("Move failed: file no longer exists")
-            return
-        with self._move_lock:
-            if self._move_busy:
-                self._set_status("A Move is already running - please wait")
-                return
-            self._move_busy = True
-            self._move_busy_path = path
-        self._set_status(f"Move started: {os.path.basename(path)}")
-        t = threading.Thread(
-            target=self._move_worker,
-            args=(path, dest_root, filename, do_subfolder, do_fixup),
-            daemon=True,
-        )
-        t.start()
-
-    def _move_worker(self, path, dest_root, filename, do_subfolder, do_fixup):
-        try:
-            _ok, msg = self._do_move(path, dest_root, filename, do_subfolder, do_fixup)
-            self._set_status(msg)
-        except Exception as exc:
-            self._set_status(f"Move failed: {exc}")
-        finally:
-            with self._move_lock:
-                self._move_busy = False
-                self._move_busy_path = None
-
-    def _do_move(self, path, dest_root, filename, do_subfolder, do_fixup):
-        """Runs on a background thread. Returns (ok, status_message)."""
+    def _compute_move_destination(self, path, dest_root, filename, do_subfolder):
+        """Work out the exact destination path a Move will write to, and
+        make sure the destination folder exists. Done up front (on the main
+        thread, before the worker starts) so the transient "Moving" record
+        can be shown immediately, pointed at the real output path."""
         rec = self._records.get(path, {})
         group_path = rec.get("group_path")
 
@@ -1133,9 +1156,62 @@ class FileManagerTab:
         try:
             os.makedirs(dest_dir, exist_ok=True)
         except OSError as exc:
-            return False, f"Move failed: could not create destination folder ({exc})"
+            return None, f"Move failed: could not create destination folder ({exc})"
 
-        final_path = self._unique_path(os.path.join(dest_dir, filename))
+        return self._unique_path(os.path.join(dest_dir, filename)), None
+
+    def _start_move(self, path, dest_root, filename, do_subfolder, do_fixup):
+        if not path or not os.path.isfile(path):
+            self._set_status("Move failed: file no longer exists")
+            return
+        with self._move_lock:
+            if self._move_busy:
+                self._set_status("A Move is already running - please wait")
+                return
+            final_path, err = self._compute_move_destination(
+                path, dest_root, filename, do_subfolder)
+            if final_path is None:
+                self._set_status(err)
+                return
+            self._move_busy = True
+            self._move_busy_path = path
+            self._move_dest_path = final_path
+            now = time.time()
+            self._moving_records[final_path] = {
+                "size": 0, "last_change": now, "rate": 0.0, "last_poll": now,
+                "mtime": now, "status": "WRITING",
+                "group_path": None, "group_label": "Moving",
+            }
+        self._set_status(f"Move started: {os.path.basename(path)}")
+        t = threading.Thread(
+            target=self._move_worker,
+            args=(path, dest_root, filename, do_subfolder, do_fixup, final_path),
+            daemon=True,
+        )
+        t.start()
+
+    def _move_worker(self, path, dest_root, filename, do_subfolder, do_fixup, final_path):
+        try:
+            _ok, msg = self._do_move(path, dest_root, filename, do_subfolder, do_fixup, final_path)
+            self._set_status(msg)
+        except Exception as exc:
+            self._set_status(f"Move failed: {exc}")
+        finally:
+            with self._move_lock:
+                self._move_busy = False
+                self._move_busy_path = None
+                self._move_dest_path = None
+                self._moving_records.pop(final_path, None)
+
+    def _do_move(self, path, dest_root, filename, do_subfolder, do_fixup, final_path):
+        """Runs on a background thread. Returns (ok, status_message).
+        *final_path* is the exact destination path, already computed (and
+        its parent folder already created) by _compute_move_destination."""
+        dest_dir = os.path.dirname(final_path)
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+        except OSError as exc:
+            return False, f"Move failed: could not create destination folder ({exc})"
 
         if do_fixup:
             found, ffmpeg_path = check_ffmpeg()
