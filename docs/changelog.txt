@@ -1,3 +1,20 @@
+v1.24.12
+
+- minor visual changes (file manager hints, window size truncation)
+- minor compatability fixes (unicode)
+- added the "Move" option in the "File Options" menu   
+    - allows you to easily move a file to it's final destination  
+    - you can add "DESTINATIONS" in Config > GLOBAL SETTINGS > DESTINATIONS
+    - the file can optionally be moved into a subfolder named after the streamer
+    - the file can optionally go through the "fixup" procedure during the move process
+- added the "Trim" option to the "File Options" menu
+    - uses ffmpeg to losslessly trim the video to your start and end timestamp
+- added the "Fixup" option to the "File Options" menu
+    - does the same thing as yt-dlp's "fixup" option.  (fixes timestamps, seeking, metadata, etc...)
+
+====================
+====================
+
 v1.24.0
 
 - added a new global key called "COMPACT_VIEW".  When set to "auto", the site panel(s) will change into compact view automatically when there are too many streamers to display in the normal view

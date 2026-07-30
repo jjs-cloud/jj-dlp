@@ -58,6 +58,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("LQ_DOWNLOADER",         "global", "false", True,  "When any recording reaches the ffmpeg error threshold (FF_ERR_THRESH) lower the video quality of the lowest priority streamer, freeing up bandwidth for the remaining streamers."),
     _KeyDef("FF_ERR_THRESH",         "global", "200",   True,  'Restart the download if we see this many ffmpeg errors ("timestamp discontinuity", "Packet corrupt") default: 200'),
     _KeyDef("SUBFOLDERS",            "global", "false", True,  "Save recordings into a subfolder named after the streamer inside OUTPUT_DIR (true/false)."),
+    _KeyDef("DESTINATIONS",          "global", "",      True,  "A list of destination paths where you might want to move your files.  Used in the File Manager tab. (e.g. C:\\My Recordings  OR /home/greg/twitch)"),
     _KeyDef("NTFY_TOPIC",            "global", "",      True,  "The topic name to use for ntfy.sh notifications. (example: jj-dlp-fj48dh734fk) Refer to docs/ntfy-setup.md for a detailed setup guide. (blank = disabled)"),
     _KeyDef("NOTIFY_CONFIRM_FILE",   "global", "true",  True,  "Confirm the recording has actually started before sending a live notification.  Note: When enabled, the notifications will be delayed by a few seconds until the file has been confirmed."),
     _KeyDef("SITE_SORT",             "global", "added_first", True, "The order to display streamers on each site panel.   This can also be adjusted by pressing the S key on the Dashboard tab."),
@@ -2195,6 +2196,16 @@ class GlobalConfigEditor:
         self._msg_filters_labels:  dict[str, str]  = {}      # callsite_id -> label
         self._msg_filters_state:   dict[str, bool] = {}      # working copy: callsite_id -> enabled
 
+        # ── Destinations popup state ────────────────────────────────────────────
+        # Activated instead of the plain text popup when DESTINATIONS is selected.
+        # Lets the user build up the comma-separated path list one entry at a
+        # time (type a path, press Enter, it's appended and shown above the
+        # blank) rather than hand-editing the raw CSV string.
+        self.destinations_mode:    bool = False
+        self._destinations_list:   list = []   # working copy of paths
+        self._destinations_buf:    str  = ""
+        self._destinations_scroll: int  = 0
+
     @staticmethod
     def _find_global_conf() -> str:
         """Return the path to global.conf inside the configs/ directory."""
@@ -2439,6 +2450,113 @@ class GlobalConfigEditor:
         _dbg(f"[CONFIG] _save_msg_filters: tag={self._msg_filters_tag!r} "
              f"disabled={sorted(k for k, v in self._msg_filters_state.items() if not v)}")
 
+    # ── Destinations popup (DESTINATIONS key) ─────────────────────────────────
+
+    def _open_destinations_popup(self) -> None:
+        """Switch to the add-one-at-a-time editor for the DESTINATIONS key."""
+        raw = self.editing_item.value.strip().strip('"\'')
+        self._destinations_list = [p.strip() for p in raw.split(",") if p.strip()] if raw else []
+        self._destinations_buf = ""
+        self._destinations_scroll = 0
+        self.destinations_mode = True
+
+    def _handle_destinations_key(self, key) -> bool:
+        """Handle keypresses while the DESTINATIONS popup is open."""
+        if key == 27:  # Esc -> save whatever has been added so far and close
+            self._save_destinations()
+            self.destinations_mode = False
+            self.editing_item = None
+            return True
+        elif key in (curses.KEY_BACKSPACE, 127, 8):
+            self._destinations_buf = self._destinations_buf[:-1]
+            return True
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
+            path = self._destinations_buf.strip()
+            if path:
+                if path not in self._destinations_list:
+                    self._destinations_list.append(path)
+                self._destinations_buf = ""
+            else:
+                # Enter on an empty blank means "done" -> save and close.
+                self._save_destinations()
+                self.destinations_mode = False
+                self.editing_item = None
+            return True
+        elif 32 <= key < 127:
+            self._destinations_buf += chr(key)
+            return True
+        return True   # consume all other keys so they don't leak to the list
+
+    def _save_destinations(self) -> None:
+        """Persist the accumulated destinations list back to global.conf as CSV."""
+        new_val = ", ".join(self._destinations_list)
+        if self.editing_item and 0 <= self.editing_item.line_idx < len(self.lines):
+            self.lines[self.editing_item.line_idx] = f"{self.editing_item.key} = {new_val}\n"
+        self.save()
+
+    def _draw_destinations_popup(self, stdscr) -> None:
+        """Draw the DESTINATIONS list-builder popup."""
+        db   = self.dashboard
+        h, w = stdscr.getmaxyx()
+
+        box_w      = min(66, w - 4)
+        inner_w    = box_w - 4
+        n_dest     = len(self._destinations_list)
+        comment    = self.editing_item.comment if self.editing_item else ""
+        comment_lines = _wrap_text(comment, inner_w) if comment else []
+
+        # 2 borders + 1 title gap + 1 "Paths:" header + n_dest rows (or 1
+        # "none yet" line) + 1 blank + 1 input row + 1 legend
+        # + comment rows (if any) + 1 blank separator after comment
+        comment_h  = len(comment_lines) + (1 if comment_lines else 0)
+        min_h      = max(n_dest, 1) + 7 + comment_h
+        box_h      = min(min_h, h - 4)
+        by1        = (h - box_h) // 2
+        bx1        = (w - box_w) // 2
+        by2        = by1 + box_h
+        bx2        = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), curses.color_pair(db.C_NORMAL))
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
+        db.safe_addstr(stdscr, by1, bx1 + 2, " DESTINATIONS ",
+                       curses.color_pair(db.C_SYSTEM) | curses.A_BOLD)
+
+        row = by1 + 1
+        if comment_lines:
+            for cl in comment_lines:
+                db.safe_addstr(stdscr, row, bx1 + 2, cl, curses.color_pair(db.C_DIM))
+                row += 1
+            row += 1  # blank separator
+
+        db.safe_addstr(stdscr, row, bx1 + 2, "Paths:", curses.color_pair(db.C_DIM))
+        row += 1
+
+        avail_rows = max(1, (by2 - row) - 2)   # reserve 2 lines for the input row + legend
+        if not self._destinations_list:
+            db.safe_addstr(stdscr, row, bx1 + 2, "(none yet)", curses.color_pair(db.C_DIM))
+            row += 1
+        else:
+            if n_dest >= self._destinations_scroll + avail_rows:
+                self._destinations_scroll = n_dest - avail_rows + 1
+            scroll = max(0, self._destinations_scroll)
+            for i in range(scroll, min(n_dest, scroll + avail_rows)):
+                path = self._destinations_list[i]
+                disp = path if len(path) <= box_w - 4 else path[:box_w - 5] + "\u25ba"
+                db.safe_addstr(stdscr, row, bx1 + 2, disp, curses.color_pair(db.C_NORMAL))
+                row += 1
+
+        input_row = by2 - 1
+        db.safe_addstr(stdscr, input_row, bx1 + 2, "New path:",
+                       curses.color_pair(db.C_WARN) | curses.A_BOLD)
+        db.safe_addstr(stdscr, input_row, bx1 + 12,
+                       (self._destinations_buf + "_")[:box_w - 14],
+                       curses.color_pair(db.C_NORMAL) | curses.A_BOLD)
+
+        db.safe_addstr(stdscr, by2, bx1 + 2,
+                       " Enter: Add path (blank Enter: Done)  Esc: Done ",
+                       curses.color_pair(db.C_INVHEAD))
+
     def _draw_msg_filters_popup(self, stdscr) -> None:
         """Draw the per-message toggle popup for a single tag."""
         db   = self.dashboard
@@ -2655,6 +2773,8 @@ class GlobalConfigEditor:
             return self._handle_msg_filters_key(key)
         if self.debug_tags_mode:
             return self._handle_debug_tags_key(key)
+        if self.destinations_mode:
+            return self._handle_destinations_key(key)
 
         if self.popup_mode:
             _dbg(f"[CONFIG] GlobalConfigEditor.handle_key() popup key={key} popup_buf={self.popup_buf!r} editing_item={self.editing_item.key if self.editing_item else None}")
@@ -2709,6 +2829,8 @@ class GlobalConfigEditor:
                 self.editing_item = self.items[self.selected_idx]
                 if self.editing_item.key == "DEBUG_LOGS":
                     self._open_debug_tags_popup()
+                elif self.editing_item.key == "DESTINATIONS":
+                    self._open_destinations_popup()
                 else:
                     self.popup_buf = self.editing_item.value
                     self.popup_mode = True
@@ -2749,9 +2871,11 @@ class GlobalConfigEditor:
             val_str = "= " + str(item.value)
             
             # columns between value start and right border (reduced by 2 to leave space for arrows)
-            max_val_w = (x2 - x1) - 26 - 3   
+            max_val_w = max(0, (x2 - x1) - 26 - 3)
             
-            if len(val_str) > max_val_w:
+            if max_val_w == 0:
+                val_str = ""
+            elif len(val_str) > max_val_w:
                 val_str = val_str[:max_val_w - 1] + "\u25ba"
             self.dashboard.safe_addstr(stdscr, row_y, x1 + 26, val_str, val_attr)
             
@@ -2765,7 +2889,7 @@ class GlobalConfigEditor:
 
         if self.popup_mode and self.editing_item:
             self.draw_popup(stdscr)
-        elif self.debug_tags_mode or self.msg_filters_mode:
+        elif self.debug_tags_mode or self.msg_filters_mode or self.destinations_mode:
             self.draw_popup(stdscr)
 
     def draw_popup(self, stdscr):
@@ -2773,6 +2897,8 @@ class GlobalConfigEditor:
             self._draw_msg_filters_popup(stdscr)
         elif self.debug_tags_mode:
             self._draw_debug_tags_popup(stdscr)
+        elif self.destinations_mode:
+            self._draw_destinations_popup(stdscr)
         else:
             self._draw_popup(stdscr)
 
@@ -3059,9 +3185,11 @@ class ConfigEditor:
                         val_str = "= " + str(item.value)
                         
                         # columns between value start and right border (reduced by 2 to leave space for arrows)
-                        max_val_w = (site_x2 - site_x1) - 29 - 3   
+                        max_val_w = max(0, (site_x2 - site_x1) - 29 - 3)
                         
-                        if len(val_str) > max_val_w:
+                        if max_val_w == 0:
+                            val_str = ""
+                        elif len(val_str) > max_val_w:
                             val_str = val_str[:max_val_w - 1] + "\u25ba"
                         self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 29, val_str, val_attr)
                 
@@ -3078,6 +3206,7 @@ class ConfigEditor:
             (self.global_editor.popup_mode and self.global_editor.editing_item)
             or self.global_editor.debug_tags_mode
             or self.global_editor.msg_filters_mode
+            or self.global_editor.destinations_mode
         ):
             self.global_editor.draw_popup(stdscr)
         elif self._focus == "site" and self.popup_mode and self.editing_item:
@@ -3139,7 +3268,8 @@ class ConfigEditor:
         # Tab key cycles focus: site → global → priority → site → …
         # (only when no popup is open in any sub-editor)
         any_popup = (self.global_editor.popup_mode or self.global_editor.debug_tags_mode
-                     or self.global_editor.msg_filters_mode or self.popup_mode)
+                     or self.global_editor.msg_filters_mode or self.global_editor.destinations_mode
+                     or self.popup_mode)
         if key == ord('\t') and not any_popup:
             _cycle = ["site", "global", "priority"]
             self._focus = _cycle[(_cycle.index(self._focus) + 1) % len(_cycle)]
@@ -3161,7 +3291,8 @@ class ConfigEditor:
             # rather than switching away from the Config tab.
             if (key == 27 and not self.global_editor.popup_mode
                     and not self.global_editor.debug_tags_mode
-                    and not self.global_editor.msg_filters_mode):
+                    and not self.global_editor.msg_filters_mode
+                    and not self.global_editor.destinations_mode):
                 self.dashboard.selected_tab = 0
                 return True
             return self.global_editor.handle_key(key)
