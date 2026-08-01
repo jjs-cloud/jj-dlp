@@ -333,7 +333,7 @@ class FileManagerTab:
         # "Move" destination-picker popup (step 1: destination + checkboxes)
         self._move_open = False
         self._move_cursor = 0
-        self._move_checks = {"subfolder": True, "fixup": True}
+        self._move_checks = {"subfolder": True, "fixup": False}
         self._move_target = None
         self._move_destinations = []
 
@@ -933,7 +933,7 @@ class FileManagerTab:
             return
         self._move_target = self._selected_path
         self._move_destinations = self._get_destinations()
-        self._move_checks = {"subfolder": True, "fixup": True}
+        self._move_checks = {"subfolder": True, "fixup": False}
         self._move_cursor = 0
         self._move_open = True
 
