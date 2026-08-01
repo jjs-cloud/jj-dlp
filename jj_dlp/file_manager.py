@@ -556,12 +556,27 @@ class FileManagerTab:
             for p, rec in self._moving_records.items():
                 rows.append(("file", p, rec))
 
+        # Remember where the current selection sat among the *old* file rows,
+        # so that if it vanishes (fixup/move/trim finishing, deleted
+        # externally, etc.) we can land on its neighbor instead of jumping
+        # back to the top of the list.
+        old_file_paths = [r[1] for r in self._rows if r[0] == "file"]
+        old_pos = None
+        if self._selected_path in old_file_paths:
+            old_pos = old_file_paths.index(self._selected_path)
+
         self._rows = rows
 
-        # Keep selection valid; default to the first file if none/invalid.
+        # Keep selection valid.
         file_paths = [r[1] for r in rows if r[0] == "file"]
         if self._selected_path not in file_paths:
-            self._selected_path = file_paths[0] if file_paths else None
+            if old_pos is not None and file_paths:
+                # Land on whatever now occupies the same (or nearest lower)
+                # position, mirroring how the list "shifts up" underneath us.
+                new_pos = min(old_pos, len(file_paths) - 1)
+                self._selected_path = file_paths[new_pos]
+            else:
+                self._selected_path = file_paths[0] if file_paths else None
 
     # ── Selection movement ──────────────────────────────────────────────────
 
