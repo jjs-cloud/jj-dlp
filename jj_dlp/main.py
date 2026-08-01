@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.24.12"
+__version__ = "1.24.13"
 
 import subprocess
 import time
@@ -3561,6 +3561,10 @@ def monitor_site(site: "SiteState") -> None:
             site.eventsub.start()
         except Exception as e:
             site.log_line(f"EventSub init failed: {e}")
+
+    # Stagger startup liveness checks slightly so the curses UI finishes
+    # drawing its initial frames smoothly before external processes launch.
+    time.sleep(2.0)
 
     while not site._stop_event.is_set():
         # Evaluate schedule-based enable/disable for all streamers before the

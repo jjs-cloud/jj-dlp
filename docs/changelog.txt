@@ -1,3 +1,8 @@
+- startup performance tweaks (stagger processes)
+
+====================
+====================
+
 v1.24.12
 
 - minor visual changes (file manager hints, window size truncation)
