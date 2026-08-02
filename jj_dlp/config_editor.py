@@ -63,6 +63,10 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("NOTIFY_CONFIRM_FILE",   "global", "true",  True,  "Confirm the recording has actually started before sending a live notification.  Note: When enabled, the notifications will be delayed by a few seconds until the file has been confirmed."),
     _KeyDef("SITE_SORT",             "global", "added_first", True, "The order to display streamers on each site panel.   This can also be adjusted by pressing the S key on the Dashboard tab."),
     _KeyDef("COMPACT_VIEW",          "global", "auto",  True,  "When streamers overflow the panel, compact view shows them in 2 columns without progress bars. (auto/true/false)"),
+    _KeyDef("WEB_UI",                "global", "false", True,  "Enable the read-only web dashboard, viewable from a browser on your local network (e.g. Safari on iPhone). Requires WEB_UI_USER and WEB_UI_PASS to also be set. (true/false)"),
+    _KeyDef("WEB_UI_PORT",           "global", "8765",  True,  "Port for the web dashboard. Visit http://<this-pc-ip>:<port> from another device, or http://127.0.0.1:<port> on this PC."),
+    _KeyDef("WEB_UI_USER",           "global", "",      True,  "Username required to log into the web dashboard (HTTP Basic Auth). Required if WEB_UI is enabled."),
+    _KeyDef("WEB_UI_PASS",           "global", "",      True,  "Password required to log into the web dashboard (HTTP Basic Auth). Required if WEB_UI is enabled. Choose something not easily guessed — anyone on your WiFi could otherwise try to log in."),
 
     # ── Site keys (per-site .conf) ────────────────────────────────────────────
     _KeyDef("SITE_LABEL",            "site",   "",      True,  "The name of this site."),
@@ -2113,11 +2117,11 @@ def _validate_value(key: str, value: str) -> tuple[bool, str]:
     bool_keys = {"DEBUG_LOGS", "CHECK_FOR_UPDATES", "ASK_FOR_BROWSER", "ASK_FOR_CONFIG",
                  "PANEL_RESIZE", "LOGGING", "SPLIT_LOGS", "POPUP_NOTIFICATIONS",
                  "DOWNLOADER_COOKIES", "CHECKER_COOKIES", "LQ_DOWNLOADER", "SUBFOLDERS",
-                 "UPGRADE_QUALITY"}
+                 "UPGRADE_QUALITY", "WEB_UI"}
     int_keys = {"UPDATE_INTERVAL", "SITE_ORDER", "CHECK_INTERVAL", "COOLDOWN_AFTER_RECORDING",
                 "SPLIT_AFTER", "STALL_CHECK_INTERVAL", "STALL_TIMEOUT", "CONFIG_CHECK_INTERVAL",
                 "POPUP_TIMEOUT", "POPUP_COOLDOWN", "PROGRESS_BAR_MAX_HOURS", "PROGRESS_BAR_WIDTH",
-                "LAST_LIVE_HIGHLIGHT", "MAX_CONCURRENT_REC", "FF_ERR_THRESH"}
+                "LAST_LIVE_HIGHLIGHT", "MAX_CONCURRENT_REC", "FF_ERR_THRESH", "WEB_UI_PORT"}
     if key in bool_keys:
         if value.lower() not in ("true", "false", "yes", "no", "1", "0"):
             return False, "Must be true or false"
@@ -2131,6 +2135,13 @@ def _validate_value(key: str, value: str) -> tuple[bool, str]:
     if key == "SITE_SORT":
         if value.lower() not in _SORT_KEYS:
             return False, f"Must be one of: {', '.join(_SORT_KEYS)}"
+    if key == "WEB_UI_PORT":
+        try:
+            port = int(value)
+            if not (1 <= port <= 65535):
+                return False, "Must be a port between 1 and 65535"
+        except ValueError:
+            return False, "Must be an integer"
     return True, ""
 
 
