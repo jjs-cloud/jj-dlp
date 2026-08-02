@@ -189,7 +189,7 @@ _INDEX_HTML = """<!DOCTYPE html>
   .btn-danger { border-color:#5c2222; color:#e88; }
   .btn-primary { border-color:#3a5c22; color:#9e8; }
   .add-row { display:flex; gap:6px; margin-top:10px; }
-  .add-row input { flex:1; font-size:0.9rem; padding:6px 8px; border-radius:6px;
+  .add-row input { flex:1; font-size:16px; padding:6px 8px; border-radius:6px;
                     border:1px solid #444; background:#1a1a1a; color:#eee; }
   .msg { font-size:0.78rem; margin-top:6px; min-height:1em; }
   .msg.err { color:#e77; }
@@ -254,6 +254,17 @@ async function refresh() {
     for (const inputEl of root.querySelectorAll('.add-row input')) {
       if (inputEl.value) prevAddInput[inputEl.dataset.site] = inputEl.value;
     }
+    // Same problem as above, but for focus: rebuilding the DOM below
+    // destroys and recreates the add-streamer <input> elements, which
+    // silently drops keyboard focus (and kicks the on-screen keyboard away
+    // on mobile) out of the box a user is actively typing in. Remember
+    // which one (if any) was focused, plus the cursor/selection position,
+    // so it can be restored after rebuild.
+    const active = document.activeElement;
+    const activeSite = (active && active.matches && active.matches('.add-row input'))
+      ? active.dataset.site : null;
+    const activeSelStart = activeSite ? active.selectionStart : null;
+    const activeSelEnd = activeSite ? active.selectionEnd : null;
 
     root.innerHTML = '';
     for (const site of data.sites) {
@@ -292,7 +303,6 @@ async function refresh() {
         removeBtn.className = 'btn btn-danger';
         removeBtn.textContent = 'Remove';
         removeBtn.onclick = async () => {
-          if (!confirm('Remove ' + s.name + ' from ' + site.label + '? This deletes it from the config; you can add it back later.')) return;
           const result = await postStreamerAction(site.id, s.name, 'remove', removeBtn);
           siteMessages[site.id] = {text: result.message, ok: result.ok, ts: Date.now()};
           refresh();
@@ -325,6 +335,14 @@ async function refresh() {
       addInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doAdd(); });
       addRow.append(addInput, addBtn);
       div.appendChild(addRow);
+
+      if (site.id === activeSite) {
+        // Restore focus after the element is attached below.
+        queueMicrotask(() => {
+          addInput.focus({preventScroll: true});
+          try { addInput.setSelectionRange(activeSelStart, activeSelEnd); } catch (_) {}
+        });
+      }
 
       const msg = document.createElement('div');
       const sm = siteMessages[site.id];
