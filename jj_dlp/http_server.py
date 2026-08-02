@@ -80,8 +80,17 @@ def _build_status_snapshot(sites: List) -> dict:
                 "duration_s": (now - since) if since else None,
             })
 
+        # site.label is fixed at startup to the config filename; the
+        # user-facing title (SITE_LABEL in the config's [General] section,
+        # defaulting to the filename) can change at runtime, so pull it
+        # from the cached config the same way the rest of the app does.
+        try:
+            display_label = site.get_cached_config().get("site_label", site.label)
+        except Exception:
+            display_label = site.label
+
         out_sites.append({
-            "label": site.label,
+            "label": display_label,
             "streamers": streamers,
             "log": log_lines,
         })
@@ -133,6 +142,19 @@ async function refresh() {
       'jj-dlp — updated ' + new Date(data.generated_at * 1000).toLocaleTimeString();
     document.getElementById('status').classList.remove('stale');
     const root = document.getElementById('sites');
+
+    // The whole #sites subtree gets rebuilt below, which would otherwise
+    // reset every .log div's scroll position to the top on each refresh.
+    // Capture each site's scroll state first (keyed by site label) so we
+    // can restore it — or, if the user was already at the bottom, keep
+    // them pinned to the bottom so new lines stay visible.
+    const prevLogState = {};
+    for (const logEl of root.querySelectorAll('.log')) {
+      prevLogState[logEl.dataset.site] = {
+        distanceFromBottom: logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight,
+      };
+    }
+
     root.innerHTML = '';
     for (const site of data.sites) {
       const div = document.createElement('div');
@@ -147,7 +169,7 @@ async function refresh() {
         dot.className = 'dot' + (s.recording ? ' rec' : (s.live ? ' live' : ''));
         const name = document.createElement('div');
         name.className = 'name';
-        name.textContent = s.name + (s.blocked ? ' (blocked)' : '');
+        name.textContent = s.name + (s.blocked ? ' (disabled)' : '');
         const dur = document.createElement('div');
         dur.className = 'dur';
         if (s.duration_s != null) {
@@ -159,9 +181,20 @@ async function refresh() {
       }
       const log = document.createElement('div');
       log.className = 'log';
+      log.dataset.site = site.label;
       log.textContent = site.log.slice(-20).join('\\n');
       div.appendChild(log);
       root.appendChild(div);
+
+      // Default to showing the most recent lines. If the user had scrolled
+      // up to read older lines, leave them roughly where they were instead
+      // of snapping back to the top (or the bottom) on every refresh.
+      const prev = prevLogState[site.label];
+      if (!prev || prev.distanceFromBottom <= 4) {
+        log.scrollTop = log.scrollHeight;
+      } else {
+        log.scrollTop = Math.max(0, log.scrollHeight - log.clientHeight - prev.distanceFromBottom);
+      }
     }
   } catch (e) {
     document.getElementById('status').textContent = 'jj-dlp — connection lost, retrying…';
