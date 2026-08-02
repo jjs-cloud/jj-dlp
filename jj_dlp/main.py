@@ -417,6 +417,10 @@ def load_global_config() -> dict:
         "ntfy_topic":         general.get("NTFY_TOPIC", "").strip().strip('"\''),
         "notify_confirm_file":_bool("NOTIFY_CONFIRM_FILE", True),
         "compact_view": general.get("COMPACT_VIEW", "auto").strip().strip('"\'') or "auto",
+        "web_ui":             _bool("WEB_UI", False),
+        "web_ui_port":        _int("WEB_UI_PORT", 8765),
+        "web_ui_user":        general.get("WEB_UI_USER", "").strip().strip('"\''),
+        "web_ui_pass":        general.get("WEB_UI_PASS", "").strip().strip('"\''),
     }
 
 def _write_global_conf_key(key: str, value: str) -> None:
@@ -6201,6 +6205,13 @@ def main() -> None:
                               daemon=True)
         wt.start()
         site.watcher_thread = wt
+
+    # ── Launch embedded web UI (opt-in, read-only v1) ─────────────────────────
+    try:
+        import http_server as _http_server
+        _http_server.start_web_server(sites, global_cfg)
+    except Exception as e:
+        startup_dbg(f"[WEBUI] failed to start: {type(e).__name__}: {e}")
 
     # ── Launch curses dashboard ───────────────────────────────────────────────
     try:

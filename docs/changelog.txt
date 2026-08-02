@@ -1,4 +1,5 @@
 - startup performance tweaks (stagger processes)
+- added a local-only web interface for jj-dlp
 
 ====================
 ====================

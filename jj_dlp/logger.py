@@ -148,6 +148,7 @@ def configure(dashboard_log_fn=None, dashboard_dbg_fn=None) -> None:
 #   CONCURRENCY — MAX_CONCURRENT eviction logic
 #   SYSTEM   — dashboard system-panel background section exception guards
 #   CHANGELOG — changelog-shown-on-update bookkeeping
+#   WEBUI - HTTP Server diagnostics
 #
 DBG_TAGS: list[str] = [
     "DRAIN",
@@ -174,6 +175,7 @@ DBG_TAGS: list[str] = [
     "CONCURRENCY",
     "SYSTEM",
     "CHANGELOG",
+    "WEBUI",
 ]
 
 import json
