@@ -30,7 +30,10 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import List, Optional
 
-import logger as _logger
+try:
+    from . import logger as _logger
+except ImportError:
+    import logger as _logger
 
 dbg = _logger.dbg
 
@@ -248,7 +251,7 @@ class _Handler(BaseHTTPRequestHandler):
 # Public entry point
 # ══════════════════════════════════════════════════════════════════════════
 
-def start_web_server(sites: List, global_cfg: dict) -> Optional[threading.Thread]:
+def start_web_server(sites: List, global_cfg: dict, log_fn=None) -> Optional[threading.Thread]:
     """Launch the embedded web UI as a daemon thread, if enabled.
 
     Reads from *global_cfg* (the dict returned by load_global_config()):
@@ -257,18 +260,32 @@ def start_web_server(sites: List, global_cfg: dict) -> Optional[threading.Thread
         web_ui_user   – str
         web_ui_pass   – str
 
+    *log_fn*, if given, is called with a short string for the essential
+    startup outcomes (started / refused / bind failure) so they show up in
+    the dashboard's Activity Log regardless of debug-tag settings — those
+    are easy to silence and shouldn't be the only place a user can learn
+    the web UI didn't come up. Pass main()'s _dash_log helper here.
+
     If web_ui is False, or web_ui_user/web_ui_pass are not both set,
     the server does not start (auth is mandatory, not optional).
     Returns the started Thread, or None if the server was not started.
     """
+    def _announce(msg: str) -> None:
+        dbg(f"[WEBUI] {msg}")
+        if log_fn is not None:
+            try:
+                log_fn(f"[WEBUI] {msg}")
+            except Exception:
+                pass
+
     if not global_cfg.get("web_ui", False):
         return None
 
     user = global_cfg.get("web_ui_user", "").strip()
     pw = global_cfg.get("web_ui_pass", "").strip()
     if not user or not pw:
-        dbg("[WEBUI] WEB_UI is enabled but WEB_UI_USER/WEB_UI_PASS are not both "
-            "set — refusing to start server without auth.")
+        _announce("WEB_UI is enabled but WEB_UI_USER/WEB_UI_PASS are not both "
+                   "set in global.conf — refusing to start server without auth.")
         return None
 
     port = global_cfg.get("web_ui_port", 8765)
@@ -282,16 +299,16 @@ def start_web_server(sites: List, global_cfg: dict) -> Optional[threading.Thread
     try:
         httpd = ThreadingHTTPServer(("0.0.0.0", port), handler_cls)
     except OSError as e:
-        dbg(f"[WEBUI] failed to bind port {port}: {e}")
+        _announce(f"failed to bind port {port}: {e}")
         return None
 
     def _run():
-        dbg(f"[WEBUI] listening on http://0.0.0.0:{port} "
-            f"(also reachable via http://127.0.0.1:{port})")
+        _announce(f"listening on http://0.0.0.0:{port} "
+                   f"(also reachable via http://127.0.0.1:{port})")
         try:
             httpd.serve_forever()
         except Exception as e:
-            dbg(f"[WEBUI] server thread crashed: {type(e).__name__}: {e}")
+            _announce(f"server thread crashed: {type(e).__name__}: {e}")
 
     thread = threading.Thread(target=_run, daemon=True, name="webui-http")
     thread.start()

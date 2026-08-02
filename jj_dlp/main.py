@@ -6208,10 +6208,12 @@ def main() -> None:
 
     # ── Launch embedded web UI (opt-in, read-only v1) ─────────────────────────
     try:
-        import http_server as _http_server
-        _http_server.start_web_server(sites, global_cfg)
+        from . import http_server as _http_server
+        _http_server.start_web_server(sites, global_cfg, log_fn=_dash_log)
     except Exception as e:
-        startup_dbg(f"[WEBUI] failed to start: {type(e).__name__}: {e}")
+        msg = f"[WEBUI] failed to start: {type(e).__name__}: {e}"
+        startup_dbg(msg)
+        _dash_log(msg)
 
     # ── Launch curses dashboard ───────────────────────────────────────────────
     try:
