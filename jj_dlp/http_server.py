@@ -1,7 +1,7 @@
 """
-http_server.py — Embedded, read-only web dashboard for jj-dlp.
+http_server.py — Embedded web dashboard for jj-dlp.
 
-Design (v1 — read-only):
+Design (v2 — read-only status + add/remove/disable streamer):
     * Zero external dependencies (stdlib http.server only).
     * Runs as a single daemon thread launched from main(), alongside the
       existing monitor/watcher threads. Reads the *same* SiteState objects
@@ -13,10 +13,35 @@ Design (v1 — read-only):
       works via 127.0.0.1 on the same machine, since it's a single listen
       socket on all interfaces.
 
-Write operations (add/remove/disable streamer, priority reorder, config
-edit) are intentionally NOT implemented yet. This module should only ever
-*read* SiteState under its locks; it must never call into config-writing
-code until v2.
+Write support (this module): add / remove / disable a streamer, mirroring
+what the curses management overlay ('a'/'r'/'d' keys) does. The actual
+config-file mutation logic (_modify_config_streamer) still lives in
+main.py and is handed in as a callback (modify_streamer_fn) so this module
+doesn't import main.py — main.py already imports this module, and keeping
+the dependency one-directional avoids a circular import.
+
+Still NOT implemented: priority reorder, general config editing. Those
+are meaningfully more complex (ordering semantics / arbitrary key-value
+edits) and are left for a later pass.
+
+Concurrency notes for the write path:
+    * _CONFIG_WRITE_LOCK below serializes all streamer-management calls
+      made through this server (ThreadingHTTPServer means concurrent
+      requests are otherwise on separate threads). It does not coordinate
+      with the curses TUI's own 'a'/'r'/'d' handling, but that runs on
+      the single main/curses thread and only ever does one edit at a time,
+      so the risk is limited to two web requests racing each other.
+    * After a successful edit we call site.invalidate_config_cache() and
+      site.trigger_event.set(), exactly like the curses handler does, so
+      the monitor thread picks up the change and dash_all_streamers /
+      dash_blocked (what /api/status reports) reflect it on the next
+      snapshot. We do NOT reach into the curses ConfigEditor's own cache
+      (ConfigEditor.load_config / priority_editor.force_reload) — this
+      server has no reference to it, since the TUI object is constructed
+      after start_web_server() is called. Practical effect: if someone is
+      simultaneously looking at the Config tab in curses, it may show
+      stale data until it's reopened. The Dashboard tab, activity log,
+      and this web UI are unaffected.
 """
 
 from __future__ import annotations
@@ -27,8 +52,9 @@ import hmac
 import json
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 try:
     from . import logger as _logger
@@ -90,12 +116,43 @@ def _build_status_snapshot(sites: List) -> dict:
             display_label = site.label
 
         out_sites.append({
+            # site.label is the config filename — fixed at startup, unique,
+            # and never changes at runtime, so it's used as the stable
+            # identifier for API calls (add/remove/disable). display_label
+            # (below) is only for showing to the user, and can change if
+            # SITE_LABEL is edited in the config.
+            "id": site.label,
             "label": display_label,
             "streamers": streamers,
             "log": log_lines,
         })
 
     return {"generated_at": now, "sites": out_sites}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Streamer management (add / remove / disable) — mirrors the curses 'a' /
+# 'r' / 'd' management overlay, driven over HTTP instead of the keyboard.
+# ══════════════════════════════════════════════════════════════════════════
+
+_ALLOWED_ACTIONS = ("add", "remove", "disable")
+_MAX_USERNAME_LEN = 100
+_MAX_BODY_BYTES = 4096
+
+# Serializes config-file writes triggered through this server. See the
+# "Concurrency notes" section of the module docstring.
+_CONFIG_WRITE_LOCK = threading.Lock()
+
+
+def _valid_username(name: str) -> bool:
+    """Match what curses' text-input already allows: non-empty, printable
+    ASCII only (curses' handler only accepts 32 <= key < 127), and capped
+    at a sane length. This also rules out embedded newlines, which would
+    otherwise let a crafted username inject extra lines/sections into the
+    config file (_modify_config_streamer writes the raw string as a line)."""
+    if not name or len(name) > _MAX_USERNAME_LEN:
+        return False
+    return all(32 <= ord(ch) < 127 for ch in name)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -124,6 +181,19 @@ _INDEX_HTML = """<!DOCTYPE html>
   .dot.rec { background:#e33; }
   .name { flex:1; }
   .dur { opacity:.6; font-variant-numeric:tabular-nums; font-size:0.85rem; }
+  .actions { display:flex; gap:6px; flex:none; }
+  .btn { font-size:0.78rem; padding:4px 9px; border-radius:6px; border:1px solid #444;
+         background:#1c1c1c; color:#ddd; }
+  .btn:active { background:#2a2a2a; }
+  .btn:disabled { opacity:.4; }
+  .btn-danger { border-color:#5c2222; color:#e88; }
+  .btn-primary { border-color:#3a5c22; color:#9e8; }
+  .add-row { display:flex; gap:6px; margin-top:10px; }
+  .add-row input { flex:1; font-size:0.9rem; padding:6px 8px; border-radius:6px;
+                    border:1px solid #444; background:#1a1a1a; color:#eee; }
+  .msg { font-size:0.78rem; margin-top:6px; min-height:1em; }
+  .msg.err { color:#e77; }
+  .msg.ok { color:#8c8; }
   .log { margin-top:8px; font-size:0.75rem; opacity:.6; max-height:120px; overflow-y:auto;
          white-space:pre-wrap; font-family:ui-monospace, monospace; }
   .stale { color:#e33; }
@@ -133,6 +203,32 @@ _INDEX_HTML = """<!DOCTYPE html>
 <h1 id="status">jj-dlp — connecting…</h1>
 <div id="sites"></div>
 <script>
+// Result of the most recent add/remove/disable action per site, so it
+// survives the innerHTML rebuild that refresh() does right after firing
+// (fetching /api/status doesn't know about it otherwise). Faded out after
+// a few seconds so it doesn't linger indefinitely.
+const siteMessages = {};
+
+async function postStreamerAction(siteId, username, action, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch('/api/streamer', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({site_id: siteId, username: username, action: action}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || data.message || ('HTTP ' + res.status));
+    }
+    return {ok: true, message: data.message || ''};
+  } catch (e) {
+    return {ok: false, message: String(e.message || e)};
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 async function refresh() {
   try {
     const res = await fetch('/api/status', {cache: 'no-store'});
@@ -144,15 +240,19 @@ async function refresh() {
     const root = document.getElementById('sites');
 
     // The whole #sites subtree gets rebuilt below, which would otherwise
-    // reset every .log div's scroll position to the top on each refresh.
-    // Capture each site's scroll state first (keyed by site label) so we
-    // can restore it — or, if the user was already at the bottom, keep
-    // them pinned to the bottom so new lines stay visible.
+    // reset every .log div's scroll position and every add-streamer input
+    // on each refresh. Capture that state first (keyed by site id) so it
+    // can be restored — or, for the log, so a user already at the bottom
+    // stays pinned there as new lines arrive.
     const prevLogState = {};
     for (const logEl of root.querySelectorAll('.log')) {
       prevLogState[logEl.dataset.site] = {
         distanceFromBottom: logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight,
       };
+    }
+    const prevAddInput = {};
+    for (const inputEl of root.querySelectorAll('.add-row input')) {
+      if (inputEl.value) prevAddInput[inputEl.dataset.site] = inputEl.value;
     }
 
     root.innerHTML = '';
@@ -162,6 +262,7 @@ async function refresh() {
       const h2 = document.createElement('h2');
       h2.textContent = site.label;
       div.appendChild(h2);
+
       for (const s of site.streamers) {
         const row = document.createElement('div');
         row.className = 'streamer';
@@ -176,12 +277,68 @@ async function refresh() {
           const m = Math.floor(s.duration_s / 60);
           dur.textContent = (m >= 60 ? Math.floor(m/60)+'h '+(m%60)+'m' : m+'m');
         }
-        row.append(dot, name, dur);
+
+        const actions = document.createElement('div');
+        actions.className = 'actions';
+        const toggleBtn = document.createElement('button');
+        toggleBtn.className = 'btn' + (s.blocked ? ' btn-primary' : '');
+        toggleBtn.textContent = s.blocked ? 'Enable' : 'Disable';
+        toggleBtn.onclick = async () => {
+          const result = await postStreamerAction(site.id, s.name, s.blocked ? 'add' : 'disable', toggleBtn);
+          siteMessages[site.id] = {text: result.message, ok: result.ok, ts: Date.now()};
+          refresh();
+        };
+        const removeBtn = document.createElement('button');
+        removeBtn.className = 'btn btn-danger';
+        removeBtn.textContent = 'Remove';
+        removeBtn.onclick = async () => {
+          if (!confirm('Remove ' + s.name + ' from ' + site.label + '? This deletes it from the config; you can add it back later.')) return;
+          const result = await postStreamerAction(site.id, s.name, 'remove', removeBtn);
+          siteMessages[site.id] = {text: result.message, ok: result.ok, ts: Date.now()};
+          refresh();
+        };
+        actions.append(toggleBtn, removeBtn);
+
+        row.append(dot, name, dur, actions);
         div.appendChild(row);
       }
+
+      const addRow = document.createElement('div');
+      addRow.className = 'add-row';
+      const addInput = document.createElement('input');
+      addInput.type = 'text';
+      addInput.placeholder = 'add streamer…';
+      addInput.dataset.site = site.id;
+      addInput.value = prevAddInput[site.id] || '';
+      const addBtn = document.createElement('button');
+      addBtn.className = 'btn btn-primary';
+      addBtn.textContent = 'Add';
+      const doAdd = async () => {
+        const username = addInput.value.trim();
+        if (!username) return;
+        const result = await postStreamerAction(site.id, username, 'add', addBtn);
+        siteMessages[site.id] = {text: result.message, ok: result.ok, ts: Date.now()};
+        if (result.ok) addInput.value = '';
+        refresh();
+      };
+      addBtn.onclick = doAdd;
+      addInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doAdd(); });
+      addRow.append(addInput, addBtn);
+      div.appendChild(addRow);
+
+      const msg = document.createElement('div');
+      const sm = siteMessages[site.id];
+      if (sm && (Date.now() - sm.ts) < 8000) {
+        msg.textContent = sm.text;
+        msg.className = 'msg ' + (sm.ok ? 'ok' : 'err');
+      } else {
+        msg.className = 'msg';
+      }
+      div.appendChild(msg);
+
       const log = document.createElement('div');
       log.className = 'log';
-      log.dataset.site = site.label;
+      log.dataset.site = site.id;
       log.textContent = site.log.slice(-20).join('\\n');
       div.appendChild(log);
       root.appendChild(div);
@@ -189,7 +346,7 @@ async function refresh() {
       // Default to showing the most recent lines. If the user had scrolled
       // up to read older lines, leave them roughly where they were instead
       // of snapping back to the top (or the bottom) on every refresh.
-      const prev = prevLogState[site.label];
+      const prev = prevLogState[site.id];
       if (!prev || prev.distanceFromBottom <= 4) {
         log.scrollTop = log.scrollHeight;
       } else {
@@ -201,6 +358,7 @@ async function refresh() {
     document.getElementById('status').classList.add('stale');
   }
 }
+
 refresh();
 setInterval(refresh, 5000);
 </script>
@@ -226,6 +384,11 @@ class _Handler(BaseHTTPRequestHandler):
     sites: List = []
     auth_user: str = ""
     auth_pass: str = ""
+    # Callback: (config_path: str, username: str, action: str) -> str.
+    # Set to main._modify_config_streamer by start_web_server(). Left as
+    # None means write endpoints are disabled (defense in depth — should
+    # never happen in practice since main.py always passes it).
+    modify_streamer_fn: Optional[Callable[[str, str, str], str]] = None
 
     # Silence default stderr access logging; route through jj-dlp's logger.
     def log_message(self, fmt, *args):
@@ -279,12 +442,100 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             self._send(404, b"not found", "text/plain")
 
+    def _json_error(self, status: int, error: str):
+        self._send(status, json.dumps({"error": error}).encode("utf-8"), "application/json")
+
+    def do_POST(self):
+        if not self._check_auth():
+            self._require_auth()
+            return
+
+        if self.path != "/api/streamer":
+            self._send(404, b"not found", "text/plain")
+            return
+
+        if self.modify_streamer_fn is None:
+            self._json_error(503, "write operations are not available")
+            return
+
+        # Browsers attach cached HTTP Basic Auth credentials to requests
+        # automatically whenever the origin matches — including requests
+        # triggered by a *different* site the browser happens to have open,
+        # not just this one. That makes state-changing endpoints a CSRF
+        # target for anyone else on the WiFi who can get the user's browser
+        # to submit a POST here. Requiring Origin/Referer (when the browser
+        # sends one) to match Host is a cheap check that blocks that case;
+        # it does nothing for non-browser clients, but those need the Basic
+        # Auth credentials directly anyway.
+        host = self.headers.get("Host", "")
+        origin = self.headers.get("Origin") or self.headers.get("Referer", "")
+        if origin:
+            origin_host = urllib.parse.urlparse(origin).netloc
+            if origin_host and origin_host != host:
+                self._json_error(403, "cross-origin request rejected")
+                return
+
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            length = 0
+        if length <= 0 or length > _MAX_BODY_BYTES:
+            self._json_error(400, "invalid request body")
+            return
+
+        try:
+            raw = self.rfile.read(length)
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception:
+            self._json_error(400, "malformed JSON body")
+            return
+
+        site_id = str(payload.get("site_id", ""))
+        username = str(payload.get("username", "")).strip()
+        action = str(payload.get("action", ""))
+
+        if action not in _ALLOWED_ACTIONS:
+            self._json_error(400, "action must be one of: " + ", ".join(_ALLOWED_ACTIONS))
+            return
+        if not _valid_username(username):
+            self._json_error(400, "invalid username")
+            return
+
+        site = next((s for s in self.sites if s.label == site_id), None)
+        if site is None:
+            self._json_error(404, "unknown site")
+            return
+
+        try:
+            with _CONFIG_WRITE_LOCK:
+                result = self.modify_streamer_fn(site.config_path, username, action)
+        except Exception as e:
+            dbg(f"[WEBUI] streamer action error: {type(e).__name__}: {e}")
+            self._json_error(500, "internal error")
+            return
+
+        # Same follow-up the curses management overlay does after a
+        # successful edit: invalidate the cached config and wake the
+        # monitor thread so dash_all_streamers/dash_blocked (what
+        # /api/status reports) pick up the change promptly.
+        site.invalidate_config_cache()
+        site.trigger_event.set()
+        site.log_line(f"[WebUI {self.client_address[0]}] {action} '{username}': {result}")
+
+        body = json.dumps({"ok": True, "message": result}).encode("utf-8")
+        self._send(200, body, "application/json")
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # Public entry point
 # ══════════════════════════════════════════════════════════════════════════
 
-def start_web_server(sites: List, global_cfg: dict, log_fn=None) -> Optional[threading.Thread]:
+def start_web_server(
+    sites: List,
+    global_cfg: dict,
+    log_fn=None,
+    modify_streamer_fn: Optional[Callable[[str, str, str], str]] = None,
+) -> Optional[threading.Thread]:
     """Launch the embedded web UI as a daemon thread, if enabled.
 
     Reads from *global_cfg* (the dict returned by load_global_config()):
@@ -298,6 +549,11 @@ def start_web_server(sites: List, global_cfg: dict, log_fn=None) -> Optional[thr
     the dashboard's Activity Log regardless of debug-tag settings — those
     are easy to silence and shouldn't be the only place a user can learn
     the web UI didn't come up. Pass main()'s _dash_log helper here.
+
+    *modify_streamer_fn*, if given, enables the add/remove/disable-streamer
+    endpoint (POST /api/streamer). Pass main()'s _modify_config_streamer
+    here. If omitted, /api/streamer responds 503 and the dashboard stays
+    read-only, same as v1.
 
     If web_ui is False, or web_ui_user/web_ui_pass are not both set,
     the server does not start (auth is mandatory, not optional).
@@ -327,6 +583,7 @@ def start_web_server(sites: List, global_cfg: dict, log_fn=None) -> Optional[thr
         "sites": sites,
         "auth_user": user,
         "auth_pass": pw,
+        "modify_streamer_fn": staticmethod(modify_streamer_fn) if modify_streamer_fn else None,
     })
 
     try:

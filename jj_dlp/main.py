@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.24.14"
+__version__ = "1.25.0"
 
 import subprocess
 import time
@@ -6206,10 +6206,14 @@ def main() -> None:
         wt.start()
         site.watcher_thread = wt
 
-    # ── Launch embedded web UI (opt-in, read-only v1) ─────────────────────────
+    # ── Launch embedded web UI (opt-in; status + add/remove/disable) ──────────
     try:
         from . import http_server as _http_server
-        _http_server.start_web_server(sites, global_cfg, log_fn=_dash_log)
+        _http_server.start_web_server(
+            sites, global_cfg,
+            log_fn=_dash_log,
+            modify_streamer_fn=_modify_config_streamer,
+        )
     except Exception as e:
         msg = f"[WEBUI] failed to start: {type(e).__name__}: {e}"
         startup_dbg(msg)
