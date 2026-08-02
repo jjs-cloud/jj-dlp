@@ -240,10 +240,13 @@ async function refresh() {
     const root = document.getElementById('sites');
 
     // The whole #sites subtree gets rebuilt below, which would otherwise
-    // reset every .log div's scroll position and every add-streamer input
-    // on each refresh. Capture that state first (keyed by site id) so it
-    // can be restored — or, for the log, so a user already at the bottom
-    // stays pinned there as new lines arrive.
+    // reset every .log div's scroll position, every add-streamer input,
+    // and — with a long streamer list — the page's own scroll position
+    // on each refresh. Capture that state first (keyed by site id, plus
+    // the page scroll) so it can be restored — or, for the log, so a
+    // user already at the bottom stays pinned there as new lines arrive.
+    const scrollX = window.scrollX;
+    const scrollY = window.scrollY;
     const prevLogState = {};
     for (const logEl of root.querySelectorAll('.log')) {
       prevLogState[logEl.dataset.site] = {
@@ -371,6 +374,10 @@ async function refresh() {
         log.scrollTop = Math.max(0, log.scrollHeight - log.clientHeight - prev.distanceFromBottom);
       }
     }
+
+    // Rebuild is done and the page is back to its full height — put the
+    // scroll position back where the user had it.
+    window.scrollTo(scrollX, scrollY);
   } catch (e) {
     document.getElementById('status').textContent = 'jj-dlp — connection lost, retrying…';
     document.getElementById('status').classList.add('stale');
