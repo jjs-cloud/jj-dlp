@@ -7,6 +7,7 @@
     - Login with the username and password you set.
 Note:  you can also access the web ui on the same machine by using http://127.0.0.1:8765
 Use this tool on your local network only.  Access over the internet is not supported.
+- optimized bundled yt-dlp fork to use less system resources (--onedir instead of --onefile)
 
 ====================
 ====================
