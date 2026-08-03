@@ -338,12 +338,7 @@ def perform_update():
         copy_and_diff(source_dir, base_dir)
         _logger().dbg("[UPDATER] perform_update: all files copied from source to base")
 
-        # ── Step 5: Set executable bits on bin/ ───────────────────────────────
-        print("Setting executable permissions on bin/ files...")
-        _mark_bin_executable(base_dir)
-        _logger().dbg("[UPDATER] perform_update: bin/ permissions set")
-
-        # ── Step 6: Mark update completed in global.json ──────────────────────
+        # ── Step 5: Mark update completed in global.json ──────────────────────
         # Re-fetch the latest SHA now that the install is done.  If additional
         # commits landed on the branch between when we started the download and
         # now, this ensures current_sha always matches whatever HEAD is at this
@@ -538,23 +533,6 @@ def replace_section(text, sec_name, new_content):
         out.append("")
 
     return "\n".join(out)
-
-
-def _mark_bin_executable(base_dir):
-    """Mark all files in <base_dir>/bin/ as executable on Linux and macOS."""
-    if sys.platform == "win32":
-        return
-    bin_dir = os.path.join(base_dir, "bin")
-    if not os.path.isdir(bin_dir):
-        return
-    for root, _dirs, files in os.walk(bin_dir):
-        for fname in files:
-            fpath = os.path.join(root, fname)
-            current = os.stat(fpath).st_mode
-            executable_mode = current | 0o111
-            if current != executable_mode:
-                os.chmod(fpath, executable_mode)
-                print(f"  Marked executable: {os.path.relpath(fpath, base_dir)}")
 
 
 def _is_binary(path: str) -> bool:
@@ -755,9 +733,6 @@ if __name__ == "__main__":
 
             _copy(_source_dir, _base_dir)
             _sdbg("files copied")
-
-            print("Setting executable permissions on bin/ files...")
-            _mark_bin_executable(_base_dir)
 
             _mark_done()
             _sdbg("update marked complete")

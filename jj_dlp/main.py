@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.25.4"
+__version__ = "1.25.5"
 
 import subprocess
 import time
@@ -23,7 +23,7 @@ import uuid
 from urllib.parse import urlparse
 import shutil
 
-from .deps import ensure_curses, plain_ffmpeg_check, check_ffmpeg
+from .deps import ensure_curses, plain_ffmpeg_check, check_ffmpeg, ensure_bin_executable
 from . import logger as _logger
 from .logger import (
     startup_dbg, startup_dbg_flush,
@@ -5995,6 +5995,11 @@ def main() -> None:
     if not plain_ffmpeg_check():
         print(f"\njj-dlp v{__version__}  ·  Aborted during ffmpeg check.")
         sys.exit(1)
+
+    # Bundled executables in bin/ lose their execute bit when copied from the
+    # GitHub zip.  Fix it on every launch (not just after an update) so the
+    # permission is correct even the first time jj-dlp runs after updating.
+    ensure_bin_executable()
 
     _script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if os.getcwd() != _script_dir:

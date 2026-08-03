@@ -4,6 +4,7 @@ deps.py  --  dependency detection & installation for jj-dlp
 Covers:
   * curses  (windows-curses on Windows, OS package on Linux/macOS)
   * ffmpeg  (winget on Windows, brew on macOS, distro PM on Linux)
+  * bin/    (marks bundled executables so they run after an update)
 
 Public API
 ----------
@@ -16,6 +17,9 @@ ensure_curses()                   -> None   (prompts & exits/continues)
 check_ffmpeg()                    -> (bool, str)
 install_ffmpeg_auto(progress_cb)  -> (bool, str)
 plain_ffmpeg_check()              -> bool   (prompts & returns continue flag)
+
+# bundled executables
+ensure_bin_executable()           -> None   (marks bin/ recursively)
 """
 
 import os
@@ -34,6 +38,41 @@ def _is_root() -> bool:
     # We only need sudo-elevation on POSIX systems anyway, so returning False
     # on Windows is both safe and correct.
     return getattr(os, "geteuid", lambda: -1)() == 0
+
+
+# ============================================================================
+# bundled executables (bin/)
+# ============================================================================
+
+def ensure_bin_executable() -> None:
+    """Mark every file under <base_dir>/bin/ executable on Linux and macOS.
+
+    The GitHub release zip does not preserve Unix executable bits, and the
+    nested platform layout (bin/linux/yt-dlp/yt-dlp, bin/windows/yt-dlp/...)
+    means the bundled binary can end up without the execute permission right
+    after an update.  This runs on every launch so the permissions are fixed
+    immediately, instead of waiting for the updater to run again.
+    """
+    if sys.platform == "win32":
+        return
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    bin_dir = os.path.join(base_dir, "bin")
+    if not os.path.isdir(bin_dir):
+        return
+    changed = 0
+    for root, _dirs, files in os.walk(bin_dir):
+        for fname in files:
+            fpath = os.path.join(root, fname)
+            try:
+                current = os.stat(fpath).st_mode
+            except OSError:
+                continue
+            executable_mode = current | 0o111
+            if current != executable_mode:
+                os.chmod(fpath, executable_mode)
+                changed += 1
+    if changed:
+        print(f"  Marked {changed} bundled executable(s) in bin/")
 
 
 # ============================================================================
