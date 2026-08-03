@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.25.2"
+__version__ = "1.25.3"
 
 import subprocess
 import time
@@ -4887,7 +4887,7 @@ class JJDlpDashboard:
                          f"  C: colors  Q: quit  ")
             elif current_tab == "File Manager":
                 hints = (f"  \u2191\u2193: select  Enter: open  Space: show folder"
-                         f"  DEL: delete  S: sort  T: toggle trash"
+                         f"  DEL: delete  S: sort  T: toggle trash  M: more options"
                          f"  C: colors  Q: quit  ")
             else:
                 hints = (f"  LEFT/RIGHT: switch tabs"
