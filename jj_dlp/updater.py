@@ -18,7 +18,7 @@ _VALID_BRANCHES = {"main", "testing", "experimental"}
 # ── Updater version ───────────────────────────────────────────────────────────
 # Incremented independently of the main jj-dlp version so we can tell which
 # updater logic is actually running during an update.
-UPDATER_VERSION = "2.2.0"
+UPDATER_VERSION = "2.3.0"
 
 # ── Lazy package imports ──────────────────────────────────────────────────────
 # Relative imports are deferred to call time so this file is also safe to
@@ -547,15 +547,14 @@ def _mark_bin_executable(base_dir):
     bin_dir = os.path.join(base_dir, "bin")
     if not os.path.isdir(bin_dir):
         return
-    for fname in os.listdir(bin_dir):
-        fpath = os.path.join(bin_dir, fname)
-        if not os.path.isfile(fpath):
-            continue
-        current = os.stat(fpath).st_mode
-        executable_mode = current | 0o111
-        if current != executable_mode:
-            os.chmod(fpath, executable_mode)
-            print(f"  Marked executable: bin/{fname}")
+    for root, _dirs, files in os.walk(bin_dir):
+        for fname in files:
+            fpath = os.path.join(root, fname)
+            current = os.stat(fpath).st_mode
+            executable_mode = current | 0o111
+            if current != executable_mode:
+                os.chmod(fpath, executable_mode)
+                print(f"  Marked executable: {os.path.relpath(fpath, base_dir)}")
 
 
 def _is_binary(path: str) -> bool:
