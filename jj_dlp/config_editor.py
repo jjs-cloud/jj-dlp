@@ -63,8 +63,8 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("NOTIFY_CONFIRM_FILE",   "global", "true",  True,  "Confirm the recording has actually started before sending a live notification.  Note: When enabled, the notifications will be delayed by a few seconds until the file has been confirmed."),
     _KeyDef("SITE_SORT",             "global", "added_first", True, "The order to display streamers on each site panel.   This can also be adjusted by pressing the S key on the Dashboard tab."),
     _KeyDef("COMPACT_VIEW",          "global", "auto",  True,  "When streamers overflow the panel, compact view shows them in 2 columns without progress bars. (auto/true/false)"),
-    _KeyDef("WEB_UI",                "global", "false", True,  "Enable the read-only web dashboard, viewable from a browser on your local network (e.g. Safari on iPhone). Requires WEB_UI_USER and WEB_UI_PASS to also be set. (true/false)"),
-    _KeyDef("WEB_UI_PORT",           "global", "8765",  True,  "Port for the web dashboard. Visit http://<this-pc-ip>:<port> from another device, or http://127.0.0.1:<port> on this PC."),
+    _KeyDef("WEB_UI",                "global", "false", True,  "Enable the Web UI, viewable from any browser on your local network by navigating to http://your-ip-address:8765 or from the same machine at http://127.0.0.1:8765. Requires WEB_UI_USER and WEB_UI_PASS to also be set. Note: Use this tool on your local network only.  Access over the internet is not supported. (true/false)"),
+    _KeyDef("WEB_UI_PORT",           "global", "8765",  True,  "Port for the web dashboard. Default: 8765"),
     _KeyDef("WEB_UI_USER",           "global", "",      True,  "Username required to log into the web dashboard (HTTP Basic Auth). Required if WEB_UI is enabled."),
     _KeyDef("WEB_UI_PASS",           "global", "",      True,  "Password required to log into the web dashboard (HTTP Basic Auth). Required if WEB_UI is enabled. Choose something not easily guessed — anyone on your WiFi could otherwise try to log in."),
 

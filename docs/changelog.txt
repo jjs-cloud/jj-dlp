@@ -1,5 +1,12 @@
 - startup performance tweaks (stagger processes)
-- added a local-only web interface for jj-dlp
+- Added a Web UI for jj-dlp.  Steps to use:
+    - Enable the WEB_UI key in Config > GLOBAL SETTINGS > WEB_UI
+    - Set a username and password in the WEB_UI_USER and WEB_UI_PASS fields
+    - Restart jj-dlp
+    - Go to http://your-ip-address:8765 in any web browser on the same local network.
+    - Login with the username and password you set.
+Note:  you can also access the web ui on the same machine by using http://127.0.0.1:8765
+Use this tool on your local network only.  Access over the internet is not supported.
 
 ====================
 ====================
