@@ -2568,6 +2568,33 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 f"streamer={streamer!r} = time.time()+{stall_timeout}s "
                 f"({_no_confirm_deadline:.2f}), dash_live_since={site.dash_live_since.get(streamer)}",
                 site_name=streamer)
+
+            def _check_no_confirm_deadline():
+                # Fires the NOTIFY_NO_CONFIRM_FILE warning as soon as the
+                # deadline has passed, independent of stall_check_interval
+                # and independent of whether proc is still alive when it's
+                # called. This must NOT be gated behind a "proc survived a
+                # full stall_check_interval" condition: _SIMULATE_WRITE_FAILURE
+                # (and real write failures) can make yt-dlp exit in well
+                # under stall_check_interval on every retry, which previously
+                # meant this check was never reached at all.
+                nonlocal _no_confirm_warned
+                if (notify_no_confirm_file
+                        and not _no_confirm_warned
+                        and not growth_seen
+                        and time.time() >= _no_confirm_deadline):
+                    _no_confirm_warned = True
+                    dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: file not confirmed for "
+                        f"streamer={streamer!r} within {int(stall_timeout)}s "
+                        f"(deadline={_no_confirm_deadline:.2f}) — sending warning",
+                        site_name=streamer)
+                    _maybe_show_live_popup(
+                        streamer, cfg, site, show_popup=show_popup,
+                        source="no_confirm_file", is_recording=True,
+                        warning=(f"The recording file could not be confirmed within "
+                                 f"{int(stall_timeout)}s — the start may have failed."),
+                        confirmed=False)
+
             seconds_since_check  = 0
             _split_log_counter   = 0  # throttle periodic split-timer dbg lines
             # Whether we've ever observed this file grow. The stall checker is
@@ -2870,6 +2897,11 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 time.sleep(1)
                 seconds_since_check += 1
 
+                # Checked every second (not gated behind stall_check_interval)
+                # so a fast-failing recording attempt can't prevent this from
+                # ever firing. See _check_no_confirm_deadline() above.
+                _check_no_confirm_deadline()
+
                 if seconds_since_check >= stall_check_interval:
                     seconds_since_check = 0
                     dbg(f"[STALL] check cycle: elapsed_since_growth="
@@ -3002,24 +3034,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         dbg(f"[STALL] no growth yet, but stall checker not armed "
                             f"(no growth seen for this file yet) — skipping stall "
                             f"detection", site_name=streamer)
-                        # NOTIFY_NO_CONFIRM_FILE failure mode: the file was never
-                        # confirmed (no growth) within one STALL_TIMEOUT (e.g.
-                        # yt-dlp exited 'normally' after a failure) — warn the
-                        # user. Independent of NOTIFY_CONFIRM_FILE.
-                        if (notify_no_confirm_file
-                                and not _no_confirm_warned
-                                and time.time() >= _no_confirm_deadline):
-                            _no_confirm_warned = True
-                            dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: file not confirmed for "
-                                f"streamer={streamer!r} within {int(stall_timeout)}s "
-                                f"(deadline={_no_confirm_deadline:.2f}) — sending warning",
-                                site_name=streamer)
-                            _maybe_show_live_popup(
-                                streamer, cfg, site, show_popup=show_popup,
-                                source="no_confirm_file", is_recording=True,
-                                warning=(f"The recording file could not be confirmed within "
-                                         f"{int(stall_timeout)}s — the start may have failed."),
-                                confirmed=False)
+                        # NOTIFY_NO_CONFIRM_FILE is now checked every second via
+                        # _check_no_confirm_deadline() above, not here — see
+                        # that function for why it can't be gated behind this
+                        # stall_check_interval-only branch.
                     else:
                         filename_error_warned = False
                         dbg(f"[STALL] NO GROWTH: size={current_size} "
@@ -3028,6 +3046,12 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         site.set_stall_since(streamer, last_growth_time)
 
             else:
+                # Safety net: if proc.poll() was already non-None before the
+                # loop got to sleep even once, _check_no_confirm_deadline()
+                # above may never have run this attempt. Give it one last
+                # chance here before we report the attempt as finished.
+                _check_no_confirm_deadline()
+
                 site.unregister_proc(streamer)
                 site.clear_stall_since(streamer)
                 site.clear_ffmpeg_error_count(streamer)
