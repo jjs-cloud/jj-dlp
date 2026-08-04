@@ -2114,6 +2114,29 @@ def _resolve_intro_delay(cfg: dict, entry_info: dict) -> dict:
     return overridden
 
 
+# ── DEBUG: write-failure simulation ─────────────────────────────────────────
+# Flip to True to reproduce the "recording can't write its file" failure mode
+# (the incident that motivated the unconfirmed-recording alert below) without
+# needing to actually break a filesystem.
+#
+# NOTE: pointing yt-dlp at a subdirectory that simply doesn't exist does NOT
+# work as a fault — yt-dlp creates any missing parent directories for its -o
+# path itself, so the write silently succeeds one level deeper and nothing
+# fails. Instead, this pre-creates a plain FILE (not a directory) at the
+# injected path component. yt-dlp then can't create anything under it —
+# you can't mkdir, or write a file, inside something that is itself a
+# regular file — so the write is guaranteed to fail regardless of any
+# directory-auto-creation behavior on yt-dlp's end. This is OS-level, so it
+# works the same on Windows/macOS/Linux.
+#
+# Watch for the flashing dashboard marker and the full-screen alert to
+# appear after roughly one stall_timeout window. Restore to False
+# afterwards — this is not meant to be left on, and the sentinel file it
+# creates (named below) should be deleted from OUTPUT_DIR when you're done.
+_SIMULATE_WRITE_FAILURE = False
+_SIMULATE_WRITE_FAILURE_BLOCKER_NAME = "_simulated_write_failure_do_not_create"
+
+
 def record_stream(streamer: str, cfg: dict, site: "SiteState",
                   use_lq: bool = False, show_popup: bool = True,
                   eviction_warning: str = "") -> None:
@@ -2231,6 +2254,20 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 )
 
             output_path = os.path.join(output_dir, current_output_tmpl)
+            if _SIMULATE_WRITE_FAILURE:
+                # See _SIMULATE_WRITE_FAILURE above. Create the blocker as a
+                # plain file (once) so yt-dlp cannot create anything "under"
+                # it — this is what actually guarantees the write fails,
+                # unlike just pointing at a missing directory.
+                _blocker_path = os.path.join(output_dir, _SIMULATE_WRITE_FAILURE_BLOCKER_NAME)
+                if not os.path.exists(_blocker_path):
+                    try:
+                        with open(_blocker_path, "wb"):
+                            pass
+                        dbg(f"[SIMULATE_WRITE_FAILURE] created blocker file at {_blocker_path!r}")
+                    except Exception as _blocker_exc:
+                        dbg(f"[SIMULATE_WRITE_FAILURE] could not create blocker file: {_blocker_exc!r}")
+                output_path = os.path.join(_blocker_path, current_output_tmpl)
 
             # ── Select downloader command (normal vs LQ) ──────────────────
             _active_dl_cmd = cfg["downloader_cmd"]
