@@ -416,6 +416,7 @@ def load_global_config() -> dict:
         "destinations":       destinations,
         "ntfy_topic":         general.get("NTFY_TOPIC", "").strip().strip('"\''),
         "notify_confirm_file":_bool("NOTIFY_CONFIRM_FILE", True),
+        "notify_no_confirm_file":_bool("NOTIFY_NO_CONFIRM_FILE", False),
         "compact_view": general.get("COMPACT_VIEW", "auto").strip().strip('"\'') or "auto",
         "web_ui":             _bool("WEB_UI", False),
         "web_ui_port":        _int("WEB_UI_PORT", 8765),
@@ -2134,8 +2135,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
     _global_cfg_nc = load_global_config()
     notify_confirm_file = _global_cfg_nc.get("notify_confirm_file", True)
+    notify_no_confirm_file = _global_cfg_nc.get("notify_no_confirm_file", False)
     initial_notification_sent = not notify_confirm_file
-    dbg(f"[NOTIFY] NOTIFY_CONFIRM_FILE={notify_confirm_file} for streamer={streamer!r} — "
+    dbg(f"[NOTIFY] NOTIFY_CONFIRM_FILE={notify_confirm_file} NOTIFY_NO_CONFIRM_FILE={notify_no_confirm_file} "
+        f"for streamer={streamer!r} — "
         f"initial_notification_sent={initial_notification_sent} "
         f"({'live notification already fired, nothing held back' if initial_notification_sent else 'live notification held until file growth is confirmed'})",
         site_name=streamer)
@@ -2519,6 +2522,17 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             recording_start_time = time.time()
             stall_check_interval = cfg["stall_check_interval"]
             stall_timeout        = cfg["stall_timeout"]
+            # NOTIFY_NO_CONFIRM_FILE tracking: if the recording file has not been
+            # confirmed within one STALL_TIMEOUT window (anchored to when the
+            # streamer went live), fire a warning notification. yt-dlp can exit
+            # 'normally' during a failure, so this deadline is the backstop.
+            _no_confirm_deadline = (site.dash_live_since.get(streamer)
+                                    or time.time()) + stall_timeout
+            _no_confirm_warned   = False
+            dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: confirmation deadline for "
+                f"streamer={streamer!r} = time.time()+{stall_timeout}s "
+                f"({_no_confirm_deadline:.2f}), dash_live_since={site.dash_live_since.get(streamer)}",
+                site_name=streamer)
             seconds_since_check  = 0
             _split_log_counter   = 0  # throttle periodic split-timer dbg lines
             # Whether we've ever observed this file grow. The stall checker is
@@ -2782,6 +2796,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                                 # New segment is a new file — it hasn't grown yet,
                                 # so the stall checker must re-earn the right to run.
                                 growth_seen = False
+                                # Re-arm the NOTIFY_NO_CONFIRM_FILE deadline for
+                                # the new segment.
+                                _no_confirm_deadline = time.time() + stall_timeout
+                                _no_confirm_warned   = False
 
                                 dbg(f"[SPLIT][record_stream] switched to part {segment_num} "
                                     f"pid={proc.pid} active_file={active_file!r} "
@@ -2949,6 +2967,24 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         dbg(f"[STALL] no growth yet, but stall checker not armed "
                             f"(no growth seen for this file yet) — skipping stall "
                             f"detection", site_name=streamer)
+                        # NOTIFY_NO_CONFIRM_FILE failure mode: the file was never
+                        # confirmed (no growth) within one STALL_TIMEOUT (e.g.
+                        # yt-dlp exited 'normally' after a failure) — warn the
+                        # user. Independent of NOTIFY_CONFIRM_FILE.
+                        if (notify_no_confirm_file
+                                and not _no_confirm_warned
+                                and time.time() >= _no_confirm_deadline):
+                            _no_confirm_warned = True
+                            dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: file not confirmed for "
+                                f"streamer={streamer!r} within {int(stall_timeout)}s "
+                                f"(deadline={_no_confirm_deadline:.2f}) — sending warning",
+                                site_name=streamer)
+                            _maybe_show_live_popup(
+                                streamer, cfg, site, show_popup=show_popup,
+                                source="no_confirm_file", is_recording=True,
+                                warning=(f"The recording file could not be confirmed within "
+                                         f"{int(stall_timeout)}s — the start may have failed."),
+                                confirmed=False)
                     else:
                         filename_error_warned = False
                         dbg(f"[STALL] NO GROWTH: size={current_size} "
