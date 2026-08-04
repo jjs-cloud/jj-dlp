@@ -13,7 +13,6 @@ import datetime
 
 _REPO_BASE = "https://github.com/jjs-cloud/jj-dlp"
 _API_BASE   = "https://api.github.com/repos/jjs-cloud/jj-dlp"
-_VALID_BRANCHES = {"main", "testing", "experimental"}
 
 # ── Updater version ───────────────────────────────────────────────────────────
 # Incremented independently of the main jj-dlp version so we can tell which
@@ -60,13 +59,13 @@ class UpdateError(Exception):
 
 
 def _get_update_branch() -> str:
-    """Return the configured update branch (falls back to 'main' if unset or invalid)."""
+    """Return the configured update branch (falls back to 'main' if unset)."""
     try:
         from .main import load_global_config
         branch = load_global_config().get("update_branch", "main")
     except Exception:
         branch = "main"
-    return branch if branch in _VALID_BRANCHES else "main"
+    return branch or "main"
 
 
 def _repo_zip_url(branch: str) -> str:

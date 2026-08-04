@@ -396,9 +396,7 @@ def load_global_config() -> dict:
     debug_log_path_raw = general.get("DEBUG_LOG_PATH", "").strip().strip('"\'')
     update_interval = _int("UPDATE_INTERVAL", 30)
 
-    _valid_branches = {"main", "testing", "experimental"}
-    _raw_branch = general.get("UPDATE_BRANCH", "main").strip().lower()
-    update_branch = _raw_branch if _raw_branch in _valid_branches else "main"
+    update_branch = general.get("UPDATE_BRANCH", "main").strip().lower()
 
     return {
         "disk_drives":        disk_drives,
