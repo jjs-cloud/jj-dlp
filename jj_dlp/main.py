@@ -717,21 +717,6 @@ class SiteState:
         # Set when size stops growing; cleared when growth resumes or recording ends.
         self.stall_since: Dict[str, float] = {}
 
-        # Write-confirmation alert tracking — streamer -> epoch when this
-        # streamer's *current* recording attempt was first flagged as having
-        # an unconfirmed/broken write path: either it never showed any file
-        # growth at all, or it grew for a while and then stopped, in both
-        # cases for at least stall_timeout seconds. This is the single
-        # source of truth for "recording has failed" — both failure shapes
-        # are treated identically (same flag, same urgency) since either one
-        # means the app's one core job (recording) isn't happening. Drives
-        # the flashing per-streamer dashboard marker and the full-screen
-        # alert modal. Guarded by dash_lock, same as stall_since. Use
-        # set_write_unconfirmed()/clear_write_unconfirmed() rather than
-        # touching this dict directly — they also handle the user-facing
-        # Log tab line.
-        self.write_unconfirmed: Dict[str, float] = {}
-
         # Ad alert tracking — streamer -> epoch of most recent ad signal.
         # Written by _drain_pipe (update_ad_alert); read by draw_system_panel.
         self.ad_alerts: Dict[str, float] = {}
@@ -786,31 +771,6 @@ class SiteState:
         """Clear stall tracking for *streamer* (growth resumed or recording ended)."""
         with self.dash_lock:
             self.stall_since.pop(streamer, None)
-
-    def set_write_unconfirmed(self, streamer: str) -> None:
-        """Flag *streamer*'s current recording attempt as having an
-        unconfirmed/broken write path (see write_unconfirmed above).
-        No-op if already flagged — writes the user-facing Log tab line
-        (and mirrors to the debug log via log_line) only the first time
-        this fires for the current failure, not on every check cycle."""
-        with self.dash_lock:
-            is_new = streamer not in self.write_unconfirmed
-            if is_new:
-                self.write_unconfirmed[streamer] = time.time()
-        if is_new:
-            self.log_line(
-                f"NOT RECORDING: {streamer} — no recording data could be "
-                f"confirmed. This is a failure of the app's core function; "
-                f"see the Dashboard tab."
-            )
-
-    def clear_write_unconfirmed(self, streamer: str) -> None:
-        """Clear the unconfirmed-write alert for *streamer* (growth resumed,
-        or the recording attempt ended for any reason)."""
-        with self.dash_lock:
-            was_set = self.write_unconfirmed.pop(streamer, None) is not None
-        if was_set:
-            self.log_line(f"Recording write confirmed again for {streamer}")
 
     def update_ad_alert(self, streamer: str) -> None:
         """Record that an ad signal was just seen for *streamer*."""
@@ -2155,29 +2115,6 @@ def _resolve_intro_delay(cfg: dict, entry_info: dict) -> dict:
     return overridden
 
 
-# ── DEBUG: write-failure simulation ─────────────────────────────────────────
-# Flip to True to reproduce the "recording can't write its file" failure mode
-# (the incident that motivated the unconfirmed-recording alert below) without
-# needing to actually break a filesystem.
-#
-# NOTE: pointing yt-dlp at a subdirectory that simply doesn't exist does NOT
-# work as a fault — yt-dlp creates any missing parent directories for its -o
-# path itself, so the write silently succeeds one level deeper and nothing
-# fails. Instead, this pre-creates a plain FILE (not a directory) at the
-# injected path component. yt-dlp then can't create anything under it —
-# you can't mkdir, or write a file, inside something that is itself a
-# regular file — so the write is guaranteed to fail regardless of any
-# directory-auto-creation behavior on yt-dlp's end. This is OS-level, so it
-# works the same on Windows/macOS/Linux.
-#
-# Watch for the flashing dashboard marker and the full-screen alert to
-# appear after roughly one stall_timeout window. Restore to False
-# afterwards — this is not meant to be left on, and the sentinel file it
-# creates (named below) should be deleted from OUTPUT_DIR when you're done.
-_SIMULATE_WRITE_FAILURE = False
-_SIMULATE_WRITE_FAILURE_BLOCKER_NAME = "_simulated_write_failure_do_not_create"
-
-
 def record_stream(streamer: str, cfg: dict, site: "SiteState",
                   use_lq: bool = False, show_popup: bool = True,
                   eviction_warning: str = "") -> None:
@@ -2293,20 +2230,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 )
 
             output_path = os.path.join(output_dir, current_output_tmpl)
-            if _SIMULATE_WRITE_FAILURE:
-                # See _SIMULATE_WRITE_FAILURE above. Create the blocker as a
-                # plain file (once) so yt-dlp cannot create anything "under"
-                # it — this is what actually guarantees the write fails,
-                # unlike just pointing at a missing directory.
-                _blocker_path = os.path.join(output_dir, _SIMULATE_WRITE_FAILURE_BLOCKER_NAME)
-                if not os.path.exists(_blocker_path):
-                    try:
-                        with open(_blocker_path, "wb"):
-                            pass
-                        dbg(f"[SIMULATE_WRITE_FAILURE] created blocker file at {_blocker_path!r}")
-                    except Exception as _blocker_exc:
-                        dbg(f"[SIMULATE_WRITE_FAILURE] could not create blocker file: {_blocker_exc!r}")
-                output_path = os.path.join(_blocker_path, current_output_tmpl)
 
             # ── Select downloader command (normal vs LQ) ──────────────────
             _active_dl_cmd = cfg["downloader_cmd"]
@@ -2904,15 +2827,14 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         streamer,
                         cfg=cfg,
                         proc_start_time=proc_start_time,
-                        # Always pass these so the same stall_timeout threshold
-                        # also catches a file that has NEVER shown any growth
-                        # (e.g. the write path is broken from the very start —
-                        # an unwritable filesystem, etc.) and not just a file
-                        # that grew for a while and then stopped. Both are the
-                        # same underlying failure — "no recording is happening"
-                        # — and should be detected on the same timescale.
-                        last_growth_time=last_growth_time,
-                        stall_timeout=stall_timeout,
+                        # Only arm the stall checker once this file has grown at
+                        # least once. get_streamer_file_size() only computes
+                        # stall_detected when both last_growth_time and
+                        # stall_timeout are provided, so withholding stall_timeout
+                        # here is what keeps the checker from starting on a file
+                        # that has never shown growth.
+                        last_growth_time=last_growth_time if growth_seen else None,
+                        stall_timeout=stall_timeout if growth_seen else None,
                         stall_check_interval=stall_check_interval,
                         known_filename=active_file,
                     )
@@ -2985,10 +2907,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
                     elif stall_detected:
                         site.log_line(f"Stall detected for {streamer} — restarting")
-                        # Recording has failed — either it never wrote any
-                        # data, or it stopped writing partway through. Both
-                        # are flagged identically (see write_unconfirmed).
-                        site.set_write_unconfirmed(streamer)
 
                         kill_proc(proc)
                         site.unregister_proc(streamer)
@@ -3005,9 +2923,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
                     elif current_size > last_size:
                         filename_error_warned = False
-                        # File is (still) growing — whatever wrote the alert,
-                        # if any, no longer applies.
-                        site.clear_write_unconfirmed(streamer)
                         if not growth_seen:
                             growth_seen = True
                             dbg(f"[STALL] first growth observed for this file — "
@@ -3027,14 +2942,11 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         last_growth_time = time.time()
                         site.clear_stall_since(streamer)
                     elif not growth_seen:
-                        # No growth yet and none has ever been seen for this
-                        # file, but we're still within the stall_timeout
-                        # grace window (if we'd already exceeded it, the
-                        # stall_detected branch above would have fired
-                        # instead). Nothing to flag yet — just keep waiting
-                        # for the first sign of growth.
+                        # No growth yet and none has ever been seen for this file —
+                        # the stall checker hasn't started, so there's nothing to
+                        # flag as stalled. Just wait for the first sign of growth.
                         filename_error_warned = False
-                        dbg(f"[STALL] no growth yet, still within grace window "
+                        dbg(f"[STALL] no growth yet, but stall checker not armed "
                             f"(no growth seen for this file yet) — skipping stall "
                             f"detection", site_name=streamer)
                     else:
@@ -3086,11 +2998,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             pass
 
     finally:
-        # This recording attempt is over (however it ended) — any lingering
-        # unconfirmed-write alert for it is no longer meaningful. If the
-        # streamer is picked back up by a fresh record_stream() call, that
-        # attempt gets its own fresh detection window.
-        site.clear_write_unconfirmed(streamer)
         with site.lock:
             site.currently_recording.discard(streamer)
             # Clear the UPGRADE_QUALITY baseline along with currently_recording
@@ -3903,20 +3810,6 @@ class JJDlpDashboard:
         self._exit_confirm_open      = False
         self._exit_confirm_sel       = 0   # 0 = Yes (default), 1 = No
 
-        # ── Recording-failure alert state ───────────────────────────────────
-        # Full-screen, flashing, does-not-auto-dismiss modal shown whenever
-        # any streamer's write_unconfirmed is set (see SiteState). Does not
-        # depend on desktop notifications being enabled — this is the
-        # in-app, always-on path for "the app's core function has failed".
-        self._write_failure_alert_open = False
-        # Streamers the user has already dismissed the CURRENT alert for.
-        # A streamer is removed from this set as soon as it recovers, so if
-        # it fails again later it will re-alert. A streamer that is still
-        # failing and still in this set will NOT re-open a dismissed alert
-        # by itself — but a *different*, not-yet-dismissed streamer newly
-        # failing will reopen the modal (now listing everyone still failing).
-        self._write_failure_dismissed: Set[str] = set()
-
     # ── Color palette ────────────────────────────────────────────────────────
     # Pair numbers and their meanings — easy to change here
     C_CHROME    = 1   # borders, labels
@@ -4394,7 +4287,6 @@ class JJDlpDashboard:
             last_live    = dict(site.dash_last_live)
             blocked      = set(site.dash_blocked)
             next_in      = site.dash_next_check_in
-            write_unconfirmed = set(site.write_unconfirmed.keys())
         with site.lock:
             recording     = set(site.currently_recording)
             intro_delay_pending = set(site.intro_delay_pending)
@@ -4518,19 +4410,7 @@ class JJDlpDashboard:
                         status_attr = curses.color_pair(self.C_DISABLED)
                 elif since is not None:
                     name_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
-                    if is_rec and s in write_unconfirmed:
-                        # Recording has failed to confirm any written data —
-                        # flash the same way [x DIS]/[●Live] already flash,
-                        # but with the reserved critical-alert color so it
-                        # can never be mistaken for a normal status.
-                        if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
-                            status_str = "‼NOTREC"
-                            status_attr = curses.color_pair(self.C_DELETE) | curses.A_BOLD
-                        else:
-                            status_str = "███████"
-                            status_attr = curses.color_pair(self.C_DELETE) | curses.A_BOLD
-                        last_live_str = "NOT REC"
-                    elif is_rec:
+                    if is_rec:
                         if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
                             status_str = "[●Live]"
                             status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
@@ -4540,7 +4420,7 @@ class JJDlpDashboard:
                     else:
                         status_str = "[●Live]"
                         status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
-                    if not (is_rec and recording_res.get(s) is not None) and not (is_rec and s in write_unconfirmed):
+                    if not (is_rec and recording_res.get(s) is not None):
                         last_live_str = ""  # currently live, no "last live"
                 else:
                     name_attr = curses.color_pair(self.C_DIM)
@@ -4555,9 +4435,7 @@ class JJDlpDashboard:
                             status_str[:7].ljust(7), status_attr)
                 col += 8
                 if last_live_str:
-                    if is_rec and s in write_unconfirmed:
-                        ll_attr = curses.color_pair(self.C_DELETE) | curses.A_BOLD
-                    elif (ll_ts is not None
+                    if (ll_ts is not None
                             and _last_live_highlight_days > 0
                             and (now - ll_ts) <= _last_live_highlight_days * 86400):
                         ll_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
@@ -4620,38 +4498,21 @@ class JJDlpDashboard:
                 elif since is not None:
                     elapsed     = now - since
                     name_attr   = curses.color_pair(self.C_LIVE) | curses.A_BOLD
-                    if is_rec and s in write_unconfirmed:
-                        # Recording has failed to confirm any written data —
-                        # flash the status AND the progress bar with the
-                        # reserved critical-alert color, so this can't be
-                        # mistaken for the normal [► REC] flash at a glance.
-                        if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
-                            status_str  = "‼NOTREC"
-                        else:
-                            status_str  = "███████"
-                        status_attr = curses.color_pair(self.C_DELETE) | curses.A_BOLD
-                        bar_str     = "█" * bar_w
-                        bar_attr    = curses.color_pair(self.C_DELETE) | curses.A_BOLD
-                        dur_str     = _fmt_duration(elapsed)
-                        last_live_str = "NOT REC"
-                    elif is_rec:
+                    if is_rec:
                         if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
                             status_str  = "[●Live]"
                             status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
                         else:
                             status_str  = "[► REC] "
                             status_attr = curses.color_pair(self.C_REC) | curses.A_BOLD
-                        bar_str     = _live_bar(elapsed, bar_w, _bar_max_secs)
-                        bar_attr    = curses.color_pair(self.C_LIVE)
-                        dur_str     = _fmt_duration(elapsed)
-                        if recording_res.get(s) is None:
-                            last_live_str = ""  # currently live, no "last live"
                     else:
                         status_str  = "[●Live]"
                         status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
-                        bar_str     = _live_bar(elapsed, bar_w, _bar_max_secs)
-                        bar_attr    = curses.color_pair(self.C_LIVE)
-                        dur_str     = _fmt_duration(elapsed)
+                    bar_str     = _live_bar(elapsed, bar_w, _bar_max_secs)
+                    bar_attr    = curses.color_pair(self.C_LIVE)
+                    dur_str     = _fmt_duration(elapsed)
+                    if not (is_rec and recording_res.get(s) is not None):
+                        last_live_str = ""  # currently live, no "last live"
                 else:
                     name_attr   = curses.color_pair(self.C_DIM)
                     status_str  = "[○ off]"
@@ -4676,9 +4537,7 @@ class JJDlpDashboard:
                     self.safe_addstr(self.stdscr, row_y, col, " " * 9, 0)
                 col += 10
                 if last_live_str:
-                    if is_rec and s in write_unconfirmed:
-                        ll_attr = curses.color_pair(self.C_DELETE) | curses.A_BOLD
-                    elif (ll_ts is not None
+                    if (ll_ts is not None
                             and _last_live_highlight_days > 0
                             and (now - ll_ts) <= _last_live_highlight_days * 86400):
                         ll_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
@@ -5334,12 +5193,6 @@ class JJDlpDashboard:
         if self._exit_confirm_open:
             self.draw_exit_confirm_popup()
 
-        # Recording-failure alert — drawn last, on top of absolutely
-        # everything (including the exit-confirmation popup), since it's
-        # the most urgent thing this app can show.
-        if self._write_failure_alert_open:
-            self.draw_write_failure_alert()
-
         self.stdscr.refresh()
 
         # Log timing every 100 frames (~5 seconds at 20fps)
@@ -5353,12 +5206,6 @@ class JJDlpDashboard:
     # ── Input handling ────────────────────────────────────────────────────────
     def handle_key(self, key) -> bool:
         """Returns False to quit."""
-        # Recording-failure alert takes priority over everything else —
-        # including the exit-confirmation popup — since it's the most
-        # urgent thing the app can show. Must be explicitly dismissed.
-        if self._write_failure_alert_open:
-            return self._handle_write_failure_alert_key(key)
-
         # Exit-confirmation popup intercepts all keys while open.
         if self._exit_confirm_open:
             return self._handle_exit_confirm_key(key)
@@ -5683,88 +5530,6 @@ class JJDlpDashboard:
         self._changelog_popup_open = True
         self._mark_changelog_shown()
 
-    # ── Recording-failure alert (full-screen, does not auto-dismiss) ───────────
-    def _current_write_failures(self) -> Set[str]:
-        """Return the set of streamer names currently flagged as
-        write_unconfirmed, across every monitored site. Streamer names are
-        assumed unique across sites for display purposes here (as elsewhere
-        on this dashboard)."""
-        failing: Set[str] = set()
-        for _site in self.sites:
-            with _site.dash_lock:
-                failing |= set(_site.write_unconfirmed.keys())
-        return failing
-
-    def _update_write_failure_alert(self) -> None:
-        """Called once per frame. Opens (or re-opens) the full-screen alert
-        whenever there's at least one currently-failing streamer that the
-        user hasn't already dismissed. Never auto-closes it — only an
-        explicit keypress in _handle_write_failure_alert_key() does that."""
-        current = self._current_write_failures()
-        # A streamer that has recovered no longer needs to stay "dismissed" —
-        # if it fails again later this lets it re-alert.
-        self._write_failure_dismissed &= current
-        if current - self._write_failure_dismissed:
-            self._write_failure_alert_open = True
-
-    def _handle_write_failure_alert_key(self, key) -> bool:
-        """Handle input while the recording-failure alert is open. Requires
-        an explicit dismissal; does not time out or auto-close. Returns True
-        to keep running (this alert never quits the app)."""
-        if key in (27, ord('q'), ord('Q'), ord('x'), ord('X'),
-                   ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
-            self._write_failure_dismissed |= self._current_write_failures()
-            self._write_failure_alert_open = False
-        return True
-
-    def draw_write_failure_alert(self) -> None:
-        """Draw the full-screen, flashing 'recording has failed' alert."""
-        if not self._write_failure_alert_open:
-            return
-        h, w = self.stdscr.getmaxyx()
-        failing = sorted(self._current_write_failures())
-        if not failing:
-            # Nothing left to show (shouldn't normally happen since
-            # _update_write_failure_alert only opens this when something is
-            # failing) — close quietly rather than leave a stale alert up.
-            self._write_failure_alert_open = False
-            return
-
-        flash_on = (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2)
-        alert_attr = curses.color_pair(self.C_DELETE) | curses.A_BOLD
-
-        # Flashing full-screen background so this cannot be missed or
-        # mistaken for a normal popup, even from across the room.
-        bg_char = "█" if flash_on else "▓"
-        for y in range(0, h):
-            self.safe_addstr(self.stdscr, y, 0, bg_char * max(0, w - 1), alert_attr)
-
-        title = " ‼ RECORDING FAILURE ‼ "
-        message = "The following streamer(s) are NOT being recorded:"
-        names_lines = [f"    {name}" for name in failing[: max(1, h - 12)]]
-        legend = " Press Enter / X / Esc / Q to dismiss "
-
-        box_w = min(w - 6, max(len(title), len(message), len(legend),
-                                max((len(n) for n in names_lines), default=0)) + 6)
-        box_h = min(h - 4, 7 + len(names_lines))
-        by1 = max(1, (h - box_h) // 2)
-        bx1 = max(1, (w - box_w) // 2)
-        by2 = by1 + box_h
-        bx2 = bx1 + box_w
-
-        for y in range(by1, by2 + 1):
-            self.safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1), alert_attr)
-        self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_DELETE)
-
-        self.safe_addstr(self.stdscr, by1, bx1 + max(0, (box_w - len(title)) // 2),
-                    title, alert_attr)
-        self.safe_addstr(self.stdscr, by1 + 2, bx1 + max(0, (box_w - len(message)) // 2),
-                    message, alert_attr)
-        for i, line in enumerate(names_lines):
-            self.safe_addstr(self.stdscr, by1 + 4 + i, bx1 + 2, line[:box_w - 4], alert_attr)
-        self.safe_addstr(self.stdscr, by2 - 1, bx1 + max(0, (box_w - len(legend)) // 2),
-                    legend[:box_w - 2], curses.color_pair(self.C_INVHEAD) | curses.A_BOLD)
-
     def _open_exit_confirm(self) -> None:
         """Open the 'Are you sure you want to exit?' popup, 'Yes' selected by default."""
         self._exit_confirm_open = True
@@ -5894,7 +5659,6 @@ class JJDlpDashboard:
 
         while True:
             _t_frame_start = time.time()
-            self._update_write_failure_alert()
             self.refresh_screen()
             _t_after_refresh = time.time()
 
