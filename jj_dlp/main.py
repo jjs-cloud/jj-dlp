@@ -2158,14 +2158,24 @@ def _resolve_intro_delay(cfg: dict, entry_info: dict) -> dict:
 # ── DEBUG: write-failure simulation ─────────────────────────────────────────
 # Flip to True to reproduce the "recording can't write its file" failure mode
 # (the incident that motivated the unconfirmed-recording alert below) without
-# needing to actually break a filesystem. When enabled, every new recording
-# attempt is pointed at a subdirectory that is never created, so yt-dlp
-# starts normally but can never write any data — no file growth is ever
-# confirmed, exactly like the original silent failure. Watch for the
-# flashing dashboard marker and the full-screen alert to appear after
-# roughly one stall_timeout window. Restore to False afterwards; this is not
-# meant to be left on.
+# needing to actually break a filesystem.
+#
+# NOTE: pointing yt-dlp at a subdirectory that simply doesn't exist does NOT
+# work as a fault — yt-dlp creates any missing parent directories for its -o
+# path itself, so the write silently succeeds one level deeper and nothing
+# fails. Instead, this pre-creates a plain FILE (not a directory) at the
+# injected path component. yt-dlp then can't create anything under it —
+# you can't mkdir, or write a file, inside something that is itself a
+# regular file — so the write is guaranteed to fail regardless of any
+# directory-auto-creation behavior on yt-dlp's end. This is OS-level, so it
+# works the same on Windows/macOS/Linux.
+#
+# Watch for the flashing dashboard marker and the full-screen alert to
+# appear after roughly one stall_timeout window. Restore to False
+# afterwards — this is not meant to be left on, and the sentinel file it
+# creates (named below) should be deleted from OUTPUT_DIR when you're done.
 _SIMULATE_WRITE_FAILURE = False
+_SIMULATE_WRITE_FAILURE_BLOCKER_NAME = "_simulated_write_failure_do_not_create"
 
 
 def record_stream(streamer: str, cfg: dict, site: "SiteState",
@@ -2284,11 +2294,19 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
             output_path = os.path.join(output_dir, current_output_tmpl)
             if _SIMULATE_WRITE_FAILURE:
-                # See _SIMULATE_WRITE_FAILURE above — redirect into a
-                # subdirectory that is never created so every write fails.
-                output_path = os.path.join(
-                    output_dir, "_simulated_write_failure_do_not_create", current_output_tmpl
-                )
+                # See _SIMULATE_WRITE_FAILURE above. Create the blocker as a
+                # plain file (once) so yt-dlp cannot create anything "under"
+                # it — this is what actually guarantees the write fails,
+                # unlike just pointing at a missing directory.
+                _blocker_path = os.path.join(output_dir, _SIMULATE_WRITE_FAILURE_BLOCKER_NAME)
+                if not os.path.exists(_blocker_path):
+                    try:
+                        with open(_blocker_path, "wb"):
+                            pass
+                        dbg(f"[SIMULATE_WRITE_FAILURE] created blocker file at {_blocker_path!r}")
+                    except Exception as _blocker_exc:
+                        dbg(f"[SIMULATE_WRITE_FAILURE] could not create blocker file: {_blocker_exc!r}")
+                output_path = os.path.join(_blocker_path, current_output_tmpl)
 
             # ── Select downloader command (normal vs LQ) ──────────────────
             _active_dl_cmd = cfg["downloader_cmd"]
@@ -2920,18 +2938,50 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     if file_error:
                         # We couldn't even locate/read the recording file this
                         # cycle (e.g. active_file points at a filename that
-                        # doesn't exist). Don't let that masquerade as "no
-                        # growth" — that would show a false "stalled" state on
-                        # the dashboard. Just give up on stall detection for
-                        # this file until it resolves itself.
-                        dbg("[STALL] filename lookup failed — giving up on "
-                            "stall detection for this cycle", site_name=streamer)
+                        # doesn't exist yet — a normal, brief situation right
+                        # after a fresh start). Don't let a single occurrence
+                        # masquerade as "no growth" — that would show a false
+                        # "stalled" state on the dashboard from transient
+                        # filename-resolution timing alone.
+                        #
+                        # However, if this has now persisted for a full
+                        # stall_timeout window since the last confirmed
+                        # growth, it's no longer transient — the file was
+                        # never (or is no longer) being written at all (e.g.
+                        # yt-dlp resolved an intended filename but can never
+                        # actually create it — an unwritable filesystem/
+                        # directory). That's the same "recording has failed"
+                        # condition as a confirmed stall and must be flagged
+                        # the same way, or a broken write path that never
+                        # produces a locatable file would silently never
+                        # alert at all.
+                        dbg("[STALL] filename lookup failed this cycle", site_name=streamer)
                         site.clear_stall_since(streamer)
                         if not filename_error_warned:
                             site.log_line(
                                 f"Warning: stall checker could not locate file for {streamer}"
                             )
                             filename_error_warned = True
+                        _file_error_elapsed = time.time() - last_growth_time
+                        if _file_error_elapsed >= stall_timeout:
+                            site.log_line(
+                                f"Recording file for {streamer} could not be located for "
+                                f"{int(_file_error_elapsed)}s — restarting"
+                            )
+                            site.set_write_unconfirmed(streamer)
+
+                            kill_proc(proc)
+                            site.unregister_proc(streamer)
+                            site.clear_stall_since(streamer)
+                            site.clear_ad_alert(streamer)
+
+                            try:
+                                close_logs()
+                            except Exception:
+                                pass
+
+                            time.sleep(5)
+                            break
 
                     elif stall_detected:
                         site.log_line(f"Stall detected for {streamer} — restarting")
