@@ -5685,7 +5685,7 @@ class JJDlpDashboard:
         return True
 
     def draw_write_failure_alert(self) -> None:
-        """Draw the full-screen, flashing 'recording has failed' alert."""
+        """Draw the centered 'recording has failed' alert popup."""
         if not self._write_failure_alert_open:
             return
         h, w = self.stdscr.getmaxyx()
@@ -5694,14 +5694,7 @@ class JJDlpDashboard:
             self._write_failure_alert_open = False
             return
 
-        flash_on = (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2)
         alert_attr = curses.color_pair(self.C_DELETE) | curses.A_BOLD
-
-        # Flashing full-screen background so this cannot be missed or
-        # mistaken for a normal popup, even from across the room.
-        bg_char = "█" if flash_on else "▓"
-        for y in range(0, h):
-            self.safe_addstr(self.stdscr, y, 0, bg_char * max(0, w - 1), alert_attr)
 
         title = " ‼ RECORDING FAILURE ‼ "
         message = "The following streamer(s) are NOT being recorded:"
