@@ -1,13 +1,16 @@
+v1.25.5
+
 - startup performance tweaks (stagger processes)
 - optimized bundled yt-dlp fork to use less system resources (--onedir instead of --onefile)
 - Previously, the File Manager did not work if you have the SUBFOLDERS option enabled. Now the File Manager recursively scans all OUTPUT_DIR and displays all subfolders.
 - There are various scenarios where a recording might fail.  Now there is a red warning popup within the ui, and also a notification when recordings fail to start.
-- Added a Web UI so you can access jj-dlp from your phone or other devices on your wifi/network.  Steps to use:
+- Added a Web UI so you can access jj-dlp from your phone or another pc on your wifi/network.  Steps to use:
     - Enable the WEB_UI setting in Config > GLOBAL SETTINGS > WEB_UI
     - Set a username and password in the WEB_UI_USER and WEB_UI_PASS fields
     - Restart jj-dlp
     - Go to http://your-ip-address:8765 in any web browser on the same local network.
     - Login with the username and password you set.  You wont have to login again for 30 days (cookie expires).
+    Note: Use the Web UI on your local network only. Access over the internet is not supported yet.
 
 ====================
 ====================
