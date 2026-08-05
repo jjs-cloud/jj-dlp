@@ -1799,9 +1799,25 @@ class FileManagerTab:
                 else:
                     row_attr = curses.color_pair(db.C_DIM)
 
+                # Subfolder-relative paths (e.g. "StreamerName/file.mp4") get
+                # their directory part drawn in a distinct color so nested
+                # files stand out. Skipped on the highlighted row so the
+                # subfolder text keeps the selection background.
+                sub_prefix = None
+                if not is_sel and "/" in name:
+                    sub_prefix = name.rpartition("/")[0] + "/"
+
                 is_moving = self._move_busy and self._move_busy_path == path
                 name_lbl = name if not is_moving else name + " Moving..."
-                db.safe_addstr(stdscr, row_y, x1 + 2, name_lbl.ljust(name_w)[:name_w], row_attr)
+                name_col = name_lbl.ljust(name_w)[:name_w]
+                if sub_prefix:
+                    pf = name_col[:len(sub_prefix)]
+                    rest = name_col[len(sub_prefix):]
+                    db.safe_addstr(stdscr, row_y, x1 + 2, pf,
+                                   curses.color_pair(db.C_SYSTEM))
+                    db.safe_addstr(stdscr, row_y, x1 + 2 + len(pf), rest, row_attr)
+                else:
+                    db.safe_addstr(stdscr, row_y, x1 + 2, name_col, row_attr)
                 db.safe_addstr(stdscr, row_y, col_status_x, status.ljust(status_w)[:status_w], row_attr)
                 db.safe_addstr(stdscr, row_y, col_mod_x, mod_txt.ljust(mod_w)[:mod_w], row_attr)
                 db.safe_addstr(stdscr, row_y, col_size_x, size_txt.rjust(size_w)[:size_w], row_attr)
