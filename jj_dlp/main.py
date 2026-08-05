@@ -2590,7 +2590,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         site_name=streamer)
                     _maybe_show_live_popup(
                         streamer, cfg, site, show_popup=show_popup,
-                        source="no_confirm_file", is_recording=True,
+                        source="no_confirm_file", is_recording=False,
                         warning=(f"The recording file could not be confirmed within "
                                  f"{int(stall_timeout)}s — the start may have failed."),
                         confirmed=False)
