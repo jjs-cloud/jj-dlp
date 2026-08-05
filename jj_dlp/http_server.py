@@ -480,15 +480,17 @@ class _Handler(BaseHTTPRequestHandler):
             _SESSIONS[sid] = time.time() + _SESSION_TTL
             return True
 
-    def _set_session_cookie(self) -> None:
+    def _set_session_cookie(self) -> str:
+        """Mint a fresh session token and return the Set-Cookie header *value*.
+        The caller emits it via _send(..., extra_headers=...) so it is written
+        after the HTTP status line — send_header() before send_response()
+        would buffer it ahead of the status line and produce a malformed
+        response (which is what broke the page on Safari/Firefox)."""
         sid = secrets.token_urlsafe(32)
         with _SESSION_LOCK:
             _SESSIONS[sid] = time.time() + _SESSION_TTL
-        self.send_header(
-            "Set-Cookie",
-            f"{_SESSION_COOKIE}={sid}; Path=/; HttpOnly; SameSite=Lax; "
-            f"Max-Age={_SESSION_TTL}",
-        )
+        return f"{_SESSION_COOKIE}={sid}; Path=/; HttpOnly; SameSite=Lax; " \
+               f"Max-Age={_SESSION_TTL}"
 
     def _authenticated(self) -> bool:
         """Return True if this request may proceed (valid session cookie OR
@@ -506,11 +508,15 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    def _send(self, status: int, body: bytes, content_type: str):
+    def _send(self, status: int, body: bytes, content_type: str,
+              extra_headers: Optional[List[tuple]] = None):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        if extra_headers:
+            for name, value in extra_headers:
+                self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -524,9 +530,12 @@ class _Handler(BaseHTTPRequestHandler):
             # Auth passed (via a session cookie or a fresh Basic login). If
             # there wasn't already a valid session cookie, mint one now so
             # the browser remembers us for future visits.
+            cookie = None
             if not self._has_valid_session():
-                self._set_session_cookie()
-            self._send(200, _INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                cookie = self._set_session_cookie()
+            extra = [("Set-Cookie", cookie)] if cookie else None
+            self._send(200, _INDEX_HTML.encode("utf-8"),
+                       "text/html; charset=utf-8", extra_headers=extra)
         elif self.path == "/manifest.json":
             self._send(200, _MANIFEST_JSON.encode("utf-8"), "application/manifest+json")
         elif self.path == "/api/status":
