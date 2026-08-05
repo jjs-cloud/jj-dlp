@@ -15,6 +15,12 @@ changed within the last ``IDLE_THRESHOLD_S`` seconds, otherwise it is IDLE.
 When there is more than one distinct OUTPUT_DIR, each folder's files are
 shown under their own group header so they stay visually separated.
 
+Each OUTPUT_DIR is scanned recursively, so files stay visible when the
+SUBFOLDERS global key is on and recordings are nested one level down in a
+per-streamer subfolder. Files found below the top of an OUTPUT_DIR are
+shown with their subfolder-relative path (e.g. "StreamerName/file.mp4")
+so it's clear which streamer's subfolder they live in.
+
 Keybinds (active only while the "File Manager" tab is selected)
 -----------------------------------------------------------------
     UP / DOWN     - move the file selection
@@ -333,7 +339,7 @@ class FileManagerTab:
         # "Move" destination-picker popup (step 1: destination + checkboxes)
         self._move_open = False
         self._move_cursor = 0
-        self._move_checks = {"subfolder": True, "fixup": True}
+        self._move_checks = {"subfolder": True, "fixup": False}
         self._move_target = None
         self._move_destinations = []
 
@@ -441,22 +447,30 @@ class FileManagerTab:
             move_dest_path = self._move_dest_path
 
         current_paths = set()
+        # Maps each discovered file path to the OUTPUT_DIR (root) it was
+        # found under, since recursive scanning means a file's immediate
+        # parent directory (e.g. a per-streamer subfolder created by the
+        # SUBFOLDERS global key) is no longer necessarily the OUTPUT_DIR
+        # itself.
+        path_roots = {}
         for _label, folder in dirs:
             try:
-                with os.scandir(folder) as it:
-                    for entry in it:
+                for root, _dirnames, filenames in os.walk(folder, followlinks=False):
+                    for fname in filenames:
+                        fpath = os.path.join(root, fname)
                         try:
-                            if not entry.is_file(follow_symlinks=False):
+                            if not os.path.isfile(fpath):
                                 continue
                             # The Move destination file is tracked separately
                             # (see below) so it isn't double-listed if a
                             # DESTINATIONS folder happens to overlap with a
                             # watched OUTPUT_DIR.
-                            if move_dest_path and os.path.abspath(entry.path) == move_dest_path:
+                            if move_dest_path and os.path.abspath(fpath) == move_dest_path:
                                 continue
-                            current_paths.add(entry.path)
                         except OSError:
                             continue
+                        current_paths.add(fpath)
+                        path_roots[fpath] = folder
             except OSError:
                 continue
 
@@ -487,7 +501,7 @@ class FileManagerTab:
             except OSError:
                 rec["mtime"] = rec.get("mtime", 0)
 
-            folder_abs = os.path.dirname(path)
+            folder_abs = path_roots.get(path, os.path.dirname(path))
             rec["group_path"] = folder_abs
             rec["group_label"] = dir_label_map.get(folder_abs, os.path.basename(folder_abs) or folder_abs)
             rec["status"] = "WRITING" if (now - rec["last_change"]) < IDLE_THRESHOLD_S else "IDLE"
@@ -556,12 +570,27 @@ class FileManagerTab:
             for p, rec in self._moving_records.items():
                 rows.append(("file", p, rec))
 
+        # Remember where the current selection sat among the *old* file rows,
+        # so that if it vanishes (fixup/move/trim finishing, deleted
+        # externally, etc.) we can land on its neighbor instead of jumping
+        # back to the top of the list.
+        old_file_paths = [r[1] for r in self._rows if r[0] == "file"]
+        old_pos = None
+        if self._selected_path in old_file_paths:
+            old_pos = old_file_paths.index(self._selected_path)
+
         self._rows = rows
 
-        # Keep selection valid; default to the first file if none/invalid.
+        # Keep selection valid.
         file_paths = [r[1] for r in rows if r[0] == "file"]
         if self._selected_path not in file_paths:
-            self._selected_path = file_paths[0] if file_paths else None
+            if old_pos is not None and file_paths:
+                # Land on whatever now occupies the same (or nearest lower)
+                # position, mirroring how the list "shifts up" underneath us.
+                new_pos = min(old_pos, len(file_paths) - 1)
+                self._selected_path = file_paths[new_pos]
+            else:
+                self._selected_path = file_paths[0] if file_paths else None
 
     # ── Selection movement ──────────────────────────────────────────────────
 
@@ -933,7 +962,7 @@ class FileManagerTab:
             return
         self._move_target = self._selected_path
         self._move_destinations = self._get_destinations()
-        self._move_checks = {"subfolder": True, "fixup": True}
+        self._move_checks = {"subfolder": True, "fixup": False}
         self._move_cursor = 0
         self._move_open = True
 
@@ -1747,7 +1776,14 @@ class FileManagerTab:
                                curses.color_pair(db.C_DIM))
             else:
                 path = payload
-                name = os.path.basename(path)
+                group_path = rec.get("group_path")
+                if group_path and os.path.dirname(os.path.abspath(path)) != os.path.abspath(group_path):
+                    # Nested inside a subfolder (e.g. a per-streamer folder
+                    # created by SUBFOLDERS) - show the subfolder-relative
+                    # path so it's clear where the file lives.
+                    name = os.path.relpath(path, group_path).replace(os.sep, "/")
+                else:
+                    name = os.path.basename(path)
                 status = rec.get("status", "IDLE")
                 size_txt = human_size(rec.get("size"))
                 rate_txt = human_rate(rec.get("rate")) if status == "WRITING" else "\u2014"
@@ -1763,9 +1799,25 @@ class FileManagerTab:
                 else:
                     row_attr = curses.color_pair(db.C_DIM)
 
+                # Subfolder-relative paths (e.g. "StreamerName/file.mp4") get
+                # their directory part drawn in a distinct color so nested
+                # files stand out. Skipped on the highlighted row so the
+                # subfolder text keeps the selection background.
+                sub_prefix = None
+                if not is_sel and "/" in name:
+                    sub_prefix = name.rpartition("/")[0] + "/"
+
                 is_moving = self._move_busy and self._move_busy_path == path
                 name_lbl = name if not is_moving else name + " Moving..."
-                db.safe_addstr(stdscr, row_y, x1 + 2, name_lbl.ljust(name_w)[:name_w], row_attr)
+                name_col = name_lbl.ljust(name_w)[:name_w]
+                if sub_prefix:
+                    pf = name_col[:len(sub_prefix)]
+                    rest = name_col[len(sub_prefix):]
+                    db.safe_addstr(stdscr, row_y, x1 + 2, pf,
+                                   curses.color_pair(db.C_SYSTEM))
+                    db.safe_addstr(stdscr, row_y, x1 + 2 + len(pf), rest, row_attr)
+                else:
+                    db.safe_addstr(stdscr, row_y, x1 + 2, name_col, row_attr)
                 db.safe_addstr(stdscr, row_y, col_status_x, status.ljust(status_w)[:status_w], row_attr)
                 db.safe_addstr(stdscr, row_y, col_mod_x, mod_txt.ljust(mod_w)[:mod_w], row_attr)
                 db.safe_addstr(stdscr, row_y, col_size_x, size_txt.rjust(size_w)[:size_w], row_attr)

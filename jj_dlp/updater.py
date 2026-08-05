@@ -13,12 +13,11 @@ import datetime
 
 _REPO_BASE = "https://github.com/jjs-cloud/jj-dlp"
 _API_BASE   = "https://api.github.com/repos/jjs-cloud/jj-dlp"
-_VALID_BRANCHES = {"main", "testing", "experimental"}
 
 # ── Updater version ───────────────────────────────────────────────────────────
 # Incremented independently of the main jj-dlp version so we can tell which
 # updater logic is actually running during an update.
-UPDATER_VERSION = "2.2.0"
+UPDATER_VERSION = "2.3.0"
 
 # ── Lazy package imports ──────────────────────────────────────────────────────
 # Relative imports are deferred to call time so this file is also safe to
@@ -60,13 +59,13 @@ class UpdateError(Exception):
 
 
 def _get_update_branch() -> str:
-    """Return the configured update branch (falls back to 'main' if unset or invalid)."""
+    """Return the configured update branch (falls back to 'main' if unset)."""
     try:
         from .main import load_global_config
         branch = load_global_config().get("update_branch", "main")
     except Exception:
         branch = "main"
-    return branch if branch in _VALID_BRANCHES else "main"
+    return branch or "main"
 
 
 def _repo_zip_url(branch: str) -> str:
@@ -338,12 +337,7 @@ def perform_update():
         copy_and_diff(source_dir, base_dir)
         _logger().dbg("[UPDATER] perform_update: all files copied from source to base")
 
-        # ── Step 5: Set executable bits on bin/ ───────────────────────────────
-        print("Setting executable permissions on bin/ files...")
-        _mark_bin_executable(base_dir)
-        _logger().dbg("[UPDATER] perform_update: bin/ permissions set")
-
-        # ── Step 6: Mark update completed in global.json ──────────────────────
+        # ── Step 5: Mark update completed in global.json ──────────────────────
         # Re-fetch the latest SHA now that the install is done.  If additional
         # commits landed on the branch between when we started the download and
         # now, this ensures current_sha always matches whatever HEAD is at this
@@ -538,24 +532,6 @@ def replace_section(text, sec_name, new_content):
         out.append("")
 
     return "\n".join(out)
-
-
-def _mark_bin_executable(base_dir):
-    """Mark all files in <base_dir>/bin/ as executable on Linux and macOS."""
-    if sys.platform == "win32":
-        return
-    bin_dir = os.path.join(base_dir, "bin")
-    if not os.path.isdir(bin_dir):
-        return
-    for fname in os.listdir(bin_dir):
-        fpath = os.path.join(bin_dir, fname)
-        if not os.path.isfile(fpath):
-            continue
-        current = os.stat(fpath).st_mode
-        executable_mode = current | 0o111
-        if current != executable_mode:
-            os.chmod(fpath, executable_mode)
-            print(f"  Marked executable: bin/{fname}")
 
 
 def _is_binary(path: str) -> bool:
@@ -756,9 +732,6 @@ if __name__ == "__main__":
 
             _copy(_source_dir, _base_dir)
             _sdbg("files copied")
-
-            print("Setting executable permissions on bin/ files...")
-            _mark_bin_executable(_base_dir)
 
             _mark_done()
             _sdbg("update marked complete")

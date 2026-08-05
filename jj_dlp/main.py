@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.24.12"
+__version__ = "1.25.5"
 
 import subprocess
 import time
@@ -23,7 +23,7 @@ import uuid
 from urllib.parse import urlparse
 import shutil
 
-from .deps import ensure_curses, plain_ffmpeg_check, check_ffmpeg
+from .deps import ensure_curses, plain_ffmpeg_check, check_ffmpeg, ensure_bin_executable
 from . import logger as _logger
 from .logger import (
     startup_dbg, startup_dbg_flush,
@@ -396,9 +396,7 @@ def load_global_config() -> dict:
     debug_log_path_raw = general.get("DEBUG_LOG_PATH", "").strip().strip('"\'')
     update_interval = _int("UPDATE_INTERVAL", 30)
 
-    _valid_branches = {"main", "testing", "experimental"}
-    _raw_branch = general.get("UPDATE_BRANCH", "main").strip().lower()
-    update_branch = _raw_branch if _raw_branch in _valid_branches else "main"
+    update_branch = general.get("UPDATE_BRANCH", "main").strip().lower()
 
     return {
         "disk_drives":        disk_drives,
@@ -416,7 +414,12 @@ def load_global_config() -> dict:
         "destinations":       destinations,
         "ntfy_topic":         general.get("NTFY_TOPIC", "").strip().strip('"\''),
         "notify_confirm_file":_bool("NOTIFY_CONFIRM_FILE", True),
+        "notify_no_confirm_file":_bool("NOTIFY_NO_CONFIRM_FILE", False),
         "compact_view": general.get("COMPACT_VIEW", "auto").strip().strip('"\'') or "auto",
+        "web_ui":             _bool("WEB_UI", False),
+        "web_ui_port":        _int("WEB_UI_PORT", 8765),
+        "web_ui_user":        general.get("WEB_UI_USER", "").strip().strip('"\''),
+        "web_ui_pass":        general.get("WEB_UI_PASS", "").strip().strip('"\''),
     }
 
 def _write_global_conf_key(key: str, value: str) -> None:
@@ -713,6 +716,12 @@ class SiteState:
         # Set when size stops growing; cleared when growth resumes or recording ends.
         self.stall_since: Dict[str, float] = {}
 
+        # Streamer names that have hit the NOTIFY_NO_CONFIRM_FILE deadline
+        # (see _check_no_confirm_deadline) — drives the full-screen
+        # recording-failure alert in the dashboard. Cleared when the user
+        # dismisses the alert.
+        self.write_failure_streamers: List[str] = []
+
         # Ad alert tracking — streamer -> epoch of most recent ad signal.
         # Written by _drain_pipe (update_ad_alert); read by draw_system_panel.
         self.ad_alerts: Dict[str, float] = {}
@@ -757,6 +766,13 @@ class SiteState:
         """Reset the ffmpeg error count for *streamer* (called at recording start/reset)."""
         with self.dash_lock:
             self.ffmpeg_error_counts.pop(streamer, None)
+
+    def flag_write_failure(self, streamer: str) -> None:
+        """Record that *streamer* just hit the NOTIFY_NO_CONFIRM_FILE
+        deadline, for display in the full-screen recording-failure alert."""
+        with self.dash_lock:
+            if streamer not in self.write_failure_streamers:
+                self.write_failure_streamers.append(streamer)
 
     def set_stall_since(self, streamer: str, epoch: float) -> None:
         """Record that *streamer*'s file stopped growing at *epoch*."""
@@ -2111,6 +2127,29 @@ def _resolve_intro_delay(cfg: dict, entry_info: dict) -> dict:
     return overridden
 
 
+# ── DEBUG: write-failure simulation ─────────────────────────────────────────
+# Flip to True to reproduce the "recording can't write its file" failure mode
+# (the incident that motivated the unconfirmed-recording alert below) without
+# needing to actually break a filesystem.
+#
+# NOTE: pointing yt-dlp at a subdirectory that simply doesn't exist does NOT
+# work as a fault — yt-dlp creates any missing parent directories for its -o
+# path itself, so the write silently succeeds one level deeper and nothing
+# fails. Instead, this pre-creates a plain FILE (not a directory) at the
+# injected path component. yt-dlp then can't create anything under it —
+# you can't mkdir, or write a file, inside something that is itself a
+# regular file — so the write is guaranteed to fail regardless of any
+# directory-auto-creation behavior on yt-dlp's end. This is OS-level, so it
+# works the same on Windows/macOS/Linux.
+#
+# Watch for the flashing dashboard marker and the full-screen alert to
+# appear after roughly one stall_timeout window. Restore to False
+# afterwards — this is not meant to be left on, and the sentinel file it
+# creates (named below) should be deleted from OUTPUT_DIR when you're done.
+_SIMULATE_WRITE_FAILURE = False
+_SIMULATE_WRITE_FAILURE_BLOCKER_NAME = "_simulated_write_failure_do_not_create"
+
+
 def record_stream(streamer: str, cfg: dict, site: "SiteState",
                   use_lq: bool = False, show_popup: bool = True,
                   eviction_warning: str = "") -> None:
@@ -2130,8 +2169,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
     _global_cfg_nc = load_global_config()
     notify_confirm_file = _global_cfg_nc.get("notify_confirm_file", True)
+    notify_no_confirm_file = _global_cfg_nc.get("notify_no_confirm_file", False)
     initial_notification_sent = not notify_confirm_file
-    dbg(f"[NOTIFY] NOTIFY_CONFIRM_FILE={notify_confirm_file} for streamer={streamer!r} — "
+    dbg(f"[NOTIFY] NOTIFY_CONFIRM_FILE={notify_confirm_file} NOTIFY_NO_CONFIRM_FILE={notify_no_confirm_file} "
+        f"for streamer={streamer!r} — "
         f"initial_notification_sent={initial_notification_sent} "
         f"({'live notification already fired, nothing held back' if initial_notification_sent else 'live notification held until file growth is confirmed'})",
         site_name=streamer)
@@ -2226,6 +2267,20 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 )
 
             output_path = os.path.join(output_dir, current_output_tmpl)
+            if _SIMULATE_WRITE_FAILURE:
+                # See _SIMULATE_WRITE_FAILURE above. Create the blocker as a
+                # plain file (once) so yt-dlp cannot create anything "under"
+                # it — this is what actually guarantees the write fails,
+                # unlike just pointing at a missing directory.
+                _blocker_path = os.path.join(output_dir, _SIMULATE_WRITE_FAILURE_BLOCKER_NAME)
+                if not os.path.exists(_blocker_path):
+                    try:
+                        with open(_blocker_path, "wb"):
+                            pass
+                        dbg(f"[SIMULATE_WRITE_FAILURE] created blocker file at {_blocker_path!r}")
+                    except Exception as _blocker_exc:
+                        dbg(f"[SIMULATE_WRITE_FAILURE] could not create blocker file: {_blocker_exc!r}")
+                output_path = os.path.join(_blocker_path, current_output_tmpl)
 
             # ── Select downloader command (normal vs LQ) ──────────────────
             _active_dl_cmd = cfg["downloader_cmd"]
@@ -2515,6 +2570,47 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             recording_start_time = time.time()
             stall_check_interval = cfg["stall_check_interval"]
             stall_timeout        = cfg["stall_timeout"]
+            # NOTIFY_NO_CONFIRM_FILE tracking: if the recording file has not been
+            # confirmed within one STALL_TIMEOUT window (anchored to when the
+            # streamer went live), fire a warning notification. yt-dlp can exit
+            # 'normally' during a failure, so this deadline is the backstop.
+            _no_confirm_deadline = (site.dash_live_since.get(streamer)
+                                    or time.time()) + stall_timeout
+            _no_confirm_warned   = False
+            dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: confirmation deadline for "
+                f"streamer={streamer!r} = time.time()+{stall_timeout}s "
+                f"({_no_confirm_deadline:.2f}), dash_live_since={site.dash_live_since.get(streamer)}",
+                site_name=streamer)
+
+            def _check_no_confirm_deadline():
+                # Fires the NOTIFY_NO_CONFIRM_FILE warning as soon as the
+                # deadline has passed, independent of stall_check_interval
+                # and independent of whether proc is still alive when it's
+                # called. This must NOT be gated behind a "proc survived a
+                # full stall_check_interval" condition: _SIMULATE_WRITE_FAILURE
+                # (and real write failures) can make yt-dlp exit in well
+                # under stall_check_interval on every retry, which previously
+                # meant this check was never reached at all.
+                nonlocal _no_confirm_warned
+                if (notify_no_confirm_file
+                        and not _no_confirm_warned
+                        and not growth_seen
+                        and time.time() >= _no_confirm_deadline):
+                    _no_confirm_warned = True
+                    dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: file not confirmed for "
+                        f"streamer={streamer!r} within {int(stall_timeout)}s "
+                        f"(deadline={_no_confirm_deadline:.2f}) — sending warning",
+                        site_name=streamer)
+                    _maybe_show_live_popup(
+                        streamer, cfg, site, show_popup=show_popup,
+                        source="no_confirm_file", is_recording=False,
+                        warning=(f"The recording file could not be confirmed within "
+                                 f"{int(stall_timeout)}s — the start may have failed."),
+                        confirmed=False)
+                    # Also drives the dashboard's full-screen recording-
+                    # failure alert (see App.draw_write_failure_alert).
+                    site.flag_write_failure(streamer)
+
             seconds_since_check  = 0
             _split_log_counter   = 0  # throttle periodic split-timer dbg lines
             # Whether we've ever observed this file grow. The stall checker is
@@ -2778,6 +2874,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                                 # New segment is a new file — it hasn't grown yet,
                                 # so the stall checker must re-earn the right to run.
                                 growth_seen = False
+                                # Re-arm the NOTIFY_NO_CONFIRM_FILE deadline for
+                                # the new segment.
+                                _no_confirm_deadline = time.time() + stall_timeout
+                                _no_confirm_warned   = False
 
                                 dbg(f"[SPLIT][record_stream] switched to part {segment_num} "
                                     f"pid={proc.pid} active_file={active_file!r} "
@@ -2812,6 +2912,11 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
                 time.sleep(1)
                 seconds_since_check += 1
+
+                # Checked every second (not gated behind stall_check_interval)
+                # so a fast-failing recording attempt can't prevent this from
+                # ever firing. See _check_no_confirm_deadline() above.
+                _check_no_confirm_deadline()
 
                 if seconds_since_check >= stall_check_interval:
                     seconds_since_check = 0
@@ -2856,18 +2961,50 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     if file_error:
                         # We couldn't even locate/read the recording file this
                         # cycle (e.g. active_file points at a filename that
-                        # doesn't exist). Don't let that masquerade as "no
-                        # growth" — that would show a false "stalled" state on
-                        # the dashboard. Just give up on stall detection for
-                        # this file until it resolves itself.
-                        dbg("[STALL] filename lookup failed — giving up on "
-                            "stall detection for this cycle", site_name=streamer)
+                        # doesn't exist yet — a normal, brief situation right
+                        # after a fresh start). Don't let a single occurrence
+                        # masquerade as "no growth" — that would show a false
+                        # "stalled" state on the dashboard from transient
+                        # filename-resolution timing alone.
+                        #
+                        # However, if this has now persisted for a full
+                        # stall_timeout window since the last confirmed
+                        # growth, it's no longer transient — the file was
+                        # never (or is no longer) being written at all (e.g.
+                        # yt-dlp resolved an intended filename but can never
+                        # actually create it — an unwritable filesystem/
+                        # directory). That's the same "recording has failed"
+                        # condition as a confirmed stall and must be flagged
+                        # the same way, or a broken write path that never
+                        # produces a locatable file would silently never
+                        # alert at all.
+                        dbg("[STALL] filename lookup failed this cycle", site_name=streamer)
                         site.clear_stall_since(streamer)
                         if not filename_error_warned:
                             site.log_line(
                                 f"Warning: stall checker could not locate file for {streamer}"
                             )
                             filename_error_warned = True
+                        _file_error_elapsed = time.time() - last_growth_time
+                        if _file_error_elapsed >= stall_timeout:
+                            site.log_line(
+                                f"Recording file for {streamer} could not be located for "
+                                f"{int(_file_error_elapsed)}s — restarting"
+                            )
+                            site.set_write_unconfirmed(streamer)
+
+                            kill_proc(proc)
+                            site.unregister_proc(streamer)
+                            site.clear_stall_since(streamer)
+                            site.clear_ad_alert(streamer)
+
+                            try:
+                                close_logs()
+                            except Exception:
+                                pass
+
+                            time.sleep(5)
+                            break
 
                     elif stall_detected:
                         site.log_line(f"Stall detected for {streamer} — restarting")
@@ -2913,6 +3050,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         dbg(f"[STALL] no growth yet, but stall checker not armed "
                             f"(no growth seen for this file yet) — skipping stall "
                             f"detection", site_name=streamer)
+                        # NOTIFY_NO_CONFIRM_FILE is now checked every second via
+                        # _check_no_confirm_deadline() above, not here — see
+                        # that function for why it can't be gated behind this
+                        # stall_check_interval-only branch.
                     else:
                         filename_error_warned = False
                         dbg(f"[STALL] NO GROWTH: size={current_size} "
@@ -2921,6 +3062,12 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         site.set_stall_since(streamer, last_growth_time)
 
             else:
+                # Safety net: if proc.poll() was already non-None before the
+                # loop got to sleep even once, _check_no_confirm_deadline()
+                # above may never have run this attempt. Give it one last
+                # chance here before we report the attempt as finished.
+                _check_no_confirm_deadline()
+
                 site.unregister_proc(streamer)
                 site.clear_stall_since(streamer)
                 site.clear_ffmpeg_error_count(streamer)
@@ -3562,6 +3709,10 @@ def monitor_site(site: "SiteState") -> None:
         except Exception as e:
             site.log_line(f"EventSub init failed: {e}")
 
+    # Stagger startup liveness checks slightly so the curses UI finishes
+    # drawing its initial frames smoothly before external processes launch.
+    time.sleep(2.0)
+
     while not site._stop_event.is_set():
         # Evaluate schedule-based enable/disable for all streamers before the
         # liveness check so any config changes take effect this iteration.
@@ -3769,6 +3920,12 @@ class JJDlpDashboard:
         # ── Exit-confirmation popup state ─────────────────────────────────────
         self._exit_confirm_open      = False
         self._exit_confirm_sel       = 0   # 0 = Yes (default), 1 = No
+
+        # ── Recording-failure alert state ───────────────────────────────────
+        # Full-screen, flashing, does-not-auto-dismiss modal shown whenever
+        # NOTIFY_NO_CONFIRM_FILE fires for a streamer (see flag_write_failure).
+        self._write_failure_alert_open = False
+        self._write_failure_names: List[str] = []
 
     # ── Color palette ────────────────────────────────────────────────────────
     # Pair numbers and their meanings — easy to change here
@@ -4879,7 +5036,7 @@ class JJDlpDashboard:
                          f"  C: colors  Q: quit  ")
             elif current_tab == "File Manager":
                 hints = (f"  \u2191\u2193: select  Enter: open  Space: show folder"
-                         f"  DEL: delete  S: sort  T: toggle trash"
+                         f"  DEL: delete  S: sort  T: toggle trash  M: more options"
                          f"  C: colors  Q: quit  ")
             else:
                 hints = (f"  LEFT/RIGHT: switch tabs"
@@ -5153,6 +5310,12 @@ class JJDlpDashboard:
         if self._exit_confirm_open:
             self.draw_exit_confirm_popup()
 
+        # Recording-failure alert — drawn last, on top of absolutely
+        # everything (including the exit-confirmation popup), since it's
+        # the most urgent thing this app can show.
+        if self._write_failure_alert_open:
+            self.draw_write_failure_alert()
+
         self.stdscr.refresh()
 
         # Log timing every 100 frames (~5 seconds at 20fps)
@@ -5166,6 +5329,11 @@ class JJDlpDashboard:
     # ── Input handling ────────────────────────────────────────────────────────
     def handle_key(self, key) -> bool:
         """Returns False to quit."""
+        # Recording-failure alert intercepts all keys while open — it's
+        # drawn on top of everything else, including the exit-confirm popup.
+        if self._write_failure_alert_open:
+            return self._handle_write_failure_alert_key(key)
+
         # Exit-confirmation popup intercepts all keys while open.
         if self._exit_confirm_open:
             return self._handle_exit_confirm_key(key)
@@ -5490,6 +5658,70 @@ class JJDlpDashboard:
         self._changelog_popup_open = True
         self._mark_changelog_shown()
 
+    # ── Recording-failure alert (full-screen, does not auto-dismiss) ───────────
+    def _update_write_failure_alert(self) -> None:
+        """Called once per frame. Opens the full-screen alert whenever a
+        streamer has been flagged by NOTIFY_NO_CONFIRM_FILE (see
+        SiteState.flag_write_failure). Never auto-closes it — only an
+        explicit keypress in _handle_write_failure_alert_key() does that."""
+        names: List[str] = []
+        for _site in self.sites:
+            with _site.dash_lock:
+                names.extend(_site.write_failure_streamers)
+        if names:
+            self._write_failure_names = sorted(set(names))
+            self._write_failure_alert_open = True
+
+    def _handle_write_failure_alert_key(self, key) -> bool:
+        """Handle input while the recording-failure alert is open. Requires
+        an explicit dismissal; does not time out or auto-close. Returns True
+        to keep running (this alert never quits the app)."""
+        if key in (27, ord('q'), ord('Q'), ord('x'), ord('X'),
+                   ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
+            for _site in self.sites:
+                with _site.dash_lock:
+                    _site.write_failure_streamers.clear()
+            self._write_failure_alert_open = False
+        return True
+
+    def draw_write_failure_alert(self) -> None:
+        """Draw the centered 'recording has failed' alert popup."""
+        if not self._write_failure_alert_open:
+            return
+        h, w = self.stdscr.getmaxyx()
+        failing = self._write_failure_names
+        if not failing:
+            self._write_failure_alert_open = False
+            return
+
+        alert_attr = curses.color_pair(self.C_DELETE) | curses.A_BOLD
+
+        title = " ‼ RECORDING FAILURE ‼ "
+        message = "The following streamer(s) are NOT being recorded:"
+        names_lines = [f"    {name}" for name in failing[: max(1, h - 12)]]
+        legend = " Press Enter / X / Esc / Q to dismiss "
+
+        box_w = min(w - 6, max(len(title), len(message), len(legend),
+                                max((len(n) for n in names_lines), default=0)) + 6)
+        box_h = min(h - 4, 7 + len(names_lines))
+        by1 = max(1, (h - box_h) // 2)
+        bx1 = max(1, (w - box_w) // 2)
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            self.safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1), alert_attr)
+        self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_DELETE)
+
+        self.safe_addstr(self.stdscr, by1, bx1 + max(0, (box_w - len(title)) // 2),
+                    title, alert_attr)
+        self.safe_addstr(self.stdscr, by1 + 2, bx1 + max(0, (box_w - len(message)) // 2),
+                    message, alert_attr)
+        for i, line in enumerate(names_lines):
+            self.safe_addstr(self.stdscr, by1 + 4 + i, bx1 + 2, line[:box_w - 4], alert_attr)
+        self.safe_addstr(self.stdscr, by2 - 1, bx1 + max(0, (box_w - len(legend)) // 2),
+                    legend[:box_w - 2], curses.color_pair(self.C_INVHEAD))
+
     def _open_exit_confirm(self) -> None:
         """Open the 'Are you sure you want to exit?' popup, 'Yes' selected by default."""
         self._exit_confirm_open = True
@@ -5619,6 +5851,7 @@ class JJDlpDashboard:
 
         while True:
             _t_frame_start = time.time()
+            self._update_write_failure_alert()
             self.refresh_screen()
             _t_after_refresh = time.time()
 
@@ -5988,6 +6221,11 @@ def main() -> None:
         print(f"\njj-dlp v{__version__}  ·  Aborted during ffmpeg check.")
         sys.exit(1)
 
+    # Bundled executables in bin/ lose their execute bit when copied from the
+    # GitHub zip.  Fix it on every launch (not just after an update) so the
+    # permission is correct even the first time jj-dlp runs after updating.
+    ensure_bin_executable()
+
     _script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if os.getcwd() != _script_dir:
         os.chdir(_script_dir)
@@ -6197,6 +6435,19 @@ def main() -> None:
                               daemon=True)
         wt.start()
         site.watcher_thread = wt
+
+    # ── Launch embedded web UI (opt-in; status + add/remove/disable) ──────────
+    try:
+        from . import http_server as _http_server
+        _http_server.start_web_server(
+            sites, global_cfg,
+            log_fn=_dash_log,
+            modify_streamer_fn=_modify_config_streamer,
+        )
+    except Exception as e:
+        msg = f"[WEBUI] failed to start: {type(e).__name__}: {e}"
+        startup_dbg(msg)
+        _dash_log(msg)
 
     # ── Launch curses dashboard ───────────────────────────────────────────────
     try:

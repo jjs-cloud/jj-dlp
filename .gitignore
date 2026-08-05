@@ -3,6 +3,7 @@
 *.bak
 *.log
 *.txt
+*.mp4
+*.flv
 research/
 !docs/*
-CLAUDE.md

@@ -61,8 +61,13 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("DESTINATIONS",          "global", "",      True,  "A list of destination paths where you might want to move your files.  Used in the File Manager tab. (e.g. C:\\My Recordings  OR /home/greg/twitch)"),
     _KeyDef("NTFY_TOPIC",            "global", "",      True,  "The topic name to use for ntfy.sh notifications. (example: jj-dlp-fj48dh734fk) Refer to docs/ntfy-setup.md for a detailed setup guide. (blank = disabled)"),
     _KeyDef("NOTIFY_CONFIRM_FILE",   "global", "true",  True,  "Confirm the recording has actually started before sending a live notification.  Note: When enabled, the notifications will be delayed by a few seconds until the file has been confirmed."),
+    _KeyDef("NOTIFY_NO_CONFIRM_FILE", "global", "true", True,  "If the recording file cannot be confirmed (does not exist or no file growth) within one STALL_TIMEOUT, send a warning notification that the file could not be confirmed (true/false)."),
     _KeyDef("SITE_SORT",             "global", "added_first", True, "The order to display streamers on each site panel.   This can also be adjusted by pressing the S key on the Dashboard tab."),
     _KeyDef("COMPACT_VIEW",          "global", "auto",  True,  "When streamers overflow the panel, compact view shows them in 2 columns without progress bars. (auto/true/false)"),
+    _KeyDef("WEB_UI",                "global", "false", True,  "Enable the Web UI, viewable from any browser on your local network by navigating to http://your-ip-address:8765 or from the same machine at http://127.0.0.1:8765. Requires WEB_UI_USER and WEB_UI_PASS to also be set. Note: Use this tool on your local network only.  Access over the internet is not supported. (true/false)"),
+    _KeyDef("WEB_UI_PORT",           "global", "8765",  True,  "Port for the web dashboard. Default: 8765"),
+    _KeyDef("WEB_UI_USER",           "global", "",      True,  "Username required to log into the web dashboard (HTTP Basic Auth). Required if WEB_UI is enabled."),
+    _KeyDef("WEB_UI_PASS",           "global", "",      True,  "Password required to log into the web dashboard (HTTP Basic Auth). Required if WEB_UI is enabled. Choose something not easily guessed — anyone on your WiFi could otherwise try to log in."),
 
     # ── Site keys (per-site .conf) ────────────────────────────────────────────
     _KeyDef("SITE_LABEL",            "site",   "",      True,  "The name of this site."),
@@ -73,7 +78,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("COOLDOWN_AFTER_RECORDING", "site", "60",   False, "Seconds to wait after a recording ends before checking again."),
     _KeyDef("SPLIT_AFTER",           "site",   "0",    True,  "When recording a stream, split the video file(s) every X minutes. (0 = no split)"),
     _KeyDef("STALL_CHECK_INTERVAL",  "site",   "30",   True, "How often to check if the recording has stalled (in seconds).  Disable by setting this to a large number. (Default: 30)"),
-    _KeyDef("STALL_TIMEOUT",         "site",   "120",  True, "Time to wait before considering a recording stalled (in seconds). (Default: 120)"),
+    _KeyDef("STALL_TIMEOUT",         "site",   "120",  True, "Time to wait before considering a recording stalled (in seconds). (Default: 120) (note: also used with NOTIFY_NO_CONFIRM_FILE)"),
     _KeyDef("CONFIG_CHECK_INTERVAL", "site",   "3",    False, "How often to check for changes to the configuration file (in seconds). (Default: 3)"),
     _KeyDef("SITE_TMPL",             "site",   "",     False, "URL where the live stream can be accessed. {username} will be replaced with the streamer's username."),
     _KeyDef("PANEL_RESIZE",          "site",   "true", True,  "When true, site panels will expand vertically as needed to display all streamers."),
@@ -85,9 +90,9 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("AD_ALERTS",             "site",   "True", True,  "Show an alert in the system panel when ads are detected in a recording (true/false)."),
     _KeyDef("POPUP_TIMEOUT",         "site",   "15",   True,  "Seconds to show the popup notification when a streamer goes live."),
     _KeyDef("POPUP_COOLDOWN",        "site",   "30",   True,  "Minutes to wait before showing another popup notification for the same streamer."),
-    _KeyDef("YT_DLP_PATH_WINDOWS",   "site",   "",     True, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
-    _KeyDef("YT_DLP_PATH_MAC",       "site",   "",     True, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
-    _KeyDef("YT_DLP_PATH_LINUX",     "site",   "",     True, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
+    _KeyDef("YT_DLP_PATH_WINDOWS",   "site",   "",     False, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
+    _KeyDef("YT_DLP_PATH_MAC",       "site",   "",     False, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
+    _KeyDef("YT_DLP_PATH_LINUX",     "site",   "",     False, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
     _KeyDef("PROGRESS_BAR_MAX_HOURS","site",   "10",    True,  "Duration of the progress bar in the site panel of the dashboard. (in hours)"),
     _KeyDef("PROGRESS_BAR_WIDTH",    "site",   "58",   True,  "Width of the progress bar in the site panel of the dashboard. (in characters)"),
     _KeyDef("DOWNLOADER_COOKIES",    "site",   "true", False, "Whether to write the --cookies-from-browser flag to this config file's [Downloader] section when a browser is selected at startup."),
@@ -2113,11 +2118,11 @@ def _validate_value(key: str, value: str) -> tuple[bool, str]:
     bool_keys = {"DEBUG_LOGS", "CHECK_FOR_UPDATES", "ASK_FOR_BROWSER", "ASK_FOR_CONFIG",
                  "PANEL_RESIZE", "LOGGING", "SPLIT_LOGS", "POPUP_NOTIFICATIONS",
                  "DOWNLOADER_COOKIES", "CHECKER_COOKIES", "LQ_DOWNLOADER", "SUBFOLDERS",
-                 "UPGRADE_QUALITY"}
+                 "UPGRADE_QUALITY", "WEB_UI"}
     int_keys = {"UPDATE_INTERVAL", "SITE_ORDER", "CHECK_INTERVAL", "COOLDOWN_AFTER_RECORDING",
                 "SPLIT_AFTER", "STALL_CHECK_INTERVAL", "STALL_TIMEOUT", "CONFIG_CHECK_INTERVAL",
                 "POPUP_TIMEOUT", "POPUP_COOLDOWN", "PROGRESS_BAR_MAX_HOURS", "PROGRESS_BAR_WIDTH",
-                "LAST_LIVE_HIGHLIGHT", "MAX_CONCURRENT_REC", "FF_ERR_THRESH"}
+                "LAST_LIVE_HIGHLIGHT", "MAX_CONCURRENT_REC", "FF_ERR_THRESH", "WEB_UI_PORT"}
     if key in bool_keys:
         if value.lower() not in ("true", "false", "yes", "no", "1", "0"):
             return False, "Must be true or false"
@@ -2131,6 +2136,13 @@ def _validate_value(key: str, value: str) -> tuple[bool, str]:
     if key == "SITE_SORT":
         if value.lower() not in _SORT_KEYS:
             return False, f"Must be one of: {', '.join(_SORT_KEYS)}"
+    if key == "WEB_UI_PORT":
+        try:
+            port = int(value)
+            if not (1 <= port <= 65535):
+                return False, "Must be a port between 1 and 65535"
+        except ValueError:
+            return False, "Must be an integer"
     return True, ""
 
 
