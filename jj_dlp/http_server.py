@@ -217,6 +217,9 @@ _INDEX_HTML = """<!DOCTYPE html>
   .log { margin-top:8px; font-size:0.75rem; opacity:.6; max-height:120px; overflow-y:auto;
          white-space:pre-wrap; font-family:ui-monospace, monospace; }
   .stale { color:#e33; }
+  @media (min-width: 641px) {
+    body { max-width: 760px; margin: 0 auto; }
+  }
 </style>
 </head>
 <body>
