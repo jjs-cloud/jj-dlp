@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.25.5"
+__version__ = "1.25.6"
 
 import subprocess
 import time
@@ -2188,6 +2188,15 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
     # SPLIT_AFTER loop below is told to stop splitting for the rest of the
     # stream instead of continuing to split every intro_delay_minutes.
     _intro_delay_disable_after_split = False
+    # NOTIFY_NO_CONFIRM_FILE grace period (seconds): when Intro Delay holds
+    # the recording start, the file is *intentionally* not written for the
+    # first intro_delay_minutes. The no-confirm deadline below is anchored
+    # to dash_live_since (when the streamer went live), not to when
+    # record_stream actually starts writing — so without this extra
+    # allowance, streamers using Intro Delay would trip the write-failure
+    # alert as a false positive every time. Only applies to the "hold"
+    # branch below (not intro_delay_split, which doesn't delay the write).
+    _no_confirm_grace_seconds = 0.0
 
     if intro_delay_enabled and intro_delay_minutes > 0 and intro_delay_split:
         # Reuse the SPLIT_AFTER machinery as-is: force the *first* split to
@@ -2215,6 +2224,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             site._stop_event.wait(timeout=min(1.0, _delay_deadline - time.time()))
         with site.lock:
             site.intro_delay_pending.discard(streamer)
+        # Extend the NOTIFY_NO_CONFIRM_FILE deadline by the hold duration so
+        # the write-failure alert doesn't fire on the file that was
+        # intentionally never written during the delay window.
+        _no_confirm_grace_seconds = intro_delay_minutes * 60
         dbg(f"[INTRO_DELAY] streamer={streamer!r} delay elapsed — starting recording")
         # The initial "is live" notification was sent as "Not recording /
         # Reason: Intro Delay" back in start_recording_if_needed(). Now that
@@ -2575,10 +2588,11 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             # streamer went live), fire a warning notification. yt-dlp can exit
             # 'normally' during a failure, so this deadline is the backstop.
             _no_confirm_deadline = (site.dash_live_since.get(streamer)
-                                    or time.time()) + stall_timeout
+                                    or time.time()) + stall_timeout + _no_confirm_grace_seconds
             _no_confirm_warned   = False
             dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: confirmation deadline for "
-                f"streamer={streamer!r} = time.time()+{stall_timeout}s "
+                f"streamer={streamer!r} = time.time()+{stall_timeout}s"
+                f"{f'+{_no_confirm_grace_seconds:.0f}s intro-delay grace' if _no_confirm_grace_seconds else ''} "
                 f"({_no_confirm_deadline:.2f}), dash_live_since={site.dash_live_since.get(streamer)}",
                 site_name=streamer)
 
