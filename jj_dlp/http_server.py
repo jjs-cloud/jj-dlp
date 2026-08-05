@@ -50,6 +50,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import threading
 import time
@@ -155,13 +156,76 @@ _CONFIG_WRITE_LOCK = threading.Lock()
 # are accepted without prompting for Basic Auth again. Credentials are still
 # required on first login (auth stays mandatory — nothing becomes anonymous).
 #
-# The token store is in-memory: tokens live for _SESSION_TTL after last use,
-# get refreshed on each authenticated request, and are discarded when the
-# server process exits. One new login is then enough to get back in.
+# The token store is *persisted to disk* so that active logins survive a
+# server restart: tokens live for _SESSION_TTL after last use, get refreshed
+# on each authenticated request, and are written to a JSON cache file in
+# configs/ (next to global.conf) whenever the store changes. On startup the
+# cache is reloaded, so a previously-logged-in client keeps its cookie and
+# is not asked for the username/password again. The cache file is gitignored
+# (configs/*.json). Session tokens are random URL-safe secrets — not the
+# user's credentials — though anyone who can read the file could impersonate
+# a logged-in client, which is the same scope as the old in-memory store.
 _SESSION_TTL = 30 * 24 * 3600            # 30 days of inactivity
 _SESSION_COOKIE = "jj_dlp_session"
+_SESSION_CACHE_FILE = ".web_sessions.json"
 _SESSIONS: dict = {}
 _SESSION_LOCK = threading.Lock()
+_SESSIONS_FILE_LOCK = threading.Lock()
+_SAVE_INTERVAL = 60                      # throttle sliding-expiry writes to 1/60s
+_last_save_ts = 0.0
+
+
+def _sessions_path() -> str:
+    """Path of the persistent session cache, alongside global.conf."""
+    config_dir = os.path.abspath("configs")
+    if os.path.isdir(config_dir):
+        return os.path.join(config_dir, _SESSION_CACHE_FILE)
+    return os.path.abspath(_SESSION_CACHE_FILE)
+
+
+def _load_sessions() -> None:
+    """Restore the persisted session store at startup so already-logged-in
+    clients keep their cookie without re-entering their credentials."""
+    path = _sessions_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception:
+        return
+    if not isinstance(raw, dict):
+        return
+    now = time.time()
+    with _SESSION_LOCK:
+        for sid, expiry in raw.items():
+            try:
+                exp = float(expiry)
+            except (TypeError, ValueError):
+                continue
+            if exp > now:
+                _SESSIONS[sid] = exp
+
+
+def _save_sessions(force: bool = False) -> None:
+    """Snapshot the session store to the cache file. Sliding-expiry refresh
+    writes are throttled (_SAVE_INTERVAL); mints and expirations always force
+    a write so the durable copy stays current. Writes are atomic (tmp+rename)
+    so a crash mid-write never leaves a corrupt file behind."""
+    global _last_save_ts
+    now = time.time()
+    with _SESSIONS_FILE_LOCK:
+        if not force and (now - _last_save_ts) < _SAVE_INTERVAL:
+            return
+        _last_save_ts = now
+        with _SESSION_LOCK:
+            snapshot = dict(_SESSIONS)
+        try:
+            path = _sessions_path()
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(snapshot, f)
+            os.replace(tmp, path)
+        except OSError:
+            pass
 
 
 def _valid_username(name: str) -> bool:
@@ -478,10 +542,12 @@ class _Handler(BaseHTTPRequestHandler):
                 return False
             if expiry < time.time():
                 _SESSIONS.pop(sid, None)
+                _save_sessions(force=True)
                 return False
             # Sliding expiry — a session stays alive as long as it's used.
             _SESSIONS[sid] = time.time() + _SESSION_TTL
-            return True
+        _save_sessions(force=False)
+        return True
 
     def _set_session_cookie(self) -> str:
         """Mint a fresh session token and return the Set-Cookie header *value*.
@@ -492,6 +558,7 @@ class _Handler(BaseHTTPRequestHandler):
         sid = secrets.token_urlsafe(32)
         with _SESSION_LOCK:
             _SESSIONS[sid] = time.time() + _SESSION_TTL
+        _save_sessions(force=True)
         return f"{_SESSION_COOKIE}={sid}; Path=/; HttpOnly; SameSite=Lax; " \
                f"Max-Age={_SESSION_TTL}"
 
@@ -688,6 +755,13 @@ def start_web_server(
         return None
 
     port = global_cfg.get("web_ui_port", 8765)
+
+    # Reload the persisted session store so clients who logged in before a
+    # restart keep their cookie and don't need to enter credentials again.
+    try:
+        _load_sessions()
+    except Exception as e:
+        _announce(f"failed to load session cache: {type(e).__name__}: {e}")
 
     handler_cls = type("_ConfiguredHandler", (_Handler,), {
         "sites": sites,
