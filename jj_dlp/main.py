@@ -716,6 +716,12 @@ class SiteState:
         # Set when size stops growing; cleared when growth resumes or recording ends.
         self.stall_since: Dict[str, float] = {}
 
+        # Streamer names that have hit the NOTIFY_NO_CONFIRM_FILE deadline
+        # (see _check_no_confirm_deadline) — drives the full-screen
+        # recording-failure alert in the dashboard. Cleared when the user
+        # dismisses the alert.
+        self.write_failure_streamers: List[str] = []
+
         # Ad alert tracking — streamer -> epoch of most recent ad signal.
         # Written by _drain_pipe (update_ad_alert); read by draw_system_panel.
         self.ad_alerts: Dict[str, float] = {}
@@ -760,6 +766,13 @@ class SiteState:
         """Reset the ffmpeg error count for *streamer* (called at recording start/reset)."""
         with self.dash_lock:
             self.ffmpeg_error_counts.pop(streamer, None)
+
+    def flag_write_failure(self, streamer: str) -> None:
+        """Record that *streamer* just hit the NOTIFY_NO_CONFIRM_FILE
+        deadline, for display in the full-screen recording-failure alert."""
+        with self.dash_lock:
+            if streamer not in self.write_failure_streamers:
+                self.write_failure_streamers.append(streamer)
 
     def set_stall_since(self, streamer: str, epoch: float) -> None:
         """Record that *streamer*'s file stopped growing at *epoch*."""
@@ -2594,6 +2607,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         warning=(f"The recording file could not be confirmed within "
                                  f"{int(stall_timeout)}s — the start may have failed."),
                         confirmed=False)
+                    # Also drives the dashboard's full-screen recording-
+                    # failure alert (see App.draw_write_failure_alert).
+                    site.flag_write_failure(streamer)
 
             seconds_since_check  = 0
             _split_log_counter   = 0  # throttle periodic split-timer dbg lines
@@ -3904,6 +3920,12 @@ class JJDlpDashboard:
         # ── Exit-confirmation popup state ─────────────────────────────────────
         self._exit_confirm_open      = False
         self._exit_confirm_sel       = 0   # 0 = Yes (default), 1 = No
+
+        # ── Recording-failure alert state ───────────────────────────────────
+        # Full-screen, flashing, does-not-auto-dismiss modal shown whenever
+        # NOTIFY_NO_CONFIRM_FILE fires for a streamer (see flag_write_failure).
+        self._write_failure_alert_open = False
+        self._write_failure_names: List[str] = []
 
     # ── Color palette ────────────────────────────────────────────────────────
     # Pair numbers and their meanings — easy to change here
@@ -5288,6 +5310,12 @@ class JJDlpDashboard:
         if self._exit_confirm_open:
             self.draw_exit_confirm_popup()
 
+        # Recording-failure alert — drawn last, on top of absolutely
+        # everything (including the exit-confirmation popup), since it's
+        # the most urgent thing this app can show.
+        if self._write_failure_alert_open:
+            self.draw_write_failure_alert()
+
         self.stdscr.refresh()
 
         # Log timing every 100 frames (~5 seconds at 20fps)
@@ -5301,6 +5329,11 @@ class JJDlpDashboard:
     # ── Input handling ────────────────────────────────────────────────────────
     def handle_key(self, key) -> bool:
         """Returns False to quit."""
+        # Recording-failure alert intercepts all keys while open — it's
+        # drawn on top of everything else, including the exit-confirm popup.
+        if self._write_failure_alert_open:
+            return self._handle_write_failure_alert_key(key)
+
         # Exit-confirmation popup intercepts all keys while open.
         if self._exit_confirm_open:
             return self._handle_exit_confirm_key(key)
@@ -5625,6 +5658,77 @@ class JJDlpDashboard:
         self._changelog_popup_open = True
         self._mark_changelog_shown()
 
+    # ── Recording-failure alert (full-screen, does not auto-dismiss) ───────────
+    def _update_write_failure_alert(self) -> None:
+        """Called once per frame. Opens the full-screen alert whenever a
+        streamer has been flagged by NOTIFY_NO_CONFIRM_FILE (see
+        SiteState.flag_write_failure). Never auto-closes it — only an
+        explicit keypress in _handle_write_failure_alert_key() does that."""
+        names: List[str] = []
+        for _site in self.sites:
+            with _site.dash_lock:
+                names.extend(_site.write_failure_streamers)
+        if names:
+            self._write_failure_names = sorted(set(names))
+            self._write_failure_alert_open = True
+
+    def _handle_write_failure_alert_key(self, key) -> bool:
+        """Handle input while the recording-failure alert is open. Requires
+        an explicit dismissal; does not time out or auto-close. Returns True
+        to keep running (this alert never quits the app)."""
+        if key in (27, ord('q'), ord('Q'), ord('x'), ord('X'),
+                   ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
+            for _site in self.sites:
+                with _site.dash_lock:
+                    _site.write_failure_streamers.clear()
+            self._write_failure_alert_open = False
+        return True
+
+    def draw_write_failure_alert(self) -> None:
+        """Draw the full-screen, flashing 'recording has failed' alert."""
+        if not self._write_failure_alert_open:
+            return
+        h, w = self.stdscr.getmaxyx()
+        failing = self._write_failure_names
+        if not failing:
+            self._write_failure_alert_open = False
+            return
+
+        flash_on = (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2)
+        alert_attr = curses.color_pair(self.C_DELETE) | curses.A_BOLD
+
+        # Flashing full-screen background so this cannot be missed or
+        # mistaken for a normal popup, even from across the room.
+        bg_char = "█" if flash_on else "▓"
+        for y in range(0, h):
+            self.safe_addstr(self.stdscr, y, 0, bg_char * max(0, w - 1), alert_attr)
+
+        title = " ‼ RECORDING FAILURE ‼ "
+        message = "The following streamer(s) are NOT being recorded:"
+        names_lines = [f"    {name}" for name in failing[: max(1, h - 12)]]
+        legend = " Press Enter / X / Esc / Q to dismiss "
+
+        box_w = min(w - 6, max(len(title), len(message), len(legend),
+                                max((len(n) for n in names_lines), default=0)) + 6)
+        box_h = min(h - 4, 7 + len(names_lines))
+        by1 = max(1, (h - box_h) // 2)
+        bx1 = max(1, (w - box_w) // 2)
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            self.safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1), alert_attr)
+        self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_DELETE)
+
+        self.safe_addstr(self.stdscr, by1, bx1 + max(0, (box_w - len(title)) // 2),
+                    title, alert_attr)
+        self.safe_addstr(self.stdscr, by1 + 2, bx1 + max(0, (box_w - len(message)) // 2),
+                    message, alert_attr)
+        for i, line in enumerate(names_lines):
+            self.safe_addstr(self.stdscr, by1 + 4 + i, bx1 + 2, line[:box_w - 4], alert_attr)
+        self.safe_addstr(self.stdscr, by2 - 1, bx1 + max(0, (box_w - len(legend)) // 2),
+                    legend[:box_w - 2], curses.color_pair(self.C_INVHEAD) | curses.A_BOLD)
+
     def _open_exit_confirm(self) -> None:
         """Open the 'Are you sure you want to exit?' popup, 'Yes' selected by default."""
         self._exit_confirm_open = True
@@ -5754,6 +5858,7 @@ class JJDlpDashboard:
 
         while True:
             _t_frame_start = time.time()
+            self._update_write_failure_alert()
             self.refresh_screen()
             _t_after_refresh = time.time()
 
