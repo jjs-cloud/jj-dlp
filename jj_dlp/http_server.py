@@ -158,11 +158,11 @@ _CONFIG_WRITE_LOCK = threading.Lock()
 #
 # The token store is *persisted to disk* so that active logins survive a
 # server restart: tokens live for _SESSION_TTL after last use, get refreshed
-# on each authenticated request, and are written to a JSON cache file in
-# configs/ (next to global.conf) whenever the store changes. On startup the
+# on each authenticated request, and are written to a JSON cache file in the
+# jj_dlp package folder whenever the store changes. On startup the
 # cache is reloaded, so a previously-logged-in client keeps its cookie and
-# is not asked for the username/password again. The cache file is gitignored
-# (configs/*.json). Session tokens are random URL-safe secrets — not the
+# is not asked for the username/password again. Session tokens are random
+# URL-safe secrets — not the
 # user's credentials — though anyone who can read the file could impersonate
 # a logged-in client, which is the same scope as the old in-memory store.
 _SESSION_TTL = 30 * 24 * 3600            # 30 days of inactivity
@@ -176,11 +176,9 @@ _last_save_ts = 0.0
 
 
 def _sessions_path() -> str:
-    """Path of the persistent session cache, alongside global.conf."""
-    config_dir = os.path.abspath("configs")
-    if os.path.isdir(config_dir):
-        return os.path.join(config_dir, _SESSION_CACHE_FILE)
-    return os.path.abspath(_SESSION_CACHE_FILE)
+    """Path of the persistent session cache, inside the jj_dlp package folder."""
+    pkg_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(pkg_dir, _SESSION_CACHE_FILE)
 
 
 def _load_sessions() -> None:
