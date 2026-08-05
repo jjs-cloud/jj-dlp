@@ -5720,7 +5720,7 @@ class JJDlpDashboard:
         for i, line in enumerate(names_lines):
             self.safe_addstr(self.stdscr, by1 + 4 + i, bx1 + 2, line[:box_w - 4], alert_attr)
         self.safe_addstr(self.stdscr, by2 - 1, bx1 + max(0, (box_w - len(legend)) // 2),
-                    legend[:box_w - 2], curses.color_pair(self.C_INVHEAD) | curses.A_BOLD)
+                    legend[:box_w - 2], curses.color_pair(self.C_INVHEAD))
 
     def _open_exit_confirm(self) -> None:
         """Open the 'Are you sure you want to exit?' popup, 'Yes' selected by default."""
