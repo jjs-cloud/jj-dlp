@@ -15,6 +15,12 @@ changed within the last ``IDLE_THRESHOLD_S`` seconds, otherwise it is IDLE.
 When there is more than one distinct OUTPUT_DIR, each folder's files are
 shown under their own group header so they stay visually separated.
 
+Each OUTPUT_DIR is scanned recursively, so files stay visible when the
+SUBFOLDERS global key is on and recordings are nested one level down in a
+per-streamer subfolder. Files found below the top of an OUTPUT_DIR are
+shown with their subfolder-relative path (e.g. "StreamerName/file.mp4")
+so it's clear which streamer's subfolder they live in.
+
 Keybinds (active only while the "File Manager" tab is selected)
 -----------------------------------------------------------------
     UP / DOWN     - move the file selection
@@ -441,22 +447,30 @@ class FileManagerTab:
             move_dest_path = self._move_dest_path
 
         current_paths = set()
+        # Maps each discovered file path to the OUTPUT_DIR (root) it was
+        # found under, since recursive scanning means a file's immediate
+        # parent directory (e.g. a per-streamer subfolder created by the
+        # SUBFOLDERS global key) is no longer necessarily the OUTPUT_DIR
+        # itself.
+        path_roots = {}
         for _label, folder in dirs:
             try:
-                with os.scandir(folder) as it:
-                    for entry in it:
+                for root, _dirnames, filenames in os.walk(folder, followlinks=False):
+                    for fname in filenames:
+                        fpath = os.path.join(root, fname)
                         try:
-                            if not entry.is_file(follow_symlinks=False):
+                            if not os.path.isfile(fpath):
                                 continue
                             # The Move destination file is tracked separately
                             # (see below) so it isn't double-listed if a
                             # DESTINATIONS folder happens to overlap with a
                             # watched OUTPUT_DIR.
-                            if move_dest_path and os.path.abspath(entry.path) == move_dest_path:
+                            if move_dest_path and os.path.abspath(fpath) == move_dest_path:
                                 continue
-                            current_paths.add(entry.path)
                         except OSError:
                             continue
+                        current_paths.add(fpath)
+                        path_roots[fpath] = folder
             except OSError:
                 continue
 
@@ -487,7 +501,7 @@ class FileManagerTab:
             except OSError:
                 rec["mtime"] = rec.get("mtime", 0)
 
-            folder_abs = os.path.dirname(path)
+            folder_abs = path_roots.get(path, os.path.dirname(path))
             rec["group_path"] = folder_abs
             rec["group_label"] = dir_label_map.get(folder_abs, os.path.basename(folder_abs) or folder_abs)
             rec["status"] = "WRITING" if (now - rec["last_change"]) < IDLE_THRESHOLD_S else "IDLE"
@@ -1762,7 +1776,14 @@ class FileManagerTab:
                                curses.color_pair(db.C_DIM))
             else:
                 path = payload
-                name = os.path.basename(path)
+                group_path = rec.get("group_path")
+                if group_path and os.path.dirname(os.path.abspath(path)) != os.path.abspath(group_path):
+                    # Nested inside a subfolder (e.g. a per-streamer folder
+                    # created by SUBFOLDERS) - show the subfolder-relative
+                    # path so it's clear where the file lives.
+                    name = os.path.relpath(path, group_path).replace(os.sep, "/")
+                else:
+                    name = os.path.basename(path)
                 status = rec.get("status", "IDLE")
                 size_txt = human_size(rec.get("size"))
                 rate_txt = human_rate(rec.get("rate")) if status == "WRITING" else "\u2014"
