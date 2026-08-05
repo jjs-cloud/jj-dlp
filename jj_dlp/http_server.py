@@ -50,6 +50,7 @@ import base64
 import hashlib
 import hmac
 import json
+import secrets
 import threading
 import time
 import urllib.parse
@@ -142,6 +143,25 @@ _MAX_BODY_BYTES = 4096
 # Serializes config-file writes triggered through this server. See the
 # "Concurrency notes" section of the module docstring.
 _CONFIG_WRITE_LOCK = threading.Lock()
+
+# ──────────────────────────────────────────────────────────────────────────
+# Persistent session store (client remembers login via a cookie)
+# ──────────────────────────────────────────────────────────────────────────
+# HTTP Basic Auth is only remembered by browsers for the current browser
+# session — close the browser (or launch as a mobile "standalone" PWA, where
+# many browsers don't persist it at all) and you're asked for the username +
+# password again. To fix that, the first successful Basic login issues a
+# long-lived random session cookie; subsequent requests with a valid cookie
+# are accepted without prompting for Basic Auth again. Credentials are still
+# required on first login (auth stays mandatory — nothing becomes anonymous).
+#
+# The token store is in-memory: tokens live for _SESSION_TTL after last use,
+# get refreshed on each authenticated request, and are discarded when the
+# server process exits. One new login is then enough to get back in.
+_SESSION_TTL = 30 * 24 * 3600            # 30 days of inactivity
+_SESSION_COOKIE = "jj_dlp_session"
+_SESSIONS: dict = {}
+_SESSION_LOCK = threading.Lock()
 
 
 def _valid_username(name: str) -> bool:
@@ -433,6 +453,53 @@ class _Handler(BaseHTTPRequestHandler):
         pw_ok = hmac.compare_digest(pw, self.auth_pass)
         return user_ok and pw_ok
 
+    # ── Session-cookie authentication ───────────────────────────────────
+    # Lets a previously-logged-in client bypass the repeated Basic Auth
+    # prompt using the long-lived cookie issued after their first login.
+
+    def _session_cookie_value(self) -> Optional[str]:
+        header = self.headers.get("Cookie", "")
+        for part in header.split(";"):
+            part = part.strip()
+            if part.startswith(_SESSION_COOKIE + "="):
+                return part[len(_SESSION_COOKIE + "="):]
+        return None
+
+    def _has_valid_session(self) -> bool:
+        sid = self._session_cookie_value()
+        if not sid:
+            return False
+        with _SESSION_LOCK:
+            expiry = _SESSIONS.get(sid)
+            if expiry is None:
+                return False
+            if expiry < time.time():
+                _SESSIONS.pop(sid, None)
+                return False
+            # Sliding expiry — a session stays alive as long as it's used.
+            _SESSIONS[sid] = time.time() + _SESSION_TTL
+            return True
+
+    def _set_session_cookie(self) -> None:
+        sid = secrets.token_urlsafe(32)
+        with _SESSION_LOCK:
+            _SESSIONS[sid] = time.time() + _SESSION_TTL
+        self.send_header(
+            "Set-Cookie",
+            f"{_SESSION_COOKIE}={sid}; Path=/; HttpOnly; SameSite=Lax; "
+            f"Max-Age={_SESSION_TTL}",
+        )
+
+    def _authenticated(self) -> bool:
+        """Return True if this request may proceed (valid session cookie OR
+        correct Basic credentials). Basic Auth remains the only way to obtain
+        a session in the first place; the cookie is just the remembered proof."""
+        if self._has_valid_session():
+            return True
+        if self._check_auth():
+            return True
+        return False
+
     def _require_auth(self):
         self.send_response(401)
         self.send_header("WWW-Authenticate", 'Basic realm="jj-dlp"')
@@ -448,11 +515,17 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if not self._check_auth():
+        if not self._authenticated():
             self._require_auth()
             return
 
-        if self.path == "/" or self.path == "/index.html":
+        path = self.path.split("?", 1)[0]
+        if path == "/" or path == "/index.html":
+            # Auth passed (via a session cookie or a fresh Basic login). If
+            # there wasn't already a valid session cookie, mint one now so
+            # the browser remembers us for future visits.
+            if not self._has_valid_session():
+                self._set_session_cookie()
             self._send(200, _INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
         elif self.path == "/manifest.json":
             self._send(200, _MANIFEST_JSON.encode("utf-8"), "application/manifest+json")
@@ -471,7 +544,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(status, json.dumps({"error": error}).encode("utf-8"), "application/json")
 
     def do_POST(self):
-        if not self._check_auth():
+        if not self._authenticated():
             self._require_auth()
             return
 
