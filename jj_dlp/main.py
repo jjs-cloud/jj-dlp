@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.25.8"
+__version__ = "1.25.9"
 
 import subprocess
 import time
@@ -652,12 +652,20 @@ class SiteState:
         # offline (alongside dash_live_since).
         self.quality_upgraded_streamers: Set[str] = set()
         # Streamers observed live-while-blocked (disabled) at some point
-        # during the current live session. Consumed (popped) the moment
-        # recording actually starts for that streamer, as a one-time signal
-        # that dash_live_since is stale relative to the recording start —
-        # i.e. this recording was triggered by an enable action, not a
-        # fresh go-live. Cleared on offline alongside dash_live_since.
+        # during the current live session. Used only to detect the
+        # blocked->enabled transition; cleared on offline alongside
+        # dash_live_since. See enable_anchor_time below for the actual
+        # deadline-anchoring fix.
         self.blocked_while_live:  Set[str] = set()
+        # Persistent (NOT one-time) anchor for the NOTIFY_NO_CONFIRM_FILE
+        # deadline, set once at the moment a streamer transitions from
+        # live-while-disabled to enabled, and reused for every recording
+        # attempt/retry for the rest of that live session — mirroring how
+        # dash_live_since itself is a persistent, session-long anchor for
+        # the normal case. dash_live_since is never touched; this is a
+        # separate, streamer-specific override that record_stream() checks
+        # first. Cleared on offline alongside dash_live_since.
+        self.enable_anchor_time:  Dict[str, float] = {}
         self.recording_threads:   List[threading.Thread] = []
         self.known_streamers:     Set[str] = set()
         self.trigger_event        = threading.Event()
@@ -2159,8 +2167,7 @@ _SIMULATE_WRITE_FAILURE_BLOCKER_NAME = "_simulated_write_failure_do_not_create"
 
 def record_stream(streamer: str, cfg: dict, site: "SiteState",
                   use_lq: bool = False, show_popup: bool = True,
-                  eviction_warning: str = "",
-                  started_after_enable: bool = False) -> None:
+                  eviction_warning: str = "") -> None:
     channel_url = cfg["site_tmpl"].format(username=streamer)
     output_dir  = cfg["output_dir"]
 
@@ -2603,27 +2610,33 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             # NOTIFY_NO_CONFIRM_FILE tracking: if the recording file has not been
             # confirmed within one STALL_TIMEOUT window (anchored to when the
             # streamer went live), fire a warning notification. yt-dlp can exit
-            # 'normally' during a failure, so this deadline is the backstop.
+            # 'normally' during a failure, so this deadline is the backstop —
+            # and because of that, the anchor must be a persistent, session-
+            # long value (like dash_live_since itself), not something reset
+            # per attempt, since a retry after a failed attempt should still
+            # measure from the same start point.
             #
             # dash_live_since is correct and is never reset — it's the source
             # of truth for how long the streamer has actually been live.
-            # But if this recording start followed a live-while-disabled
-            # period (started_after_enable), dash_live_since predates when
-            # we actually started trying to write the file, and using it as
-            # the deadline anchor would fire a false-positive alert on a
-            # file that's had zero seconds to grow. In that case, anchor to
-            # time.time() instead, for this recording attempt only.
-            _no_confirm_anchor = (recording_start_time if started_after_enable
-                                   else (site.dash_live_since.get(streamer) or time.time()))
-            _no_confirm_deadline = _no_confirm_anchor + stall_timeout + _no_confirm_grace_seconds
+            # But if this streamer was ever live-while-disabled during the
+            # current session, site.enable_anchor_time holds a separate,
+            # persistent anchor set once at the moment of enabling, and
+            # reused for every attempt/retry afterward — otherwise a retry
+            # following a fast failure would fall back to the stale
+            # dash_live_since and fire a false-positive alert almost
+            # immediately, exactly as dash_live_since predates the enable.
+            _no_confirm_anchor_val = site.enable_anchor_time.get(streamer)
+            _no_confirm_anchor_src = "enable_anchor_time"
+            if _no_confirm_anchor_val is None:
+                _no_confirm_anchor_val = site.dash_live_since.get(streamer) or time.time()
+                _no_confirm_anchor_src = "dash_live_since"
+            _no_confirm_deadline = _no_confirm_anchor_val + stall_timeout + _no_confirm_grace_seconds
             _no_confirm_warned   = False
             dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: confirmation deadline for "
-                f"streamer={streamer!r} = "
-                f"{'recording_start_time' if started_after_enable else 'dash_live_since'}"
-                f"+{stall_timeout}s"
+                f"streamer={streamer!r} = {_no_confirm_anchor_src}+{stall_timeout}s"
                 f"{f'+{_no_confirm_grace_seconds:.0f}s intro-delay grace' if _no_confirm_grace_seconds else ''} "
                 f"({_no_confirm_deadline:.2f}), dash_live_since={site.dash_live_since.get(streamer)}, "
-                f"started_after_enable={started_after_enable}",
+                f"enable_anchor_time={site.enable_anchor_time.get(streamer)}",
                 site_name=streamer)
 
             def _check_no_confirm_deadline():
@@ -3325,13 +3338,16 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                     else:
                         site.recording_resolution.pop(streamer, None)
                 site.recording_attempt_started[streamer] = time.time()
-                # One-time signal: this recording start followed a period of
-                # being live-while-disabled, so dash_live_since predates the
-                # enable action and is not a safe anchor for the
-                # NOTIFY_NO_CONFIRM_FILE deadline. Consumed here (popped),
-                # not just read, so it only fires for this one start.
-                _started_after_enable = streamer in site.blocked_while_live
-                site.blocked_while_live.discard(streamer)
+                # Persistent anchor: if this streamer was ever observed
+                # live-while-disabled during the current live session, and
+                # we haven't already set an anchor for it, set one now
+                # (first recording start after enabling). Left in place
+                # (not popped) so every retry for the rest of this live
+                # session reuses the same anchor — dash_live_since is never
+                # touched or treated as stale itself.
+                if (streamer in site.blocked_while_live
+                        and streamer not in site.enable_anchor_time):
+                    site.enable_anchor_time[streamer] = time.time()
                 with site.dash_lock:
                     if streamer not in site.dash_live_since:
                         site.dash_live_since[streamer] = time.time()
@@ -3347,7 +3363,7 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                                        is_recording=not _intro_delay_holding,
                                        reason="Intro Delay" if _intro_delay_holding else "",
                                        warning=eviction_warning)
-            t = threading.Thread(target=record_stream, args=(streamer, streamer_cfg, site), kwargs={"use_lq": is_lq, "show_popup": show_popup, "eviction_warning": eviction_warning, "started_after_enable": _started_after_enable}, daemon=True)
+            t = threading.Thread(target=record_stream, args=(streamer, streamer_cfg, site), kwargs={"use_lq": is_lq, "show_popup": show_popup, "eviction_warning": eviction_warning}, daemon=True)
             t.start()
             site.recording_threads.append(t)
             
@@ -3812,6 +3828,7 @@ def monitor_site(site: "SiteState") -> None:
                     if s not in live_set:
                         site.quality_upgraded_streamers.discard(s)
                         site.blocked_while_live.discard(s)
+                        site.enable_anchor_time.pop(s, None)
 
             if live_now:
                 start_recording_if_needed(live_now, cfg, site, resolution_map=live_info)
