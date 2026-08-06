@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.25.10"
+__version__ = "1.25.11"
 
 import subprocess
 import time
@@ -2831,6 +2831,11 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 # under stall_check_interval on every retry, which previously
                 # meant this check was never reached at all.
                 nonlocal _no_confirm_warned
+                # FIX: guard so this function never fires for a streamer that's
+                # being evicted or the app is shutting down, no matter which
+                # call site invokes it.
+                if site._stop_event.is_set() or streamer in site.evicted_streamers:
+                    return
                 if (notify_no_confirm_file
                         and not _no_confirm_warned
                         and not growth_seen
@@ -3301,6 +3306,32 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         site.set_stall_since(streamer, last_growth_time)
 
             else:
+                # FIX: this branch runs whenever the inner loop exits because
+                # `proc.poll() is None` was already False the moment the loop
+                # condition was (re-)checked - most commonly because another
+                # thread killed our process via eviction
+                # (kill_proc_for_streamer) *between* our loop iterations,
+                # before the loop body ever ran and got a chance
+                # to see site.evicted_streamers/_stop_event. That's the exact
+                # race that let a freshly-evicted, not-yet-growth-confirmed
+                # streamer fall through to the "safety net" below and get
+                # flagged as a write failure.
+                #
+                # Handle that case the same way the loop body already does
+                # for eviction/stop (clean teardown, no "recording finished"
+                # bookkeeping, no safety-net check) instead of treating it
+                # like a normal end-of-attempt.
+                if site._stop_event.is_set() or streamer in site.evicted_streamers:
+                    site.unregister_proc(streamer)
+                    site.clear_stall_since(streamer)
+                    site.clear_ffmpeg_error_count(streamer)
+                    site.clear_ad_alert(streamer)
+                    try:
+                        close_logs()
+                    except Exception:
+                        pass
+                    return
+
                 # Safety net: if proc.poll() was already non-None before the
                 # loop got to sleep even once, _check_no_confirm_deadline()
                 # above may never have run this attempt. Give it one last
