@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.25.12"
+__version__ = "1.25.13"
 
 import subprocess
 import time
@@ -679,7 +679,7 @@ class LiveSession:
     was_blocked_while_live: bool = False  # observed live-while-disabled at some point this session
     enable_anchor: Optional[float] = None # set once on the blocked->enabled transition; overrides `since` as the NOTIFY_NO_CONFIRM_FILE anchor
     notif_shown: bool = False             # a non-recording notification has already fired this session
-    last_stall_restart: Optional[float] = None  # epoch of the most recent stall-triggered restart this session; gives NOTIFY_NO_CONFIRM_FILE a fresh grace window on the following attempt without touching `since`/`enable_anchor`
+    last_restart_anchor: Optional[float] = None  # epoch of the most recent restart this session (stall, LQ, or quality upgrade); gives NOTIFY_NO_CONFIRM_FILE a fresh grace window on the following attempt without touching `since`/`enable_anchor`
 
 
 class SiteState:
@@ -970,28 +970,29 @@ class SiteState:
             if session and session.enable_anchor is None:
                 session.enable_anchor = epoch
 
-    def get_last_stall_restart(self, streamer: str) -> Optional[float]:
+    def get_last_restart_anchor(self, streamer: str) -> Optional[float]:
         with self.session_lock:
             session = self.live_sessions.get(streamer)
-            return session.last_stall_restart if session else None
+            return session.last_restart_anchor if session else None
 
-    def set_last_stall_restart(self, streamer: str, epoch: float) -> None:
-        """Record that *streamer* was just restarted after a confirmed
-        stall. Used to give the next attempt's NOTIFY_NO_CONFIRM_FILE
-        deadline a fresh window, without disturbing `since`/`enable_anchor`
-        (which must keep reflecting the real live-session start time)."""
+    def set_last_restart_anchor(self, streamer: str, epoch: float) -> None:
+        """Record that *streamer* was just restarted (stall, LQ, or
+        quality upgrade). Used to give the next attempt's
+        NOTIFY_NO_CONFIRM_FILE deadline a fresh window, without disturbing
+        `since`/`enable_anchor` (which must keep reflecting the real
+        live-session start time)."""
         with self.session_lock:
             session = self.live_sessions.get(streamer)
             if session:
-                session.last_stall_restart = epoch
+                session.last_restart_anchor = epoch
 
-    def clear_last_stall_restart(self, streamer: str) -> None:
-        """Clear the stall-restart marker once growth is confirmed again,
-        so it doesn't linger and affect a later, unrelated attempt."""
+    def clear_last_restart_anchor(self, streamer: str) -> None:
+        """Clear the restart anchor once growth is confirmed again, so it
+        doesn't linger and affect a later, unrelated attempt."""
         with self.session_lock:
             session = self.live_sessions.get(streamer)
             if session:
-                session.last_stall_restart = None
+                session.last_restart_anchor = None
 
     def was_notif_shown(self, streamer: str) -> bool:
         with self.session_lock:
@@ -2159,7 +2160,7 @@ def _launch_lq_recording(streamer: str, cfg: dict, site: "SiteState",
         site.currently_recording.add(streamer)
         site.evicted_streamers.discard(streamer)
     site.mark_live(streamer)
-    site.set_last_stall_restart(streamer, time.time())
+    site.set_last_restart_anchor(streamer, time.time())
 
     site.log_line(f"LQ recording starting for {streamer}")
     dbg(f"[LQ] Launching LQ record_stream for {streamer}")
@@ -2897,12 +2898,13 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             if _no_confirm_anchor_val is None:
                 _no_confirm_anchor_val = site.get_live_since(streamer) or time.time()
                 _no_confirm_anchor_src = "live_since"
-            # If this attempt follows a stall-triggered restart, take the
-            # more recent of the two anchors to avoid firing the write-failure alert
-            _last_stall_restart = site.get_last_stall_restart(streamer)
-            if _last_stall_restart is not None and _last_stall_restart > _no_confirm_anchor_val:
-                _no_confirm_anchor_val = _last_stall_restart
-                _no_confirm_anchor_src = "last_stall_restart"
+            # If this attempt follows a restart (stall, LQ, or quality
+            # upgrade), take the more recent of the two anchors to avoid
+            # firing the write-failure alert
+            _last_restart_anchor = site.get_last_restart_anchor(streamer)
+            if _last_restart_anchor is not None and _last_restart_anchor > _no_confirm_anchor_val:
+                _no_confirm_anchor_val = _last_restart_anchor
+                _no_confirm_anchor_src = "last_restart_anchor"
             # Floor the anchor at this process's own start time.  If the
             # streamer had been live for longer than stall_timeout already,
             # using the raw persisted anchor would put _no_confirm_deadline
@@ -3365,7 +3367,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         # fresh window instead of reusing the original
                         # live_since/enable_anchor, which would fire the
                         # write-failure alert.
-                        site.set_last_stall_restart(streamer, time.time())
+                        site.set_last_restart_anchor(streamer, time.time())
 
                         kill_proc(proc)
                         site.unregister_proc(streamer)
@@ -3384,7 +3386,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         filename_error_warned = False
                         if not growth_seen:
                             growth_seen = True
-                            site.clear_last_stall_restart(streamer)
+                            site.clear_last_restart_anchor(streamer)
                             dbg(f"[STALL] first growth observed for this file — "
                                 f"stall checker is now armed", site_name=streamer)
                             if not initial_notification_sent:
@@ -4070,7 +4072,7 @@ def _check_quality_upgrades(site: "SiteState",
                 site.recording_resolution[streamer] = new_height
                 site.evicted_streamers.add(streamer)
             site.mark_quality_upgraded(streamer)
-            site.set_last_stall_restart(streamer, time.time())
+            site.set_last_restart_anchor(streamer, time.time())
             site.kill_proc_for_streamer(streamer)
 
 
