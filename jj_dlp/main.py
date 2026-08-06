@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.25.11"
+__version__ = "1.25.12"
 
 import subprocess
 import time
@@ -2026,10 +2026,37 @@ def probe_file_height(filepath: str) -> Optional[int]:
 def get_streamer_file_size(output_dir, streamer, cfg=None,
                            last_growth_time=None, stall_timeout=None,
                            stall_check_interval=None, proc_start_time=None,
-                           known_filename=None):
+known_filename=None):
+    global _simulate_stall_permanent_lock
     try:
         filename = known_filename
         size = os.path.getsize(filename) if filename else 0
+        if _SIMULATE_STALL:
+            # Permanent mode: once a stall has already been detected (setting the
+            # process-wide latch), every subsequent read is pinned to 0 bytes —
+            # including the pre-arm init lookup — so a restarted file can never
+            # show any growth. Force this before the armed/freeze logic below so
+            # nothing can re-arm or regrow afterward.
+            if _SIMULATE_STALL_PERMANENT and _simulate_stall_permanent_lock:
+                size = 0
+            else:
+                # See the _SIMULATE_STALL flag description up top. We only freeze
+                # the reported size once the caller has *armed* the stall checker,
+                # which it does by passing last_growth_time/stall_timeout (it only
+                # does that after growth_seen has flipped true). Before that, real
+                # sizes pass through so growth can be observed and the checker armed
+                # exactly as usual. Once armed, report a fixed byte count forever,
+                # so `current_size > last_size` in record_stream() never triggers
+                # and the armed stall timer runs down to a restart.
+                if last_growth_time is not None and stall_timeout is not None:
+                    _frozen = _simulate_stall_sizes.get(filename)
+                    if _frozen is None and size > 0:
+                        _frozen = size
+                        _simulate_stall_sizes[filename] = _frozen
+                        dbg(f"[SIMULATE_STALL] armed — freezing reported size at "
+                            f"{_frozen} bytes for {filename!r}", site_name=streamer)
+                    if _frozen is not None:
+                        size = _frozen
         stall_detected = False
         if last_growth_time is not None and stall_timeout is not None:
             time_now = time.time()
@@ -2044,6 +2071,12 @@ def get_streamer_file_size(output_dir, streamer, cfg=None,
                 stall_detected = True
                 dbg(f"[STALL] TRIGGERED: stalled={stalled:.2f}s >= threshold={stall_timeout}s",
                     site_name=streamer)
+                if _SIMULATE_STALL and _SIMULATE_STALL_PERMANENT and not _simulate_stall_permanent_lock:
+                    # First real stall detected — latch permanent mode so every
+                    # subsequent (restarted) file is reported at a fixed 0 bytes.
+                    _simulate_stall_permanent_lock = True
+                    dbg("[SIMULATE_STALL] permanent latch engaged — "
+                        "restarted files will be pinned at 0 bytes", site_name=streamer)
         return size, stall_detected, filename or "", False
     except Exception as e:
         dbg(f"[STALL] exception in get_streamer_file_size: {type(e).__name__}: {e}",
@@ -2356,6 +2389,46 @@ def _resolve_intro_delay(cfg: dict, entry_info: dict) -> dict:
 # creates (named below) should be deleted from OUTPUT_DIR when you're done.
 _SIMULATE_WRITE_FAILURE = False
 _SIMULATE_WRITE_FAILURE_BLOCKER_NAME = "_simulated_write_failure_do_not_create"
+
+# Simulate a recording *stall* (file exists but stops growing) without touching
+# the filesystem. Unlike _SIMULATE_WRITE_FAILURE above — which prevents the file
+# from ever being created — this one lets the real file grow normally, and it is
+# only armed by the same logic that arms the real stall checker.
+#
+# See get_streamer_file_size() below for the mechanism. In short: growth is first
+# allowed to happen normally so the caller's "growth_seen" flag flips on (which
+# is what arms the [STALL] timer). As soon as that state is reached, this reports
+# a fixed, frozen byte count every cycle instead of the real (still-growing)
+# size, so `current_size > last_size` never fires and the armed stall timer runs
+# down to a restart. The stall_detected branch in record_stream() should fire
+# after roughly one stall_timeout window.
+#
+# The frozen value is captured from the real size at the moment the checker is
+# armed, then held fixed every cycle after that. Because the byte count is
+# frozen at (effectively) the size that armed the checker, the plateau the
+# caller observes converges within a cycle or two of the arming call.
+# Keyed by filename so a segment change (SPLIT_AFTER) naturally starts a fresh
+# freeze for the new _partN file.
+_SIMULATE_STALL = False
+_simulate_stall_sizes: dict = {}
+
+# Makes the stall permanent. With only _SIMULATE_STALL on, each restart lets the
+# re-started file grow a little once (to re-arm the checker) before freezing it
+# again — so the stall/restart cycle keeps repeating forever. Set this alongside
+# _SIMULATE_STALL to instead pin the re-started file to a permanent 0 bytes.
+#
+# Mechanism: the first time a real stall is DETECTED (i.e. after the restarter
+# has triggered once on the initial segment, which uses the normal snapshot
+# freeze), we set a process-wide latch. From then on the reported size is forced
+# to 0 for every call — including the pre-arm init lookup — so any restarted file
+# is reported at 0 bytes and can never show growth, matching a "recording opened
+# but never produces bytes" state.
+#
+# This latch is whole-process, so leave both flags off when you're done.
+_SIMULATE_STALL_PERMANENT = False
+# Internal latch: once True (set at the first stall detection), reported size is
+# pinned at 0 for the remainder of the process.
+_simulate_stall_permanent_lock = False
 
 
 def record_stream(streamer: str, cfg: dict, site: "SiteState",
