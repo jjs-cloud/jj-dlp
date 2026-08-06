@@ -672,8 +672,7 @@ class LiveSession:
     blocked_while_live, enable_anchor_time, notif_shown_session).
 
     Only `since` is persisted across restarts (see _save_live_since_cache).
-    The rest resets to its default if the process restarts mid-stream —
-    that's an accepted tradeoff, not an oversight.
+    The rest resets to its default if the process restarts mid-stream.
     """
     since: float                          # epoch this live session started
     quality_upgraded: bool = False        # UPGRADE_QUALITY already fired once this session
@@ -722,19 +721,7 @@ class SiteState:
 
         # ── Live session tracking ────────────────────────────────────────
         # Single source of truth for "how long has this streamer been
-        # live" and everything scoped to that live session. A streamer has
-        # an entry in live_sessions if and only if they are currently
-        # considered live — that dict's membership *is* the liveness
-        # signal, replacing what used to be five separately-maintained
-        # containers (dash_live_since, quality_upgraded_streamers,
-        # blocked_while_live, enable_anchor_time, notif_shown_session)
-        # that had to be created/cleared in lockstep by convention.
-        #
-        # Do not read/write live_sessions directly outside this class —
-        # use mark_live() / mark_offline() and the accessor methods below,
-        # so the "already live? no-op" idempotency and the persistence
-        # side-effect stay in one place instead of being re-implemented at
-        # every call site.
+        # live" and everything scoped to that live session.
         self.session_lock         = threading.Lock()
         self.live_sessions:       Dict[str, "LiveSession"] = {}
         # Only the `since` epoch is persisted (see LiveSession's
@@ -935,13 +922,7 @@ class SiteState:
 
     def get_live_duration(self, streamer: str) -> Optional[float]:
         """Seconds this streamer has been continuously live, or None if
-        they're not currently tracked as live.
-
-        Callers decide what "not live" means for their own purposes rather
-        than this method silently substituting 0 or time.time() — that
-        fallback was previously duplicated (and decided slightly
-        differently) at each call site.
-        """
+        they're not currently tracked as live."""
         since = self.get_live_since(streamer)
         return (time.time() - since) if since is not None else None
 
