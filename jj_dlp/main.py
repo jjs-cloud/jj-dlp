@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.25.9"
+__version__ = "1.25.10"
 
 import subprocess
 import time
@@ -12,6 +12,7 @@ import json
 import re as _re
 import threading
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from datetime import time as _dt_time
 from typing import List, Set, Tuple, Dict, Optional
@@ -613,6 +614,74 @@ def _save_last_live_cache(config_path: str, last_live: Dict[str, float]) -> None
         _save_global_json(global_data)
 
 
+def _load_live_since_cache(config_path: str) -> Dict[str, float]:
+    """Return the persisted live-since timestamps for the given site from
+    global.json.
+
+    Each entry maps a streamer name to the Unix epoch at which their
+    *current* live session started. This is read at startup (to seed
+    SiteState.live_sessions so a process restart doesn't reset an
+    in-progress stream's duration back to zero) and again each time a new
+    live session is recognized (to recover the true start time rather than
+    stamping "now"). Only the epoch is persisted — the rest of a
+    LiveSession (quality_upgraded, blocked_while_live flag, enable_anchor,
+    notif_shown) is scoped to the running process and is fine to lose on
+    restart.
+    """
+    site_key = os.path.basename(config_path)
+    with _global_json_lock:
+        global_data = _load_global_json()
+    site_data = global_data.get("sites", {}).get(site_key, {})
+    raw = site_data.get("live_since", {})
+    if isinstance(raw, dict):
+        return {k: float(v) for k, v in raw.items()}
+    return {}
+
+
+def _save_live_since_cache(config_path: str, live_since: Dict[str, float]) -> None:
+    """Persist live-since timestamps for the given site into global.json.
+
+    Merges with any existing data so other sites' entries are preserved.
+    Called on every live/offline transition (see SiteState.mark_live /
+    mark_offline), mirroring _save_last_live_cache's call pattern.
+    """
+    site_key = os.path.basename(config_path)
+    with _global_json_lock:
+        global_data = _load_global_json()
+        if "sites" not in global_data or not isinstance(global_data["sites"], dict):
+            global_data["sites"] = {}
+        if site_key not in global_data["sites"] or not isinstance(global_data["sites"][site_key], dict):
+            global_data["sites"][site_key] = {}
+        global_data["sites"][site_key]["live_since"] = {
+            streamer: timestamp for streamer, timestamp in live_since.items()
+        }
+        _save_global_json(global_data)
+
+
+@dataclass
+class LiveSession:
+    """All state scoped to one continuous live session for one streamer.
+
+    Created by SiteState.mark_live() the moment a streamer is first
+    observed live, and discarded by SiteState.mark_offline() the moment
+    they're observed offline. While a streamer has an entry in
+    SiteState.live_sessions, they ARE considered live — that dict
+    membership is the single source of truth for liveness, replacing what
+    used to be five separate dicts/sets that had to be kept in sync by
+    convention (dash_live_since, quality_upgraded_streamers,
+    blocked_while_live, enable_anchor_time, notif_shown_session).
+
+    Only `since` is persisted across restarts (see _save_live_since_cache).
+    The rest resets to its default if the process restarts mid-stream —
+    that's an accepted tradeoff, not an oversight.
+    """
+    since: float                          # epoch this live session started
+    quality_upgraded: bool = False        # UPGRADE_QUALITY already fired once this session
+    was_blocked_while_live: bool = False  # observed live-while-disabled at some point this session
+    enable_anchor: Optional[float] = None # set once on the blocked->enabled transition; overrides `since` as the NOTIFY_NO_CONFIRM_FILE anchor
+    notif_shown: bool = False             # a non-recording notification has already fired this session
+
+
 class SiteState:
     """All mutable runtime state for a single monitored site/config."""
 
@@ -647,32 +716,35 @@ class SiteState:
         # Used purely to gate the recording_resolution fallback in the
         # dashboard renderer.
         self.recording_attempt_started: Dict[str, float] = {}
-        # Streamers that have already been quality-upgraded during the
-        # current live stream session. Cleared when the streamer goes
-        # offline (alongside dash_live_since).
-        self.quality_upgraded_streamers: Set[str] = set()
-        # Streamers observed live-while-blocked (disabled) at some point
-        # during the current live session. Used only to detect the
-        # blocked->enabled transition; cleared on offline alongside
-        # dash_live_since. See enable_anchor_time below for the actual
-        # deadline-anchoring fix.
-        self.blocked_while_live:  Set[str] = set()
-        # Persistent (NOT one-time) anchor for the NOTIFY_NO_CONFIRM_FILE
-        # deadline, set once at the moment a streamer transitions from
-        # live-while-disabled to enabled, and reused for every recording
-        # attempt/retry for the rest of that live session — mirroring how
-        # dash_live_since itself is a persistent, session-long anchor for
-        # the normal case. dash_live_since is never touched; this is a
-        # separate, streamer-specific override that record_stream() checks
-        # first. Cleared on offline alongside dash_live_since.
-        self.enable_anchor_time:  Dict[str, float] = {}
         self.recording_threads:   List[threading.Thread] = []
         self.known_streamers:     Set[str] = set()
         self.trigger_event        = threading.Event()
 
+        # ── Live session tracking ────────────────────────────────────────
+        # Single source of truth for "how long has this streamer been
+        # live" and everything scoped to that live session. A streamer has
+        # an entry in live_sessions if and only if they are currently
+        # considered live — that dict's membership *is* the liveness
+        # signal, replacing what used to be five separately-maintained
+        # containers (dash_live_since, quality_upgraded_streamers,
+        # blocked_while_live, enable_anchor_time, notif_shown_session)
+        # that had to be created/cleared in lockstep by convention.
+        #
+        # Do not read/write live_sessions directly outside this class —
+        # use mark_live() / mark_offline() and the accessor methods below,
+        # so the "already live? no-op" idempotency and the persistence
+        # side-effect stay in one place instead of being re-implemented at
+        # every call site.
+        self.session_lock         = threading.Lock()
+        self.live_sessions:       Dict[str, "LiveSession"] = {}
+        # Only the `since` epoch is persisted (see LiveSession's
+        # docstring). Loaded once here so a process restart mid-stream
+        # recovers the true start time instead of resetting it to "now" —
+        # see mark_live()'s use of this as a one-shot recovery source.
+        self._live_since_cache:   Dict[str, float] = _load_live_since_cache(config_path)
+
         # Dashboard display state (written by monitor thread, read by renderer)
         self.dash_lock            = threading.Lock()
-        self.dash_live_since:     Dict[str, float] = {}   # streamer -> epoch
         self.dash_last_live:      Dict[str, float] = _load_last_live_cache(config_path)   # streamer -> epoch when recording stopped
         self.dash_next_check_in:  float = 0.0
         self.dash_all_streamers:  List[str] = []
@@ -709,14 +781,11 @@ class SiteState:
         # Shared by both the popup (tkinter/notify-send) and ntfy channels so
         # that they follow the exact same POPUP_COOLDOWN-gated schedule.
         self.notif_last_shown:    Dict[str, float] = {}
-        # Streamers for whom a "not recording" (disabled / lower-priority)
-        # notification has already been shown during the current continuous
-        # live session. Cleared when the streamer goes offline so the
-        # notification can fire again next time they go live. This prevents
-        # the notification from re-appearing every popup_cooldown minutes for
-        # as long as the streamer stays live. Shared by both the popup and
-        # ntfy channels.
-        self.notif_shown_session: set = set()
+        # Whether a "not recording" (disabled / lower-priority) notification
+        # has already been shown during the current continuous live session
+        # now lives on LiveSession.notif_shown (see was_notif_shown /
+        # mark_notif_shown below) — folded in alongside the other
+        # per-live-session state instead of being tracked separately.
 
         # Active yt-dlp subprocesses: streamer -> proc
         # Written by record_stream threads; read by stop() for clean kill.
@@ -808,6 +877,127 @@ class SiteState:
         """Remove the ad alert for *streamer* (called when recording ends)."""
         with self.dash_lock:
             self.ad_alerts.pop(streamer, None)
+
+    # ── Live session tracking ────────────────────────────────────────────
+    # See the live_sessions field comment above for why this is the only
+    # place that should touch self.live_sessions directly.
+
+    def mark_live(self, streamer: str) -> None:
+        """Record that *streamer* is now live, starting a new LiveSession.
+
+        Idempotent — a no-op if *streamer* is already tracked as live, so
+        every call site that "notices" a streamer is live (poll loop,
+        EventSub callback, LQ start, retry reuse) can call this
+        unconditionally instead of re-implementing the
+        "if not already tracked" guard itself.
+
+        Recovers the true start time from the persisted cache if this
+        process restarted mid-stream, rather than stamping time.time() and
+        silently resetting everyone's live duration to zero on restart.
+        """
+        with self.session_lock:
+            if streamer in self.live_sessions:
+                return
+            since = self._live_since_cache.get(streamer, time.time())
+            self.live_sessions[streamer] = LiveSession(since=since)
+            snapshot = {s: sess.since for s, sess in self.live_sessions.items()}
+        _save_live_since_cache(self.config_path, snapshot)
+
+    def mark_offline(self, streamer: str) -> None:
+        """Record that *streamer* is no longer live, ending its LiveSession.
+
+        Idempotent — a no-op if *streamer* isn't currently tracked as live.
+        Also updates dash_last_live (the existing "recording ended" cache),
+        matching the previous behavior of clearing both together.
+        """
+        with self.session_lock:
+            if streamer not in self.live_sessions:
+                return
+            del self.live_sessions[streamer]
+            self._live_since_cache.pop(streamer, None)
+            snapshot = {s: sess.since for s, sess in self.live_sessions.items()}
+        _save_live_since_cache(self.config_path, snapshot)
+        with self.dash_lock:
+            self.dash_last_live[streamer] = time.time()
+            last_live_snapshot = dict(self.dash_last_live)
+        _save_last_live_cache(self.config_path, last_live_snapshot)
+
+    def is_live(self, streamer: str) -> bool:
+        with self.session_lock:
+            return streamer in self.live_sessions
+
+    def get_live_since(self, streamer: str) -> Optional[float]:
+        """Epoch this streamer's current live session started, or None if
+        they're not currently tracked as live."""
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            return session.since if session else None
+
+    def get_live_duration(self, streamer: str) -> Optional[float]:
+        """Seconds this streamer has been continuously live, or None if
+        they're not currently tracked as live.
+
+        Callers decide what "not live" means for their own purposes rather
+        than this method silently substituting 0 or time.time() — that
+        fallback was previously duplicated (and decided slightly
+        differently) at each call site.
+        """
+        since = self.get_live_since(streamer)
+        return (time.time() - since) if since is not None else None
+
+    def snapshot_live_since(self) -> Dict[str, float]:
+        """Return a point-in-time {streamer: since_epoch} copy for the
+        dashboard renderer — same shape dash_live_since used to provide."""
+        with self.session_lock:
+            return {s: sess.since for s, sess in self.live_sessions.items()}
+
+    def was_quality_upgraded(self, streamer: str) -> bool:
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            return bool(session and session.quality_upgraded)
+
+    def mark_quality_upgraded(self, streamer: str) -> None:
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            if session:
+                session.quality_upgraded = True
+
+    def was_blocked_while_live(self, streamer: str) -> bool:
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            return bool(session and session.was_blocked_while_live)
+
+    def mark_blocked_while_live(self, streamer: str) -> None:
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            if session:
+                session.was_blocked_while_live = True
+
+    def get_enable_anchor(self, streamer: str) -> Optional[float]:
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            return session.enable_anchor if session else None
+
+    def set_enable_anchor_if_unset(self, streamer: str, epoch: float) -> None:
+        """Set the NOTIFY_NO_CONFIRM_FILE override anchor once, on the
+        blocked->enabled transition. Left in place (not overwritten) for
+        every retry for the rest of the live session — mirrors the old
+        enable_anchor_time semantics exactly."""
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            if session and session.enable_anchor is None:
+                session.enable_anchor = epoch
+
+    def was_notif_shown(self, streamer: str) -> bool:
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            return bool(session and session.notif_shown)
+
+    def mark_notif_shown(self, streamer: str) -> None:
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            if session:
+                session.notif_shown = True
 
     def kill_all_procs(self) -> None:
         """Kill every registered yt-dlp process. Called on quit."""
@@ -1417,10 +1607,10 @@ def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
     # them from the caller's candidate list. Relying on the cooldown alone
     # then means notifications keep re-appearing every popup_cooldown
     # minutes for the entire time they're live. Instead, only notify once
-    # per continuous live session; site.notif_shown_session is cleared when
-    # the streamer goes offline (see the poll loop). This applies to both
-    # channels identically.
-    if not is_recording and streamer in site.notif_shown_session:
+    # per continuous live session; this resets automatically when the
+    # streamer's LiveSession is torn down on mark_offline(). This applies
+    # to both channels identically.
+    if not is_recording and site.was_notif_shown(streamer):
         dbg(f"[NOTIFY] suppressed - already shown this live session for streamer={streamer!r} reason={reason!r}")
         return
 
@@ -1458,7 +1648,7 @@ def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
 
     site.notif_last_shown[streamer] = time.time()
     if not is_recording:
-        site.notif_shown_session.add(streamer)
+        site.mark_notif_shown(streamer)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1930,9 +2120,7 @@ def _launch_lq_recording(streamer: str, cfg: dict, site: "SiteState",
         # Claim the slot before starting the thread.
         site.currently_recording.add(streamer)
         site.evicted_streamers.discard(streamer)
-        with site.dash_lock:
-            if streamer not in site.dash_live_since:
-                site.dash_live_since[streamer] = time.time()
+    site.mark_live(streamer)
 
     site.log_line(f"LQ recording starting for {streamer}")
     dbg(f"[LQ] Launching LQ record_stream for {streamer}")
@@ -2206,11 +2394,11 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
     # NOTIFY_NO_CONFIRM_FILE grace period (seconds): when Intro Delay holds
     # the recording start, the file is *intentionally* not written for the
     # first intro_delay_minutes. The no-confirm deadline below is anchored
-    # to dash_live_since (when the streamer went live), not to when
-    # record_stream actually starts writing — so without this extra
-    # allowance, streamers using Intro Delay would trip the write-failure
-    # alert as a false positive every time. Only applies to the "hold"
-    # branch below (not intro_delay_split, which doesn't delay the write).
+    # to the streamer's live-since time, not to when record_stream actually
+    # starts writing — so without this extra allowance, streamers using
+    # Intro Delay would trip the write-failure alert as a false positive
+    # every time. Only applies to the "hold" branch below (not
+    # intro_delay_split, which doesn't delay the write).
     _no_confirm_grace_seconds = 0.0
 
     if intro_delay_enabled and intro_delay_minutes > 0 and intro_delay_split:
@@ -2223,17 +2411,17 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
         dbg(f"[INTRO_DELAY] streamer={streamer!r} split mode: first split forced "
             f"at {intro_delay_minutes}m, further splitting disabled afterward")
     elif intro_delay_enabled and intro_delay_minutes > 0:
-        # Anchor the hold to dash_live_since (how long the streamer has
-        # actually been live), not to time.time() at thread-start. This
-        # means elapsed live time counts toward the delay: e.g. if a
-        # streamer was live for 10m before being enabled and intro_delay
-        # is 5m, the delay window has already passed and recording starts
-        # immediately instead of waiting a further 5m from the enable.
-        _intro_delay_anchor = site.dash_live_since.get(streamer) or time.time()
+        # Anchor the hold to when the streamer actually went live, not to
+        # time.time() at thread-start. This means elapsed live time counts
+        # toward the delay: e.g. if a streamer was live for 10m before
+        # being enabled and intro_delay is 5m, the delay window has
+        # already passed and recording starts immediately instead of
+        # waiting a further 5m from the enable.
+        _intro_delay_anchor = site.get_live_since(streamer) or time.time()
         _delay_deadline = _intro_delay_anchor + intro_delay_minutes * 60
         _delay_remaining = max(0.0, _delay_deadline - time.time())
         dbg(f"[INTRO_DELAY] streamer={streamer!r} delay mode: configured "
-            f"{intro_delay_minutes}m from dash_live_since, "
+            f"{intro_delay_minutes}m from live-since, "
             f"{_delay_remaining:.0f}s remaining")
         with site.lock:
             site.intro_delay_pending.add(streamer)
@@ -2612,31 +2800,31 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             # streamer went live), fire a warning notification. yt-dlp can exit
             # 'normally' during a failure, so this deadline is the backstop —
             # and because of that, the anchor must be a persistent, session-
-            # long value (like dash_live_since itself), not something reset
+            # long value (the streamer's live-since time), not something reset
             # per attempt, since a retry after a failed attempt should still
             # measure from the same start point.
             #
-            # dash_live_since is correct and is never reset — it's the source
-            # of truth for how long the streamer has actually been live.
-            # But if this streamer was ever live-while-disabled during the
-            # current session, site.enable_anchor_time holds a separate,
-            # persistent anchor set once at the moment of enabling, and
-            # reused for every attempt/retry afterward — otherwise a retry
-            # following a fast failure would fall back to the stale
-            # dash_live_since and fire a false-positive alert almost
-            # immediately, exactly as dash_live_since predates the enable.
-            _no_confirm_anchor_val = site.enable_anchor_time.get(streamer)
-            _no_confirm_anchor_src = "enable_anchor_time"
+            # live-since is correct and is never reset — it's the source of
+            # truth for how long the streamer has actually been live. But if
+            # this streamer was ever live-while-disabled during the current
+            # session, get_enable_anchor() holds a separate, persistent
+            # anchor set once at the moment of enabling, and reused for
+            # every attempt/retry afterward — otherwise a retry following a
+            # fast failure would fall back to the stale live-since time and
+            # fire a false-positive alert almost immediately, exactly as
+            # live-since predates the enable.
+            _no_confirm_anchor_val = site.get_enable_anchor(streamer)
+            _no_confirm_anchor_src = "enable_anchor"
             if _no_confirm_anchor_val is None:
-                _no_confirm_anchor_val = site.dash_live_since.get(streamer) or time.time()
-                _no_confirm_anchor_src = "dash_live_since"
+                _no_confirm_anchor_val = site.get_live_since(streamer) or time.time()
+                _no_confirm_anchor_src = "live_since"
             _no_confirm_deadline = _no_confirm_anchor_val + stall_timeout + _no_confirm_grace_seconds
             _no_confirm_warned   = False
             dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: confirmation deadline for "
                 f"streamer={streamer!r} = {_no_confirm_anchor_src}+{stall_timeout}s"
                 f"{f'+{_no_confirm_grace_seconds:.0f}s intro-delay grace' if _no_confirm_grace_seconds else ''} "
-                f"({_no_confirm_deadline:.2f}), dash_live_since={site.dash_live_since.get(streamer)}, "
-                f"enable_anchor_time={site.enable_anchor_time.get(streamer)}",
+                f"({_no_confirm_deadline:.2f}), live_since={site.get_live_since(streamer)}, "
+                f"enable_anchor={site.get_enable_anchor(streamer)}",
                 site_name=streamer)
 
             def _check_no_confirm_deadline():
@@ -3204,11 +3392,12 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                          if s in blocked and s not in currently_recording]
         to_start = [s for s in live_now
                     if s not in currently_recording and s not in blocked]
-        # Remember that this streamer was live while disabled, so that if
-        # they're later enabled during the same live session, we know
-        # dash_live_since predates the recording start and shouldn't be
-        # used as the NOTIFY_NO_CONFIRM_FILE deadline anchor for it.
-        site.blocked_while_live.update(disabled_live)
+    # Remember that these streamers were live while disabled, so that if
+    # they're later enabled during the same live session, we know
+    # live-since predates the recording start and shouldn't be used as the
+    # NOTIFY_NO_CONFIRM_FILE deadline anchor for them.
+    for streamer in disabled_live:
+        site.mark_blocked_while_live(streamer)
 
     for streamer in disabled_live:
         _maybe_show_live_popup(streamer, cfg, site, show_popup=show_popup,
@@ -3338,19 +3527,15 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                     else:
                         site.recording_resolution.pop(streamer, None)
                 site.recording_attempt_started[streamer] = time.time()
-                # Persistent anchor: if this streamer was ever observed
-                # live-while-disabled during the current live session, and
-                # we haven't already set an anchor for it, set one now
-                # (first recording start after enabling). Left in place
-                # (not popped) so every retry for the rest of this live
-                # session reuses the same anchor — dash_live_since is never
-                # touched or treated as stale itself.
-                if (streamer in site.blocked_while_live
-                        and streamer not in site.enable_anchor_time):
-                    site.enable_anchor_time[streamer] = time.time()
-                with site.dash_lock:
-                    if streamer not in site.dash_live_since:
-                        site.dash_live_since[streamer] = time.time()
+            site.mark_live(streamer)
+            # Persistent anchor: if this streamer was ever observed
+            # live-while-disabled during the current live session, and we
+            # haven't already set an anchor for it, set one now (first
+            # recording start after enabling). Left in place for every
+            # retry for the rest of this live session — live-since itself
+            # is never touched or treated as stale.
+            if site.was_blocked_while_live(streamer):
+                site.set_enable_anchor_if_unset(streamer, time.time())
             _intro_delay_holding = (streamer_cfg.get("intro_delay_enabled", False)
                                      and not streamer_cfg.get("intro_delay_split", False))
             if global_cfg.get("notify_confirm_file", True) and not _intro_delay_holding:
@@ -3709,8 +3894,8 @@ def _check_quality_upgrades(site: "SiteState",
     """
     with site.lock:
         active = set(site.currently_recording) - site.evicted_streamers
-        # Skip streamers that have already been upgraded once.
-        active -= site.quality_upgraded_streamers
+    # Skip streamers that have already been upgraded once this live session.
+    active = {s for s in active if not site.was_quality_upgraded(s)}
 
     dbg(f"[UPGRADE_QUALITY] Checking quality upgrades for {site.label}, active_recordings={active}")
     for streamer in active:
@@ -3742,8 +3927,8 @@ def _check_quality_upgrades(site: "SiteState",
             )
             with site.lock:
                 site.recording_resolution[streamer] = new_height
-                site.quality_upgraded_streamers.add(streamer)
                 site.evicted_streamers.add(streamer)
+            site.mark_quality_upgraded(streamer)
             site.kill_proc_for_streamer(streamer)
 
 
@@ -3759,9 +3944,7 @@ def monitor_site(site: "SiteState") -> None:
 
     if site.eventsub_state is not None and initial_cfg.get("twitch_enabled"):
         def _on_stream_online(broadcaster_login: str, cfg: dict) -> None:
-            with site.dash_lock:
-                if broadcaster_login not in site.dash_live_since:
-                    site.dash_live_since[broadcaster_login] = time.time()
+            site.mark_live(broadcaster_login)
             current_cfg = load_config(cfg["config_path"])
             if broadcaster_login in current_cfg.get("streamers", []):
                 start_recording_if_needed([broadcaster_login], current_cfg, site,
@@ -3815,20 +3998,17 @@ def monitor_site(site: "SiteState") -> None:
                 site.dash_all_streamers.extend(streamers)
                 site.dash_blocked.clear()
                 site.dash_blocked.update(cfg["blocked"])
-                live_set = set(live_now)
-                for s in streamers:
-                    if s not in live_set:
-                        site.dash_live_since.pop(s, None)
-                        site.notif_shown_session.discard(s)
-                    elif s not in site.dash_live_since:
-                        site.dash_live_since[s] = time.time()
 
-            with site.lock:
-                for s in streamers:
-                    if s not in live_set:
-                        site.quality_upgraded_streamers.discard(s)
-                        site.blocked_while_live.discard(s)
-                        site.enable_anchor_time.pop(s, None)
+            # One call each — mark_offline() tears down the whole
+            # LiveSession (quality_upgraded, blocked_while_live,
+            # enable_anchor, notif_shown all reset together as a unit),
+            # and mark_live() is a no-op if already tracked.
+            live_set = set(live_now)
+            for s in streamers:
+                if s not in live_set:
+                    site.mark_offline(s)
+                else:
+                    site.mark_live(s)
 
             if live_now:
                 start_recording_if_needed(live_now, cfg, site, resolution_map=live_info)
@@ -4165,8 +4345,8 @@ class JJDlpDashboard:
         for site in self.sites:
             with site.dash_lock:
                 all_s      = list(site.dash_all_streamers)
-                live_since = dict(site.dash_live_since)
                 blocked    = set(site.dash_blocked)
+            live_since = site.snapshot_live_since()
             with site.lock:
                 recording  = set(site.currently_recording)
                 intro_delay_pending = set(site.intro_delay_pending)
@@ -4474,10 +4654,10 @@ class JJDlpDashboard:
             cfg_label    = _panel_cfg.get("site_label",
                                        os.path.basename(site.config_path))
             all_s        = list(site.dash_all_streamers)
-            live_since   = dict(site.dash_live_since)
             last_live    = dict(site.dash_last_live)
             blocked      = set(site.dash_blocked)
             next_in      = site.dash_next_check_in
+        live_since   = site.snapshot_live_since()
         with site.lock:
             recording     = set(site.currently_recording)
             intro_delay_pending = set(site.intro_delay_pending)
