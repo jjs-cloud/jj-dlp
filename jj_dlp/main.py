@@ -2799,6 +2799,19 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             if _no_confirm_anchor_val is None:
                 _no_confirm_anchor_val = site.get_live_since(streamer) or time.time()
                 _no_confirm_anchor_src = "live_since"
+            # Floor the anchor at this process's own start time.  If the
+            # streamer had been live for longer than stall_timeout already,
+            # using the raw persisted anchor would put _no_confirm_deadline
+            # in the past before this attempt even starts, firing the
+            # write-failure alert immediately on every launch. 
+            if _no_confirm_anchor_val < _SCRIPT_START_TIME:
+                dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: {_no_confirm_anchor_src} "
+                    f"({_no_confirm_anchor_val:.2f}) predates this process's start "
+                    f"({_SCRIPT_START_TIME:.2f}) — flooring anchor at process start "
+                    f"for streamer={streamer!r}",
+                    site_name=streamer)
+                _no_confirm_anchor_val = _SCRIPT_START_TIME
+                _no_confirm_anchor_src += "+floored_at_process_start"
             _no_confirm_deadline = _no_confirm_anchor_val + stall_timeout + _no_confirm_grace_seconds
             _no_confirm_warned   = False
             dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: confirmation deadline for "
