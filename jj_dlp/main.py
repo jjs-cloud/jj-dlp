@@ -2159,6 +2159,7 @@ def _launch_lq_recording(streamer: str, cfg: dict, site: "SiteState",
         site.currently_recording.add(streamer)
         site.evicted_streamers.discard(streamer)
     site.mark_live(streamer)
+    site.set_last_stall_restart(streamer, time.time())
 
     site.log_line(f"LQ recording starting for {streamer}")
     dbg(f"[LQ] Launching LQ record_stream for {streamer}")
@@ -3654,6 +3655,7 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                                                source=source,
                                                is_recording=False,
                                                reason="Lower priority")
+                        site.mark_blocked_while_live(streamer)
                         continue
 
             with site.lock:
@@ -4068,6 +4070,7 @@ def _check_quality_upgrades(site: "SiteState",
                 site.recording_resolution[streamer] = new_height
                 site.evicted_streamers.add(streamer)
             site.mark_quality_upgraded(streamer)
+            site.set_last_stall_restart(streamer, time.time())
             site.kill_proc_for_streamer(streamer)
 
 
