@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.25.6"
+__version__ = "1.25.7"
 
 import subprocess
 import time
@@ -2208,11 +2208,20 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
         dbg(f"[INTRO_DELAY] streamer={streamer!r} split mode: first split forced "
             f"at {intro_delay_minutes}m, further splitting disabled afterward")
     elif intro_delay_enabled and intro_delay_minutes > 0:
-        dbg(f"[INTRO_DELAY] streamer={streamer!r} delay mode: holding recording "
-            f"start for {intro_delay_minutes}m")
+        # Anchor the hold to dash_live_since (how long the streamer has
+        # actually been live), not to time.time() at thread-start. This
+        # means elapsed live time counts toward the delay: e.g. if a
+        # streamer was live for 10m before being enabled and intro_delay
+        # is 5m, the delay window has already passed and recording starts
+        # immediately instead of waiting a further 5m from the enable.
+        _intro_delay_anchor = site.dash_live_since.get(streamer) or time.time()
+        _delay_deadline = _intro_delay_anchor + intro_delay_minutes * 60
+        _delay_remaining = max(0.0, _delay_deadline - time.time())
+        dbg(f"[INTRO_DELAY] streamer={streamer!r} delay mode: configured "
+            f"{intro_delay_minutes}m from dash_live_since, "
+            f"{_delay_remaining:.0f}s remaining")
         with site.lock:
             site.intro_delay_pending.add(streamer)
-        _delay_deadline = time.time() + intro_delay_minutes * 60
         while time.time() < _delay_deadline:
             if site._stop_event.is_set() or streamer in site.evicted_streamers:
                 dbg(f"[INTRO_DELAY] streamer={streamer!r} aborted during delay "
