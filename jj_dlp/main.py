@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.25.20"
+__version__ = "1.25.21"
 
 import subprocess
 import time
@@ -30,7 +30,7 @@ from .logger import (
     startup_dbg, startup_dbg_flush,
     dbg,
     log_crash,
-    get_debug_log_path, get_log_path, get_log_file_paths,
+    get_debug_log_path, get_log_file_paths, get_checker_log_path,
     ENABLE_CRASH_LOG,
     configure_debug_log as _configure_debug_log,
 )
@@ -1827,10 +1827,16 @@ def _modify_config_streamer(config_path: str, username: str, action: str) -> str
 # yt-dlp subprocess helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-def open_log_streams(cfg: dict):
+def open_log_streams(cfg: dict, streamer: str):
     log_out_fp = log_err_fp = None
     if cfg.get("logging"):
-        out_path, err_path = get_log_file_paths(cfg)
+        out_path, err_path = get_log_file_paths(cfg, streamer)
+        try:
+            dir_part = os.path.dirname(out_path)
+            if dir_part:
+                os.makedirs(dir_part, exist_ok=True)
+        except Exception:
+            pass
         try:
             log_out_fp = open(out_path, "a", encoding="utf-8")
         except Exception:
@@ -1978,10 +1984,13 @@ def get_live_streamers(streamers: List[str], cfg: dict,
     if result.stderr:
         dbg(f"[CHECKER] stderr (first 500 chars): {result.stderr[:500]!r}")
     if cfg["logging"]:
-        out_path, err_path = get_log_file_paths(cfg)
+        checker_path = get_checker_log_path(cfg)
         try:
             if result.stdout:
-                with open(out_path, "a", encoding="utf-8") as _lf:
+                dir_part = os.path.dirname(checker_path)
+                if dir_part:
+                    os.makedirs(dir_part, exist_ok=True)
+                with open(checker_path, "a", encoding="utf-8") as _lf:
                     _lf.write(result.stdout)
         except Exception:
             pass
@@ -2597,7 +2606,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                  channel_url]
             )
 
-            out_target, err_target, close_logs, log_out_fp, log_err_fp = open_log_streams(cfg)
+            out_target, err_target, close_logs, log_out_fp, log_err_fp = open_log_streams(cfg, streamer)
 
             try:
                 _popen_kwargs: dict = dict(stdout=out_target, stderr=err_target)
@@ -3065,7 +3074,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                             ["-o", next_output_path, channel_url]
                         )
 
-                        next_out_target, next_err_target, next_close_logs, next_log_out_fp, next_log_err_fp = open_log_streams(cfg)
+                        next_out_target, next_err_target, next_close_logs, next_log_out_fp, next_log_err_fp = open_log_streams(cfg, streamer)
 
                         try:
                             _next_popen_kwargs: dict = dict(

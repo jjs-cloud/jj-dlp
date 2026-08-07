@@ -30,8 +30,11 @@ get_dbg_message_overrides(tag)     Return the saved per-message overrides for a 
 configure(dashboard_log_fn, ...)   Inject dashboard logger and optional per-line debug
                                    optional per-line debug callback for the Log tab.
 get_debug_log_path(cfg)            Resolve the debug log path from a config dict.
-get_log_path(cfg)                  Resolve the activity log path from a config dict.
-get_log_file_paths(cfg)            Return (stdout_path, stderr_path) for yt-dlp logging.
+get_log_dir(cfg)                   Resolve the directory used for site/streamer log files.
+get_log_file_paths(cfg, streamer)  Return (stdout_path, stderr_path) for one streamer's
+                                    yt-dlp logging, e.g. logs/twitch.emiru.stdout.log.
+get_checker_log_path(cfg)          Return the single, site-level log path used for the
+                                    combined multi-streamer liveness-checker output.
 """
 
 import os
@@ -475,23 +478,56 @@ def get_debug_log_path(cfg: dict) -> str:
     return os.path.join(cfg.get("output_dir", "."), "debug.log")
 
 
-def get_log_path(cfg: dict) -> str:
-    """Return the resolved activity log path for a given config dict."""
+_FILENAME_SAFE_RE = re.compile(r"[^\w.\-]+")
+
+
+def _sanitize_for_filename(name: str) -> str:
+    """Make *name* safe to use as a path component (no separators, etc.)."""
+    cleaned = _FILENAME_SAFE_RE.sub("_", (name or "").strip())
+    return cleaned or "unknown"
+
+
+def get_log_dir(cfg: dict) -> str:
+    """Return the directory that per-streamer (and checker) log files live in.
+
+    LOG_PATH is treated as a directory now that file *names* are derived
+    from the site label / streamer rather than from LOG_PATH itself. If
+    LOG_PATH isn't set, logs land in a top-level "logs" folder.
+    """
     lp = cfg.get("log_path") or ""
     if lp.strip():
         return lp
-    return os.path.join(cfg.get("output_dir", "."), "jj-dlp.log")
+    return "logs"
 
 
-def get_log_file_paths(cfg: dict) -> tuple:
+def _log_site_label(cfg: dict) -> str:
+    return _sanitize_for_filename(cfg.get("site_label") or "site")
+
+
+def get_log_file_paths(cfg: dict, streamer: str) -> tuple:
     """
-    Return (stdout_log_path, stderr_log_path).
-    When split_logs is False both paths are the same file.
+    Return (stdout_log_path, stderr_log_path) for *streamer* only, e.g.
+    logs/twitch.emiru.stdout.log / logs/twitch.emiru.stderr.log.
+
+    When split_logs is False both paths are the same single per-streamer
+    file (logs/twitch.emiru.log).
     """
-    base = get_log_path(cfg)
+    log_dir = get_log_dir(cfg)
+    base = f"{_log_site_label(cfg)}.{_sanitize_for_filename(streamer)}"
     if cfg.get("split_logs"):
-        return f"{base}.stdout.log", f"{base}.stderr.log"
-    return base, base
+        return (os.path.join(log_dir, f"{base}.stdout.log"),
+                os.path.join(log_dir, f"{base}.stderr.log"))
+    single = os.path.join(log_dir, f"{base}.log")
+    return single, single
+
+
+def get_checker_log_path(cfg: dict) -> str:
+    """Return the single, site-level log path for the combined multi-streamer
+    liveness-checker output (this doesn't belong to any one streamer, so it
+    isn't split like the per-streamer stdout/stderr logs above).
+    """
+    log_dir = get_log_dir(cfg)
+    return os.path.join(log_dir, f"{_log_site_label(cfg)}.checker.log")
 
 
 
