@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.25.19"
+__version__ = "1.25.20"
 
 import subprocess
 import time
@@ -3433,6 +3433,12 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     except Exception:
                         pass
                     return
+
+                # Normal yt-dlp exit (return code 0) is a valid restart
+                # trigger too: the monitor loop sees the streamer still live
+                # and relaunches almost immediately.
+                _refresh_restart_anchor_if_growing(
+                    site, streamer, growth_seen, reason="normal_exit")
 
                 # Safety net: if proc.poll() was already non-None before the
                 # loop got to sleep even once, _check_no_confirm_deadline()
