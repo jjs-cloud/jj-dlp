@@ -2430,102 +2430,36 @@ def _resolve_intro_delay(cfg: dict, entry_info: dict) -> dict:
 
 
 # ── DEBUG: write-failure simulation ─────────────────────────────────────────
-# Flip to True to reproduce the "recording can't write its file" failure mode
-# (the incident that motivated the unconfirmed-recording alert below) without
-# needing to actually break a filesystem.
-#
-# NOTE: pointing yt-dlp at a subdirectory that simply doesn't exist does NOT
-# work as a fault — yt-dlp creates any missing parent directories for its -o
-# path itself, so the write silently succeeds one level deeper and nothing
-# fails. Instead, this pre-creates a plain FILE (not a directory) at the
-# injected path component. yt-dlp then can't create anything under it —
-# you can't mkdir, or write a file, inside something that is itself a
-# regular file — so the write is guaranteed to fail regardless of any
-# directory-auto-creation behavior on yt-dlp's end. This is OS-level, so it
-# works the same on Windows/macOS/Linux.
-#
-# Watch for the flashing dashboard marker and the full-screen alert to
-# appear after roughly one stall_timeout window. Restore to False
-# afterwards — this is not meant to be left on, and the sentinel file it
-# creates (named below) should be deleted from OUTPUT_DIR when you're done.
+# Flip to True to make recordings fail to write: a plain FILE is pre-created at
+# the output path (OS-level, cross-platform), so yt-dlp can't create anything
+# under it. Watch for the marker/alert after ~one stall_timeout. Restore to
+# False and delete the sentinel file (named below) when done.
 _SIMULATE_WRITE_FAILURE = False
 _SIMULATE_WRITE_FAILURE_BLOCKER_NAME = "_simulated_write_failure_do_not_create"
 
-# Simulate a recording *stall* (file exists but stops growing) without touching
-# the filesystem. Unlike _SIMULATE_WRITE_FAILURE above — which prevents the file
-# from ever being created — this one lets the real file grow normally, and it is
-# only armed by the same logic that arms the real stall checker.
-#
-# See get_streamer_file_size() below for the mechanism. In short: growth is first
-# allowed to happen normally so the caller's "growth_seen" flag flips on (which
-# is what arms the [STALL] timer). As soon as that state is reached, this reports
-# a fixed, frozen byte count every cycle instead of the real (still-growing)
-# size, so `current_size > last_size` never fires and the armed stall timer runs
-# down to a restart. The stall_detected branch in record_stream() should fire
-# after roughly one stall_timeout window.
-#
-# The frozen value is captured from the real size at the moment the checker is
-# armed, then held fixed every cycle after that. Because the byte count is
-# frozen at (effectively) the size that armed the checker, the plateau the
-# caller observes converges within a cycle or two of the arming call.
-# Keyed by filename so a segment change (SPLIT_AFTER) naturally starts a fresh
-# freeze for the new _partN file.
+# ── DEBUG: stall simulation ─────────────────────────────────────────────────
+# Flip to True to make a recording look stalled (file exists, stops growing):
+# real growth proceeds until the stall checker arms (growth_seen), then the size
+# is frozen so the stall timer runs down to a restart. Keyed by filename, so a
+# SPLIT_AFTER segment change restarts the freeze. Watch for the [STALL] restart
+# after ~one stall_timeout.
 _SIMULATE_STALL = False
 _simulate_stall_sizes: dict = {}
 
-# Makes the stall permanent. With only _SIMULATE_STALL on, each restart lets the
-# re-started file grow a little once (to re-arm the checker) before freezing it
-# again — so the stall/restart cycle keeps repeating forever. Set this alongside
-# _SIMULATE_STALL to instead pin the re-started file to a permanent 0 bytes.
-#
-# Mechanism: the first time a real stall is DETECTED (i.e. after the restarter
-# has triggered once on the initial segment, which uses the normal snapshot
-# freeze), we set a process-wide latch. From then on the reported size is forced
-# to 0 for every call — including the pre-arm init lookup — so any restarted file
-# is reported at 0 bytes and can never show growth, matching a "recording opened
-# but never produces bytes" state.
-#
-# This latch is whole-process, so leave both flags off when you're done.
+# Makes the stall permanent: after the first stall, reported size is pinned at 0,
+# so restarted files can never grow (otherwise each restart regrows once and the
+# cycle repeats forever). Whole-process — leave both flags off when done.
 _SIMULATE_STALL_PERMANENT = False
-# Internal latch: once True (set at the first stall detection), reported size is
-# pinned at 0 for the remainder of the process.
+# Internal latch: once True, reported size is pinned at 0 for the rest of the process.
 _simulate_stall_permanent_lock = False
 
 # ── DEBUG: LQ-restart simulation ────────────────────────────────────────────
-# Flip to True to reproduce the LQ (low-quality) bandwidth-saving restart path
-# without needing a real stream to actually throw ffmpeg errors.
-#
-# While on, this injects simulated ffmpeg-error counts so the *real* LQ
-# machinery runs end-to-end:
-#   error counting → FF_ERR_THRESH reached → ffmpeg_error_event →
-#   record_stream's error branch → _maybe_trigger_lq → evict_and_restart
-#   (lowest-priority target) → _launch_lq_recording → record_stream(use_lq=True)
-#
-# Requirements to see the downgrade happen (identical to a real trigger):
-#   1. LQ_DOWNLOADER = true in global.conf
-#   2. At least TWO streamers recording, each on a site config that has an
-#      [LQ_Downloader] section
-#   3. The target must not be a "bypass" streamer, and must not have been
-#      LQ-attempted within _LQ_RECENT_WINDOW (30 minutes)
-#
-# How it stays deterministic: the first recording to confirm file growth (the
-# same "growth_seen" that arms the stall checker) is claimed as the "storm"
-# streamer — the only one whose simulated error count climbs. Its count only
-# starts climbing once a SECOND recording has also confirmed growth, because
-# _maybe_trigger_lq requires another active recording to already have ffmpeg
-# errors (condition 1). Every other growth-confirmed recording gets a small
-# fixed "seed" of errors so that gate passes, but their local counters stay
-# far below the threshold — only the storm ever fires the error event. The
-# downgrade target is then chosen by the real priority logic (lowest-priority
-# eligible non-triggering streamer).
-#
-# After the storm triggers, the storm recording also restarts itself normally
-# (that's the real error-threshold restarter), and the whole thing is one-shot
-# per process: the storm latch stays claimed, and _LQ_RECENT_WINDOW would block
-# re-targeting the same streamer anyway. Watch for the Log tab entries
-# "[LQ] Targeting ...", "Bandwidth save: stopping ...", "Recording started:
-# ... [LQ]", and confirm the LQ relaunch does NOT trip the write-failure alert.
-# Restore to False when done — this is not meant to be left on.
+# Flip to True to run the real LQ restart path (ffmpeg_error_event →
+# _maybe_trigger_lq → evict + record_stream(use_lq=True)) via injected errors.
+# Needs LQ_DOWNLOADER=true and ≥2 live streamers with [LQ_Downloader] sections;
+# the first growth-confirmed recording is the "storm" whose errors climb once a
+# 2nd recording is armed. One-shot per process. Watch for "Bandwidth save:
+# stopping ..." / "Recording started: ... [LQ]". Flip back to False when done.
 _SIMULATE_LQ_RESTART = False
 _SIMULATE_LQ_ERRORS_PER_TICK = 25   # injected per ~1s loop tick → 200 threshold in ~8s
 _SIMULATE_LQ_SEED_ERRORS = 3        # seeds "another recording has ffmpeg errors"
@@ -2541,15 +2475,10 @@ def _maybe_simulate_lq_errors(streamer: str, site: "SiteState", use_lq: bool,
                               ffmpeg_error_event: threading.Event) -> None:
     """Inject simulated ffmpeg errors to drive the LQ-restart path.
 
-    See the _SIMULATE_LQ_RESTART flag description up top. Called once per
-    inner-loop tick (roughly once a second) from record_stream. No-op unless
-    the sim is armed; designed so only one recording (the "storm") ever
-    reaches FFMPEG_ERROR_RESTART_THRESHOLD, while every other
-    growth-confirmed recording is seeded with a small fixed error count so
-    _maybe_trigger_lq's "another active recording has ffmpeg errors" gate
-    passes. Uses the same site.set_ffmpeg_error_count() the real drain-pipe
-    counting does, so the dashboard's ffmpeg-errors section shows the storm
-    climbing toward the threshold just like a genuinely degraded stream.
+    See the _SIMULATE_LQ_RESTART flag up top. No-op unless armed; one recording
+    (the "storm") climbs to FFMPEG_ERROR_RESTART_THRESHOLD while the rest get a
+    small error seed. Uses site.set_ffmpeg_error_count() so the dashboard's
+    ffmpeg-errors section shows the count climbing like a real degraded stream.
     """
     global _simulate_lq_storm_claimed, _simulate_lq_storm_streamer
     if not _SIMULATE_LQ_RESTART:
