@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.25.14"
+__version__ = "1.25.15"
 
 import subprocess
 import time
@@ -976,11 +976,14 @@ class SiteState:
             return session.last_restart_anchor if session else None
 
     def set_last_restart_anchor(self, streamer: str, epoch: float) -> None:
-        """Record that *streamer* was just restarted (stall, LQ, or
-        quality upgrade). Used to give the next attempt's
-        NOTIFY_NO_CONFIRM_FILE deadline a fresh window, without disturbing
-        `since`/`enable_anchor` (which must keep reflecting the real
-        live-session start time)."""
+        """Record that *streamer* was just restarted (or will/might restart) (stall recovery, an
+        LQ downgrade, a quality-upgrade restart, or a concurrency
+        eviction). Used to give the next attempt's NOTIFY_NO_CONFIRM_FILE
+        deadline a fresh window, without disturbing `since`/`enable_anchor`
+        (which must keep reflecting the real live-session start time).
+        Prefer calling this via evict_and_restart() for anything that
+        externally evicts an active recording (LQ, quality upgrade,
+        concurrency)."""
         with self.session_lock:
             session = self.live_sessions.get(streamer)
             if session:
@@ -993,6 +996,34 @@ class SiteState:
             session = self.live_sessions.get(streamer)
             if session:
                 session.last_restart_anchor = None
+
+    def evict_and_restart(self, streamer: str) -> None:
+        """Evict an actively-recording streamer so it can be restarted
+        elsewhere (LQ downgrade, quality-upgrade restart, or concurrency
+        eviction — anything that kills a currently-recording streamer with
+        the expectation that it (or a replacement recording of it) comes
+        back up shortly after).
+
+          1. Flag the streamer as evicted, so record_stream's inner loop
+             self-terminates cleanly instead of treating this as a stall
+             or failure.
+          2. Refresh last_restart_anchor *before* killing the process, so
+             the next attempt's NOTIFY_NO_CONFIRM_FILE deadline is seeded
+             from "now" instead of falling back to a stale live_since/
+             enable_anchor and firing the write-failure alert almost
+             immediately on the retry.
+          3. Kill the ffmpeg/yt-dlp process.
+
+        The stall-detected restart in record_stream() does NOT use this
+        method — it's an in-loop self-restart (the recording thread is
+        killing and retrying itself, not being evicted by another thread),
+        so it has its own teardown sequence and calls
+        set_last_restart_anchor() directly.
+        """
+        with self.lock:
+            self.evicted_streamers.add(streamer)
+        self.set_last_restart_anchor(streamer, time.time())
+        self.kill_proc_for_streamer(streamer)
 
     def was_notif_shown(self, streamer: str) -> bool:
         with self.session_lock:
@@ -2160,7 +2191,6 @@ def _launch_lq_recording(streamer: str, cfg: dict, site: "SiteState",
         site.currently_recording.add(streamer)
         site.evicted_streamers.discard(streamer)
     site.mark_live(streamer)
-    site.set_last_restart_anchor(streamer, time.time())
 
     site.log_line(f"LQ recording starting for {streamer}")
     dbg(f"[LQ] Launching LQ record_stream for {streamer}")
@@ -2290,9 +2320,7 @@ def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) ->
         _lq_attempted[(tgt_str, tgt_label)] = now
 
     # Evict the current recording.
-    with tgt_site.lock:
-        tgt_site.evicted_streamers.add(tgt_str)
-    tgt_site.kill_proc_for_streamer(tgt_str)
+    tgt_site.evict_and_restart(tgt_str)
 
     # Launch the LQ restart in a background thread (waits for eviction to clear).
     threading.Thread(
@@ -3640,24 +3668,7 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                         target_site.log_line(
                             f"Warning: Evicted {target_streamer} (lower priority) - making room for {streamer}"
                         )
-                        with target_site.lock:
-                            target_site.evicted_streamers.add(target_streamer)
-                        # Same category of event as an LQ or quality-upgrade
-                        # eviction: target_streamer was actively recording
-                        # (likely growth-confirmed) and is being killed here
-                        # only to free a slot — it's expected to resume
-                        # later. Refresh its restart anchor so that when it
-                        # eventually gets a free slot again, its
-                        # NOTIFY_NO_CONFIRM_FILE deadline doesn't fall back
-                        # to a stale live_since. target_streamer is never
-                        # marked blocked_while_live (that's reserved for
-                        # config-disabled streamers), so without this it had
-                        # no anchor-refresh path at all.
-                        target_site.set_last_restart_anchor(target_streamer, time.time())
-                        # kill_proc_for_streamer is called without holding
-                        # any site.lock so it cannot deadlock against the
-                        # finally block in record_stream.
-                        target_site.kill_proc_for_streamer(target_streamer)
+                        target_site.evict_and_restart(target_streamer)
                         eviction_warning = f"evicted {target_streamer}"
 
                     elif not is_bypass:
@@ -4082,10 +4093,8 @@ def _check_quality_upgrades(site: "SiteState",
             )
             with site.lock:
                 site.recording_resolution[streamer] = new_height
-                site.evicted_streamers.add(streamer)
             site.mark_quality_upgraded(streamer)
-            site.set_last_restart_anchor(streamer, time.time())
-            site.kill_proc_for_streamer(streamer)
+            site.evict_and_restart(streamer)
 
 
 def monitor_site(site: "SiteState") -> None:
