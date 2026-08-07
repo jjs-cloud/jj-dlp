@@ -2362,6 +2362,29 @@ def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) ->
     ).start()
 
 
+def _refresh_restart_anchor_if_growing(site: "SiteState", streamer: str,
+                                        growth_seen: bool, reason: str) -> None:
+    """Refresh last_restart_anchor for an in-loop self-restart (the recording
+    thread killing and retrying itself — stall recovery, ffmpeg-error
+    threshold, or any future restart branch added to record_stream()).
+
+    Only meaningful when growth_seen is True: that's what distinguishes "this
+    attempt was actually recording and is restarting for an operational
+    reason" from "this attempt never confirmed a write in the first place."
+    In the latter case the original deadline should be left alone so a
+    genuinely failed attempt still surfaces NOTIFY_NO_CONFIRM_FILE.
+
+    This is for in-loop self-restarts only. External evictions (LQ, quality
+    upgrade, concurrency) should go through SiteState.evict_and_restart()
+    instead, which handles anchor refresh with different timing assumptions.
+    """
+    if not growth_seen:
+        return
+    site.set_last_restart_anchor(streamer, time.time())
+    dbg(f"[RESTART_ANCHOR] refreshed for {streamer!r} (reason={reason})",
+        site_name=streamer)
+
+
 def _resolve_split_after(cfg: dict, entry_info: dict) -> dict:
     """Return a cfg dict to use for a single streamer, applying that
     streamer's per-streamer Split override (set via the SPLIT settings
@@ -3123,6 +3146,17 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
                 if ffmpeg_error_event.is_set():
                     site.log_line(f"ffmpeg error threshold reached for {streamer} — restarting")
+
+                    # Same reasoning as the stall-detected branch below: this
+                    # attempt was actually recording, so give the next
+                    # attempt's NOTIFY_NO_CONFIRM_FILE deadline a fresh
+                    # window instead of reusing the original
+                    # live_since/enable_anchor (which goes stale across
+                    # repeated restarts and fires a false write-failure
+                    # alert even though the stream is recording fine).
+                    _refresh_restart_anchor_if_growing(
+                        site, streamer, growth_seen, reason="ffmpeg_error_threshold")
+
                     kill_proc(proc)
                     site.unregister_proc(streamer)
                     site.clear_ad_alert(streamer)
@@ -3466,7 +3500,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         # fresh window instead of reusing the original
                         # live_since/enable_anchor, which would fire the
                         # write-failure alert.
-                        site.set_last_restart_anchor(streamer, time.time())
+                        _refresh_restart_anchor_if_growing(
+                            site, streamer, growth_seen, reason="stall_detected")
 
                         kill_proc(proc)
                         site.unregister_proc(streamer)
