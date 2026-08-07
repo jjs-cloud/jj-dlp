@@ -78,7 +78,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("COOLDOWN_AFTER_RECORDING", "site", "60",   False, "Seconds to wait after a recording ends before checking again."),
     _KeyDef("SPLIT_AFTER",           "site",   "0",    True,  "When recording a stream, split the video file(s) every X minutes. (0 = no split)"),
     _KeyDef("STALL_CHECK_INTERVAL",  "site",   "30",   True, "How often to check if the recording has stalled (in seconds).  Disable by setting this to a large number. (Default: 30)"),
-    _KeyDef("STALL_TIMEOUT",         "site",   "120",  True, "Time to wait before considering a recording stalled (in seconds). (Default: 120) (note: also used with NOTIFY_NO_CONFIRM_FILE) (note: keep this >= CHECK_INTERVAL to avoid false write-failure alerts)"),
+    _KeyDef("STALL_TIMEOUT",         "site",   "120",  False, "Time to wait before considering a recording stalled (in seconds). (Default: 120) (note: also used with NOTIFY_NO_CONFIRM_FILE) (note: keep this >= CHECK_INTERVAL to avoid false write-failure alerts)"),
     _KeyDef("CONFIG_CHECK_INTERVAL", "site",   "3",    False, "How often to check for changes to the configuration file (in seconds). (Default: 3)"),
     _KeyDef("SITE_TMPL",             "site",   "",     False, "URL where the live stream can be accessed. {username} will be replaced with the streamer's username."),
     _KeyDef("PANEL_RESIZE",          "site",   "true", True,  "When true, site panels will expand vertically as needed to display all streamers."),
