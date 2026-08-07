@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.25.13"
+__version__ = "1.25.14"
 
 import subprocess
 import time
@@ -3642,6 +3642,18 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                         )
                         with target_site.lock:
                             target_site.evicted_streamers.add(target_streamer)
+                        # Same category of event as an LQ or quality-upgrade
+                        # eviction: target_streamer was actively recording
+                        # (likely growth-confirmed) and is being killed here
+                        # only to free a slot — it's expected to resume
+                        # later. Refresh its restart anchor so that when it
+                        # eventually gets a free slot again, its
+                        # NOTIFY_NO_CONFIRM_FILE deadline doesn't fall back
+                        # to a stale live_since. target_streamer is never
+                        # marked blocked_while_live (that's reserved for
+                        # config-disabled streamers), so without this it had
+                        # no anchor-refresh path at all.
+                        target_site.set_last_restart_anchor(target_streamer, time.time())
                         # kill_proc_for_streamer is called without holding
                         # any site.lock so it cannot deadlock against the
                         # finally block in record_stream.
