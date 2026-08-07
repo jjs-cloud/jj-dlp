@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.25.17"
+__version__ = "1.25.18"
 
 import subprocess
 import time
@@ -2486,6 +2486,22 @@ _simulate_lq_storm_streamer = ""
 _simulate_lq_armed: set = set()
 _simulate_lq_lock = threading.Lock()
 
+# ── DEBUG: quality-upgrade simulation ──────────────────────────────────────
+# Flip to True to run the real UPGRADE_QUALITY path (_check_quality_upgrades
+# → evict_and_restart) by injecting a higher resolution into the checker's
+# json output once the recording is running at its real baseline. Needs
+# UPGRADE_QUALITY=true in the site config; one-shot per live session. Watch
+# for "Quality upgrade detected: Xp -> Yp — restarting recording". Flip
+# back to False when done.
+_SIMULATE_QUALITY_UPGRADE = True
+_SIMULATE_QUALITY_UPGRADE_HIGH = 1440   # fake "source upgraded to" height (Twitch 1440p tier)
+_SIMULATE_QUALITY_UPGRADE_LOW  = 480    # fake baseline seeded if checker reported no resolution at start
+# Internal state (do not edit): claim latch/name, baseline-ready latch, lock.
+_simulate_quality_upgrade_claimed = False
+_simulate_quality_upgrade_target = ""
+_simulate_quality_upgrade_ready = False
+_simulate_quality_upgrade_lock = threading.Lock()
+
 
 def _maybe_simulate_lq_errors(streamer: str, site: "SiteState", use_lq: bool,
                               growth_seen: bool, ffmpeg_error_counter: list,
@@ -2538,6 +2554,70 @@ def _maybe_simulate_lq_errors(streamer: str, site: "SiteState", use_lq: bool,
         dbg(f"[SIMULATE_LQ] seeded {streamer!r} with "
             f"{_SIMULATE_LQ_SEED_ERRORS} ffmpeg errors (for LQ trigger gate)",
             site_name=streamer)
+
+
+def _maybe_simulate_quality_upgrade(site: "SiteState",
+                                    live_info: Dict[str, Optional[int]]) -> None:
+    """Inject a fake higher resolution into the checker's live_info dict so
+    the real UPGRADE_QUALITY machinery fires without the source genuinely
+    switching.
+
+    See the _SIMULATE_QUALITY_UPGRADE flag up top. No-op unless armed; one
+    recording (the first not-yet-upgraded active one) is claimed, then once
+    it's been recording with an established baseline for one full check cycle
+    its checker-reported height is faked above that baseline so
+    _check_quality_upgrades restarts it "at the higher quality". One-shot per
+    live session — the site's quality_upgraded flag gates repeats.
+    """
+    global _simulate_quality_upgrade_claimed, _simulate_quality_upgrade_target
+    global _simulate_quality_upgrade_ready
+    if not _SIMULATE_QUALITY_UPGRADE:
+        return
+    with site.lock:
+        active = set(site.currently_recording) - site.evicted_streamers
+        baselines = dict(site.recording_resolution)
+    active = {s for s in active if not site.was_quality_upgraded(s)}
+    if not active:
+        return
+
+    inject_height = None
+    with _simulate_quality_upgrade_lock:
+        if _simulate_quality_upgrade_claimed:
+            # Self-heal: if the claimed target's recording ended before we
+            # could fire, release the claim so the next recording is picked up.
+            if _simulate_quality_upgrade_target not in active:
+                _simulate_quality_upgrade_claimed = False
+                _simulate_quality_upgrade_ready = False
+        if not _simulate_quality_upgrade_claimed:
+            _simulate_quality_upgrade_target = sorted(active)[0]
+            _simulate_quality_upgrade_claimed = True
+            _simulate_quality_upgrade_ready = False
+            dbg(f"[SIMULATE_QUALITY_UPGRADE] target claimed: "
+                f"{_simulate_quality_upgrade_target!r}", site_name=_simulate_quality_upgrade_target)
+        target = _simulate_quality_upgrade_target
+
+        old_height = baselines.get(target)
+        if old_height is None:
+            # No baseline yet (checker reported no resolution at start) — seed
+            # a low one so the real check establishes it this cycle; the jump
+            # fires next cycle.
+            inject_height = _SIMULATE_QUALITY_UPGRADE_LOW
+        elif not _simulate_quality_upgrade_ready:
+            # Baseline exists; hold one full check cycle so the low-res
+            # recording is genuinely running before we claim the upgrade.
+            _simulate_quality_upgrade_ready = True
+            dbg(f"[SIMULATE_QUALITY_UPGRADE] {target!r} recording at "
+                f"{old_height}p — will fake upgrade on next check",
+                site_name=target)
+        else:
+            inject_height = max(_SIMULATE_QUALITY_UPGRADE_HIGH, old_height + 360)
+
+    if inject_height is not None:
+        live_info[target] = inject_height
+        if inject_height != _SIMULATE_QUALITY_UPGRADE_LOW:
+            dbg(f"[SIMULATE_QUALITY_UPGRADE] injecting higher resolution for "
+                f"{target!r}: json now reports {inject_height}p "
+                f"(baseline {old_height}p)", site_name=target)
 
 
 def record_stream(streamer: str, cfg: dict, site: "SiteState",
@@ -4161,6 +4241,12 @@ def _check_quality_upgrades(site: "SiteState",
     down cleanly, and start_recording_if_needed picks the streamer back up
     fresh on (or before) the next poll cycle since it's still live.
     """
+    # ── Quality-upgrade simulation (DEBUG) ─────────────────────────
+    # Fakes a higher checker-reported resolution (via live_info) so the real
+    # UPGRADE_QUALITY machinery runs without the source genuinely switching.
+    # See _SIMULATE_QUALITY_UPGRADE up top.
+    _maybe_simulate_quality_upgrade(site, live_info)
+
     with site.lock:
         active = set(site.currently_recording) - site.evicted_streamers
     # Skip streamers that have already been upgraded once this live session.

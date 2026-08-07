@@ -1,3 +1,8 @@
+- fixed the "Warning: Not Recording" notification
+
+====================
+====================
+
 v1.25.5
 
 - startup performance tweaks (stagger processes)
