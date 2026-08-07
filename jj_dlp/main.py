@@ -2491,6 +2491,108 @@ _SIMULATE_STALL_PERMANENT = False
 # pinned at 0 for the remainder of the process.
 _simulate_stall_permanent_lock = False
 
+# ── DEBUG: LQ-restart simulation ────────────────────────────────────────────
+# Flip to True to reproduce the LQ (low-quality) bandwidth-saving restart path
+# without needing a real stream to actually throw ffmpeg errors.
+#
+# While on, this injects simulated ffmpeg-error counts so the *real* LQ
+# machinery runs end-to-end:
+#   error counting → FF_ERR_THRESH reached → ffmpeg_error_event →
+#   record_stream's error branch → _maybe_trigger_lq → evict_and_restart
+#   (lowest-priority target) → _launch_lq_recording → record_stream(use_lq=True)
+#
+# Requirements to see the downgrade happen (identical to a real trigger):
+#   1. LQ_DOWNLOADER = true in global.conf
+#   2. At least TWO streamers recording, each on a site config that has an
+#      [LQ_Downloader] section
+#   3. The target must not be a "bypass" streamer, and must not have been
+#      LQ-attempted within _LQ_RECENT_WINDOW (30 minutes)
+#
+# How it stays deterministic: the first recording to confirm file growth (the
+# same "growth_seen" that arms the stall checker) is claimed as the "storm"
+# streamer — the only one whose simulated error count climbs. Its count only
+# starts climbing once a SECOND recording has also confirmed growth, because
+# _maybe_trigger_lq requires another active recording to already have ffmpeg
+# errors (condition 1). Every other growth-confirmed recording gets a small
+# fixed "seed" of errors so that gate passes, but their local counters stay
+# far below the threshold — only the storm ever fires the error event. The
+# downgrade target is then chosen by the real priority logic (lowest-priority
+# eligible non-triggering streamer).
+#
+# After the storm triggers, the storm recording also restarts itself normally
+# (that's the real error-threshold restarter), and the whole thing is one-shot
+# per process: the storm latch stays claimed, and _LQ_RECENT_WINDOW would block
+# re-targeting the same streamer anyway. Watch for the Log tab entries
+# "[LQ] Targeting ...", "Bandwidth save: stopping ...", "Recording started:
+# ... [LQ]", and confirm the LQ relaunch does NOT trip the write-failure alert.
+# Restore to False when done — this is not meant to be left on.
+_SIMULATE_LQ_RESTART = False
+_SIMULATE_LQ_ERRORS_PER_TICK = 25   # injected per ~1s loop tick → 200 threshold in ~8s
+_SIMULATE_LQ_SEED_ERRORS = 3        # seeds "another recording has ffmpeg errors"
+# Internal state (do not edit): storm claim latch/name, armed-streamer set, lock.
+_simulate_lq_storm_claimed = False
+_simulate_lq_storm_streamer = ""
+_simulate_lq_armed: set = set()
+_simulate_lq_lock = threading.Lock()
+
+
+def _maybe_simulate_lq_errors(streamer: str, site: "SiteState", use_lq: bool,
+                              growth_seen: bool, ffmpeg_error_counter: list,
+                              ffmpeg_error_event: threading.Event) -> None:
+    """Inject simulated ffmpeg errors to drive the LQ-restart path.
+
+    See the _SIMULATE_LQ_RESTART flag description up top. Called once per
+    inner-loop tick (roughly once a second) from record_stream. No-op unless
+    the sim is armed; designed so only one recording (the "storm") ever
+    reaches FFMPEG_ERROR_RESTART_THRESHOLD, while every other
+    growth-confirmed recording is seeded with a small fixed error count so
+    _maybe_trigger_lq's "another active recording has ffmpeg errors" gate
+    passes. Uses the same site.set_ffmpeg_error_count() the real drain-pipe
+    counting does, so the dashboard's ffmpeg-errors section shows the storm
+    climbing toward the threshold just like a genuinely degraded stream.
+    """
+    global _simulate_lq_storm_claimed, _simulate_lq_storm_streamer
+    if not _SIMULATE_LQ_RESTART:
+        return
+    if use_lq or not growth_seen or ffmpeg_error_event.is_set():
+        return
+
+    with _simulate_lq_lock:
+        _simulate_lq_armed.add(streamer)
+        if not _simulate_lq_storm_claimed:
+            # The first recording to confirm growth is the storm.
+            _simulate_lq_storm_claimed = True
+            _simulate_lq_storm_streamer = streamer
+            dbg(f"[SIMULATE_LQ] storm streamer claimed: {streamer!r} "
+                f"(error count will climb once a 2nd recording arms)",
+                site_name=streamer)
+        is_storm = (streamer == _simulate_lq_storm_streamer)
+
+    if is_storm:
+        # Wait until at least one OTHER recording has also armed+seeded so
+        # _maybe_trigger_lq's condition 1 can be satisfied.
+        if len(_simulate_lq_armed) < 2:
+            return
+        ffmpeg_error_counter[0] += _SIMULATE_LQ_ERRORS_PER_TICK
+        if ffmpeg_error_counter[0] > FFMPEG_ERROR_RESTART_THRESHOLD:
+            ffmpeg_error_counter[0] = FFMPEG_ERROR_RESTART_THRESHOLD
+        site.set_ffmpeg_error_count(streamer, ffmpeg_error_counter[0])
+        dbg(f"[SIMULATE_LQ] storm {streamer!r} injected errors: "
+            f"count={ffmpeg_error_counter[0]}/{FFMPEG_ERROR_RESTART_THRESHOLD}",
+            site_name=streamer)
+        if ffmpeg_error_counter[0] >= FFMPEG_ERROR_RESTART_THRESHOLD:
+            dbg(f"[SIMULATE_LQ] storm {streamer!r} reached threshold — "
+                f"setting ffmpeg_error_event", site_name=streamer)
+            ffmpeg_error_event.set()
+    else:
+        # Seed other growth-confirmed recordings so condition 1 passes. Refresh
+        # every tick so the 300s last_ffmpeg_error window stays valid until the
+        # storm actually fires.
+        site.set_ffmpeg_error_count(streamer, _SIMULATE_LQ_SEED_ERRORS)
+        dbg(f"[SIMULATE_LQ] seeded {streamer!r} with "
+            f"{_SIMULATE_LQ_SEED_ERRORS} ffmpeg errors (for LQ trigger gate)",
+            site_name=streamer)
+
 
 def record_stream(streamer: str, cfg: dict, site: "SiteState",
                   use_lq: bool = False, show_popup: bool = True,
@@ -3080,6 +3182,15 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     # for the full cooldown period.
                     site._stop_event.wait(timeout=cfg["cooldown_after_recording"])
                     return
+
+                # ── LQ-restart simulation (DEBUG) ──────────────────────────
+                # Injects simulated ffmpeg-error counts so the real LQ
+                # machinery can be exercised without a genuinely degraded
+                # stream. See _SIMULATE_LQ_RESTART up top. Placed just before
+                # the event check below so a simulated threshold hit is caught
+                # on the very next loop iteration.
+                _maybe_simulate_lq_errors(streamer, site, use_lq, growth_seen,
+                                          ffmpeg_error_counter, ffmpeg_error_event)
 
                 if ffmpeg_error_event.is_set():
                     site.log_line(f"ffmpeg error threshold reached for {streamer} — restarting")
