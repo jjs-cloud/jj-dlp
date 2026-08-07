@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.25.15"
+__version__ = "1.25.16"
 
 import subprocess
 import time
@@ -680,6 +680,7 @@ class LiveSession:
     enable_anchor: Optional[float] = None # set once on the blocked->enabled transition; overrides `since` as the NOTIFY_NO_CONFIRM_FILE anchor
     notif_shown: bool = False             # a non-recording notification has already fired this session
     last_restart_anchor: Optional[float] = None  # epoch of the most recent restart this session (stall, LQ, or quality upgrade); gives NOTIFY_NO_CONFIRM_FILE a fresh grace window on the following attempt without touching `since`/`enable_anchor`
+    evicted_for_concurrency: bool = False  # evicted to free a slot for a higher-priority streamer, restart time unknown/unbounded; consumed at actual restart to refresh last_restart_anchor then instead of at eviction time (see was_evicted_for_concurrency)
 
 
 class SiteState:
@@ -997,7 +998,30 @@ class SiteState:
             if session:
                 session.last_restart_anchor = None
 
-    def evict_and_restart(self, streamer: str) -> None:
+    def was_evicted_for_concurrency(self, streamer: str) -> bool:
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            return bool(session and session.evicted_for_concurrency)
+
+    def mark_evicted_for_concurrency(self, streamer: str) -> None:
+        """Record that *streamer* was evicted to free a slot for a
+        higher-priority streamer. Actual restart time here is unbounded 
+        Mirrors was_blocked_while_live's deferred-anchor pattern: this flag is
+        consumed at the actual restart point in start_recording_if_needed,
+        where last_restart_anchor is refreshed to `now` right then."""
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            if session:
+                session.evicted_for_concurrency = True
+
+    def clear_evicted_for_concurrency(self, streamer: str) -> None:
+        """Consume the flag once the streamer actually resumes recording."""
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            if session:
+                session.evicted_for_concurrency = False
+
+    def evict_and_restart(self, streamer: str, refresh_anchor: bool = True) -> None:
         """Evict an actively-recording streamer so it can be restarted
         elsewhere (LQ downgrade, quality-upgrade restart, or concurrency
         eviction — anything that kills a currently-recording streamer with
@@ -1007,11 +1031,17 @@ class SiteState:
           1. Flag the streamer as evicted, so record_stream's inner loop
              self-terminates cleanly instead of treating this as a stall
              or failure.
-          2. Refresh last_restart_anchor *before* killing the process, so
-             the next attempt's NOTIFY_NO_CONFIRM_FILE deadline is seeded
-             from "now" instead of falling back to a stale live_since/
-             enable_anchor and firing the write-failure alert almost
-             immediately on the retry.
+          2. If refresh_anchor (the default), refresh last_restart_anchor
+             *before* killing the process, so the next attempt's
+             NOTIFY_NO_CONFIRM_FILE deadline is seeded from "now" instead
+             of falling back to a stale live_since/enable_anchor and
+             firing the write-failure alert almost immediately on the
+             retry. This default is only correct when the restart happens
+             shortly after eviction (LQ, quality upgrade — both restart
+             within seconds). Pass refresh_anchor=False for eviction paths
+             where the restart timing is unbounded (concurrency eviction)
+             and instead refresh last_restart_anchor at the actual restart
+             point — see mark_evicted_for_concurrency().
           3. Kill the ffmpeg/yt-dlp process.
 
         The stall-detected restart in record_stream() does NOT use this
@@ -1022,7 +1052,8 @@ class SiteState:
         """
         with self.lock:
             self.evicted_streamers.add(streamer)
-        self.set_last_restart_anchor(streamer, time.time())
+        if refresh_anchor:
+            self.set_last_restart_anchor(streamer, time.time())
         self.kill_proc_for_streamer(streamer)
 
     def was_notif_shown(self, streamer: str) -> bool:
@@ -3668,7 +3699,11 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                         target_site.log_line(
                             f"Warning: Evicted {target_streamer} (lower priority) - making room for {streamer}"
                         )
-                        target_site.evict_and_restart(target_streamer)
+                        # Restart timing here is unbounded (could be
+                        # minutes/hours until a slot frees up), unlike
+                        # LQ/quality-upgrade which restart within seconds
+                        target_site.mark_evicted_for_concurrency(target_streamer)
+                        target_site.evict_and_restart(target_streamer, refresh_anchor=False)
                         eviction_warning = f"evicted {target_streamer}"
 
                     elif not is_bypass:
@@ -3702,6 +3737,14 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
             # is never touched or treated as stale.
             if site.was_blocked_while_live(streamer):
                 site.set_enable_anchor_if_unset(streamer, time.time())
+            # Same idea, for the other deferred-restart case: if this
+            # streamer was evicted for concurrency at some earlier point,
+            # this is the actual restart, so refresh last_restart_anchor
+            # to now (not at eviction time, since that gap was unbounded)
+            # and consume the flag.
+            if site.was_evicted_for_concurrency(streamer):
+                site.set_last_restart_anchor(streamer, time.time())
+                site.clear_evicted_for_concurrency(streamer)
             _intro_delay_holding = (streamer_cfg.get("intro_delay_enabled", False)
                                      and not streamer_cfg.get("intro_delay_split", False))
             if global_cfg.get("notify_confirm_file", True) and not _intro_delay_holding:
