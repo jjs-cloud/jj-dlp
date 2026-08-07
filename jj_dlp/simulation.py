@@ -64,7 +64,7 @@ _simulate_lq_lock = threading.Lock()
 # UPGRADE_QUALITY=true in the site config; one-shot per live session. Watch
 # for "Quality upgrade detected: Xp -> Yp — restarting recording". Flip
 # back to False when done.
-_SIMULATE_QUALITY_UPGRADE = True
+_SIMULATE_QUALITY_UPGRADE = False
 _SIMULATE_QUALITY_UPGRADE_HIGH = 1440   # fake "source upgraded to" height (Twitch 1440p tier)
 _SIMULATE_QUALITY_UPGRADE_LOW  = 480    # fake baseline seeded if checker reported no resolution at start
 # Internal state (do not edit): claim latch/name, baseline-ready latch, lock.
