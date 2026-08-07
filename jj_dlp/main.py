@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.25.18"
+__version__ = "1.25.19"
 
 import subprocess
 import time
@@ -43,6 +43,7 @@ from .browser_config import (
 )
 from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS, _compute_config_id, SiteSortManager, SORT_OPTIONS, _SORT_LABELS
 from .file_manager import FileManagerTab
+from . import simulation as _simulation
 
 import curses  # noqa: E402
 
@@ -2090,36 +2091,11 @@ def get_streamer_file_size(output_dir, streamer, cfg=None,
                            last_growth_time=None, stall_timeout=None,
                            stall_check_interval=None, proc_start_time=None,
 known_filename=None):
-    global _simulate_stall_permanent_lock
     try:
         filename = known_filename
         size = os.path.getsize(filename) if filename else 0
-        if _SIMULATE_STALL:
-            # Permanent mode: once a stall has already been detected (setting the
-            # process-wide latch), every subsequent read is pinned to 0 bytes —
-            # including the pre-arm init lookup — so a restarted file can never
-            # show any growth. Force this before the armed/freeze logic below so
-            # nothing can re-arm or regrow afterward.
-            if _SIMULATE_STALL_PERMANENT and _simulate_stall_permanent_lock:
-                size = 0
-            else:
-                # See the _SIMULATE_STALL flag description up top. We only freeze
-                # the reported size once the caller has *armed* the stall checker,
-                # which it does by passing last_growth_time/stall_timeout (it only
-                # does that after growth_seen has flipped true). Before that, real
-                # sizes pass through so growth can be observed and the checker armed
-                # exactly as usual. Once armed, report a fixed byte count forever,
-                # so `current_size > last_size` in record_stream() never triggers
-                # and the armed stall timer runs down to a restart.
-                if last_growth_time is not None and stall_timeout is not None:
-                    _frozen = _simulate_stall_sizes.get(filename)
-                    if _frozen is None and size > 0:
-                        _frozen = size
-                        _simulate_stall_sizes[filename] = _frozen
-                        dbg(f"[SIMULATE_STALL] armed — freezing reported size at "
-                            f"{_frozen} bytes for {filename!r}", site_name=streamer)
-                    if _frozen is not None:
-                        size = _frozen
+        size = _simulation.maybe_freeze_stall_size(
+            filename, size, last_growth_time, stall_timeout, streamer)
         stall_detected = False
         if last_growth_time is not None and stall_timeout is not None:
             time_now = time.time()
@@ -2134,12 +2110,7 @@ known_filename=None):
                 stall_detected = True
                 dbg(f"[STALL] TRIGGERED: stalled={stalled:.2f}s >= threshold={stall_timeout}s",
                     site_name=streamer)
-                if _SIMULATE_STALL and _SIMULATE_STALL_PERMANENT and not _simulate_stall_permanent_lock:
-                    # First real stall detected — latch permanent mode so every
-                    # subsequent (restarted) file is reported at a fixed 0 bytes.
-                    _simulate_stall_permanent_lock = True
-                    dbg("[SIMULATE_STALL] permanent latch engaged — "
-                        "restarted files will be pinned at 0 bytes", site_name=streamer)
+                _simulation.maybe_latch_stall_permanent(streamer)
         return size, stall_detected, filename or "", False
     except Exception as e:
         dbg(f"[STALL] exception in get_streamer_file_size: {type(e).__name__}: {e}",
@@ -2446,180 +2417,6 @@ def _resolve_intro_delay(cfg: dict, entry_info: dict) -> dict:
     return overridden
 
 
-# ── DEBUG: write-failure simulation ─────────────────────────────────────────
-# Flip to True to make recordings fail to write: a plain FILE is pre-created at
-# the output path (OS-level, cross-platform), so yt-dlp can't create anything
-# under it. Watch for the marker/alert after ~one stall_timeout. Restore to
-# False and delete the sentinel file (named below) when done.
-_SIMULATE_WRITE_FAILURE = False
-_SIMULATE_WRITE_FAILURE_BLOCKER_NAME = "_simulated_write_failure_do_not_create"
-
-# ── DEBUG: stall simulation ─────────────────────────────────────────────────
-# Flip to True to make a recording look stalled (file exists, stops growing):
-# real growth proceeds until the stall checker arms (growth_seen), then the size
-# is frozen so the stall timer runs down to a restart. Keyed by filename, so a
-# SPLIT_AFTER segment change restarts the freeze. Watch for the [STALL] restart
-# after ~one stall_timeout.
-_SIMULATE_STALL = False
-_simulate_stall_sizes: dict = {}
-
-# Makes the stall permanent: after the first stall, reported size is pinned at 0,
-# so restarted files can never grow (otherwise each restart regrows once and the
-# cycle repeats forever). Whole-process — leave both flags off when done.
-_SIMULATE_STALL_PERMANENT = False
-# Internal latch: once True, reported size is pinned at 0 for the rest of the process.
-_simulate_stall_permanent_lock = False
-
-# ── DEBUG: LQ-restart simulation ────────────────────────────────────────────
-# Flip to True to run the real LQ restart path (ffmpeg_error_event →
-# _maybe_trigger_lq → evict + record_stream(use_lq=True)) via injected errors.
-# Needs LQ_DOWNLOADER=true and ≥2 live streamers with [LQ_Downloader] sections;
-# the first growth-confirmed recording is the "storm" whose errors climb once a
-# 2nd recording is armed. One-shot per process. Watch for "Bandwidth save:
-# stopping ..." / "Recording started: ... [LQ]". Flip back to False when done.
-_SIMULATE_LQ_RESTART = False
-_SIMULATE_LQ_ERRORS_PER_TICK = 25   # injected per ~1s loop tick → 200 threshold in ~8s
-_SIMULATE_LQ_SEED_ERRORS = 3        # seeds "another recording has ffmpeg errors"
-# Internal state (do not edit): storm claim latch/name, armed-streamer set, lock.
-_simulate_lq_storm_claimed = False
-_simulate_lq_storm_streamer = ""
-_simulate_lq_armed: set = set()
-_simulate_lq_lock = threading.Lock()
-
-# ── DEBUG: quality-upgrade simulation ──────────────────────────────────────
-# Flip to True to run the real UPGRADE_QUALITY path (_check_quality_upgrades
-# → evict_and_restart) by injecting a higher resolution into the checker's
-# json output once the recording is running at its real baseline. Needs
-# UPGRADE_QUALITY=true in the site config; one-shot per live session. Watch
-# for "Quality upgrade detected: Xp -> Yp — restarting recording". Flip
-# back to False when done.
-_SIMULATE_QUALITY_UPGRADE = True
-_SIMULATE_QUALITY_UPGRADE_HIGH = 1440   # fake "source upgraded to" height (Twitch 1440p tier)
-_SIMULATE_QUALITY_UPGRADE_LOW  = 480    # fake baseline seeded if checker reported no resolution at start
-# Internal state (do not edit): claim latch/name, baseline-ready latch, lock.
-_simulate_quality_upgrade_claimed = False
-_simulate_quality_upgrade_target = ""
-_simulate_quality_upgrade_ready = False
-_simulate_quality_upgrade_lock = threading.Lock()
-
-
-def _maybe_simulate_lq_errors(streamer: str, site: "SiteState", use_lq: bool,
-                              growth_seen: bool, ffmpeg_error_counter: list,
-                              ffmpeg_error_event: threading.Event) -> None:
-    """Inject simulated ffmpeg errors to drive the LQ-restart path.
-
-    See the _SIMULATE_LQ_RESTART flag up top. No-op unless armed; one recording
-    (the "storm") climbs to FFMPEG_ERROR_RESTART_THRESHOLD while the rest get a
-    small error seed. Uses site.set_ffmpeg_error_count() so the dashboard's
-    ffmpeg-errors section shows the count climbing like a real degraded stream.
-    """
-    global _simulate_lq_storm_claimed, _simulate_lq_storm_streamer
-    if not _SIMULATE_LQ_RESTART:
-        return
-    if use_lq or not growth_seen or ffmpeg_error_event.is_set():
-        return
-
-    with _simulate_lq_lock:
-        _simulate_lq_armed.add(streamer)
-        if not _simulate_lq_storm_claimed:
-            # The first recording to confirm growth is the storm.
-            _simulate_lq_storm_claimed = True
-            _simulate_lq_storm_streamer = streamer
-            dbg(f"[SIMULATE_LQ] storm streamer claimed: {streamer!r} "
-                f"(error count will climb once a 2nd recording arms)",
-                site_name=streamer)
-        is_storm = (streamer == _simulate_lq_storm_streamer)
-
-    if is_storm:
-        # Wait until at least one OTHER recording has also armed+seeded so
-        # _maybe_trigger_lq's condition 1 can be satisfied.
-        if len(_simulate_lq_armed) < 2:
-            return
-        ffmpeg_error_counter[0] += _SIMULATE_LQ_ERRORS_PER_TICK
-        if ffmpeg_error_counter[0] > FFMPEG_ERROR_RESTART_THRESHOLD:
-            ffmpeg_error_counter[0] = FFMPEG_ERROR_RESTART_THRESHOLD
-        site.set_ffmpeg_error_count(streamer, ffmpeg_error_counter[0])
-        dbg(f"[SIMULATE_LQ] storm {streamer!r} injected errors: "
-            f"count={ffmpeg_error_counter[0]}/{FFMPEG_ERROR_RESTART_THRESHOLD}",
-            site_name=streamer)
-        if ffmpeg_error_counter[0] >= FFMPEG_ERROR_RESTART_THRESHOLD:
-            dbg(f"[SIMULATE_LQ] storm {streamer!r} reached threshold — "
-                f"setting ffmpeg_error_event", site_name=streamer)
-            ffmpeg_error_event.set()
-    else:
-        # Seed other growth-confirmed recordings so condition 1 passes. Refresh
-        # every tick so the 300s last_ffmpeg_error window stays valid until the
-        # storm actually fires.
-        site.set_ffmpeg_error_count(streamer, _SIMULATE_LQ_SEED_ERRORS)
-        dbg(f"[SIMULATE_LQ] seeded {streamer!r} with "
-            f"{_SIMULATE_LQ_SEED_ERRORS} ffmpeg errors (for LQ trigger gate)",
-            site_name=streamer)
-
-
-def _maybe_simulate_quality_upgrade(site: "SiteState",
-                                    live_info: Dict[str, Optional[int]]) -> None:
-    """Inject a fake higher resolution into the checker's live_info dict so
-    the real UPGRADE_QUALITY machinery fires without the source genuinely
-    switching.
-
-    See the _SIMULATE_QUALITY_UPGRADE flag up top. No-op unless armed; one
-    recording (the first not-yet-upgraded active one) is claimed, then once
-    it's been recording with an established baseline for one full check cycle
-    its checker-reported height is faked above that baseline so
-    _check_quality_upgrades restarts it "at the higher quality". One-shot per
-    live session — the site's quality_upgraded flag gates repeats.
-    """
-    global _simulate_quality_upgrade_claimed, _simulate_quality_upgrade_target
-    global _simulate_quality_upgrade_ready
-    if not _SIMULATE_QUALITY_UPGRADE:
-        return
-    with site.lock:
-        active = set(site.currently_recording) - site.evicted_streamers
-        baselines = dict(site.recording_resolution)
-    active = {s for s in active if not site.was_quality_upgraded(s)}
-    if not active:
-        return
-
-    inject_height = None
-    with _simulate_quality_upgrade_lock:
-        if _simulate_quality_upgrade_claimed:
-            # Self-heal: if the claimed target's recording ended before we
-            # could fire, release the claim so the next recording is picked up.
-            if _simulate_quality_upgrade_target not in active:
-                _simulate_quality_upgrade_claimed = False
-                _simulate_quality_upgrade_ready = False
-        if not _simulate_quality_upgrade_claimed:
-            _simulate_quality_upgrade_target = sorted(active)[0]
-            _simulate_quality_upgrade_claimed = True
-            _simulate_quality_upgrade_ready = False
-            dbg(f"[SIMULATE_QUALITY_UPGRADE] target claimed: "
-                f"{_simulate_quality_upgrade_target!r}", site_name=_simulate_quality_upgrade_target)
-        target = _simulate_quality_upgrade_target
-
-        old_height = baselines.get(target)
-        if old_height is None:
-            # No baseline yet (checker reported no resolution at start) — seed
-            # a low one so the real check establishes it this cycle; the jump
-            # fires next cycle.
-            inject_height = _SIMULATE_QUALITY_UPGRADE_LOW
-        elif not _simulate_quality_upgrade_ready:
-            # Baseline exists; hold one full check cycle so the low-res
-            # recording is genuinely running before we claim the upgrade.
-            _simulate_quality_upgrade_ready = True
-            dbg(f"[SIMULATE_QUALITY_UPGRADE] {target!r} recording at "
-                f"{old_height}p — will fake upgrade on next check",
-                site_name=target)
-        else:
-            inject_height = max(_SIMULATE_QUALITY_UPGRADE_HIGH, old_height + 360)
-
-    if inject_height is not None:
-        live_info[target] = inject_height
-        if inject_height != _SIMULATE_QUALITY_UPGRADE_LOW:
-            dbg(f"[SIMULATE_QUALITY_UPGRADE] injecting higher resolution for "
-                f"{target!r}: json now reports {inject_height}p "
-                f"(baseline {old_height}p)", site_name=target)
-
-
 def record_stream(streamer: str, cfg: dict, site: "SiteState",
                   use_lq: bool = False, show_popup: bool = True,
                   eviction_warning: str = "") -> None:
@@ -2758,21 +2555,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     segment_num
                 )
 
-            output_path = os.path.join(output_dir, current_output_tmpl)
-            if _SIMULATE_WRITE_FAILURE:
-                # See _SIMULATE_WRITE_FAILURE above. Create the blocker as a
-                # plain file (once) so yt-dlp cannot create anything "under"
-                # it — this is what actually guarantees the write fails,
-                # unlike just pointing at a missing directory.
-                _blocker_path = os.path.join(output_dir, _SIMULATE_WRITE_FAILURE_BLOCKER_NAME)
-                if not os.path.exists(_blocker_path):
-                    try:
-                        with open(_blocker_path, "wb"):
-                            pass
-                        dbg(f"[SIMULATE_WRITE_FAILURE] created blocker file at {_blocker_path!r}")
-                    except Exception as _blocker_exc:
-                        dbg(f"[SIMULATE_WRITE_FAILURE] could not create blocker file: {_blocker_exc!r}")
-                output_path = os.path.join(_blocker_path, current_output_tmpl)
+            output_path = _simulation.get_write_failure_output_path(
+                output_dir, current_output_tmpl)
 
             # ── Select downloader command (normal vs LQ) ──────────────────
             _active_dl_cmd = cfg["downloader_cmd"]
@@ -3215,8 +2999,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 # stream. See _SIMULATE_LQ_RESTART up top. Placed just before
                 # the event check below so a simulated threshold hit is caught
                 # on the very next loop iteration.
-                _maybe_simulate_lq_errors(streamer, site, use_lq, growth_seen,
-                                          ffmpeg_error_counter, ffmpeg_error_event)
+                _simulation._maybe_simulate_lq_errors(
+                    streamer, site, use_lq, growth_seen,
+                    ffmpeg_error_counter, ffmpeg_error_event,
+                    FFMPEG_ERROR_RESTART_THRESHOLD)
 
                 if ffmpeg_error_event.is_set():
                     site.log_line(f"ffmpeg error threshold reached for {streamer} — restarting")
@@ -4245,7 +4031,7 @@ def _check_quality_upgrades(site: "SiteState",
     # Fakes a higher checker-reported resolution (via live_info) so the real
     # UPGRADE_QUALITY machinery runs without the source genuinely switching.
     # See _SIMULATE_QUALITY_UPGRADE up top.
-    _maybe_simulate_quality_upgrade(site, live_info)
+    _simulation._maybe_simulate_quality_upgrade(site, live_info)
 
     with site.lock:
         active = set(site.currently_recording) - site.evicted_streamers
