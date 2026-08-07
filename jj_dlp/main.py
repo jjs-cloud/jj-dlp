@@ -5302,7 +5302,7 @@ class JJDlpDashboard:
         """
         border_pair = self.C_HILIGHT if is_active else self.C_DIM
         self.draw_box(self.stdscr, y1, x1, y2, x2, border_pair)
-        title = " STREAMERS " if not is_active else " STREAMERS [Tab] "
+        title = " STREAMERS " if not is_active else " STREAMERS [  ] "
         self.safe_addstr(self.stdscr, y1, x1 + 2, title,
                     curses.color_pair(border_pair) | curses.A_BOLD)
 
@@ -5343,7 +5343,7 @@ class JJDlpDashboard:
 
         border_pair = self.C_HILIGHT if is_active else self.C_DIM
         self.draw_box(self.stdscr, y1, x1, y2, x2, border_pair)
-        title_suffix = " [Tab]" if is_active else ""
+        title_suffix = " [  ]" if is_active else ""
         self.safe_addstr(self.stdscr, y1, x1 + 2, f" {title}{title_suffix} ",
                     curses.color_pair(border_pair) | curses.A_BOLD)
 
