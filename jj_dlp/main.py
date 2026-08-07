@@ -749,6 +749,12 @@ class SiteState:
         self.dash_debug_lines:    deque = deque(maxlen=DEBUG_LOG_BUFFER_SIZE)      # recent debug-tag log
         self.dash_stdout_lines:   deque = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)   # recent stdout lines
         self.dash_stderr_lines:   deque = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)   # recent stderr lines
+        # Same lines, additionally bucketed per-streamer so the STREAMERS
+        # panel on the Stdout/Stderr tabs can show one streamer's output in
+        # isolation. No liveness-checker output is shown. Buckets are
+        # created lazily on first use.
+        self.dash_stdout_lines_by_streamer: Dict[str, deque] = {}
+        self.dash_stderr_lines_by_streamer: Dict[str, deque] = {}
 
         # Twitch EventSub
         self.eventsub             = None
@@ -1120,13 +1126,25 @@ class SiteState:
             self.dash_log_lines.append(line)   # deque(maxlen=...) evicts automatically
         _logger.log_dashboard_line(msg)
 
-    def add_stdout_line(self, line: str) -> None:
+    def add_stdout_line(self, line: str, streamer: str = "") -> None:
         with self.dash_lock:
             self.dash_stdout_lines.append(line)
+            if streamer:
+                buf = self.dash_stdout_lines_by_streamer.get(streamer)
+                if buf is None:
+                    buf = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)
+                    self.dash_stdout_lines_by_streamer[streamer] = buf
+                buf.append(line)
 
-    def add_stderr_line(self, line: str) -> None:
+    def add_stderr_line(self, line: str, streamer: str = "") -> None:
         with self.dash_lock:
             self.dash_stderr_lines.append(line)
+            if streamer:
+                buf = self.dash_stderr_lines_by_streamer.get(streamer)
+                if buf is None:
+                    buf = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)
+                    self.dash_stderr_lines_by_streamer[streamer] = buf
+                buf.append(line)
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -1909,9 +1927,9 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
                     pass
             if site is not None:
                 if pipe_type == "stdout":
-                    site.add_stdout_line(line)
+                    site.add_stdout_line(line, streamer=streamer)
                 elif pipe_type == "stderr":
-                    site.add_stderr_line(line)
+                    site.add_stderr_line(line, streamer=streamer)
             if (ffmpeg_error_counter is not None and ffmpeg_error_event is not None
                     and FFMPEG_ERROR_RESTART_THRESHOLD > 0 and not ffmpeg_error_event.is_set()):
                 line_lower = line.lower()
@@ -4304,6 +4322,15 @@ class JJDlpDashboard:
         self._log_scroll    = 0
         self._stdout_scroll = 0
         self._stderr_scroll = 0
+        # STREAMERS panel (Stdout/Stderr tabs): 0 = "All Streamers",
+        # 1..N = index+1 into site.dash_all_streamers. Shared by both tabs
+        # and reset whenever the selected site changes.
+        self._streamer_panel_sel    = 0
+        self._streamer_panel_scroll = 0
+        # Which of the two panels (STREAMERS list vs content pane) UP/DOWN
+        # currently drives on the Stdout/Stderr tabs. Toggled with Tab, the
+        # same way the Config tab cycles its panels.
+        self._pipe_focus = "streamers"
 
         # Disk usage cache — refreshed at most once every 10 seconds
         self._disk_cache_time: float = 0.0
@@ -5250,11 +5277,10 @@ class JJDlpDashboard:
             self.safe_addstr(self.stdscr, y1 + 1, x2 - len(scroll_info) - 1,
                         scroll_info, curses.color_pair(self.C_WARN))
 
-    def _draw_pipe_tab(self, y1, x1, y2, x2, title: str, lines: List[str],
-                       scroll: int = 0) -> int:
-        """Draw a pipe-output tab. Returns the clamped scroll value."""
-        sel_site = self.sites[self.selected_site_idx] if self.sites else None
-        tab_x    = x1 + 1
+    def _draw_pipe_tab_bar(self, y1, x1, x2) -> None:
+        """Draw the '  Site: <site> <site> ...' switcher row shared by the
+        Stdout/Stderr tabs."""
+        tab_x = x1 + 1
         self.safe_addstr(self.stdscr, y1, x1, "  Site: ",
                     curses.color_pair(self.C_DIM))
         tab_x += 8
@@ -5268,14 +5294,63 @@ class JJDlpDashboard:
             self.safe_addstr(self.stdscr, y1, tab_x, label, attr)
             tab_x += len(label) + 1
 
-        self.draw_box(self.stdscr, y1 + 1, x1, y2, x2, self.C_DIM)
-        self.safe_addstr(self.stdscr, y1 + 1, x1 + 2, f" {title} ",
-                    curses.color_pair(self.C_DIM) | curses.A_BOLD)
+    def _draw_streamer_panel(self, y1, x1, y2, x2, site: Optional["SiteState"],
+                             is_active: bool = False) -> None:
+        """Draw the STREAMERS panel: 'All Streamers' plus one row per
+        streamer on the currently selected site. Selection is tracked in
+        self._streamer_panel_sel (0 = All Streamers, 1..N = streamer index).
+        """
+        border_pair = self.C_HILIGHT if is_active else self.C_DIM
+        self.draw_box(self.stdscr, y1, x1, y2, x2, border_pair)
+        title = " STREAMERS " if not is_active else " STREAMERS [Tab] "
+        self.safe_addstr(self.stdscr, y1, x1 + 2, title,
+                    curses.color_pair(border_pair) | curses.A_BOLD)
+
+        streamers = list(site.dash_all_streamers) if site is not None else []
+        # Clamp selection in case the streamer list shrank (e.g. one removed).
+        self._streamer_panel_sel = min(self._streamer_panel_sel, len(streamers))
+
+        rows = ["All Streamers"] + streamers
+        visible_rows = (y2 - y1) - 1
+        sel = self._streamer_panel_sel
+
+        max_scroll = max(0, len(rows) - visible_rows)
+        self._streamer_panel_scroll = min(self._streamer_panel_scroll, max_scroll)
+        if sel < self._streamer_panel_scroll:
+            self._streamer_panel_scroll = sel
+        elif sel >= self._streamer_panel_scroll + visible_rows:
+            self._streamer_panel_scroll = sel - visible_rows + 1
+
+        start = self._streamer_panel_scroll
+        view  = rows[start : start + visible_rows]
+        row_width = max(1, (x2 - x1) - 2)
+
+        for i, name in enumerate(view):
+            idx = start + i
+            label = name[:row_width].ljust(row_width)
+            if idx == sel:
+                attr = (curses.color_pair(self.C_HILIGHT) | curses.A_BOLD
+                         | (curses.A_REVERSE if is_active else 0))
+            else:
+                attr = curses.color_pair(self.C_DIM)
+            self.safe_addstr(self.stdscr, y1 + 1 + i, x1 + 1, label, attr)
+
+    def _draw_pipe_tab(self, y1, x1, y2, x2, title: str, lines: List[str],
+                       scroll: int = 0, is_active: bool = False) -> int:
+        """Draw a pipe-output content box (STREAMERS panel is drawn
+        separately). Returns the clamped scroll value."""
+        sel_site = self.sites[self.selected_site_idx] if self.sites else None
+
+        border_pair = self.C_HILIGHT if is_active else self.C_DIM
+        self.draw_box(self.stdscr, y1, x1, y2, x2, border_pair)
+        title_suffix = " [Tab]" if is_active else ""
+        self.safe_addstr(self.stdscr, y1, x1 + 2, f" {title}{title_suffix} ",
+                    curses.color_pair(border_pair) | curses.A_BOLD)
 
         if sel_site is None:
             return 0
 
-        visible_rows = (y2 - y1) - 3
+        visible_rows = (y2 - y1) - 2
         line_width   = max(1, (x2 - x1) - 4)
 
         wrapped   = self._wrap_lines(lines, line_width)
@@ -5286,56 +5361,103 @@ class JJDlpDashboard:
         view  = wrapped[start : start + visible_rows]
 
         for i, line in enumerate(view):
-            self.safe_addstr(self.stdscr, y1 + 2 + i, x1 + 2, line,
+            self.safe_addstr(self.stdscr, y1 + 1 + i, x1 + 2, line,
                         curses.color_pair(self.C_DIM))
 
         # Scroll indicator
         if max_scroll > 0:
             scroll_info = f" ↑{scroll}/{max_scroll} " if scroll else " (end) "
-            self.safe_addstr(self.stdscr, y1 + 1, x2 - len(scroll_info) - 1,
+            self.safe_addstr(self.stdscr, y1, x2 - len(scroll_info) - 1,
                         scroll_info, curses.color_pair(self.C_WARN))
 
         return scroll
 
+    # Width of the STREAMERS panel on the Stdout/Stderr tabs.
+    _STREAMER_PANEL_W = 24
+
     def draw_stdout_tab(self, y1, x1, y2, x2):
         sel_site = self.sites[self.selected_site_idx] if self.sites else None
+
+        self._draw_pipe_tab_bar(y1, x1, x2)
+
+        panel_x2 = min(x2, x1 + self._STREAMER_PANEL_W)
+        self._draw_streamer_panel(y1 + 1, x1, y2, panel_x2, sel_site,
+                                   is_active=(self._pipe_focus == "streamers"))
+
+        streamers = list(sel_site.dash_all_streamers) if sel_site is not None else []
+        sel_idx   = self._streamer_panel_sel
+
         lines = []
         show_all = False
         if sel_site is not None:
-            show_all = sel_site.show_checker_stdout
-            with sel_site.dash_lock:
-                raw = list(sel_site.dash_stdout_lines)
-            if show_all:
-                # Strip the internal prefix tag before displaying
-                lines = [
-                    (ln[len(_CHECKER_STDOUT_PREFIX):] if ln.startswith(_CHECKER_STDOUT_PREFIX) else ln)
-                    for ln in raw
-                ]
+            if sel_idx == 0:
+                # All Streamers — unchanged behaviour, including the
+                # checker "Show All" toggle.
+                show_all = sel_site.show_checker_stdout
+                with sel_site.dash_lock:
+                    raw = list(sel_site.dash_stdout_lines)
+                if show_all:
+                    # Strip the internal prefix tag before displaying
+                    lines = [
+                        (ln[len(_CHECKER_STDOUT_PREFIX):] if ln.startswith(_CHECKER_STDOUT_PREFIX) else ln)
+                        for ln in raw
+                    ]
+                else:
+                    # Only downloader output (no checker prefix)
+                    lines = [ln for ln in raw if not ln.startswith(_CHECKER_STDOUT_PREFIX)]
             else:
-                # Only downloader output (no checker prefix)
-                lines = [ln for ln in raw if not ln.startswith(_CHECKER_STDOUT_PREFIX)]
-        title = " STDOUT — Show All: ON  (Press A to toggle) " if show_all else " STDOUT — Show All: OFF (Press A to toggle) "
+                # One specific streamer — its own yt-dlp output only, no
+                # checker JSON.
+                streamer = streamers[sel_idx - 1] if sel_idx - 1 < len(streamers) else ""
+                with sel_site.dash_lock:
+                    lines = list(sel_site.dash_stdout_lines_by_streamer.get(streamer, ()))
+
+        if sel_idx == 0:
+            title = " STDOUT — Show All: ON  (Press A to toggle) " if show_all else " STDOUT — Show All: OFF (Press A to toggle) "
+        else:
+            title = f" STDOUT — {streamers[sel_idx - 1] if sel_idx - 1 < len(streamers) else ''} "
         self._stdout_scroll = self._draw_pipe_tab(
-            y1, x1, y2, x2, title, lines, self._stdout_scroll)
+            y1 + 1, panel_x2 + 1, y2, x2, title, lines, self._stdout_scroll,
+            is_active=(self._pipe_focus == "content"))
 
     def draw_stderr_tab(self, y1, x1, y2, x2):
         sel_site = self.sites[self.selected_site_idx] if self.sites else None
+
+        self._draw_pipe_tab_bar(y1, x1, x2)
+
+        panel_x2 = min(x2, x1 + self._STREAMER_PANEL_W)
+        self._draw_streamer_panel(y1 + 1, x1, y2, panel_x2, sel_site,
+                                   is_active=(self._pipe_focus == "streamers"))
+
+        streamers = list(sel_site.dash_all_streamers) if sel_site is not None else []
+        sel_idx   = self._streamer_panel_sel
+
         lines = []
         show_all = False
         if sel_site is not None:
-            show_all = sel_site.show_checker_stderr
-            with sel_site.dash_lock:
-                raw = list(sel_site.dash_stderr_lines)
-            if show_all:
-                lines = [
-                    (ln[len(_CHECKER_STDERR_PREFIX):] if ln.startswith(_CHECKER_STDERR_PREFIX) else ln)
-                    for ln in raw
-                ]
+            if sel_idx == 0:
+                show_all = sel_site.show_checker_stderr
+                with sel_site.dash_lock:
+                    raw = list(sel_site.dash_stderr_lines)
+                if show_all:
+                    lines = [
+                        (ln[len(_CHECKER_STDERR_PREFIX):] if ln.startswith(_CHECKER_STDERR_PREFIX) else ln)
+                        for ln in raw
+                    ]
+                else:
+                    lines = [ln for ln in raw if not ln.startswith(_CHECKER_STDERR_PREFIX)]
             else:
-                lines = [ln for ln in raw if not ln.startswith(_CHECKER_STDERR_PREFIX)]
-        title = " STDERR — Show All: ON  (Press A to toggle) " if show_all else " STDERR — Show All: OFF (Press A to toggle) "
+                streamer = streamers[sel_idx - 1] if sel_idx - 1 < len(streamers) else ""
+                with sel_site.dash_lock:
+                    lines = list(sel_site.dash_stderr_lines_by_streamer.get(streamer, ()))
+
+        if sel_idx == 0:
+            title = " STDERR — Show All: ON  (Press A to toggle) " if show_all else " STDERR — Show All: OFF (Press A to toggle) "
+        else:
+            title = f" STDERR — {streamers[sel_idx - 1] if sel_idx - 1 < len(streamers) else ''} "
         self._stderr_scroll = self._draw_pipe_tab(
-            y1, x1, y2, x2, title, lines, self._stderr_scroll)
+            y1 + 1, panel_x2 + 1, y2, x2, title, lines, self._stderr_scroll,
+            is_active=(self._pipe_focus == "content"))
 
     # ── EventSub tab ─────────────────────────────────────────────────────────
     def draw_eventsub_tab(self, y1, x1, y2, x2):
@@ -5416,20 +5538,36 @@ class JJDlpDashboard:
                 sel_site = self.sites[self.selected_site_idx] if self.sites else None
                 show_all = sel_site.show_checker_stdout if sel_site else False
                 show_label = "ON " if show_all else "OFF"
-                hints = (f"  LEFT/RIGHT: switch tabs"
-                         f"  [: prev site  ]: next site"
-                         f"  UP: scroll up  DOWN: scroll down"
-                         f"  A: Show All [{show_label}]"
-                         f"  C: colors  Q: quit  ")
+                focus_hint = ("UP/DOWN: select streamer" if self._pipe_focus == "streamers"
+                               else "UP/DOWN: scroll")
+                if self._streamer_panel_sel == 0:
+                    hints = (f"  LEFT/RIGHT: switch tabs"
+                             f"  [: prev site  ]: next site"
+                             f"  Tab: switch panel  {focus_hint}"
+                             f"  A: Show All [{show_label}]"
+                             f"  C: colors  Q: quit  ")
+                else:
+                    hints = (f"  LEFT/RIGHT: switch tabs"
+                             f"  [: prev site  ]: next site"
+                             f"  Tab: switch panel  {focus_hint}"
+                             f"  C: colors  Q: quit  ")
             elif current_tab == "Stderr":
                 sel_site = self.sites[self.selected_site_idx] if self.sites else None
                 show_all = sel_site.show_checker_stderr if sel_site else False
                 show_label = "ON " if show_all else "OFF"
-                hints = (f"  LEFT/RIGHT: switch tabs"
-                         f"  [: prev site  ]: next site"
-                         f"  UP: scroll up  DOWN: scroll down"
-                         f"  A: Show All [{show_label}]"
-                         f"  C: colors  Q: quit  ")
+                focus_hint = ("UP/DOWN: select streamer" if self._pipe_focus == "streamers"
+                               else "UP/DOWN: scroll")
+                if self._streamer_panel_sel == 0:
+                    hints = (f"  LEFT/RIGHT: switch tabs"
+                             f"  [: prev site  ]: next site"
+                             f"  Tab: switch panel  {focus_hint}"
+                             f"  A: Show All [{show_label}]"
+                             f"  C: colors  Q: quit  ")
+                else:
+                    hints = (f"  LEFT/RIGHT: switch tabs"
+                             f"  [: prev site  ]: next site"
+                             f"  Tab: switch panel  {focus_hint}"
+                             f"  C: colors  Q: quit  ")
             elif current_tab == "Dashboard":
                 sort_lbl = self.sort_manager.current_sort_label
                 hints = (f"  LEFT/RIGHT: switch tabs"
@@ -5802,41 +5940,65 @@ class JJDlpDashboard:
             self.selected_site_idx = (self.selected_site_idx + 1) % max(1, len(self.sites))
             # Reset scroll when switching sites
             self._log_scroll = self._stdout_scroll = self._stderr_scroll = 0
+            self._streamer_panel_sel = self._streamer_panel_scroll = 0
             self.config_editor.notify_site_changed(self.selected_site_idx)
         elif key in (ord('['), curses.KEY_PPAGE):   # prev site
             self.selected_site_idx = (self.selected_site_idx - 1) % max(1, len(self.sites))
             # Reset scroll when switching sites
             self._log_scroll = self._stdout_scroll = self._stderr_scroll = 0
+            self._streamer_panel_sel = self._streamer_panel_scroll = 0
             self.config_editor.notify_site_changed(self.selected_site_idx)
-        elif key in (curses.KEY_UP, ord('k')):
+        elif key == ord('\t') and current_tab_name in ("Stdout", "Stderr"):
+            # Cycle focus between the STREAMERS panel and the content pane,
+            # the same way Tab cycles panels on the Config tab.
+            self._pipe_focus = "content" if self._pipe_focus == "streamers" else "streamers"
+        elif key == curses.KEY_UP:
             tab = self.TABS[self.selected_tab]
             if tab == "Log":
                 self._log_scroll += 1
-            elif tab == "Stdout":
-                self._stdout_scroll += 1
-            elif tab == "Stderr":
-                self._stderr_scroll += 1
-        elif key in (curses.KEY_DOWN, ord('j')):
+            elif tab in ("Stdout", "Stderr"):
+                if self._pipe_focus == "streamers":
+                    self._streamer_panel_sel = max(0, self._streamer_panel_sel - 1)
+                elif tab == "Stdout":
+                    self._stdout_scroll += 1
+                else:
+                    self._stderr_scroll += 1
+        elif key == curses.KEY_DOWN:
             tab = self.TABS[self.selected_tab]
             if tab == "Log":
                 self._log_scroll = max(0, self._log_scroll - 1)
-            elif tab == "Stdout":
-                self._stdout_scroll = max(0, self._stdout_scroll - 1)
-            elif tab == "Stderr":
-                self._stderr_scroll = max(0, self._stderr_scroll - 1)
+            elif tab in ("Stdout", "Stderr"):
+                if self._pipe_focus == "streamers":
+                    sel_site = self.sites[self.selected_site_idx] if self.sites else None
+                    max_idx  = len(sel_site.dash_all_streamers) if sel_site is not None else 0
+                    self._streamer_panel_sel = min(max_idx, self._streamer_panel_sel + 1)
+                elif tab == "Stdout":
+                    self._stdout_scroll = max(0, self._stdout_scroll - 1)
+                else:
+                    self._stderr_scroll = max(0, self._stderr_scroll - 1)
+        elif key == ord('k'):   # Log tab only — Stdout/Stderr use Tab + arrow keys
+            if self.TABS[self.selected_tab] == "Log":
+                self._log_scroll += 1
+        elif key == ord('j'):
+            if self.TABS[self.selected_tab] == "Log":
+                self._log_scroll = max(0, self._log_scroll - 1)
         elif key in (ord('a'), ord('A')):
             if current_tab_name == "Log" and self.sites:
                 sel = self.sites[self.selected_site_idx]
                 sel.show_debug_log = not sel.show_debug_log
                 self._log_scroll = 0
             elif current_tab_name == "Stdout" and self.sites:
-                sel = self.sites[self.selected_site_idx]
-                sel.show_checker_stdout = not sel.show_checker_stdout
-                self._stdout_scroll = 0
+                # "Show All" only means anything on the All Streamers view —
+                # a specific streamer never has checker JSON to show.
+                if self._streamer_panel_sel == 0:
+                    sel = self.sites[self.selected_site_idx]
+                    sel.show_checker_stdout = not sel.show_checker_stdout
+                    self._stdout_scroll = 0
             elif current_tab_name == "Stderr" and self.sites:
-                sel = self.sites[self.selected_site_idx]
-                sel.show_checker_stderr = not sel.show_checker_stderr
-                self._stderr_scroll = 0
+                if self._streamer_panel_sel == 0:
+                    sel = self.sites[self.selected_site_idx]
+                    sel.show_checker_stderr = not sel.show_checker_stderr
+                    self._stderr_scroll = 0
             else:
                 self._start_mgmt("add")
         elif key in (ord('r'), ord('R')):

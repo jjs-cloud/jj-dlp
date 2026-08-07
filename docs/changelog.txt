@@ -1,4 +1,5 @@
-- fixed the "Warning: Not Recording" notification
+- fixed the "‼ RECORDING FAILURE ‼" notification
+- stdout and stderr tab can now be filtered by streamer
 
 ====================
 ====================
