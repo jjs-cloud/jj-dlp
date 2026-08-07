@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.25.16"
+__version__ = "1.25.17"
 
 import subprocess
 import time
@@ -2364,19 +2364,13 @@ def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) ->
 
 def _refresh_restart_anchor_if_growing(site: "SiteState", streamer: str,
                                         growth_seen: bool, reason: str) -> None:
-    """Refresh last_restart_anchor for an in-loop self-restart (the recording
-    thread killing and retrying itself — stall recovery, ffmpeg-error
-    threshold, or any future restart branch added to record_stream()).
+    """Refresh last_restart_anchor for an in-loop self-restart (stall
+    recovery, ffmpeg-error threshold, or any future restart branch).
 
-    Only meaningful when growth_seen is True: that's what distinguishes "this
-    attempt was actually recording and is restarting for an operational
-    reason" from "this attempt never confirmed a write in the first place."
-    In the latter case the original deadline should be left alone so a
-    genuinely failed attempt still surfaces NOTIFY_NO_CONFIRM_FILE.
-
-    This is for in-loop self-restarts only. External evictions (LQ, quality
-    upgrade, concurrency) should go through SiteState.evict_and_restart()
-    instead, which handles anchor refresh with different timing assumptions.
+    Only refreshes when growth_seen is True — otherwise this attempt never
+    confirmed a write, and NOTIFY_NO_CONFIRM_FILE should still fire.
+    In-loop self-restarts only; external evictions should use
+    SiteState.evict_and_restart() instead.
     """
     if not growth_seen:
         return
@@ -3147,13 +3141,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 if ffmpeg_error_event.is_set():
                     site.log_line(f"ffmpeg error threshold reached for {streamer} — restarting")
 
-                    # Same reasoning as the stall-detected branch below: this
-                    # attempt was actually recording, so give the next
-                    # attempt's NOTIFY_NO_CONFIRM_FILE deadline a fresh
-                    # window instead of reusing the original
-                    # live_since/enable_anchor (which goes stale across
-                    # repeated restarts and fires a false write-failure
-                    # alert even though the stream is recording fine).
+                    # Same reasoning as stall-detected below: this attempt
+                    # was recording, so give the next attempt's deadline a
+                    # fresh window instead of a stale live_since/enable_anchor.
                     _refresh_restart_anchor_if_growing(
                         site, streamer, growth_seen, reason="ffmpeg_error_threshold")
 
@@ -3492,14 +3482,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     elif stall_detected:
                         site.log_line(f"Stall detected for {streamer} — restarting")
 
-                        # Growth was already confirmed this attempt (that's
-                        # what makes this a "stall" rather than a
-                        # never-confirmed start), so the recording was
-                        # working. Mark the restart time so the next
-                        # attempt's NOTIFY_NO_CONFIRM_FILE deadline gets a
-                        # fresh window instead of reusing the original
-                        # live_since/enable_anchor, which would fire the
-                        # write-failure alert.
+                        # Growth was already confirmed (that's what makes
+                        # this a "stall" not a never-confirmed start), so
+                        # give the next attempt's deadline a fresh window.
                         _refresh_restart_anchor_if_growing(
                             site, streamer, growth_seen, reason="stall_detected")
 
