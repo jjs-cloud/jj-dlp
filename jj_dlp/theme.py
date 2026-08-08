@@ -614,7 +614,7 @@ def apply_palette(dashboard):
 
 # ─────────────────────────────────────────────────────────────────────────
 # ThemeManager — owns the theme popup (base scheme picker, role color editor,
-# and per-site browser), bound to the repurposed 'c' key.
+# and per-site browser), bound to the 't' key.
 # ─────────────────────────────────────────────────────────────────────────
 class ThemeManager:
     """Popup UI for customizing themes. Mirrors the shape of
@@ -638,6 +638,7 @@ class ThemeManager:
         self.popup_open = False
         self.mode = self.MODE_MAIN
         self._main_sel = 0
+        self._solid_bg = True   # solid (opaque) popup background; 'f' toggles
 
         self._scheme_sel = _state.get('base_scheme_idx', 0)
 
@@ -667,6 +668,13 @@ class ThemeManager:
         (keys are consumed and never leak to the dashboard while open)."""
         if not self.popup_open:
             return False
+
+        if key in (ord('f'), ord('F')) and self.mode != self.MODE_SITE_LIST:
+            # Toggle between a solid (opaque) and translucent popup background.
+            # Not active in the site browser so 'f' can still be typed into
+            # the filter there.
+            self._solid_bg = not self._solid_bg
+            return True
 
         if self.mode == self.MODE_MAIN:
             self._handle_main_key(key)
@@ -877,6 +885,11 @@ class ThemeManager:
         by2 = min(sh - 1, by1 + h)
         bx2 = min(sw - 1, bx1 + w)
         db = self.dashboard
+        if self._solid_bg:
+            # Opaque fill so the dashboard content behind the popup is hidden.
+            fill_attr = curses.color_pair(db.C_NORMAL)
+            for y in range(by1, by2 + 1):
+                db.safe_addstr(stdscr, y, bx1, " " * (bx2 - bx1 + 1), fill_attr)
         db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_CHROME)
         return by1, bx1, by2, bx2
 
@@ -894,7 +907,7 @@ class ThemeManager:
                      if i == self._main_sel else curses.color_pair(db.C_NORMAL))
             prefix = "> " if i == self._main_sel else "  "
             db.safe_addstr(stdscr, by1 + 2 + i, bx1 + 2, prefix + opt, attr_)
-        db.safe_addstr(stdscr, by2, bx1 + 2, " \u2191\u2193:Move  Enter:Select  Esc:Close ",
+        db.safe_addstr(stdscr, by2, bx1 + 2, " \u2191\u2193:Move  Enter:Select  f:BG  Esc:Close ",
                         curses.color_pair(db.C_INVHEAD))
 
     def _draw_scheme_select(self, stdscr):
@@ -915,7 +928,7 @@ class ThemeManager:
                 attr_ = curses.color_pair(db.C_NORMAL)
             prefix = "> " if i == self._scheme_sel else ("* " if is_cur else "  ")
             db.safe_addstr(stdscr, by1 + 2 + i, bx1 + 2, (prefix + name)[:w - 4], attr_)
-        db.safe_addstr(stdscr, by2, bx1 + 2, " \u2191\u2193:Move  Enter:Apply  Esc:Back ",
+        db.safe_addstr(stdscr, by2, bx1 + 2, " \u2191\u2193:Move  Enter:Apply  f:BG  Esc:Back ",
                         curses.color_pair(db.C_INVHEAD))
 
     def _draw_role_list(self, stdscr):
@@ -938,7 +951,7 @@ class ThemeManager:
             line = f"{prefix}{label:<24}{fg_name}"
             db.safe_addstr(stdscr, by1 + 2 + i, bx1 + 2, line[:w - 4], attr_)
         db.safe_addstr(stdscr, by2, bx1 + 2,
-                        " Apply to active scheme.  r:Reset ",
+                        " f:BG  r:Reset ",
                         curses.color_pair(db.C_INVHEAD))
 
     def _draw_role_edit(self, stdscr):

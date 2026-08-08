@@ -4410,7 +4410,7 @@ class JJDlpDashboard:
         self.file_manager = FileManagerTab(self)
 
         # Theme manager — owns the theme popup (base scheme, role colors,
-        # and per-call-site overrides), bound to the 'c' key.
+        # and per-call-site overrides), bound to the 't' key.
         self.theme_manager = theme.ThemeManager(self)
 
         # ── Changelog popup state ─────────────────────────────────────────────
@@ -4526,9 +4526,9 @@ class JJDlpDashboard:
     }
 
     def randomize_colors(self):
-        """Cycle to the next color scheme (kept for any external callers;
-        the 'c' key now opens the theme popup instead, which offers the
-        same scheme picker plus role/site customization)."""
+        """Cycle to the next color scheme. Bound to the 'c' key ('C' for
+        Colors); the 't' key opens the full theme editor popup instead,
+        which offers the same scheme picker plus role/site customization."""
         self._color_scheme_idx = (self._color_scheme_idx + 1) % len(self.COLOR_SCHEMES)
         theme.get_state()['base_scheme_idx'] = self._color_scheme_idx
         self._apply_color_scheme()
@@ -5637,7 +5637,7 @@ class JJDlpDashboard:
                 hints = (f"  LEFT/RIGHT: switch tabs"
                          f"  [: prev site  ]: next site"
                          f"  UP: scroll up  DOWN: scroll down"
-                         f"  C: theme  Q: quit  ")
+                         f"  C: Colors  Q: quit  ")
             elif current_tab == "Stdout":
                 sel_site = self.sites[self.selected_site_idx] if self.sites else None
                 show_all = sel_site.show_checker_stdout if sel_site else False
@@ -5649,12 +5649,12 @@ class JJDlpDashboard:
                              f"  [: prev site  ]: next site"
                              f"  Tab: switch panel  {focus_hint}"
                              f"  A: Show All [{show_label}]"
-                             f"  C: theme  Q: quit  ")
+                             f"  C: Colors  Q: quit  ")
                 else:
                     hints = (f"  LEFT/RIGHT: switch tabs"
                              f"  [: prev site  ]: next site"
                              f"  Tab: switch panel  {focus_hint}"
-                             f"  C: theme  Q: quit  ")
+                             f"  C: Colors  Q: quit  ")
             elif current_tab == "Stderr":
                 sel_site = self.sites[self.selected_site_idx] if self.sites else None
                 show_all = sel_site.show_checker_stderr if sel_site else False
@@ -5666,34 +5666,34 @@ class JJDlpDashboard:
                              f"  [: prev site  ]: next site"
                              f"  Tab: switch panel  {focus_hint}"
                              f"  A: Show All [{show_label}]"
-                             f"  C: theme  Q: quit  ")
+                             f"  C: Colors  Q: quit  ")
                 else:
                     hints = (f"  LEFT/RIGHT: switch tabs"
                              f"  [: prev site  ]: next site"
                              f"  Tab: switch panel  {focus_hint}"
-                             f"  C: theme  Q: quit  ")
+                             f"  C: Colors  Q: quit  ")
             elif current_tab == "Dashboard":
                 sort_lbl = self.sort_manager.current_sort_label
                 hints = (f"  LEFT/RIGHT: switch tabs"
                          f"  [: prev site  ]: next site"
                          f"  A: add/enable streamer R: remove streamer D: disable streamer"
                          f"  S: Sort"
-                         f"  C: theme  Q: quit  ")
+                         f"  C: Colors  Q: quit  ")
             elif current_tab == "Config":
                 hints = (f"  LEFT/RIGHT: switch tabs"
                          f"  [: prev site  ]: next site"
                          f"  Tab: Next Panel"
                          f"  G: Changelog"
-                         f"  C: theme  Q: quit  ")
+                         f"  C: Colors  T: Theme Editor  Q: quit  ")
             elif current_tab == "File Manager":
                 hints = (f"  \u2191\u2193: select  Enter: open  Space: show folder"
                          f"  DEL: delete  S: sort  T: toggle trash  M: more options"
-                         f"  C: theme  Q: quit  ")
+                         f"  C: Colors  Q: quit  ")
             else:
                 hints = (f"  LEFT/RIGHT: switch tabs"
                          f"  [: prev site  ]: next site"
                          f"  Tab: Next Panel"
-                         f"  C: theme  Q: quit  ")
+                         f"  C: Colors  Q: quit  ")
         self.safe_addstr(self.stdscr, h - 1, 0,
                     hints.ljust(w - 1)[:w - 1],
                     theme.attr(self, "main_jjdlpdashboard_draw_footer_invhead", self.C_INVHEAD, False))
@@ -6118,6 +6118,8 @@ class JJDlpDashboard:
         elif key in (ord('d'), ord('D')):
             self._start_mgmt("disable")
         elif key in (ord('c'), ord('C')):
+            self.randomize_colors()
+        elif key in (ord('t'), ord('T')):
             self.theme_manager.open_popup()
         elif key in (ord('s'), ord('S')):
             if current_tab_name == "Dashboard":
