@@ -614,7 +614,7 @@ def apply_palette(dashboard):
 
 # ─────────────────────────────────────────────────────────────────────────
 # ThemeManager — owns the theme popup (base scheme picker, role color editor,
-# and per-site browser), bound to the 't' key.
+# and per-site browser), bound to the 'n' key.
 # ─────────────────────────────────────────────────────────────────────────
 class ThemeManager:
     """Popup UI for customizing themes. Mirrors the shape of

@@ -1,7 +1,8 @@
-v1.25.24
+v1.26.0
 
 - fixed the "‼ RECORDING FAILURE ‼" notification
-- stdout and stderr tab can now be filtered by streamer.  Log files are now separated by streamer.
+- stdout and stderr tab can now be filtered by streamer.  Log files (when enabled) are now separated by streamer.
+- added 3 new color themes and also a theme manager (open with the N key) so you can customize the color of every part of jj-dlp 
 
 ====================
 ====================

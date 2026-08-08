@@ -4410,7 +4410,7 @@ class JJDlpDashboard:
         self.file_manager = FileManagerTab(self)
 
         # Theme manager — owns the theme popup (base scheme, role colors,
-        # and per-call-site overrides), bound to the 't' key.
+        # and per-call-site overrides), bound to the 'n' key.
         self.theme_manager = theme.ThemeManager(self)
 
         # ── Changelog popup state ─────────────────────────────────────────────
@@ -4527,7 +4527,7 @@ class JJDlpDashboard:
 
     def randomize_colors(self):
         """Cycle to the next color scheme. Bound to the 'c' key ('C' for
-        Colors); the 't' key opens the full theme editor popup instead,
+        Colors); the 'n' key opens the full theme editor popup instead,
         which offers the same scheme picker plus role/site customization."""
         self._color_scheme_idx = (self._color_scheme_idx + 1) % len(self.COLOR_SCHEMES)
         theme.get_state()['base_scheme_idx'] = self._color_scheme_idx
@@ -5684,7 +5684,7 @@ class JJDlpDashboard:
                          f"  [: prev site  ]: next site"
                          f"  Tab: Next Panel"
                          f"  G: Changelog"
-                         f"  C: Colors  T: Theme Editor  Q: quit  ")
+                         f"  C: Colors  N: Theme Manager  Q: quit  ")
             elif current_tab == "File Manager":
                 hints = (f"  \u2191\u2193: select  Enter: open  Space: show folder"
                          f"  DEL: delete  S: sort  T: toggle trash  M: more options"
@@ -6119,7 +6119,7 @@ class JJDlpDashboard:
             self._start_mgmt("disable")
         elif key in (ord('c'), ord('C')):
             self.randomize_colors()
-        elif key in (ord('t'), ord('T')):
+        elif key in (ord('n'), ord('N')):
             self.theme_manager.open_popup()
         elif key in (ord('s'), ord('S')):
             if current_tab_name == "Dashboard":
