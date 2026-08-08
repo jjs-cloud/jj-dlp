@@ -4495,12 +4495,12 @@ class JJDlpDashboard:
          curses.COLOR_CYAN,    curses.COLOR_BLACK,   curses.COLOR_GREEN,
          curses.COLOR_WHITE,   curses.COLOR_CYAN,    curses.COLOR_YELLOW,
          curses.COLOR_WHITE,   curses.COLOR_RED),
-        # 7: DOS Red
-        (curses.COLOR_WHITE,   curses.COLOR_WHITE,   curses.COLOR_BLACK,
+        # 7: DOS Red (red alert / danger screen)
+        (curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_WHITE,
          curses.COLOR_YELLOW,  curses.COLOR_GREEN,   curses.COLOR_RED,
          curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_WHITE,
-         curses.COLOR_MAGENTA, curses.COLOR_BLACK,   curses.COLOR_GREEN,
-         curses.COLOR_WHITE,   curses.COLOR_MAGENTA, curses.COLOR_YELLOW,
+         curses.COLOR_YELLOW,  curses.COLOR_BLACK,   curses.COLOR_GREEN,
+         curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_WHITE,
          curses.COLOR_WHITE,   curses.COLOR_BLACK),
         # 8: DOS White (classic light-background word-processor screen)
         (curses.COLOR_BLUE,    curses.COLOR_WHITE,   curses.COLOR_BLUE,
