@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.0"
+__version__ = "1.26.1"
 
 import subprocess
 import time
@@ -4385,6 +4385,12 @@ class JJDlpDashboard:
         self._log_scroll    = 0
         self._stdout_scroll = 0
         self._stderr_scroll = 0
+        # When scrolled up (scroll > 0), the displayed lines are frozen to a
+        # snapshot so live output can't keep shoving the viewport around. Set
+        # while scroll > 0, cleared when the user scrolls back to 0 (live).
+        self._log_frozen_lines    = None
+        self._stdout_frozen_lines = None
+        self._stderr_frozen_lines = None
         # STREAMERS panel (Stdout/Stderr tabs): 0 = "All Streamers",
         # 1..N = index+1 into site.dash_all_streamers. Shared by both tabs
         # and reset whenever the selected site changes.
@@ -5286,6 +5292,21 @@ class JJDlpDashboard:
     # ── Line-wrap helper ─────────────────────────────────────────────────────
     _CONTROL_CHAR_RE = _re.compile(r'[\x00-\x08\x0b-\x1f\x7f]')
 
+    @staticmethod
+    def _apply_freeze(scroll: int, live_lines: List[str],
+                      frozen: Optional[List[str]]) -> "Tuple[Optional[List[str]], List[str]]":
+        """Return (updated_frozen, lines_to_draw) for the scroll-up freeze.
+
+        scroll == 0 means live-following: drop any stale snapshot.
+        scroll >  0 freezes the display on a snapshot so active writers
+        (ffmpeg) can't keep shifting the viewport while the user reads.
+        """
+        if scroll == 0:
+            return None, live_lines
+        if frozen is None:
+            return list(live_lines), list(live_lines)
+        return frozen, frozen
+
     @classmethod
     def _sanitize_line(cls, line: str) -> str:
         """Strip control characters (stray '\\r' in particular) that would
@@ -5354,6 +5375,9 @@ class JJDlpDashboard:
         display_lines = (
             _merge_lines_by_timestamp(raw_lines, raw_debug) if raw_debug else raw_lines
         )
+
+        self._log_frozen_lines, display_lines = self._apply_freeze(
+            self._log_scroll, display_lines, self._log_frozen_lines)
 
         wrapped = self._wrap_lines(display_lines, line_width)
 
@@ -5520,6 +5544,8 @@ class JJDlpDashboard:
             title = " STDOUT — Show All: ON  (Press A to toggle) " if show_all else " STDOUT — Show All: OFF (Press A to toggle) "
         else:
             title = f" STDOUT — {streamers[sel_idx - 1] if sel_idx - 1 < len(streamers) else ''} "
+        self._stdout_frozen_lines, lines = self._apply_freeze(
+            self._stdout_scroll, lines, self._stdout_frozen_lines)
         self._stdout_scroll = self._draw_pipe_tab(
             y1 + 1, panel_x2 + 1, y2, x2, title, lines, self._stdout_scroll,
             is_active=(self._pipe_focus == "content"))
@@ -5559,6 +5585,8 @@ class JJDlpDashboard:
             title = " STDERR — Show All: ON  (Press A to toggle) " if show_all else " STDERR — Show All: OFF (Press A to toggle) "
         else:
             title = f" STDERR — {streamers[sel_idx - 1] if sel_idx - 1 < len(streamers) else ''} "
+        self._stderr_frozen_lines, lines = self._apply_freeze(
+            self._stderr_scroll, lines, self._stderr_frozen_lines)
         self._stderr_scroll = self._draw_pipe_tab(
             y1 + 1, panel_x2 + 1, y2, x2, title, lines, self._stderr_scroll,
             is_active=(self._pipe_focus == "content"))
@@ -6071,6 +6099,8 @@ class JJDlpDashboard:
             elif tab in ("Stdout", "Stderr"):
                 if self._pipe_focus == "streamers":
                     self._streamer_panel_sel = max(0, self._streamer_panel_sel - 1)
+                    # A different streamer buffer starts back at live-following.
+                    self._stdout_scroll = self._stderr_scroll = 0
                 elif tab == "Stdout":
                     self._stdout_scroll += 1
                 else:
@@ -6084,6 +6114,8 @@ class JJDlpDashboard:
                     sel_site = self.sites[self.selected_site_idx] if self.sites else None
                     max_idx  = len(sel_site.dash_all_streamers) if sel_site is not None else 0
                     self._streamer_panel_sel = min(max_idx, self._streamer_panel_sel + 1)
+                    # A different streamer buffer starts back at live-following.
+                    self._stdout_scroll = self._stderr_scroll = 0
                 elif tab == "Stdout":
                     self._stdout_scroll = max(0, self._stdout_scroll - 1)
                 else:
