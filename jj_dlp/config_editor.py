@@ -545,14 +545,14 @@ class PriorityEditor:
             "Enter:More Settings"
         ]
         for hint in hints:
-            db.safe_addstr(stdscr, row_y, x1 + 2, hint, theme.attr(db, "config_editor_priorityeditor_draw_dim_1", db.C_DIM, False))
+            db.safe_addstr(stdscr, row_y, x1 + 2, hint, theme.attr(db, "config_editor_priorityeditor_draw_dim_1", db.C_DIM, True))
             row_y += 1
         
         row_y += 2
 
         if not self._entries:
             db.safe_addstr(stdscr, row_y, x1 + 2, "No streamers.",
-                           theme.attr(db, "config_editor_priorityeditor_draw_dim_2", db.C_DIM, False))
+                           theme.attr(db, "config_editor_priorityeditor_draw_dim_2", db.C_DIM, True))
             return
 
         # usable character columns inside box (reduced by 1 to guarantee space for the arrow)
@@ -582,7 +582,7 @@ class PriorityEditor:
             else:
                 attr = (theme.attr(db, "config_editor_priorityeditor_draw_hilight_2", db.C_HILIGHT, True)
                         if is_sel
-                        else theme.attr(db, "config_editor_priorityeditor_draw_normal", db.C_NORMAL, False))
+                        else theme.attr(db, "config_editor_priorityeditor_draw_normal", db.C_NORMAL, True))
 
             db.safe_addstr(stdscr, row_y, x1 + 1, prefix + label, attr)
 
@@ -2880,7 +2880,7 @@ class GlobalConfigEditor:
             key_attr = (theme.attr(db, "config_editor_globalconfigeditor_draw_hilight_1", db.C_HILIGHT, True)
                         if is_sel else theme.attr(db, "config_editor_globalconfigeditor_draw_warn", db.C_WARN, True))
             val_attr = (theme.attr(db, "config_editor_globalconfigeditor_draw_hilight_2", db.C_HILIGHT, True)
-                        if is_sel else theme.attr(db, "config_editor_globalconfigeditor_draw_live_3", db.C_LIVE, False))
+                        if is_sel else theme.attr(db, "config_editor_globalconfigeditor_draw_live_3", db.C_NORMAL, True))
             self.dashboard.safe_addstr(stdscr, row_y, x1 + 1, prefix + f"{item.key:<22}", key_attr)
             val_str = "= " + str(item.value)
             
@@ -3193,7 +3193,7 @@ class ConfigEditor:
                     key_attr = (attr if is_selected
                                 else theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_warn_3", self.dashboard.C_WARN, True))
                     val_attr = (attr if is_selected
-                                else theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_live_3", self.dashboard.C_LIVE, False))
+                                else theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_live_3", self.dashboard.C_NORMAL, True))
                     self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 2, prefix + f"{item.key:<25}", key_attr)
                     if item.has_equals:
                         val_str = "= " + str(item.value)

@@ -1798,7 +1798,7 @@ class FileManagerTab:
                 elif status == "WRITING":
                     row_attr = theme.attr(db, "file_manager_filemanagertab_draw_live", db.C_LIVE, True)
                 else:
-                    row_attr = theme.attr(db, "file_manager_filemanagertab_draw_dim_3", db.C_DIM, False)
+                    row_attr = theme.attr(db, "file_manager_filemanagertab_draw_dim_3", db.C_NORMAL, True)
 
                 # Subfolder-relative paths (e.g. "StreamerName/file.mp4") get
                 # their directory part drawn in a distinct color so nested
@@ -1815,7 +1815,7 @@ class FileManagerTab:
                     pf = name_col[:len(sub_prefix)]
                     rest = name_col[len(sub_prefix):]
                     db.safe_addstr(stdscr, row_y, x1 + 2, pf,
-                                   theme.attr(db, "file_manager_filemanagertab_draw_system_2", db.C_SYSTEM, False))
+                                   theme.attr(db, "file_manager_filemanagertab_draw_system_2", db.C_WARN, False))
                     db.safe_addstr(stdscr, row_y, x1 + 2 + len(pf), rest, row_attr)
                 else:
                     db.safe_addstr(stdscr, row_y, x1 + 2, name_col, row_attr)

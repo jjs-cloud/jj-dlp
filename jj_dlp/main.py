@@ -4504,14 +4504,14 @@ class JJDlpDashboard:
         (curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_WHITE,
          curses.COLOR_YELLOW,  curses.COLOR_GREEN,   curses.COLOR_RED,
          curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_WHITE,
-         curses.COLOR_YELLOW,  curses.COLOR_BLACK,   curses.COLOR_GREEN,
-         curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_WHITE,
-         curses.COLOR_WHITE,   curses.COLOR_BLACK),
+         curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
+         curses.COLOR_YELLOW,  curses.COLOR_YELLOW,  curses.COLOR_WHITE,
+         curses.COLOR_WHITE,   curses.COLOR_BLUE),
         # 8: DOS White (classic light-background word-processor screen)
         (curses.COLOR_BLUE,    curses.COLOR_WHITE,   curses.COLOR_BLUE,
          curses.COLOR_RED,     curses.COLOR_GREEN,   curses.COLOR_WHITE,
          curses.COLOR_BLUE,    curses.COLOR_MAGENTA, curses.COLOR_RED,
-         curses.COLOR_CYAN,    curses.COLOR_WHITE,   curses.COLOR_GREEN,
+         curses.COLOR_BLACK,   curses.COLOR_WHITE,   curses.COLOR_GREEN,
          curses.COLOR_BLACK,   curses.COLOR_CYAN,    curses.COLOR_BLUE,
          curses.COLOR_WHITE,   curses.COLOR_RED),
     ]
@@ -4540,7 +4540,7 @@ class JJDlpDashboard:
         scheme. self._color_scheme_idx is kept in sync with theme's saved
         base_scheme_idx so existing readers (e.g. the DOS Red bold-tabs
         check in draw_tabs) keep working unchanged."""
-        self._color_scheme_idx = theme.get_state().get('base_scheme_idx', 0) % len(self.COLOR_SCHEMES)
+        self._color_scheme_idx = theme.get_state().get('base_scheme_idx', theme.DEFAULT_BASE_SCHEME_IDX) % len(self.COLOR_SCHEMES)
         theme.apply_palette(self)
 
     def setup_colors(self):
@@ -4595,9 +4595,9 @@ class JJDlpDashboard:
             label = f"  {tab}  "
             if i == self.selected_tab:
                 self.safe_addstr(self.stdscr, y, x, label,
-                            theme.attr(self, "main_jjdlpdashboard_draw_tabs_hilight", self.C_HILIGHT, True))
+                            theme.attr(self, "main_jjdlpdashboard_draw_tabs_hilight", self.C_HILIGHT, False))
             else:
-                attr = theme.attr(self, "main_jjdlpdashboard_draw_tabs_invhead", self.C_INVHEAD, False)
+                attr = theme.attr(self, "main_jjdlpdashboard_draw_tabs_invhead", self.C_CHROME, True)
                 if dos_red:
                     attr |= curses.A_BOLD
                 self.safe_addstr(self.stdscr, y, x, label, attr)
@@ -4704,7 +4704,7 @@ class JJDlpDashboard:
             if label:
                 self.safe_addstr(self.stdscr, row_y, x1 + 2,
                             label[:label_w].ljust(label_w),
-                            theme.attr(self, "main_jjdlpdashboard_split_after_rows_dim", self.C_DIM, False))
+                            theme.attr(self, "main_jjdlpdashboard_split_after_rows_dim", self.C_NORMAL, True))
                 self.safe_addstr(self.stdscr, row_y, x1 + 2 + label_w + 1,
                             str(val)[:inner_w - label_w - 1],
                             theme.attr(self, "main_jjdlpdashboard_split_after_rows_cpair", cpair, True))
@@ -4887,7 +4887,7 @@ class JJDlpDashboard:
 
             if disk_row_y < y2 - 1:
                 self.safe_addstr(self.stdscr, disk_row_y, x1 + 2, "── Disk ──",
-                            theme.attr(self, "main_jjdlpdashboard_update_disk_usage_system", self.C_SYSTEM, False))
+                            theme.attr(self, "main_jjdlpdashboard_update_disk_usage_system", self.C_SYSTEM, True))
                 disk_row_y += 1
             for drive, usage in self._disk_cache_results:
                 if disk_row_y >= y2 - 1:
@@ -4903,7 +4903,7 @@ class JJDlpDashboard:
                 color = self.C_LIVE if pct < 80 else (self.C_WARN if pct < 95 else self.C_REC)
                 self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
                             disk_str[:inner_w],
-                            theme.attr(self, "main_jjdlpdashboard_update_disk_usage_color", color, False))
+                            theme.attr(self, "main_jjdlpdashboard_update_disk_usage_color", color, True))
                 disk_row_y += 1
         except Exception as _disk_outer_exc:
             dbg(f"[DISK] outer exception in disk section: {type(_disk_outer_exc).__name__}: {_disk_outer_exc}")
@@ -4911,7 +4911,7 @@ class JJDlpDashboard:
         # Uptime at bottom
         self.safe_addstr(self.stdscr, y2 - 1, x1 + 2,
                     f"Up: {uptime_str}"[:inner_w],
-                    theme.attr(self, "main_jjdlpdashboard_update_disk_usage_chrome", self.C_CHROME, False))
+                    theme.attr(self, "main_jjdlpdashboard_update_disk_usage_chrome", self.C_CHROME, True))
 
     # ── Site panel (one per config) ──────────────────────────────────────────
     def draw_site_panel(self, site: "SiteState", y1, x1, y2, x2, is_selected: bool = False):
@@ -5161,11 +5161,11 @@ class JJDlpDashboard:
                     if not (is_rec and recording_res.get(s) is not None):
                         last_live_str = ""  # currently live, no "last live"
                 else:
-                    name_attr   = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_5", self.C_DIM, False)
+                    name_attr   = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_5", self.C_NORMAL, True)
                     status_str  = "[○ off]"
-                    status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_6", self.C_DIM, False)
+                    status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_6", self.C_NORMAL, True)
                     bar_str     = "─" * bar_w
-                    bar_attr    = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_7", self.C_DIM, False)
+                    bar_attr    = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_7", self.C_NORMAL, True)
                     dur_str     = ""
 
                 col = x1 + 2
@@ -5189,7 +5189,7 @@ class JJDlpDashboard:
                             and (now - ll_ts) <= _last_live_highlight_days * 86400):
                         ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_10", self.C_LIVE, True)
                     else:
-                        ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_8", self.C_DIM, False)
+                        ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_8", self.C_NORMAL, True)
                     self.safe_addstr(self.stdscr, row_y, col,
                                 last_live_str[:last_live_w],
                                 ll_attr)
@@ -5316,15 +5316,15 @@ class JJDlpDashboard:
         sel_site = self.sites[self.selected_site_idx] if self.sites else None
         tab_x    = x1 + 1
         self.safe_addstr(self.stdscr, y1, x1, "  Site: ",
-                    theme.attr(self, "main_jjdlpdashboard_draw_log_tab_dim_1", self.C_DIM, False))
+                    theme.attr(self, "main_jjdlpdashboard_draw_log_tab_dim_1", self.C_NORMAL, True))
         tab_x += 8
         for i, site in enumerate(self.sites):
             lbl = site.get_cached_config().get("site_label",
                               os.path.basename(site.config_path))
             label = f" {lbl} "
-            attr  = (theme.attr(self, "main_jjdlpdashboard_draw_log_tab_hilight", self.C_HILIGHT, True)
+            attr  = (theme.attr(self, "main_jjdlpdashboard_draw_log_tab_hilight", self.C_HILIGHT, False)
                      if i == self.selected_site_idx
-                     else theme.attr(self, "main_jjdlpdashboard_draw_log_tab_chrome", self.C_CHROME, False))
+                     else theme.attr(self, "main_jjdlpdashboard_draw_log_tab_chrome", self.C_CHROME, True))
             self.safe_addstr(self.stdscr, y1, tab_x, label, attr)
             tab_x += len(label) + 1
 
@@ -5335,7 +5335,7 @@ class JJDlpDashboard:
 
         self.draw_box(self.stdscr, y1 + 1, x1, y2, x2, self.C_DIM)
         self.safe_addstr(self.stdscr, y1 + 1, x1 + 2, title,
-                    theme.attr(self, "main_jjdlpdashboard_draw_log_tab_dim_2", self.C_DIM, True))
+                    theme.attr(self, "main_jjdlpdashboard_draw_log_tab_dim_2", self.C_NORMAL, True))
 
         if sel_site is None:
             return
@@ -5366,13 +5366,13 @@ class JJDlpDashboard:
         view  = wrapped[start : start + visible_rows]
 
         for i, line in enumerate(view):
-            attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_dim_3", self.C_DIM, False)
+            attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_dim_3", self.C_NORMAL, True)
             if "Live now" in line or "Recording started" in line:
-                attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_live", self.C_LIVE, False)
+                attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_live", self.C_LOGO, True)
             elif "ERROR" in line or "Stall" in line or "STOPPED" in line:
-                attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_rec", self.C_REC, False)
+                attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_rec", self.C_REC, True)
             elif "Warning" in line:
-                attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_warn_1", self.C_WARN, False)
+                attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_warn_1", self.C_WARN, True)
             self.safe_addstr(self.stdscr, y1 + 2 + i, x1 + 2, line, attr)
 
         # Scroll indicator
@@ -5386,15 +5386,15 @@ class JJDlpDashboard:
         Stdout/Stderr tabs."""
         tab_x = x1 + 1
         self.safe_addstr(self.stdscr, y1, x1, "  Site: ",
-                    theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_bar_dim", self.C_DIM, False))
+                    theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_bar_dim", self.C_NORMAL, True))
         tab_x += 8
         for i, site in enumerate(self.sites):
             lbl = site.get_cached_config().get("site_label",
                               os.path.basename(site.config_path))
             label = f" {lbl} "
-            attr  = (theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_bar_hilight", self.C_HILIGHT, True)
+            attr  = (theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_bar_hilight", self.C_HILIGHT, False)
                      if i == self.selected_site_idx
-                     else theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_bar_chrome", self.C_CHROME, False))
+                     else theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_bar_chrome", self.C_CHROME, True))
             self.safe_addstr(self.stdscr, y1, tab_x, label, attr)
             tab_x += len(label) + 1
 
@@ -5408,7 +5408,7 @@ class JJDlpDashboard:
         self.draw_box(self.stdscr, y1, x1, y2, x2, border_pair)
         title = " STREAMERS " if not is_active else " STREAMERS [  ] "
         self.safe_addstr(self.stdscr, y1, x1 + 2, title,
-                    theme.attr(self, "main_jjdlpdashboard_draw_streamer_panel_border_pair", border_pair, True))
+                    theme.attr(self, "main_jjdlpdashboard_draw_streamer_panel_border_pair", border_pair, False))
 
         streamers = list(site.dash_all_streamers) if site is not None else []
         # Clamp selection in case the streamer list shrank (e.g. one removed).
@@ -5433,10 +5433,10 @@ class JJDlpDashboard:
             idx = start + i
             label = name[:row_width].ljust(row_width)
             if idx == sel:
-                attr = (theme.attr(self, "main_jjdlpdashboard_draw_streamer_panel_hilight", self.C_HILIGHT, True)
+                attr = (theme.attr(self, "main_jjdlpdashboard_draw_streamer_panel_hilight", self.C_CHROME, False)
                          | (curses.A_REVERSE if is_active else 0))
             else:
-                attr = theme.attr(self, "main_jjdlpdashboard_draw_streamer_panel_dim", self.C_DIM, False)
+                attr = theme.attr(self, "main_jjdlpdashboard_draw_streamer_panel_dim", self.C_NORMAL, True)
             self.safe_addstr(self.stdscr, y1 + 1 + i, x1 + 1, label, attr)
 
     def _draw_pipe_tab(self, y1, x1, y2, x2, title: str, lines: List[str],
@@ -5466,13 +5466,13 @@ class JJDlpDashboard:
 
         for i, line in enumerate(view):
             self.safe_addstr(self.stdscr, y1 + 1 + i, x1 + 2, line,
-                        theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_dim", self.C_DIM, False))
+                        theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_dim", self.C_NORMAL, True))
 
         # Scroll indicator
         if max_scroll > 0:
             scroll_info = f" ↑{scroll}/{max_scroll} " if scroll else " (end) "
             self.safe_addstr(self.stdscr, y1, x2 - len(scroll_info) - 1,
-                        scroll_info, theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_warn", self.C_WARN, False))
+                        scroll_info, theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_warn", self.C_WARN, True))
 
         return scroll
 
