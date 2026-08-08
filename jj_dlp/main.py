@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.25.23"
+__version__ = "1.25.24"
 
 import subprocess
 import time
@@ -1894,28 +1894,60 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
     """
     dbg(f"[DRAIN] thread started pipe_type={pipe_type!r} streamer={streamer!r} pipe={pipe!r}")
     line_count = 0
+
+    def _read_chunk() -> bytes:
+        # read1() returns as soon as *any* data is available from the OS
+        # pipe buffer (at most one underlying read syscall), instead of
+        # blocking until a full line — that's essential here since yt-dlp's
+        # progress updates end in a bare '\r' with no '\n' at all. Iterating
+        # the pipe object directly (`for raw in pipe`) uses readline()
+        # under the hood, which only splits on '\n' and would sit blocked
+        # for the entire download, never surfacing progress updates until
+        # something else finally wrote a real newline (or the process
+        # exited and flushed everything at once).
+        if hasattr(pipe, "read1"):
+            return pipe.read1(4096)
+        return pipe.read(4096)
+
     try:
-        for raw in pipe:
-            # On Windows, yt-dlp.exe writes stdout in the active code page
-            # (e.g. cp1252), not UTF-8.  Use the locale encoding so that
-            # cp1252-representable non-ASCII characters (accents, etc.)
-            # survive; emoji/CJK that can't be represented are already
-            # replaced with '?' by yt-dlp itself and are unrecoverable
-            # from stdout — the sidecar technique handles those.
-            decoded = raw.decode(encoding=locale.getpreferredencoding(), errors="replace").rstrip("\n")
+        buf = b""
+        while True:
+            chunk = _read_chunk()
+            if not chunk:
+                break
+            buf += chunk
 
-            # yt-dlp (and ffmpeg) write progress updates as a bare '\r'
-            # with no trailing '\n', so they overwrite the same terminal
-            # line in place. Python's pipe iteration only splits on '\n',
-            # so a whole burst of these updates can arrive here as one
-            # giant string with embedded '\r's. Split it back into
-            # individual updates: otherwise the log file gets one huge
-            # blob per flush, and worse, curses interprets an embedded
-            # '\r' as "move to column 0", which is what was smearing
-            # STDOUT/STDERR output across the STREAMERS panel.
-            sub_lines = [s for s in decoded.split("\r") if s != ""] or [""]
+            # Emit every complete line/update as soon as its terminator
+            # ('\r', '\n', or '\r\n') shows up in the buffer.
+            while True:
+                idx_r = buf.find(b"\r")
+                idx_n = buf.find(b"\n")
+                if idx_r == -1 and idx_n == -1:
+                    break
+                if idx_r == -1:
+                    idx, sep_len = idx_n, 1
+                elif idx_n == -1:
+                    idx, sep_len = idx_r, 1
+                elif idx_r < idx_n:
+                    idx = idx_r
+                    sep_len = 2 if idx_n == idx_r + 1 else 1   # collapse '\r\n'
+                else:
+                    idx, sep_len = idx_n, 1
 
-            for line in sub_lines:
+                raw_line = buf[:idx]
+                buf = buf[idx + sep_len:]
+
+                # On Windows, yt-dlp.exe writes stdout in the active code
+                # page (e.g. cp1252), not UTF-8. Use the locale encoding so
+                # that cp1252-representable non-ASCII characters (accents,
+                # etc.) survive; emoji/CJK that can't be represented are
+                # already replaced with '?' by yt-dlp itself and are
+                # unrecoverable from stdout — the sidecar technique
+                # handles those.
+                line = raw_line.decode(encoding=locale.getpreferredencoding(), errors="replace")
+                if not line:
+                    continue
+
                 line_count += 1
                 if line_count <= 3:
                     dbg(f"[DRAIN] pipe_type={pipe_type!r} streamer={streamer!r} line#{line_count}: {line[:200]!r}")
@@ -1963,6 +1995,23 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
                         dbg(f"[AD] signal detected streamer={streamer!r} "
                             f"pipe={pipe_type!r}: {line[:120]!r}",
                             site_name=streamer)
+
+        # EOF — flush any trailing partial line that never got a terminator.
+        if buf:
+            line = buf.decode(encoding=locale.getpreferredencoding(), errors="replace")
+            if line:
+                line_count += 1
+                if log_fp is not None:
+                    try:
+                        log_fp.write(line + "\n")
+                        log_fp.flush()
+                    except Exception:
+                        pass
+                if site is not None:
+                    if pipe_type == "stdout":
+                        site.add_stdout_line(line, streamer=streamer)
+                    elif pipe_type == "stderr":
+                        site.add_stderr_line(line, streamer=streamer)
     except Exception as _drain_exc:
         dbg(f"[DRAIN] pipe_type={pipe_type!r} streamer={streamer!r} EXCEPTION: {_drain_exc!r}")
     dbg(f"[DRAIN] thread exiting pipe_type={pipe_type!r} streamer={streamer!r} total_lines={line_count}")
