@@ -104,7 +104,7 @@ PAIR_NUM_ROLE = {v: k for k, v in ROLE_PAIR_NUM.items()}
 SITE_REGISTRY = {
     'config_editor_priorityeditor_draw_live_1': {'file': 'config_editor.py', 'line': 531, 'label': 'Priority Editor — Title (STREAMER SETTINGS)', 'default_role': 'LIVE', 'default_bold': True},
     'config_editor_priorityeditor_draw_live_2': {'file': 'config_editor.py', 'line': 535, 'label': 'Priority Editor — Mode Indicator Badge', 'default_role': 'LIVE', 'default_bold': True},
-    'config_editor_priorityeditor_draw_dim_1': {'file': 'config_editor.py', 'line': 546, 'label': 'Priority Editor — Hints List', 'default_role': 'DIM', 'default_bold': False},
+    'config_editor_priorityeditor_draw_dim_1': {'file': 'config_editor.py', 'line': 546, 'label': 'Priority Editor — Hints List', 'default_role': 'NORMAL', 'default_bold': False},
     'config_editor_priorityeditor_draw_dim_2': {'file': 'config_editor.py', 'line': 553, 'label': 'Priority Editor — \'No streamers.\' Message', 'default_role': 'DIM', 'default_bold': False},
     'config_editor_priorityeditor_draw_hilight_1': {'file': 'config_editor.py', 'line': 577, 'label': 'Priority Editor — Bypass Streamer Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
     'config_editor_priorityeditor_draw_live_3': {'file': 'config_editor.py', 'line': 579, 'label': 'Priority Editor — Bypass Streamer Row (Unselected)', 'default_role': 'LIVE', 'default_bold': True},

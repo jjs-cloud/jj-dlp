@@ -545,7 +545,7 @@ class PriorityEditor:
             "Enter:More Settings"
         ]
         for hint in hints:
-            db.safe_addstr(stdscr, row_y, x1 + 2, hint, theme.attr(db, "config_editor_priorityeditor_draw_dim_1", db.C_DIM, True))
+            db.safe_addstr(stdscr, row_y, x1 + 2, hint, theme.attr(db, "config_editor_priorityeditor_draw_dim_1", db.C_NORMAL, True))
             row_y += 1
         
         row_y += 2
