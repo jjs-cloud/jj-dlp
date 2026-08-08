@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.25.22"
+__version__ = "1.25.23"
 
 import subprocess
 import time
@@ -751,7 +751,10 @@ class SiteState:
         self.dash_stderr_lines:   deque = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)   # recent stderr lines
         # Same lines, additionally bucketed per-streamer so the STREAMERS
         # panel on the Stdout/Stderr tabs can show one streamer's output in
-        # isolation. No liveness-checker output is shown. Buckets are
+        # isolation. Only populated for lines that belong to an actual
+        # streamer's yt-dlp process — the combined liveness-checker output
+        # (tagged via _CHECKER_STDOUT_PREFIX / _CHECKER_STDERR_PREFIX) has no
+        # single owning streamer and is never added here. Buckets are
         # created lazily on first use.
         self.dash_stdout_lines_by_streamer: Dict[str, deque] = {}
         self.dash_stderr_lines_by_streamer: Dict[str, deque] = {}
@@ -1902,54 +1905,67 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
             # survive; emoji/CJK that can't be represented are already
             # replaced with '?' by yt-dlp itself and are unrecoverable
             # from stdout — the sidecar technique handles those.
-            line = raw.decode(encoding=locale.getpreferredencoding(), errors="replace").rstrip("\n")
-            line_count += 1
-            if line_count <= 3:
-                dbg(f"[DRAIN] pipe_type={pipe_type!r} streamer={streamer!r} line#{line_count}: {line[:200]!r}")
+            decoded = raw.decode(encoding=locale.getpreferredencoding(), errors="replace").rstrip("\n")
 
-            # ── Parse yt-dlp destination filename ────────────────────────────
-            if (filename_holder is not None and filename_event is not None
-                    and not filename_event.is_set()):
-                stripped = line.strip()
-                if stripped.startswith(_YTDLP_DESTINATION_PREFIX):
-                    dest = stripped[len(_YTDLP_DESTINATION_PREFIX):].strip()
-                    if dest:
-                        filename_holder.append(dest)
-                        filename_event.set()
-                        dbg(f"[DRAIN] parsed destination filename={dest!r} "
-                            f"pipe_type={pipe_type!r} streamer={streamer!r}")
+            # yt-dlp (and ffmpeg) write progress updates as a bare '\r'
+            # with no trailing '\n', so they overwrite the same terminal
+            # line in place. Python's pipe iteration only splits on '\n',
+            # so a whole burst of these updates can arrive here as one
+            # giant string with embedded '\r's. Split it back into
+            # individual updates: otherwise the log file gets one huge
+            # blob per flush, and worse, curses interprets an embedded
+            # '\r' as "move to column 0", which is what was smearing
+            # STDOUT/STDERR output across the STREAMERS panel.
+            sub_lines = [s for s in decoded.split("\r") if s != ""] or [""]
 
-            if log_fp is not None:
-                try:
-                    log_fp.write(line + "\n")
-                    log_fp.flush()
-                except Exception:
-                    pass
-            if site is not None:
-                if pipe_type == "stdout":
-                    site.add_stdout_line(line, streamer=streamer)
-                elif pipe_type == "stderr":
-                    site.add_stderr_line(line, streamer=streamer)
-            if (ffmpeg_error_counter is not None and ffmpeg_error_event is not None
-                    and FFMPEG_ERROR_RESTART_THRESHOLD > 0 and not ffmpeg_error_event.is_set()):
-                line_lower = line.lower()
-                for pattern in FFMPEG_ERROR_PATTERNS:
-                    if pattern.lower() in line_lower:
-                        ffmpeg_error_counter[0] += 1
-                        if site is not None and streamer:
-                            site.set_ffmpeg_error_count(streamer, ffmpeg_error_counter[0])
-                        if ffmpeg_error_counter[0] >= FFMPEG_ERROR_RESTART_THRESHOLD:
-                            ffmpeg_error_event.set()
-                        break
+            for line in sub_lines:
+                line_count += 1
+                if line_count <= 3:
+                    dbg(f"[DRAIN] pipe_type={pipe_type!r} streamer={streamer!r} line#{line_count}: {line[:200]!r}")
 
-            if ad_alerts_enabled and site is not None and streamer:
-                if (_AD_DISCONTINUITY_RE.search(line) or
-                        _AD_SEGMENT_URL_RE.search(line) or
-                        _AD_TWITCH_TAG_RE.search(line)):
-                    site.update_ad_alert(streamer)
-                    dbg(f"[AD] signal detected streamer={streamer!r} "
-                        f"pipe={pipe_type!r}: {line[:120]!r}",
-                        site_name=streamer)
+                # ── Parse yt-dlp destination filename ────────────────────────────
+                if (filename_holder is not None and filename_event is not None
+                        and not filename_event.is_set()):
+                    stripped = line.strip()
+                    if stripped.startswith(_YTDLP_DESTINATION_PREFIX):
+                        dest = stripped[len(_YTDLP_DESTINATION_PREFIX):].strip()
+                        if dest:
+                            filename_holder.append(dest)
+                            filename_event.set()
+                            dbg(f"[DRAIN] parsed destination filename={dest!r} "
+                                f"pipe_type={pipe_type!r} streamer={streamer!r}")
+
+                if log_fp is not None:
+                    try:
+                        log_fp.write(line + "\n")
+                        log_fp.flush()
+                    except Exception:
+                        pass
+                if site is not None:
+                    if pipe_type == "stdout":
+                        site.add_stdout_line(line, streamer=streamer)
+                    elif pipe_type == "stderr":
+                        site.add_stderr_line(line, streamer=streamer)
+                if (ffmpeg_error_counter is not None and ffmpeg_error_event is not None
+                        and FFMPEG_ERROR_RESTART_THRESHOLD > 0 and not ffmpeg_error_event.is_set()):
+                    line_lower = line.lower()
+                    for pattern in FFMPEG_ERROR_PATTERNS:
+                        if pattern.lower() in line_lower:
+                            ffmpeg_error_counter[0] += 1
+                            if site is not None and streamer:
+                                site.set_ffmpeg_error_count(streamer, ffmpeg_error_counter[0])
+                            if ffmpeg_error_counter[0] >= FFMPEG_ERROR_RESTART_THRESHOLD:
+                                ffmpeg_error_event.set()
+                            break
+
+                if ad_alerts_enabled and site is not None and streamer:
+                    if (_AD_DISCONTINUITY_RE.search(line) or
+                            _AD_SEGMENT_URL_RE.search(line) or
+                            _AD_TWITCH_TAG_RE.search(line)):
+                        site.update_ad_alert(streamer)
+                        dbg(f"[AD] signal detected streamer={streamer!r} "
+                            f"pipe={pipe_type!r}: {line[:120]!r}",
+                            site_name=streamer)
     except Exception as _drain_exc:
         dbg(f"[DRAIN] pipe_type={pipe_type!r} streamer={streamer!r} EXCEPTION: {_drain_exc!r}")
     dbg(f"[DRAIN] thread exiting pipe_type={pipe_type!r} streamer={streamer!r} total_lines={line_count}")
@@ -5190,13 +5206,23 @@ class JJDlpDashboard:
             self.draw_site_panel(site, py1, px1, py2, px2, is_selected)
 
     # ── Line-wrap helper ─────────────────────────────────────────────────────
-    @staticmethod
-    def _wrap_lines(lines: List[str], max_width: int) -> List[str]:
+    _CONTROL_CHAR_RE = _re.compile(r'[\x00-\x08\x0b-\x1f\x7f]')
+
+    @classmethod
+    def _sanitize_line(cls, line: str) -> str:
+        """Strip control characters (stray '\\r' in particular) that would
+        otherwise make curses jump the cursor mid-draw and smear output
+        over neighboring panels."""
+        return cls._CONTROL_CHAR_RE.sub("", line)
+
+    @classmethod
+    def _wrap_lines(cls, lines: List[str], max_width: int) -> List[str]:
         """Wrap each line to max_width characters, preserving order."""
         if max_width <= 0:
             return lines
         wrapped = []
         for line in lines:
+            line = cls._sanitize_line(line)
             if not line:
                 wrapped.append("")
                 continue
@@ -5302,7 +5328,7 @@ class JJDlpDashboard:
         """
         border_pair = self.C_HILIGHT if is_active else self.C_DIM
         self.draw_box(self.stdscr, y1, x1, y2, x2, border_pair)
-        title = " STREAMERS " if not is_active else " STREAMERS [  ] "
+        title = " STREAMERS " if not is_active else " STREAMERS [Tab] "
         self.safe_addstr(self.stdscr, y1, x1 + 2, title,
                     curses.color_pair(border_pair) | curses.A_BOLD)
 
@@ -5343,7 +5369,7 @@ class JJDlpDashboard:
 
         border_pair = self.C_HILIGHT if is_active else self.C_DIM
         self.draw_box(self.stdscr, y1, x1, y2, x2, border_pair)
-        title_suffix = " [  ]" if is_active else ""
+        title_suffix = " [Tab]" if is_active else ""
         self.safe_addstr(self.stdscr, y1, x1 + 2, f" {title}{title_suffix} ",
                     curses.color_pair(border_pair) | curses.A_BOLD)
 
