@@ -17,7 +17,10 @@ Two independent customization layers, both persisted to theme.json:
      a starting point, then optionally recolor any of the 13 named roles
      (C_CHROME, C_HILIGHT, ... C_DELETE) by fg/bg. This changes what each
      role *means* color-wise, same as editing the COLOR_SCHEMES tuple
-     directly — every call site that uses that role updates together.
+     directly — every call site that uses that role updates together. Role
+     color changes are stored PER base scheme (keyed by scheme index in
+     theme.json), so each scheme keeps its own palette; the editor always
+     targets whichever scheme is currently active.
 
   2. PER-SITE OVERRIDES — repoint an individual call site to a different
      role entirely (e.g. make one C_LOGO site render as C_REC instead) and/or
@@ -460,7 +463,8 @@ def _theme_json_path():
 def load_theme():
     """Load theme.json. Returns a dict with 'base_scheme_idx', 'role_overrides',
     and 'site_overrides' keys, filled with safe defaults if the file is
-    missing, empty, or unparseable."""
+    missing, empty, or unparseable. role_overrides is stored per base scheme
+    index: {str(scheme_idx): {role: {'fg': name, 'bg': name}}}."""
     path = _theme_json_path()
     default = {'base_scheme_idx': 0, 'role_overrides': {}, 'site_overrides': {}}
     try:
@@ -551,13 +555,22 @@ def attr(owner, tag, default_pair_arg, default_bold):
     return result
 
 
+def role_overrides_for(scheme_idx=None):
+    """Return the role-override dict ({role: {'fg': name, 'bg': name}}) for
+    the given scheme index, defaulting to the active base scheme. The dict is
+    created on demand, so callers can mutate it directly."""
+    idx = str(_state.get('base_scheme_idx', 0) if scheme_idx is None else scheme_idx)
+    return _state.setdefault('role_overrides', {}).setdefault(idx, {})
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # Applying role fg/bg overrides on top of a base COLOR_SCHEMES tuple.
 # ─────────────────────────────────────────────────────────────────────────
 def resolve_scheme_values(dashboard):
     """Return a dict {role: {'fg': curses.COLOR_*, 'bg': curses.COLOR_* or
     None}} for all 13 roles, combining the active base scheme with any saved
-    role_overrides. bg is None for roles that share the ambient background."""
+    role_overrides for that scheme. bg is None for roles that share the
+    ambient background."""
     scheme = dashboard.COLOR_SCHEMES[_state.get('base_scheme_idx', 0) % len(dashboard.COLOR_SCHEMES)]
     values = {}
     for role in ROLE_ORDER:
@@ -565,8 +578,7 @@ def resolve_scheme_values(dashboard):
     for (role, field), value in zip(SCHEME_TUPLE_FIELDS, scheme):
         values[role][field] = value
 
-    role_overrides = _state.get('role_overrides', {})
-    for role, ov in role_overrides.items():
+    for role, ov in role_overrides_for().items():
         if role not in values:
             continue
         if ov.get('fg'):
@@ -721,9 +733,9 @@ class ThemeManager:
             self._role_edit_field = 'fg'
             self.mode = self.MODE_ROLE_EDIT
         elif key in (ord('r'), ord('R')):
-            # Reset this role's override back to the base scheme's value.
+            # Reset this role's override back to the active scheme's base value.
             role = ROLE_ORDER[self._role_sel]
-            _state.get('role_overrides', {}).pop(role, None)
+            role_overrides_for().pop(role, None)
             apply_palette(self.dashboard)
             save_theme(_state)
 
@@ -746,12 +758,12 @@ class ThemeManager:
             delta = 1 if key in (curses.KEY_RIGHT, curses.KEY_DOWN) else -1
             new_name = COLOR_NAMES[(idx + delta) % len(COLOR_NAMES)]
 
-            role_overrides = _state.setdefault('role_overrides', {})
+            role_overrides = role_overrides_for()
             ov = role_overrides.setdefault(role, {})
             ov[field] = new_name
             apply_palette(self.dashboard)
         elif key in (ord('r'), ord('R')):
-            _state.get('role_overrides', {}).pop(role, None)
+            role_overrides_for().pop(role, None)
             apply_palette(self.dashboard)
         elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
             save_theme(_state)
@@ -910,9 +922,11 @@ class ThemeManager:
         db = self.dashboard
         n = len(ROLE_ORDER)
         h = n + 4
-        w = 40
+        w = 42
         by1, bx1, by2, bx2 = self._box(stdscr, h, w)
-        db.safe_addstr(stdscr, by1, bx1 + 2, " ROLE COLORS ",
+        scheme_idx = _state.get('base_scheme_idx', 0) % len(self.SCHEME_NAMES)
+        title = f" ROLE COLORS - {self.SCHEME_NAMES[scheme_idx]} "
+        db.safe_addstr(stdscr, by1, bx1 + 2, title[:w - 4],
                         curses.color_pair(db.C_INVHEAD) | curses.A_BOLD)
         values = resolve_scheme_values(self.dashboard)
         for i, role in enumerate(ROLE_ORDER):
@@ -923,7 +937,8 @@ class ThemeManager:
             prefix = "> " if i == self._role_sel else "  "
             line = f"{prefix}{label:<24}{fg_name}"
             db.safe_addstr(stdscr, by1 + 2 + i, bx1 + 2, line[:w - 4], attr_)
-        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Edit  r:Reset  Esc:Back ",
+        db.safe_addstr(stdscr, by2, bx1 + 2,
+                        " Apply to active scheme.  r:Reset ",
                         curses.color_pair(db.C_INVHEAD))
 
     def _draw_role_edit(self, stdscr):
