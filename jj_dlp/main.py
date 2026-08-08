@@ -751,10 +751,7 @@ class SiteState:
         self.dash_stderr_lines:   deque = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)   # recent stderr lines
         # Same lines, additionally bucketed per-streamer so the STREAMERS
         # panel on the Stdout/Stderr tabs can show one streamer's output in
-        # isolation. Only populated for lines that belong to an actual
-        # streamer's yt-dlp process — the combined liveness-checker output
-        # (tagged via _CHECKER_STDOUT_PREFIX / _CHECKER_STDERR_PREFIX) has no
-        # single owning streamer and is never added here. Buckets are
+        # isolation. No liveness-checker output is shown. Buckets are
         # created lazily on first use.
         self.dash_stdout_lines_by_streamer: Dict[str, deque] = {}
         self.dash_stderr_lines_by_streamer: Dict[str, deque] = {}
@@ -5328,7 +5325,7 @@ class JJDlpDashboard:
         """
         border_pair = self.C_HILIGHT if is_active else self.C_DIM
         self.draw_box(self.stdscr, y1, x1, y2, x2, border_pair)
-        title = " STREAMERS " if not is_active else " STREAMERS [Tab] "
+        title = " STREAMERS " if not is_active else " STREAMERS [  ] "
         self.safe_addstr(self.stdscr, y1, x1 + 2, title,
                     curses.color_pair(border_pair) | curses.A_BOLD)
 
@@ -5369,7 +5366,7 @@ class JJDlpDashboard:
 
         border_pair = self.C_HILIGHT if is_active else self.C_DIM
         self.draw_box(self.stdscr, y1, x1, y2, x2, border_pair)
-        title_suffix = " [Tab]" if is_active else ""
+        title_suffix = " [  ]" if is_active else ""
         self.safe_addstr(self.stdscr, y1, x1 + 2, f" {title}{title_suffix} ",
                     curses.color_pair(border_pair) | curses.A_BOLD)
 
