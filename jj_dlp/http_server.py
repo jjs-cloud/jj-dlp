@@ -73,9 +73,11 @@ dbg = _logger.dbg
 def _build_status_snapshot(sites: List) -> dict:
     """Return a JSON-serializable snapshot of all sites' dashboard state.
 
-    Mirrors what the curses renderer reads: everything here is taken under
-    each site's dash_lock, matching the locking discipline documented on
-    SiteState (dash_lock guards dash_* attributes).
+    Mirrors what the curses renderer reads: dash_* attributes are taken
+    under each site's dash_lock. Live-session state (live_since) is no
+    longer a dash_* attribute — it's read via site.snapshot_live_since(),
+    which takes site.session_lock internally, matching the same accessor
+    the curses renderer now uses.
     """
     now = time.time()
     out_sites = []
@@ -83,9 +85,9 @@ def _build_status_snapshot(sites: List) -> dict:
     for site in sites:
         with site.dash_lock:
             all_streamers = list(site.dash_all_streamers)
-            live_since = dict(site.dash_live_since)
             blocked = set(site.dash_blocked)
             log_lines = list(site.dash_log_lines)[-100:]
+        live_since = site.snapshot_live_since()
 
         # currently_recording / evicted_streamers live under site.lock, not
         # dash_lock — mirror the renderer's practice of taking both.

@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.25.5"
+__version__ = "1.26.0"
 
 import subprocess
 import time
@@ -12,6 +12,7 @@ import json
 import re as _re
 import threading
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from datetime import time as _dt_time
 from typing import List, Set, Tuple, Dict, Optional
@@ -24,12 +25,13 @@ from urllib.parse import urlparse
 import shutil
 
 from .deps import ensure_curses, plain_ffmpeg_check, check_ffmpeg, ensure_bin_executable
+from . import theme
 from . import logger as _logger
 from .logger import (
     startup_dbg, startup_dbg_flush,
     dbg,
     log_crash,
-    get_debug_log_path, get_log_path, get_log_file_paths,
+    get_debug_log_path, get_log_file_paths, get_checker_log_path,
     ENABLE_CRASH_LOG,
     configure_debug_log as _configure_debug_log,
 )
@@ -42,6 +44,7 @@ from .browser_config import (
 )
 from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS, _compute_config_id, SiteSortManager, SORT_OPTIONS, _SORT_LABELS
 from .file_manager import FileManagerTab
+from . import simulation as _simulation
 
 import curses  # noqa: E402
 
@@ -613,6 +616,75 @@ def _save_last_live_cache(config_path: str, last_live: Dict[str, float]) -> None
         _save_global_json(global_data)
 
 
+def _load_live_since_cache(config_path: str) -> Dict[str, float]:
+    """Return the persisted live-since timestamps for the given site from
+    global.json.
+
+    Each entry maps a streamer name to the Unix epoch at which their
+    *current* live session started. This is read at startup (to seed
+    SiteState.live_sessions so a process restart doesn't reset an
+    in-progress stream's duration back to zero) and again each time a new
+    live session is recognized (to recover the true start time rather than
+    stamping "now"). Only the epoch is persisted — the rest of a
+    LiveSession (quality_upgraded, blocked_while_live flag, enable_anchor,
+    notif_shown) is scoped to the running process and is fine to lose on
+    restart.
+    """
+    site_key = os.path.basename(config_path)
+    with _global_json_lock:
+        global_data = _load_global_json()
+    site_data = global_data.get("sites", {}).get(site_key, {})
+    raw = site_data.get("live_since", {})
+    if isinstance(raw, dict):
+        return {k: float(v) for k, v in raw.items()}
+    return {}
+
+
+def _save_live_since_cache(config_path: str, live_since: Dict[str, float]) -> None:
+    """Persist live-since timestamps for the given site into global.json.
+
+    Merges with any existing data so other sites' entries are preserved.
+    Called on every live/offline transition (see SiteState.mark_live /
+    mark_offline), mirroring _save_last_live_cache's call pattern.
+    """
+    site_key = os.path.basename(config_path)
+    with _global_json_lock:
+        global_data = _load_global_json()
+        if "sites" not in global_data or not isinstance(global_data["sites"], dict):
+            global_data["sites"] = {}
+        if site_key not in global_data["sites"] or not isinstance(global_data["sites"][site_key], dict):
+            global_data["sites"][site_key] = {}
+        global_data["sites"][site_key]["live_since"] = {
+            streamer: timestamp for streamer, timestamp in live_since.items()
+        }
+        _save_global_json(global_data)
+
+
+@dataclass
+class LiveSession:
+    """All state scoped to one continuous live session for one streamer.
+
+    Created by SiteState.mark_live() the moment a streamer is first
+    observed live, and discarded by SiteState.mark_offline() the moment
+    they're observed offline. While a streamer has an entry in
+    SiteState.live_sessions, they ARE considered live — that dict
+    membership is the single source of truth for liveness, replacing what
+    used to be five separate dicts/sets that had to be kept in sync by
+    convention (dash_live_since, quality_upgraded_streamers,
+    blocked_while_live, enable_anchor_time, notif_shown_session).
+
+    Only `since` is persisted across restarts (see _save_live_since_cache).
+    The rest resets to its default if the process restarts mid-stream.
+    """
+    since: float                          # epoch this live session started
+    quality_upgraded: bool = False        # UPGRADE_QUALITY already fired once this session
+    was_blocked_while_live: bool = False  # observed live-while-disabled at some point this session
+    enable_anchor: Optional[float] = None # set once on the blocked->enabled transition; overrides `since` as the NOTIFY_NO_CONFIRM_FILE anchor
+    notif_shown: bool = False             # a non-recording notification has already fired this session
+    last_restart_anchor: Optional[float] = None  # epoch of the most recent restart this session (stall, LQ, or quality upgrade); gives NOTIFY_NO_CONFIRM_FILE a fresh grace window on the following attempt without touching `since`/`enable_anchor`
+    evicted_for_concurrency: bool = False  # evicted to free a slot for a higher-priority streamer, restart time unknown/unbounded; consumed at actual restart to refresh last_restart_anchor then instead of at eviction time (see was_evicted_for_concurrency)
+
+
 class SiteState:
     """All mutable runtime state for a single monitored site/config."""
 
@@ -647,17 +719,23 @@ class SiteState:
         # Used purely to gate the recording_resolution fallback in the
         # dashboard renderer.
         self.recording_attempt_started: Dict[str, float] = {}
-        # Streamers that have already been quality-upgraded during the
-        # current live stream session. Cleared when the streamer goes
-        # offline (alongside dash_live_since).
-        self.quality_upgraded_streamers: Set[str] = set()
         self.recording_threads:   List[threading.Thread] = []
         self.known_streamers:     Set[str] = set()
         self.trigger_event        = threading.Event()
 
+        # ── Live session tracking ────────────────────────────────────────
+        # Single source of truth for "how long has this streamer been
+        # live" and everything scoped to that live session.
+        self.session_lock         = threading.Lock()
+        self.live_sessions:       Dict[str, "LiveSession"] = {}
+        # Only the `since` epoch is persisted (see LiveSession's
+        # docstring). Loaded once here so a process restart mid-stream
+        # recovers the true start time instead of resetting it to "now" —
+        # see mark_live()'s use of this as a one-shot recovery source.
+        self._live_since_cache:   Dict[str, float] = _load_live_since_cache(config_path)
+
         # Dashboard display state (written by monitor thread, read by renderer)
         self.dash_lock            = threading.Lock()
-        self.dash_live_since:     Dict[str, float] = {}   # streamer -> epoch
         self.dash_last_live:      Dict[str, float] = _load_last_live_cache(config_path)   # streamer -> epoch when recording stopped
         self.dash_next_check_in:  float = 0.0
         self.dash_all_streamers:  List[str] = []
@@ -672,6 +750,12 @@ class SiteState:
         self.dash_debug_lines:    deque = deque(maxlen=DEBUG_LOG_BUFFER_SIZE)      # recent debug-tag log
         self.dash_stdout_lines:   deque = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)   # recent stdout lines
         self.dash_stderr_lines:   deque = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)   # recent stderr lines
+        # Same lines, additionally bucketed per-streamer so the STREAMERS
+        # panel on the Stdout/Stderr tabs can show one streamer's output in
+        # isolation. No liveness-checker output is shown. Buckets are
+        # created lazily on first use.
+        self.dash_stdout_lines_by_streamer: Dict[str, deque] = {}
+        self.dash_stderr_lines_by_streamer: Dict[str, deque] = {}
 
         # Twitch EventSub
         self.eventsub             = None
@@ -694,14 +778,11 @@ class SiteState:
         # Shared by both the popup (tkinter/notify-send) and ntfy channels so
         # that they follow the exact same POPUP_COOLDOWN-gated schedule.
         self.notif_last_shown:    Dict[str, float] = {}
-        # Streamers for whom a "not recording" (disabled / lower-priority)
-        # notification has already been shown during the current continuous
-        # live session. Cleared when the streamer goes offline so the
-        # notification can fire again next time they go live. This prevents
-        # the notification from re-appearing every popup_cooldown minutes for
-        # as long as the streamer stays live. Shared by both the popup and
-        # ntfy channels.
-        self.notif_shown_session: set = set()
+        # Whether a "not recording" (disabled / lower-priority) notification
+        # has already been shown during the current continuous live session
+        # now lives on LiveSession.notif_shown (see was_notif_shown /
+        # mark_notif_shown below) — folded in alongside the other
+        # per-live-session state instead of being tracked separately.
 
         # Active yt-dlp subprocesses: streamer -> proc
         # Written by record_stream threads; read by stop() for clean kill.
@@ -794,6 +875,206 @@ class SiteState:
         with self.dash_lock:
             self.ad_alerts.pop(streamer, None)
 
+    # ── Live session tracking ────────────────────────────────────────────
+    # See the live_sessions field comment above for why this is the only
+    # place that should touch self.live_sessions directly.
+
+    def mark_live(self, streamer: str) -> None:
+        """Record that *streamer* is now live, starting a new LiveSession.
+
+        Idempotent — a no-op if *streamer* is already tracked as live, so
+        every call site that "notices" a streamer is live (poll loop,
+        EventSub callback, LQ start, retry reuse) can call this
+        unconditionally instead of re-implementing the
+        "if not already tracked" guard itself.
+
+        Recovers the true start time from the persisted cache if this
+        process restarted mid-stream, rather than stamping time.time() and
+        silently resetting everyone's live duration to zero on restart.
+        """
+        with self.session_lock:
+            if streamer in self.live_sessions:
+                return
+            since = self._live_since_cache.get(streamer, time.time())
+            self.live_sessions[streamer] = LiveSession(since=since)
+            snapshot = {s: sess.since for s, sess in self.live_sessions.items()}
+        _save_live_since_cache(self.config_path, snapshot)
+
+    def mark_offline(self, streamer: str) -> None:
+        """Record that *streamer* is no longer live, ending its LiveSession.
+
+        Idempotent — a no-op if *streamer* isn't currently tracked as live.
+        Also updates dash_last_live (the existing "recording ended" cache),
+        matching the previous behavior of clearing both together.
+        """
+        with self.session_lock:
+            if streamer not in self.live_sessions:
+                return
+            del self.live_sessions[streamer]
+            self._live_since_cache.pop(streamer, None)
+            snapshot = {s: sess.since for s, sess in self.live_sessions.items()}
+        _save_live_since_cache(self.config_path, snapshot)
+        with self.dash_lock:
+            self.dash_last_live[streamer] = time.time()
+            last_live_snapshot = dict(self.dash_last_live)
+        _save_last_live_cache(self.config_path, last_live_snapshot)
+
+    def is_live(self, streamer: str) -> bool:
+        with self.session_lock:
+            return streamer in self.live_sessions
+
+    def get_live_since(self, streamer: str) -> Optional[float]:
+        """Epoch this streamer's current live session started, or None if
+        they're not currently tracked as live."""
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            return session.since if session else None
+
+    def get_live_duration(self, streamer: str) -> Optional[float]:
+        """Seconds this streamer has been continuously live, or None if
+        they're not currently tracked as live."""
+        since = self.get_live_since(streamer)
+        return (time.time() - since) if since is not None else None
+
+    def snapshot_live_since(self) -> Dict[str, float]:
+        """Return a point-in-time {streamer: since_epoch} copy for the
+        dashboard renderer — same shape dash_live_since used to provide."""
+        with self.session_lock:
+            return {s: sess.since for s, sess in self.live_sessions.items()}
+
+    def was_quality_upgraded(self, streamer: str) -> bool:
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            return bool(session and session.quality_upgraded)
+
+    def mark_quality_upgraded(self, streamer: str) -> None:
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            if session:
+                session.quality_upgraded = True
+
+    def was_blocked_while_live(self, streamer: str) -> bool:
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            return bool(session and session.was_blocked_while_live)
+
+    def mark_blocked_while_live(self, streamer: str) -> None:
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            if session:
+                session.was_blocked_while_live = True
+
+    def get_enable_anchor(self, streamer: str) -> Optional[float]:
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            return session.enable_anchor if session else None
+
+    def set_enable_anchor_if_unset(self, streamer: str, epoch: float) -> None:
+        """Set the NOTIFY_NO_CONFIRM_FILE override anchor once, on the
+        blocked->enabled transition. Left in place (not overwritten) for
+        every retry for the rest of the live session — mirrors the old
+        enable_anchor_time semantics exactly."""
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            if session and session.enable_anchor is None:
+                session.enable_anchor = epoch
+
+    def get_last_restart_anchor(self, streamer: str) -> Optional[float]:
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            return session.last_restart_anchor if session else None
+
+    def set_last_restart_anchor(self, streamer: str, epoch: float) -> None:
+        """Record that *streamer* was just restarted (or will/might restart) (stall recovery, an
+        LQ downgrade, a quality-upgrade restart, or a concurrency
+        eviction). Used to give the next attempt's NOTIFY_NO_CONFIRM_FILE
+        deadline a fresh window, without disturbing `since`/`enable_anchor`
+        (which must keep reflecting the real live-session start time).
+        Prefer calling this via evict_and_restart() for anything that
+        externally evicts an active recording (LQ, quality upgrade,
+        concurrency)."""
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            if session:
+                session.last_restart_anchor = epoch
+
+    def clear_last_restart_anchor(self, streamer: str) -> None:
+        """Clear the restart anchor once growth is confirmed again, so it
+        doesn't linger and affect a later, unrelated attempt."""
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            if session:
+                session.last_restart_anchor = None
+
+    def was_evicted_for_concurrency(self, streamer: str) -> bool:
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            return bool(session and session.evicted_for_concurrency)
+
+    def mark_evicted_for_concurrency(self, streamer: str) -> None:
+        """Record that *streamer* was evicted to free a slot for a
+        higher-priority streamer. Actual restart time here is unbounded 
+        Mirrors was_blocked_while_live's deferred-anchor pattern: this flag is
+        consumed at the actual restart point in start_recording_if_needed,
+        where last_restart_anchor is refreshed to `now` right then."""
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            if session:
+                session.evicted_for_concurrency = True
+
+    def clear_evicted_for_concurrency(self, streamer: str) -> None:
+        """Consume the flag once the streamer actually resumes recording."""
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            if session:
+                session.evicted_for_concurrency = False
+
+    def evict_and_restart(self, streamer: str, refresh_anchor: bool = True) -> None:
+        """Evict an actively-recording streamer so it can be restarted
+        elsewhere (LQ downgrade, quality-upgrade restart, or concurrency
+        eviction — anything that kills a currently-recording streamer with
+        the expectation that it (or a replacement recording of it) comes
+        back up shortly after).
+
+          1. Flag the streamer as evicted, so record_stream's inner loop
+             self-terminates cleanly instead of treating this as a stall
+             or failure.
+          2. If refresh_anchor (the default), refresh last_restart_anchor
+             *before* killing the process, so the next attempt's
+             NOTIFY_NO_CONFIRM_FILE deadline is seeded from "now" instead
+             of falling back to a stale live_since/enable_anchor and
+             firing the write-failure alert almost immediately on the
+             retry. This default is only correct when the restart happens
+             shortly after eviction (LQ, quality upgrade — both restart
+             within seconds). Pass refresh_anchor=False for eviction paths
+             where the restart timing is unbounded (concurrency eviction)
+             and instead refresh last_restart_anchor at the actual restart
+             point — see mark_evicted_for_concurrency().
+          3. Kill the ffmpeg/yt-dlp process.
+
+        The stall-detected restart in record_stream() does NOT use this
+        method — it's an in-loop self-restart (the recording thread is
+        killing and retrying itself, not being evicted by another thread),
+        so it has its own teardown sequence and calls
+        set_last_restart_anchor() directly.
+        """
+        with self.lock:
+            self.evicted_streamers.add(streamer)
+        if refresh_anchor:
+            self.set_last_restart_anchor(streamer, time.time())
+        self.kill_proc_for_streamer(streamer)
+
+    def was_notif_shown(self, streamer: str) -> bool:
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            return bool(session and session.notif_shown)
+
+    def mark_notif_shown(self, streamer: str) -> None:
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            if session:
+                session.notif_shown = True
+
     def kill_all_procs(self) -> None:
         """Kill every registered yt-dlp process. Called on quit."""
         with self._procs_lock:
@@ -846,13 +1127,25 @@ class SiteState:
             self.dash_log_lines.append(line)   # deque(maxlen=...) evicts automatically
         _logger.log_dashboard_line(msg)
 
-    def add_stdout_line(self, line: str) -> None:
+    def add_stdout_line(self, line: str, streamer: str = "") -> None:
         with self.dash_lock:
             self.dash_stdout_lines.append(line)
+            if streamer:
+                buf = self.dash_stdout_lines_by_streamer.get(streamer)
+                if buf is None:
+                    buf = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)
+                    self.dash_stdout_lines_by_streamer[streamer] = buf
+                buf.append(line)
 
-    def add_stderr_line(self, line: str) -> None:
+    def add_stderr_line(self, line: str, streamer: str = "") -> None:
         with self.dash_lock:
             self.dash_stderr_lines.append(line)
+            if streamer:
+                buf = self.dash_stderr_lines_by_streamer.get(streamer)
+                if buf is None:
+                    buf = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)
+                    self.dash_stderr_lines_by_streamer[streamer] = buf
+                buf.append(line)
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -1402,10 +1695,10 @@ def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
     # them from the caller's candidate list. Relying on the cooldown alone
     # then means notifications keep re-appearing every popup_cooldown
     # minutes for the entire time they're live. Instead, only notify once
-    # per continuous live session; site.notif_shown_session is cleared when
-    # the streamer goes offline (see the poll loop). This applies to both
-    # channels identically.
-    if not is_recording and streamer in site.notif_shown_session:
+    # per continuous live session; this resets automatically when the
+    # streamer's LiveSession is torn down on mark_offline(). This applies
+    # to both channels identically.
+    if not is_recording and site.was_notif_shown(streamer):
         dbg(f"[NOTIFY] suppressed - already shown this live session for streamer={streamer!r} reason={reason!r}")
         return
 
@@ -1443,7 +1736,7 @@ def _maybe_show_live_popup(streamer: str, cfg: dict, site: "SiteState",
 
     site.notif_last_shown[streamer] = time.time()
     if not is_recording:
-        site.notif_shown_session.add(streamer)
+        site.mark_notif_shown(streamer)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1553,10 +1846,16 @@ def _modify_config_streamer(config_path: str, username: str, action: str) -> str
 # yt-dlp subprocess helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-def open_log_streams(cfg: dict):
+def open_log_streams(cfg: dict, streamer: str):
     log_out_fp = log_err_fp = None
     if cfg.get("logging"):
-        out_path, err_path = get_log_file_paths(cfg)
+        out_path, err_path = get_log_file_paths(cfg, streamer)
+        try:
+            dir_part = os.path.dirname(out_path)
+            if dir_part:
+                os.makedirs(dir_part, exist_ok=True)
+        except Exception:
+            pass
         try:
             log_out_fp = open(out_path, "a", encoding="utf-8")
         except Exception:
@@ -1596,62 +1895,124 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
     """
     dbg(f"[DRAIN] thread started pipe_type={pipe_type!r} streamer={streamer!r} pipe={pipe!r}")
     line_count = 0
+
+    def _read_chunk() -> bytes:
+        # read1() returns as soon as *any* data is available from the OS
+        # pipe buffer (at most one underlying read syscall), instead of
+        # blocking until a full line — that's essential here since yt-dlp's
+        # progress updates end in a bare '\r' with no '\n' at all. Iterating
+        # the pipe object directly (`for raw in pipe`) uses readline()
+        # under the hood, which only splits on '\n' and would sit blocked
+        # for the entire download, never surfacing progress updates until
+        # something else finally wrote a real newline (or the process
+        # exited and flushed everything at once).
+        if hasattr(pipe, "read1"):
+            return pipe.read1(4096)
+        return pipe.read(4096)
+
     try:
-        for raw in pipe:
-            # On Windows, yt-dlp.exe writes stdout in the active code page
-            # (e.g. cp1252), not UTF-8.  Use the locale encoding so that
-            # cp1252-representable non-ASCII characters (accents, etc.)
-            # survive; emoji/CJK that can't be represented are already
-            # replaced with '?' by yt-dlp itself and are unrecoverable
-            # from stdout — the sidecar technique handles those.
-            line = raw.decode(encoding=locale.getpreferredencoding(), errors="replace").rstrip("\n")
-            line_count += 1
-            if line_count <= 3:
-                dbg(f"[DRAIN] pipe_type={pipe_type!r} streamer={streamer!r} line#{line_count}: {line[:200]!r}")
+        buf = b""
+        while True:
+            chunk = _read_chunk()
+            if not chunk:
+                break
+            buf += chunk
 
-            # ── Parse yt-dlp destination filename ────────────────────────────
-            if (filename_holder is not None and filename_event is not None
-                    and not filename_event.is_set()):
-                stripped = line.strip()
-                if stripped.startswith(_YTDLP_DESTINATION_PREFIX):
-                    dest = stripped[len(_YTDLP_DESTINATION_PREFIX):].strip()
-                    if dest:
-                        filename_holder.append(dest)
-                        filename_event.set()
-                        dbg(f"[DRAIN] parsed destination filename={dest!r} "
-                            f"pipe_type={pipe_type!r} streamer={streamer!r}")
+            # Emit every complete line/update as soon as its terminator
+            # ('\r', '\n', or '\r\n') shows up in the buffer.
+            while True:
+                idx_r = buf.find(b"\r")
+                idx_n = buf.find(b"\n")
+                if idx_r == -1 and idx_n == -1:
+                    break
+                if idx_r == -1:
+                    idx, sep_len = idx_n, 1
+                elif idx_n == -1:
+                    idx, sep_len = idx_r, 1
+                elif idx_r < idx_n:
+                    idx = idx_r
+                    sep_len = 2 if idx_n == idx_r + 1 else 1   # collapse '\r\n'
+                else:
+                    idx, sep_len = idx_n, 1
 
-            if log_fp is not None:
-                try:
-                    log_fp.write(line + "\n")
-                    log_fp.flush()
-                except Exception:
-                    pass
-            if site is not None:
-                if pipe_type == "stdout":
-                    site.add_stdout_line(line)
-                elif pipe_type == "stderr":
-                    site.add_stderr_line(line)
-            if (ffmpeg_error_counter is not None and ffmpeg_error_event is not None
-                    and FFMPEG_ERROR_RESTART_THRESHOLD > 0 and not ffmpeg_error_event.is_set()):
-                line_lower = line.lower()
-                for pattern in FFMPEG_ERROR_PATTERNS:
-                    if pattern.lower() in line_lower:
-                        ffmpeg_error_counter[0] += 1
-                        if site is not None and streamer:
-                            site.set_ffmpeg_error_count(streamer, ffmpeg_error_counter[0])
-                        if ffmpeg_error_counter[0] >= FFMPEG_ERROR_RESTART_THRESHOLD:
-                            ffmpeg_error_event.set()
-                        break
+                raw_line = buf[:idx]
+                buf = buf[idx + sep_len:]
 
-            if ad_alerts_enabled and site is not None and streamer:
-                if (_AD_DISCONTINUITY_RE.search(line) or
-                        _AD_SEGMENT_URL_RE.search(line) or
-                        _AD_TWITCH_TAG_RE.search(line)):
-                    site.update_ad_alert(streamer)
-                    dbg(f"[AD] signal detected streamer={streamer!r} "
-                        f"pipe={pipe_type!r}: {line[:120]!r}",
-                        site_name=streamer)
+                # On Windows, yt-dlp.exe writes stdout in the active code
+                # page (e.g. cp1252), not UTF-8. Use the locale encoding so
+                # that cp1252-representable non-ASCII characters (accents,
+                # etc.) survive; emoji/CJK that can't be represented are
+                # already replaced with '?' by yt-dlp itself and are
+                # unrecoverable from stdout — the sidecar technique
+                # handles those.
+                line = raw_line.decode(encoding=locale.getpreferredencoding(), errors="replace")
+                if not line:
+                    continue
+
+                line_count += 1
+                if line_count <= 3:
+                    dbg(f"[DRAIN] pipe_type={pipe_type!r} streamer={streamer!r} line#{line_count}: {line[:200]!r}")
+
+                # ── Parse yt-dlp destination filename ────────────────────────────
+                if (filename_holder is not None and filename_event is not None
+                        and not filename_event.is_set()):
+                    stripped = line.strip()
+                    if stripped.startswith(_YTDLP_DESTINATION_PREFIX):
+                        dest = stripped[len(_YTDLP_DESTINATION_PREFIX):].strip()
+                        if dest:
+                            filename_holder.append(dest)
+                            filename_event.set()
+                            dbg(f"[DRAIN] parsed destination filename={dest!r} "
+                                f"pipe_type={pipe_type!r} streamer={streamer!r}")
+
+                if log_fp is not None:
+                    try:
+                        log_fp.write(line + "\n")
+                        log_fp.flush()
+                    except Exception:
+                        pass
+                if site is not None:
+                    if pipe_type == "stdout":
+                        site.add_stdout_line(line, streamer=streamer)
+                    elif pipe_type == "stderr":
+                        site.add_stderr_line(line, streamer=streamer)
+                if (ffmpeg_error_counter is not None and ffmpeg_error_event is not None
+                        and FFMPEG_ERROR_RESTART_THRESHOLD > 0 and not ffmpeg_error_event.is_set()):
+                    line_lower = line.lower()
+                    for pattern in FFMPEG_ERROR_PATTERNS:
+                        if pattern.lower() in line_lower:
+                            ffmpeg_error_counter[0] += 1
+                            if site is not None and streamer:
+                                site.set_ffmpeg_error_count(streamer, ffmpeg_error_counter[0])
+                            if ffmpeg_error_counter[0] >= FFMPEG_ERROR_RESTART_THRESHOLD:
+                                ffmpeg_error_event.set()
+                            break
+
+                if ad_alerts_enabled and site is not None and streamer:
+                    if (_AD_DISCONTINUITY_RE.search(line) or
+                            _AD_SEGMENT_URL_RE.search(line) or
+                            _AD_TWITCH_TAG_RE.search(line)):
+                        site.update_ad_alert(streamer)
+                        dbg(f"[AD] signal detected streamer={streamer!r} "
+                            f"pipe={pipe_type!r}: {line[:120]!r}",
+                            site_name=streamer)
+
+        # EOF — flush any trailing partial line that never got a terminator.
+        if buf:
+            line = buf.decode(encoding=locale.getpreferredencoding(), errors="replace")
+            if line:
+                line_count += 1
+                if log_fp is not None:
+                    try:
+                        log_fp.write(line + "\n")
+                        log_fp.flush()
+                    except Exception:
+                        pass
+                if site is not None:
+                    if pipe_type == "stdout":
+                        site.add_stdout_line(line, streamer=streamer)
+                    elif pipe_type == "stderr":
+                        site.add_stderr_line(line, streamer=streamer)
     except Exception as _drain_exc:
         dbg(f"[DRAIN] pipe_type={pipe_type!r} streamer={streamer!r} EXCEPTION: {_drain_exc!r}")
     dbg(f"[DRAIN] thread exiting pipe_type={pipe_type!r} streamer={streamer!r} total_lines={line_count}")
@@ -1704,10 +2065,13 @@ def get_live_streamers(streamers: List[str], cfg: dict,
     if result.stderr:
         dbg(f"[CHECKER] stderr (first 500 chars): {result.stderr[:500]!r}")
     if cfg["logging"]:
-        out_path, err_path = get_log_file_paths(cfg)
+        checker_path = get_checker_log_path(cfg)
         try:
             if result.stdout:
-                with open(out_path, "a", encoding="utf-8") as _lf:
+                dir_part = os.path.dirname(checker_path)
+                if dir_part:
+                    os.makedirs(dir_part, exist_ok=True)
+                with open(checker_path, "a", encoding="utf-8") as _lf:
                     _lf.write(result.stdout)
         except Exception:
             pass
@@ -1816,10 +2180,12 @@ def probe_file_height(filepath: str) -> Optional[int]:
 def get_streamer_file_size(output_dir, streamer, cfg=None,
                            last_growth_time=None, stall_timeout=None,
                            stall_check_interval=None, proc_start_time=None,
-                           known_filename=None):
+known_filename=None):
     try:
         filename = known_filename
         size = os.path.getsize(filename) if filename else 0
+        size = _simulation.maybe_freeze_stall_size(
+            filename, size, last_growth_time, stall_timeout, streamer)
         stall_detected = False
         if last_growth_time is not None and stall_timeout is not None:
             time_now = time.time()
@@ -1834,6 +2200,7 @@ def get_streamer_file_size(output_dir, streamer, cfg=None,
                 stall_detected = True
                 dbg(f"[STALL] TRIGGERED: stalled={stalled:.2f}s >= threshold={stall_timeout}s",
                     site_name=streamer)
+                _simulation.maybe_latch_stall_permanent(streamer)
         return size, stall_detected, filename or "", False
     except Exception as e:
         dbg(f"[STALL] exception in get_streamer_file_size: {type(e).__name__}: {e}",
@@ -1915,9 +2282,7 @@ def _launch_lq_recording(streamer: str, cfg: dict, site: "SiteState",
         # Claim the slot before starting the thread.
         site.currently_recording.add(streamer)
         site.evicted_streamers.discard(streamer)
-        with site.dash_lock:
-            if streamer not in site.dash_live_since:
-                site.dash_live_since[streamer] = time.time()
+    site.mark_live(streamer)
 
     site.log_line(f"LQ recording starting for {streamer}")
     dbg(f"[LQ] Launching LQ record_stream for {streamer}")
@@ -2047,9 +2412,7 @@ def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) ->
         _lq_attempted[(tgt_str, tgt_label)] = now
 
     # Evict the current recording.
-    with tgt_site.lock:
-        tgt_site.evicted_streamers.add(tgt_str)
-    tgt_site.kill_proc_for_streamer(tgt_str)
+    tgt_site.evict_and_restart(tgt_str)
 
     # Launch the LQ restart in a background thread (waits for eviction to clear).
     threading.Thread(
@@ -2058,6 +2421,23 @@ def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) ->
         daemon=True,
         name=f"lq-launch-{tgt_str}",
     ).start()
+
+
+def _refresh_restart_anchor_if_growing(site: "SiteState", streamer: str,
+                                        growth_seen: bool, reason: str) -> None:
+    """Refresh last_restart_anchor for an in-loop self-restart (stall
+    recovery, ffmpeg-error threshold, or any future restart branch).
+
+    Only refreshes when growth_seen is True — otherwise this attempt never
+    confirmed a write, and NOTIFY_NO_CONFIRM_FILE should still fire.
+    In-loop self-restarts only; external evictions should use
+    SiteState.evict_and_restart() instead.
+    """
+    if not growth_seen:
+        return
+    site.set_last_restart_anchor(streamer, time.time())
+    dbg(f"[RESTART_ANCHOR] refreshed for {streamer!r} (reason={reason})",
+        site_name=streamer)
 
 
 def _resolve_split_after(cfg: dict, entry_info: dict) -> dict:
@@ -2127,29 +2507,6 @@ def _resolve_intro_delay(cfg: dict, entry_info: dict) -> dict:
     return overridden
 
 
-# ── DEBUG: write-failure simulation ─────────────────────────────────────────
-# Flip to True to reproduce the "recording can't write its file" failure mode
-# (the incident that motivated the unconfirmed-recording alert below) without
-# needing to actually break a filesystem.
-#
-# NOTE: pointing yt-dlp at a subdirectory that simply doesn't exist does NOT
-# work as a fault — yt-dlp creates any missing parent directories for its -o
-# path itself, so the write silently succeeds one level deeper and nothing
-# fails. Instead, this pre-creates a plain FILE (not a directory) at the
-# injected path component. yt-dlp then can't create anything under it —
-# you can't mkdir, or write a file, inside something that is itself a
-# regular file — so the write is guaranteed to fail regardless of any
-# directory-auto-creation behavior on yt-dlp's end. This is OS-level, so it
-# works the same on Windows/macOS/Linux.
-#
-# Watch for the flashing dashboard marker and the full-screen alert to
-# appear after roughly one stall_timeout window. Restore to False
-# afterwards — this is not meant to be left on, and the sentinel file it
-# creates (named below) should be deleted from OUTPUT_DIR when you're done.
-_SIMULATE_WRITE_FAILURE = False
-_SIMULATE_WRITE_FAILURE_BLOCKER_NAME = "_simulated_write_failure_do_not_create"
-
-
 def record_stream(streamer: str, cfg: dict, site: "SiteState",
                   use_lq: bool = False, show_popup: bool = True,
                   eviction_warning: str = "") -> None:
@@ -2188,6 +2545,15 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
     # SPLIT_AFTER loop below is told to stop splitting for the rest of the
     # stream instead of continuing to split every intro_delay_minutes.
     _intro_delay_disable_after_split = False
+    # NOTIFY_NO_CONFIRM_FILE grace period (seconds): when Intro Delay holds
+    # the recording start, the file is *intentionally* not written for the
+    # first intro_delay_minutes. The no-confirm deadline below is anchored
+    # to the streamer's live-since time, not to when record_stream actually
+    # starts writing — so without this extra allowance, streamers using
+    # Intro Delay would trip the write-failure alert as a false positive
+    # every time. Only applies to the "hold" branch below (not
+    # intro_delay_split, which doesn't delay the write).
+    _no_confirm_grace_seconds = 0.0
 
     if intro_delay_enabled and intro_delay_minutes > 0 and intro_delay_split:
         # Reuse the SPLIT_AFTER machinery as-is: force the *first* split to
@@ -2199,11 +2565,20 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
         dbg(f"[INTRO_DELAY] streamer={streamer!r} split mode: first split forced "
             f"at {intro_delay_minutes}m, further splitting disabled afterward")
     elif intro_delay_enabled and intro_delay_minutes > 0:
-        dbg(f"[INTRO_DELAY] streamer={streamer!r} delay mode: holding recording "
-            f"start for {intro_delay_minutes}m")
+        # Anchor the hold to when the streamer actually went live, not to
+        # time.time() at thread-start. This means elapsed live time counts
+        # toward the delay: e.g. if a streamer was live for 10m before
+        # being enabled and intro_delay is 5m, the delay window has
+        # already passed and recording starts immediately instead of
+        # waiting a further 5m from the enable.
+        _intro_delay_anchor = site.get_live_since(streamer) or time.time()
+        _delay_deadline = _intro_delay_anchor + intro_delay_minutes * 60
+        _delay_remaining = max(0.0, _delay_deadline - time.time())
+        dbg(f"[INTRO_DELAY] streamer={streamer!r} delay mode: configured "
+            f"{intro_delay_minutes}m from live-since, "
+            f"{_delay_remaining:.0f}s remaining")
         with site.lock:
             site.intro_delay_pending.add(streamer)
-        _delay_deadline = time.time() + intro_delay_minutes * 60
         while time.time() < _delay_deadline:
             if site._stop_event.is_set() or streamer in site.evicted_streamers:
                 dbg(f"[INTRO_DELAY] streamer={streamer!r} aborted during delay "
@@ -2215,6 +2590,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             site._stop_event.wait(timeout=min(1.0, _delay_deadline - time.time()))
         with site.lock:
             site.intro_delay_pending.discard(streamer)
+        # Extend the NOTIFY_NO_CONFIRM_FILE deadline by the hold duration so
+        # the write-failure alert doesn't fire on the file that was
+        # intentionally never written during the delay window.
+        _no_confirm_grace_seconds = intro_delay_minutes * 60
         dbg(f"[INTRO_DELAY] streamer={streamer!r} delay elapsed — starting recording")
         # The initial "is live" notification was sent as "Not recording /
         # Reason: Intro Delay" back in start_recording_if_needed(). Now that
@@ -2266,21 +2645,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     segment_num
                 )
 
-            output_path = os.path.join(output_dir, current_output_tmpl)
-            if _SIMULATE_WRITE_FAILURE:
-                # See _SIMULATE_WRITE_FAILURE above. Create the blocker as a
-                # plain file (once) so yt-dlp cannot create anything "under"
-                # it — this is what actually guarantees the write fails,
-                # unlike just pointing at a missing directory.
-                _blocker_path = os.path.join(output_dir, _SIMULATE_WRITE_FAILURE_BLOCKER_NAME)
-                if not os.path.exists(_blocker_path):
-                    try:
-                        with open(_blocker_path, "wb"):
-                            pass
-                        dbg(f"[SIMULATE_WRITE_FAILURE] created blocker file at {_blocker_path!r}")
-                    except Exception as _blocker_exc:
-                        dbg(f"[SIMULATE_WRITE_FAILURE] could not create blocker file: {_blocker_exc!r}")
-                output_path = os.path.join(_blocker_path, current_output_tmpl)
+            output_path = _simulation.get_write_failure_output_path(
+                output_dir, current_output_tmpl)
 
             # ── Select downloader command (normal vs LQ) ──────────────────
             _active_dl_cmd = cfg["downloader_cmd"]
@@ -2321,7 +2687,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                  channel_url]
             )
 
-            out_target, err_target, close_logs, log_out_fp, log_err_fp = open_log_streams(cfg)
+            out_target, err_target, close_logs, log_out_fp, log_err_fp = open_log_streams(cfg, streamer)
 
             try:
                 _popen_kwargs: dict = dict(stdout=out_target, stderr=err_target)
@@ -2573,13 +2939,53 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             # NOTIFY_NO_CONFIRM_FILE tracking: if the recording file has not been
             # confirmed within one STALL_TIMEOUT window (anchored to when the
             # streamer went live), fire a warning notification. yt-dlp can exit
-            # 'normally' during a failure, so this deadline is the backstop.
-            _no_confirm_deadline = (site.dash_live_since.get(streamer)
-                                    or time.time()) + stall_timeout
+            # 'normally' during a failure, so this deadline is the backstop —
+            # and because of that, the anchor must be a persistent, session-
+            # long value (the streamer's live-since time), not something reset
+            # per attempt, since a retry after a failed attempt should still
+            # measure from the same start point.
+            #
+            # live-since is correct and is never reset — it's the source of
+            # truth for how long the streamer has actually been live. But if
+            # this streamer was ever live-while-disabled during the current
+            # session, get_enable_anchor() holds a separate, persistent
+            # anchor set once at the moment of enabling, and reused for
+            # every attempt/retry afterward — otherwise a retry following a
+            # fast failure would fall back to the stale live-since time and
+            # fire a false-positive alert almost immediately, exactly as
+            # live-since predates the enable.
+            _no_confirm_anchor_val = site.get_enable_anchor(streamer)
+            _no_confirm_anchor_src = "enable_anchor"
+            if _no_confirm_anchor_val is None:
+                _no_confirm_anchor_val = site.get_live_since(streamer) or time.time()
+                _no_confirm_anchor_src = "live_since"
+            # If this attempt follows a restart (stall, LQ, or quality
+            # upgrade), take the more recent of the two anchors to avoid
+            # firing the write-failure alert
+            _last_restart_anchor = site.get_last_restart_anchor(streamer)
+            if _last_restart_anchor is not None and _last_restart_anchor > _no_confirm_anchor_val:
+                _no_confirm_anchor_val = _last_restart_anchor
+                _no_confirm_anchor_src = "last_restart_anchor"
+            # Floor the anchor at this process's own start time.  If the
+            # streamer had been live for longer than stall_timeout already,
+            # using the raw persisted anchor would put _no_confirm_deadline
+            # in the past before this attempt even starts, firing the
+            # write-failure alert immediately on every launch. 
+            if _no_confirm_anchor_val < _SCRIPT_START_TIME:
+                dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: {_no_confirm_anchor_src} "
+                    f"({_no_confirm_anchor_val:.2f}) predates this process's start "
+                    f"({_SCRIPT_START_TIME:.2f}) — flooring anchor at process start "
+                    f"for streamer={streamer!r}",
+                    site_name=streamer)
+                _no_confirm_anchor_val = _SCRIPT_START_TIME
+                _no_confirm_anchor_src += "+floored_at_process_start"
+            _no_confirm_deadline = _no_confirm_anchor_val + stall_timeout + _no_confirm_grace_seconds
             _no_confirm_warned   = False
             dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: confirmation deadline for "
-                f"streamer={streamer!r} = time.time()+{stall_timeout}s "
-                f"({_no_confirm_deadline:.2f}), dash_live_since={site.dash_live_since.get(streamer)}",
+                f"streamer={streamer!r} = {_no_confirm_anchor_src}+{stall_timeout}s"
+                f"{f'+{_no_confirm_grace_seconds:.0f}s intro-delay grace' if _no_confirm_grace_seconds else ''} "
+                f"({_no_confirm_deadline:.2f}), live_since={site.get_live_since(streamer)}, "
+                f"enable_anchor={site.get_enable_anchor(streamer)}",
                 site_name=streamer)
 
             def _check_no_confirm_deadline():
@@ -2592,6 +2998,11 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 # under stall_check_interval on every retry, which previously
                 # meant this check was never reached at all.
                 nonlocal _no_confirm_warned
+                # FIX: guard so this function never fires for a streamer that's
+                # being evicted or the app is shutting down, no matter which
+                # call site invokes it.
+                if site._stop_event.is_set() or streamer in site.evicted_streamers:
+                    return
                 if (notify_no_confirm_file
                         and not _no_confirm_warned
                         and not growth_seen
@@ -2672,8 +3083,26 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     site._stop_event.wait(timeout=cfg["cooldown_after_recording"])
                     return
 
+                # ── LQ-restart simulation (DEBUG) ──────────────────────────
+                # Injects simulated ffmpeg-error counts so the real LQ
+                # machinery can be exercised without a genuinely degraded
+                # stream. See _SIMULATE_LQ_RESTART up top. Placed just before
+                # the event check below so a simulated threshold hit is caught
+                # on the very next loop iteration.
+                _simulation._maybe_simulate_lq_errors(
+                    streamer, site, use_lq, growth_seen,
+                    ffmpeg_error_counter, ffmpeg_error_event,
+                    FFMPEG_ERROR_RESTART_THRESHOLD)
+
                 if ffmpeg_error_event.is_set():
                     site.log_line(f"ffmpeg error threshold reached for {streamer} — restarting")
+
+                    # Same reasoning as stall-detected below: this attempt
+                    # was recording, so give the next attempt's deadline a
+                    # fresh window instead of a stale live_since/enable_anchor.
+                    _refresh_restart_anchor_if_growing(
+                        site, streamer, growth_seen, reason="ffmpeg_error_threshold")
+
                     kill_proc(proc)
                     site.unregister_proc(streamer)
                     site.clear_ad_alert(streamer)
@@ -2726,7 +3155,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                             ["-o", next_output_path, channel_url]
                         )
 
-                        next_out_target, next_err_target, next_close_logs, next_log_out_fp, next_log_err_fp = open_log_streams(cfg)
+                        next_out_target, next_err_target, next_close_logs, next_log_out_fp, next_log_err_fp = open_log_streams(cfg, streamer)
 
                         try:
                             _next_popen_kwargs: dict = dict(
@@ -3009,6 +3438,12 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     elif stall_detected:
                         site.log_line(f"Stall detected for {streamer} — restarting")
 
+                        # Growth was already confirmed (that's what makes
+                        # this a "stall" not a never-confirmed start), so
+                        # give the next attempt's deadline a fresh window.
+                        _refresh_restart_anchor_if_growing(
+                            site, streamer, growth_seen, reason="stall_detected")
+
                         kill_proc(proc)
                         site.unregister_proc(streamer)
                         site.clear_stall_since(streamer)
@@ -3026,6 +3461,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         filename_error_warned = False
                         if not growth_seen:
                             growth_seen = True
+                            site.clear_last_restart_anchor(streamer)
                             dbg(f"[STALL] first growth observed for this file — "
                                 f"stall checker is now armed", site_name=streamer)
                             if not initial_notification_sent:
@@ -3062,6 +3498,38 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         site.set_stall_since(streamer, last_growth_time)
 
             else:
+                # FIX: this branch runs whenever the inner loop exits because
+                # `proc.poll() is None` was already False the moment the loop
+                # condition was (re-)checked - most commonly because another
+                # thread killed our process via eviction
+                # (kill_proc_for_streamer) *between* our loop iterations,
+                # before the loop body ever ran and got a chance
+                # to see site.evicted_streamers/_stop_event. That's the exact
+                # race that let a freshly-evicted, not-yet-growth-confirmed
+                # streamer fall through to the "safety net" below and get
+                # flagged as a write failure.
+                #
+                # Handle that case the same way the loop body already does
+                # for eviction/stop (clean teardown, no "recording finished"
+                # bookkeeping, no safety-net check) instead of treating it
+                # like a normal end-of-attempt.
+                if site._stop_event.is_set() or streamer in site.evicted_streamers:
+                    site.unregister_proc(streamer)
+                    site.clear_stall_since(streamer)
+                    site.clear_ffmpeg_error_count(streamer)
+                    site.clear_ad_alert(streamer)
+                    try:
+                        close_logs()
+                    except Exception:
+                        pass
+                    return
+
+                # Normal yt-dlp exit (return code 0) is a valid restart
+                # trigger too: the monitor loop sees the streamer still live
+                # and relaunches almost immediately.
+                _refresh_restart_anchor_if_growing(
+                    site, streamer, growth_seen, reason="normal_exit")
+
                 # Safety net: if proc.poll() was already non-None before the
                 # loop got to sleep even once, _check_no_confirm_deadline()
                 # above may never have run this attempt. Give it one last
@@ -3147,6 +3615,12 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                          if s in blocked and s not in currently_recording]
         to_start = [s for s in live_now
                     if s not in currently_recording and s not in blocked]
+    # Remember that these streamers were live while disabled, so that if
+    # they're later enabled during the same live session, we know
+    # live-since predates the recording start and shouldn't be used as the
+    # NOTIFY_NO_CONFIRM_FILE deadline anchor for them.
+    for streamer in disabled_live:
+        site.mark_blocked_while_live(streamer)
 
     for streamer in disabled_live:
         _maybe_show_live_popup(streamer, cfg, site, show_popup=show_popup,
@@ -3247,12 +3721,11 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                         target_site.log_line(
                             f"Warning: Evicted {target_streamer} (lower priority) - making room for {streamer}"
                         )
-                        with target_site.lock:
-                            target_site.evicted_streamers.add(target_streamer)
-                        # kill_proc_for_streamer is called without holding
-                        # any site.lock so it cannot deadlock against the
-                        # finally block in record_stream.
-                        target_site.kill_proc_for_streamer(target_streamer)
+                        # Restart timing here is unbounded (could be
+                        # minutes/hours until a slot frees up), unlike
+                        # LQ/quality-upgrade which restart within seconds
+                        target_site.mark_evicted_for_concurrency(target_streamer)
+                        target_site.evict_and_restart(target_streamer, refresh_anchor=False)
                         eviction_warning = f"evicted {target_streamer}"
 
                     elif not is_bypass:
@@ -3264,6 +3737,7 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                                                source=source,
                                                is_recording=False,
                                                reason="Lower priority")
+                        site.mark_blocked_while_live(streamer)
                         continue
 
             with site.lock:
@@ -3276,9 +3750,23 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                     else:
                         site.recording_resolution.pop(streamer, None)
                 site.recording_attempt_started[streamer] = time.time()
-                with site.dash_lock:
-                    if streamer not in site.dash_live_since:
-                        site.dash_live_since[streamer] = time.time()
+            site.mark_live(streamer)
+            # Persistent anchor: if this streamer was ever observed
+            # live-while-disabled during the current live session, and we
+            # haven't already set an anchor for it, set one now (first
+            # recording start after enabling). Left in place for every
+            # retry for the rest of this live session — live-since itself
+            # is never touched or treated as stale.
+            if site.was_blocked_while_live(streamer):
+                site.set_enable_anchor_if_unset(streamer, time.time())
+            # Same idea, for the other deferred-restart case: if this
+            # streamer was evicted for concurrency at some earlier point,
+            # this is the actual restart, so refresh last_restart_anchor
+            # to now (not at eviction time, since that gap was unbounded)
+            # and consume the flag.
+            if site.was_evicted_for_concurrency(streamer):
+                site.set_last_restart_anchor(streamer, time.time())
+                site.clear_evicted_for_concurrency(streamer)
             _intro_delay_holding = (streamer_cfg.get("intro_delay_enabled", False)
                                      and not streamer_cfg.get("intro_delay_split", False))
             if global_cfg.get("notify_confirm_file", True) and not _intro_delay_holding:
@@ -3635,10 +4123,16 @@ def _check_quality_upgrades(site: "SiteState",
     down cleanly, and start_recording_if_needed picks the streamer back up
     fresh on (or before) the next poll cycle since it's still live.
     """
+    # ── Quality-upgrade simulation (DEBUG) ─────────────────────────
+    # Fakes a higher checker-reported resolution (via live_info) so the real
+    # UPGRADE_QUALITY machinery runs without the source genuinely switching.
+    # See _SIMULATE_QUALITY_UPGRADE up top.
+    _simulation._maybe_simulate_quality_upgrade(site, live_info)
+
     with site.lock:
         active = set(site.currently_recording) - site.evicted_streamers
-        # Skip streamers that have already been upgraded once.
-        active -= site.quality_upgraded_streamers
+    # Skip streamers that have already been upgraded once this live session.
+    active = {s for s in active if not site.was_quality_upgraded(s)}
 
     dbg(f"[UPGRADE_QUALITY] Checking quality upgrades for {site.label}, active_recordings={active}")
     for streamer in active:
@@ -3670,9 +4164,8 @@ def _check_quality_upgrades(site: "SiteState",
             )
             with site.lock:
                 site.recording_resolution[streamer] = new_height
-                site.quality_upgraded_streamers.add(streamer)
-                site.evicted_streamers.add(streamer)
-            site.kill_proc_for_streamer(streamer)
+            site.mark_quality_upgraded(streamer)
+            site.evict_and_restart(streamer)
 
 
 def monitor_site(site: "SiteState") -> None:
@@ -3687,9 +4180,7 @@ def monitor_site(site: "SiteState") -> None:
 
     if site.eventsub_state is not None and initial_cfg.get("twitch_enabled"):
         def _on_stream_online(broadcaster_login: str, cfg: dict) -> None:
-            with site.dash_lock:
-                if broadcaster_login not in site.dash_live_since:
-                    site.dash_live_since[broadcaster_login] = time.time()
+            site.mark_live(broadcaster_login)
             current_cfg = load_config(cfg["config_path"])
             if broadcaster_login in current_cfg.get("streamers", []):
                 start_recording_if_needed([broadcaster_login], current_cfg, site,
@@ -3743,18 +4234,17 @@ def monitor_site(site: "SiteState") -> None:
                 site.dash_all_streamers.extend(streamers)
                 site.dash_blocked.clear()
                 site.dash_blocked.update(cfg["blocked"])
-                live_set = set(live_now)
-                for s in streamers:
-                    if s not in live_set:
-                        site.dash_live_since.pop(s, None)
-                        site.notif_shown_session.discard(s)
-                    elif s not in site.dash_live_since:
-                        site.dash_live_since[s] = time.time()
 
-            with site.lock:
-                for s in streamers:
-                    if s not in live_set:
-                        site.quality_upgraded_streamers.discard(s)
+            # One call each — mark_offline() tears down the whole
+            # LiveSession (quality_upgraded, blocked_while_live,
+            # enable_anchor, notif_shown all reset together as a unit),
+            # and mark_live() is a no-op if already tracked.
+            live_set = set(live_now)
+            for s in streamers:
+                if s not in live_set:
+                    site.mark_offline(s)
+                else:
+                    site.mark_live(s)
 
             if live_now:
                 start_recording_if_needed(live_now, cfg, site, resolution_map=live_info)
@@ -3826,7 +4316,7 @@ class JJDlpDashboard:
         def safe_ch(y, x, ch):
             if 0 <= y < h and 0 <= x < w - 1:
                 try:
-                    stdscr.addch(y, x, ch, curses.color_pair(pair))
+                    stdscr.addch(y, x, ch, theme.attr(JJDlpDashboard, "main_jjdlpdashboard_safe_ch_pair", pair, False))
                 except curses.error:
                     pass
         for x in range(x1 + 1, x2):
@@ -3895,6 +4385,15 @@ class JJDlpDashboard:
         self._log_scroll    = 0
         self._stdout_scroll = 0
         self._stderr_scroll = 0
+        # STREAMERS panel (Stdout/Stderr tabs): 0 = "All Streamers",
+        # 1..N = index+1 into site.dash_all_streamers. Shared by both tabs
+        # and reset whenever the selected site changes.
+        self._streamer_panel_sel    = 0
+        self._streamer_panel_scroll = 0
+        # Which of the two panels (STREAMERS list vs content pane) UP/DOWN
+        # currently drives on the Stdout/Stderr tabs. Toggled with Tab, the
+        # same way the Config tab cycles its panels.
+        self._pipe_focus = "streamers"
 
         # Disk usage cache — refreshed at most once every 10 seconds
         self._disk_cache_time: float = 0.0
@@ -3909,6 +4408,10 @@ class JJDlpDashboard:
 
         # File Manager tab — watches OUTPUT_DIRs for the current set of sites
         self.file_manager = FileManagerTab(self)
+
+        # Theme manager — owns the theme popup (base scheme, role colors,
+        # and per-call-site overrides), bound to the 'n' key.
+        self.theme_manager = theme.ThemeManager(self)
 
         # ── Changelog popup state ─────────────────────────────────────────────
         # Shown once after startup when update_available=false & changelog_shown=false.
@@ -3990,32 +4493,55 @@ class JJDlpDashboard:
          curses.COLOR_CYAN,    curses.COLOR_BLACK,   curses.COLOR_GREEN,
          curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_MAGENTA,
          curses.COLOR_WHITE,   curses.COLOR_RED),
+        # 6: DOS Blue (classic QBasic/EDIT-style white-on-blue screen)
+        (curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_CYAN,
+         curses.COLOR_YELLOW,  curses.COLOR_GREEN,   curses.COLOR_BLUE,
+         curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_RED,
+         curses.COLOR_CYAN,    curses.COLOR_BLACK,   curses.COLOR_GREEN,
+         curses.COLOR_WHITE,   curses.COLOR_CYAN,    curses.COLOR_YELLOW,
+         curses.COLOR_WHITE,   curses.COLOR_RED),
+        # 7: DOS Red (red alert / danger screen)
+        (curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_WHITE,
+         curses.COLOR_YELLOW,  curses.COLOR_GREEN,   curses.COLOR_RED,
+         curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_WHITE,
+         curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
+         curses.COLOR_YELLOW,  curses.COLOR_YELLOW,  curses.COLOR_WHITE,
+         curses.COLOR_WHITE,   curses.COLOR_BLUE),
+        # 8: DOS White (classic light-background word-processor screen)
+        (curses.COLOR_BLUE,    curses.COLOR_WHITE,   curses.COLOR_BLUE,
+         curses.COLOR_RED,     curses.COLOR_GREEN,   curses.COLOR_WHITE,
+         curses.COLOR_BLUE,    curses.COLOR_MAGENTA, curses.COLOR_RED,
+         curses.COLOR_BLACK,   curses.COLOR_WHITE,   curses.COLOR_GREEN,
+         curses.COLOR_BLACK,   curses.COLOR_CYAN,    curses.COLOR_BLUE,
+         curses.COLOR_WHITE,   curses.COLOR_RED),
     ]
 
+    # Main dashboard background for each scheme (index-aligned with
+    # COLOR_SCHEMES). Defaults to COLOR_BLACK when not listed here — the
+    # DOS Blue/Red/White schemes override this to recolor the whole screen.
+    _SCHEME_BACKGROUND = {
+        6: curses.COLOR_BLUE,
+        7: curses.COLOR_RED,
+        8: curses.COLOR_WHITE,
+    }
+
     def randomize_colors(self):
-        """Cycle to the next color scheme."""
+        """Cycle to the next color scheme. Bound to the 'c' key ('C' for
+        Colors); the 'n' key opens the full theme editor popup instead,
+        which offers the same scheme picker plus role/site customization."""
         self._color_scheme_idx = (self._color_scheme_idx + 1) % len(self.COLOR_SCHEMES)
+        theme.get_state()['base_scheme_idx'] = self._color_scheme_idx
         self._apply_color_scheme()
+        theme.save_theme(theme.get_state())
 
     def _apply_color_scheme(self):
-        s = self.COLOR_SCHEMES[self._color_scheme_idx]
-        (chrome_fg, hilight_fg, hilight_bg, warn_fg, live_fg,
-         invhead_fg, invhead_bg, logo_fg, rec_fg, dim_fg,
-         livebadge_fg, livebadge_bg, normal_fg, disabled_fg, system_fg,
-         delete_fg, delete_bg) = s
-        curses.init_pair(self.C_CHROME,    chrome_fg,    curses.COLOR_BLACK)
-        curses.init_pair(self.C_HILIGHT,   hilight_fg,   hilight_bg)
-        curses.init_pair(self.C_WARN,      warn_fg,      curses.COLOR_BLACK)
-        curses.init_pair(self.C_LIVE,      live_fg,      curses.COLOR_BLACK)
-        curses.init_pair(self.C_INVHEAD,   invhead_fg,   invhead_bg)
-        curses.init_pair(self.C_LOGO,      logo_fg,      curses.COLOR_BLACK)
-        curses.init_pair(self.C_REC,       rec_fg,       curses.COLOR_BLACK)
-        curses.init_pair(self.C_DIM,       dim_fg,       curses.COLOR_BLACK)
-        curses.init_pair(self.C_LIVEBADGE, livebadge_fg, livebadge_bg)
-        curses.init_pair(self.C_NORMAL,    normal_fg,    curses.COLOR_BLACK)
-        curses.init_pair(self.C_DISABLED,  disabled_fg,  curses.COLOR_BLACK)
-        curses.init_pair(self.C_SYSTEM,    system_fg,    curses.COLOR_BLACK)
-        curses.init_pair(self.C_DELETE,   delete_fg,   delete_bg)
+        """Re-initialize all 13 curses pairs. Delegates to theme.py, which
+        layers any saved role-color overrides on top of the active base
+        scheme. self._color_scheme_idx is kept in sync with theme's saved
+        base_scheme_idx so existing readers (e.g. the DOS Red bold-tabs
+        check in draw_tabs) keep working unchanged."""
+        self._color_scheme_idx = theme.get_state().get('base_scheme_idx', 0) % len(self.COLOR_SCHEMES)
+        theme.apply_palette(self)
 
     def setup_colors(self):
         curses.start_color()
@@ -4027,7 +4553,7 @@ class JJDlpDashboard:
     def draw_logo(self, y, x):
         for i, line in enumerate(ASCII_LOGO):
             self.safe_addstr(self.stdscr, y + i, x, line,
-                        curses.color_pair(self.C_LOGO) | curses.A_BOLD)
+                        theme.attr(self, "main_jjdlpdashboard_draw_logo_logo", self.C_LOGO, True))
 
     # ── Christmas Day easter egg ────────────────────────────────────────────
     @staticmethod
@@ -4057,20 +4583,24 @@ class JJDlpDashboard:
             else:
                 pair = self.C_REC
             self.safe_addstr(self.stdscr, y + i, x + 15, line,
-                        curses.color_pair(pair) | curses.A_BOLD)
+                        theme.attr(self, "main_jjdlpdashboard_draw_christmas_easte_pair", pair, True))
 
         self.safe_addstr(self.stdscr, y + len(tree) + 1, x + 11, greeting,
-                    curses.color_pair(self.C_LIVE) | curses.A_BOLD)
+                    theme.attr(self, "main_jjdlpdashboard_draw_christmas_easte_live", self.C_LIVE, True))
 
     # ── Tab bar ──────────────────────────────────────────────────────────────
     def draw_tabs(self, y, x):
+        dos_red = (self._color_scheme_idx == 7)  # DOS Red: bold tab headers
         for i, tab in enumerate(self.TABS):
             label = f"  {tab}  "
             if i == self.selected_tab:
                 self.safe_addstr(self.stdscr, y, x, label,
-                            curses.color_pair(self.C_HILIGHT) | curses.A_BOLD)
+                            theme.attr(self, "main_jjdlpdashboard_draw_tabs_hilight", self.C_HILIGHT, False))
             else:
-                self.safe_addstr(self.stdscr, y, x, label, curses.color_pair(self.C_INVHEAD))
+                attr = theme.attr(self, "main_jjdlpdashboard_draw_tabs_invhead", self.C_CHROME, True)
+                if dos_red:
+                    attr |= curses.A_BOLD
+                self.safe_addstr(self.stdscr, y, x, label, attr)
             x += len(label) + 1
 
     # ── System status sidebar ────────────────────────────────────────────────
@@ -4078,7 +4608,7 @@ class JJDlpDashboard:
         """Draws the SYSTEM info panel (from demo). Placed in the sidebar."""
         self.draw_box(self.stdscr, y1, x1, y2, x2, self.C_SYSTEM)
         self.safe_addstr(self.stdscr, y1, x1 + 2, " SYSTEM ",
-                    curses.color_pair(self.C_SYSTEM) | curses.A_BOLD)
+                    theme.attr(self, "main_jjdlpdashboard_draw_system_panel_system", self.C_SYSTEM, True))
 
         # Aggregate counts across all sites
         total_streamers = 0
@@ -4091,8 +4621,8 @@ class JJDlpDashboard:
         for site in self.sites:
             with site.dash_lock:
                 all_s      = list(site.dash_all_streamers)
-                live_since = dict(site.dash_live_since)
                 blocked    = set(site.dash_blocked)
+            live_since = site.snapshot_live_since()
             with site.lock:
                 recording  = set(site.currently_recording)
                 intro_delay_pending = set(site.intro_delay_pending)
@@ -4174,10 +4704,10 @@ class JJDlpDashboard:
             if label:
                 self.safe_addstr(self.stdscr, row_y, x1 + 2,
                             label[:label_w].ljust(label_w),
-                            curses.color_pair(self.C_DIM))
+                            theme.attr(self, "main_jjdlpdashboard_split_after_rows_dim", self.C_NORMAL, True))
                 self.safe_addstr(self.stdscr, row_y, x1 + 2 + label_w + 1,
                             str(val)[:inner_w - label_w - 1],
-                            curses.color_pair(cpair) | curses.A_BOLD)
+                            theme.attr(self, "main_jjdlpdashboard_split_after_rows_cpair", cpair, True))
 
         # Disk space rows — drives from global.conf take precedence; fall back to per-site
         disk_row_y = y1 + 2 + len(rows) + 1
@@ -4198,7 +4728,7 @@ class JJDlpDashboard:
                 if ffmpeg_row_y < y2 - 1:
                     self.safe_addstr(self.stdscr, ffmpeg_row_y, x1 + 2,
                                 "── ffmpeg errors ──"[:inner_w],
-                                curses.color_pair(self.C_REC))
+                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_rec_1", self.C_REC, False))
                     ffmpeg_row_y += 1
                 for _streamer, _count in all_ffmpeg_errors:
                     if ffmpeg_row_y >= y2 - 1:
@@ -4207,10 +4737,10 @@ class JJDlpDashboard:
                     _val   = str(_count)
                     self.safe_addstr(self.stdscr, ffmpeg_row_y, x1 + 2,
                                 _label,
-                                curses.color_pair(self.C_REC))
+                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_rec_2", self.C_REC, False))
                     self.safe_addstr(self.stdscr, ffmpeg_row_y, x1 + 2 + label_w + 1,
                                 _val[:inner_w - label_w - 1],
-                                curses.color_pair(self.C_REC))
+                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_rec_3", self.C_REC, False))
                     ffmpeg_row_y += 1
                 disk_row_y = ffmpeg_row_y + 1
         except Exception as _ffmpeg_err_exc:
@@ -4232,7 +4762,7 @@ class JJDlpDashboard:
                 if disk_row_y < y2 - 1:
                     self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
                                 "── stalled ──"[:inner_w],
-                                curses.color_pair(self.C_REC))
+                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_rec_4", self.C_REC, False))
                     disk_row_y += 1
                 for _streamer, _secs in all_stalls:
                     if disk_row_y >= y2 - 1:
@@ -4241,10 +4771,10 @@ class JJDlpDashboard:
                     _val   = _fmt_duration(int(_secs))
                     self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
                                 _label,
-                                curses.color_pair(self.C_REC))
+                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_rec_5", self.C_REC, False))
                     self.safe_addstr(self.stdscr, disk_row_y, x1 + 2 + label_w + 1,
                                 _val[:inner_w - label_w - 1],
-                                curses.color_pair(self.C_REC))
+                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_rec_6", self.C_REC, False))
                     disk_row_y += 1
                 disk_row_y += 1
         except Exception as _stall_exc:
@@ -4263,13 +4793,13 @@ class JJDlpDashboard:
                 if disk_row_y < y2 - 1:
                     self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
                                 "── ads ──"[:inner_w],
-                                curses.color_pair(self.C_WARN) | curses.A_BOLD)
+                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_warn_1", self.C_WARN, True))
                     disk_row_y += 1
                 for _streamer in all_ad_alerts:
                     if disk_row_y >= y2 - 1:
                         break
                     _label = _streamer[:label_w].ljust(label_w)
-                    _attr  = curses.color_pair(self.C_WARN) | curses.A_BOLD
+                    _attr  = theme.attr(self, "main_jjdlpdashboard_split_after_rows_warn_2", self.C_WARN, True)
                     self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
                                 _label, _attr)
                     self.safe_addstr(self.stdscr, disk_row_y, x1 + 2 + label_w + 1,
@@ -4357,7 +4887,7 @@ class JJDlpDashboard:
 
             if disk_row_y < y2 - 1:
                 self.safe_addstr(self.stdscr, disk_row_y, x1 + 2, "── Disk ──",
-                            curses.color_pair(self.C_SYSTEM))
+                            theme.attr(self, "main_jjdlpdashboard_update_disk_usage_system", self.C_SYSTEM, True))
                 disk_row_y += 1
             for drive, usage in self._disk_cache_results:
                 if disk_row_y >= y2 - 1:
@@ -4373,7 +4903,7 @@ class JJDlpDashboard:
                 color = self.C_LIVE if pct < 80 else (self.C_WARN if pct < 95 else self.C_REC)
                 self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
                             disk_str[:inner_w],
-                            curses.color_pair(color))
+                            theme.attr(self, "main_jjdlpdashboard_update_disk_usage_color", color, True))
                 disk_row_y += 1
         except Exception as _disk_outer_exc:
             dbg(f"[DISK] outer exception in disk section: {type(_disk_outer_exc).__name__}: {_disk_outer_exc}")
@@ -4381,7 +4911,7 @@ class JJDlpDashboard:
         # Uptime at bottom
         self.safe_addstr(self.stdscr, y2 - 1, x1 + 2,
                     f"Up: {uptime_str}"[:inner_w],
-                    curses.color_pair(self.C_CHROME))
+                    theme.attr(self, "main_jjdlpdashboard_update_disk_usage_chrome", self.C_CHROME, True))
 
     # ── Site panel (one per config) ──────────────────────────────────────────
     def draw_site_panel(self, site: "SiteState", y1, x1, y2, x2, is_selected: bool = False):
@@ -4400,10 +4930,10 @@ class JJDlpDashboard:
             cfg_label    = _panel_cfg.get("site_label",
                                        os.path.basename(site.config_path))
             all_s        = list(site.dash_all_streamers)
-            live_since   = dict(site.dash_live_since)
             last_live    = dict(site.dash_last_live)
             blocked      = set(site.dash_blocked)
             next_in      = site.dash_next_check_in
+        live_since   = site.snapshot_live_since()
         with site.lock:
             recording     = set(site.currently_recording)
             intro_delay_pending = set(site.intro_delay_pending)
@@ -4439,23 +4969,23 @@ class JJDlpDashboard:
         # Site label on top border
         label_text = f"  {cfg_label}  "
         self.safe_addstr(self.stdscr, header_y, x1 + 2, label_text,
-                    curses.color_pair(self.C_CHROME) | curses.A_BOLD)
+                    theme.attr(self, "main_jjdlpdashboard_draw_site_panel_chrome_1", self.C_CHROME, True))
 
         # Status badge row
         badge_y = y1 + 1
         bx = x1 + 2
         self.safe_addstr(self.stdscr, badge_y, bx,
-                    f"LIVE:{live_cnt}",  curses.color_pair(self.C_LIVE) | curses.A_BOLD)
+                    f"LIVE:{live_cnt}",  theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_1", self.C_LIVE, True))
         bx += 7
         self.safe_addstr(self.stdscr, badge_y, bx,
-                    f"REC:{rec_cnt}",    curses.color_pair(self.C_REC) | curses.A_BOLD)
+                    f"REC:{rec_cnt}",    theme.attr(self, "main_jjdlpdashboard_draw_site_panel_rec_1", self.C_REC, True))
         bx += 6
         self.safe_addstr(self.stdscr, badge_y, bx,
-                    f"OFF:{off_cnt}",    curses.color_pair(self.C_DIM))
+                    f"OFF:{off_cnt}",    theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_1", self.C_DIM, False))
         bx += 6
         if dis_cnt:
             self.safe_addstr(self.stdscr, badge_y, bx,
-                        f"DIS:{dis_cnt}", curses.color_pair(self.C_DISABLED))
+                        f"DIS:{dis_cnt}", theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_1", self.C_DISABLED, False))
 
         # ── Streamer rows ──
         panel_width  = x2 - x1 - 2   # usable inner width
@@ -4484,7 +5014,7 @@ class JJDlpDashboard:
             _rows_used = min(max_rows, (len(all_s) + 1) // 2)
             for _sy in range(row_start, row_start + _rows_used):
                 self.safe_addstr(self.stdscr, _sy, _sep_col, "│",
-                            curses.color_pair(self.C_CHROME))
+                            theme.attr(self, "main_jjdlpdashboard_draw_site_panel_chrome_2", self.C_CHROME, False))
             for i, s in enumerate(all_s):
                 row_idx = i // 2
                 col_idx = i % 2
@@ -4514,35 +5044,35 @@ class JJDlpDashboard:
                     last_live_str = ""
 
                 if is_dis:
-                    name_attr = curses.color_pair(self.C_DISABLED)
+                    name_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_2", self.C_DISABLED, False)
                     if since is not None:
                         if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
                             status_str = "[●Live]"
-                            status_attr = curses.color_pair(self.C_DISABLED) | curses.A_BOLD
+                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_3", self.C_DISABLED, True)
                         else:
                             status_str = "[x DIS]"
-                            status_attr = curses.color_pair(self.C_DISABLED)
+                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_4", self.C_DISABLED, False)
                     else:
                         status_str = "[x DIS]"
-                        status_attr = curses.color_pair(self.C_DISABLED)
+                        status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_5", self.C_DISABLED, False)
                 elif since is not None:
-                    name_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
+                    name_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_2", self.C_LIVE, True)
                     if is_rec:
                         if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
                             status_str = "[●Live]"
-                            status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
+                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_3", self.C_LIVE, True)
                         else:
                             status_str = "[► REC] "
-                            status_attr = curses.color_pair(self.C_REC) | curses.A_BOLD
+                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_rec_2", self.C_REC, True)
                     else:
                         status_str = "[●Live]"
-                        status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
+                        status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_4", self.C_LIVE, True)
                     if not (is_rec and recording_res.get(s) is not None):
                         last_live_str = ""  # currently live, no "last live"
                 else:
-                    name_attr = curses.color_pair(self.C_DIM)
+                    name_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_2", self.C_DIM, False)
                     status_str = "[○ off]"
-                    status_attr = curses.color_pair(self.C_DIM)
+                    status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_3", self.C_DIM, False)
 
                 col = x1 + 2 + col_idx * (half_w + _col_gap)
                 self.safe_addstr(self.stdscr, row_y, col,
@@ -4555,9 +5085,9 @@ class JJDlpDashboard:
                     if (ll_ts is not None
                             and _last_live_highlight_days > 0
                             and (now - ll_ts) <= _last_live_highlight_days * 86400):
-                        ll_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
+                        ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_5", self.C_LIVE, True)
                     else:
-                        ll_attr = curses.color_pair(self.C_DIM)
+                        ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_4", self.C_DIM, False)
                     self.safe_addstr(self.stdscr, row_y, col,
                                 last_live_str[:last_live_w_compact],
                                 ll_attr)
@@ -4598,44 +5128,44 @@ class JJDlpDashboard:
                     last_live_str = ""
 
                 if is_dis:
-                    name_attr   = curses.color_pair(self.C_DISABLED)
+                    name_attr   = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_6", self.C_DISABLED, False)
                     bar_str     = "─" * bar_w
-                    bar_attr    = curses.color_pair(self.C_DISABLED)
+                    bar_attr    = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_7", self.C_DISABLED, False)
                     dur_str     = ""
                     if since is not None:
                         if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
                             status_str  = "[●Live]"
-                            status_attr = curses.color_pair(self.C_DISABLED) | curses.A_BOLD
+                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_8", self.C_DISABLED, True)
                         else:
                             status_str  = "[x DIS]"
-                            status_attr = curses.color_pair(self.C_DISABLED)
+                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_9", self.C_DISABLED, False)
                     else:
                         status_str  = "[x DIS]"
-                        status_attr = curses.color_pair(self.C_DISABLED)
+                        status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_10", self.C_DISABLED, False)
                 elif since is not None:
                     elapsed     = now - since
-                    name_attr   = curses.color_pair(self.C_LIVE) | curses.A_BOLD
+                    name_attr   = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_6", self.C_LIVE, True)
                     if is_rec:
                         if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
                             status_str  = "[●Live]"
-                            status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
+                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_7", self.C_LIVE, True)
                         else:
                             status_str  = "[► REC] "
-                            status_attr = curses.color_pair(self.C_REC) | curses.A_BOLD
+                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_rec_3", self.C_REC, True)
                     else:
                         status_str  = "[●Live]"
-                        status_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
+                        status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_8", self.C_LIVE, True)
                     bar_str     = _live_bar(elapsed, bar_w, _bar_max_secs)
-                    bar_attr    = curses.color_pair(self.C_LIVE)
+                    bar_attr    = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_9", self.C_LIVE, False)
                     dur_str     = _fmt_duration(elapsed)
                     if not (is_rec and recording_res.get(s) is not None):
                         last_live_str = ""  # currently live, no "last live"
                 else:
-                    name_attr   = curses.color_pair(self.C_DIM)
+                    name_attr   = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_5", self.C_NORMAL, True)
                     status_str  = "[○ off]"
-                    status_attr = curses.color_pair(self.C_DIM)
+                    status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_6", self.C_NORMAL, True)
                     bar_str     = "─" * bar_w
-                    bar_attr    = curses.color_pair(self.C_DIM)
+                    bar_attr    = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_7", self.C_NORMAL, True)
                     dur_str     = ""
 
                 col = x1 + 2
@@ -4649,7 +5179,7 @@ class JJDlpDashboard:
                 col += bar_w + 1
                 if dur_str:
                     self.safe_addstr(self.stdscr, row_y, col,
-                                dur_str[:9].ljust(9), curses.color_pair(self.C_CHROME))
+                                dur_str[:9].ljust(9), theme.attr(self, "main_jjdlpdashboard_draw_site_panel_chrome_3", self.C_CHROME, False))
                 else:
                     self.safe_addstr(self.stdscr, row_y, col, " " * 9, 0)
                 col += 10
@@ -4657,9 +5187,9 @@ class JJDlpDashboard:
                     if (ll_ts is not None
                             and _last_live_highlight_days > 0
                             and (now - ll_ts) <= _last_live_highlight_days * 86400):
-                        ll_attr = curses.color_pair(self.C_LIVE) | curses.A_BOLD
+                        ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_10", self.C_LIVE, True)
                     else:
-                        ll_attr = curses.color_pair(self.C_DIM)
+                        ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_8", self.C_NORMAL, True)
                     self.safe_addstr(self.stdscr, row_y, col,
                                 last_live_str[:last_live_w],
                                 ll_attr)
@@ -4679,7 +5209,7 @@ class JJDlpDashboard:
             _nxt_str = f"{nxt:>4.0f}s"
         self.safe_addstr(self.stdscr, y2 - 1, x1 + 2,
                     f"Next check: {_nxt_str}",
-                    curses.color_pair(self.C_WARN) | curses.A_BOLD)
+                    theme.attr(self, "main_jjdlpdashboard_draw_site_panel_warn", self.C_WARN, True))
 
     # ── Dashboard tab ────────────────────────────────────────────────────────
     def draw_dashboard_tab(self, y1, x1, y2, x2):
@@ -4754,13 +5284,23 @@ class JJDlpDashboard:
             self.draw_site_panel(site, py1, px1, py2, px2, is_selected)
 
     # ── Line-wrap helper ─────────────────────────────────────────────────────
-    @staticmethod
-    def _wrap_lines(lines: List[str], max_width: int) -> List[str]:
+    _CONTROL_CHAR_RE = _re.compile(r'[\x00-\x08\x0b-\x1f\x7f]')
+
+    @classmethod
+    def _sanitize_line(cls, line: str) -> str:
+        """Strip control characters (stray '\\r' in particular) that would
+        otherwise make curses jump the cursor mid-draw and smear output
+        over neighboring panels."""
+        return cls._CONTROL_CHAR_RE.sub("", line)
+
+    @classmethod
+    def _wrap_lines(cls, lines: List[str], max_width: int) -> List[str]:
         """Wrap each line to max_width characters, preserving order."""
         if max_width <= 0:
             return lines
         wrapped = []
         for line in lines:
+            line = cls._sanitize_line(line)
             if not line:
                 wrapped.append("")
                 continue
@@ -4776,15 +5316,15 @@ class JJDlpDashboard:
         sel_site = self.sites[self.selected_site_idx] if self.sites else None
         tab_x    = x1 + 1
         self.safe_addstr(self.stdscr, y1, x1, "  Site: ",
-                    curses.color_pair(self.C_DIM))
+                    theme.attr(self, "main_jjdlpdashboard_draw_log_tab_dim_1", self.C_NORMAL, True))
         tab_x += 8
         for i, site in enumerate(self.sites):
             lbl = site.get_cached_config().get("site_label",
                               os.path.basename(site.config_path))
             label = f" {lbl} "
-            attr  = (curses.color_pair(self.C_HILIGHT) | curses.A_BOLD
+            attr  = (theme.attr(self, "main_jjdlpdashboard_draw_log_tab_hilight", self.C_HILIGHT, False)
                      if i == self.selected_site_idx
-                     else curses.color_pair(self.C_CHROME))
+                     else theme.attr(self, "main_jjdlpdashboard_draw_log_tab_chrome", self.C_CHROME, True))
             self.safe_addstr(self.stdscr, y1, tab_x, label, attr)
             tab_x += len(label) + 1
 
@@ -4795,7 +5335,7 @@ class JJDlpDashboard:
 
         self.draw_box(self.stdscr, y1 + 1, x1, y2, x2, self.C_DIM)
         self.safe_addstr(self.stdscr, y1 + 1, x1 + 2, title,
-                    curses.color_pair(self.C_DIM) | curses.A_BOLD)
+                    theme.attr(self, "main_jjdlpdashboard_draw_log_tab_dim_2", self.C_NORMAL, True))
 
         if sel_site is None:
             return
@@ -4826,47 +5366,95 @@ class JJDlpDashboard:
         view  = wrapped[start : start + visible_rows]
 
         for i, line in enumerate(view):
-            attr = curses.color_pair(self.C_DIM)
+            attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_dim_3", self.C_NORMAL, True)
             if "Live now" in line or "Recording started" in line:
-                attr = curses.color_pair(self.C_LIVE)
+                attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_live", self.C_LOGO, True)
             elif "ERROR" in line or "Stall" in line or "STOPPED" in line:
-                attr = curses.color_pair(self.C_REC)
+                attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_rec", self.C_REC, True)
             elif "Warning" in line:
-                attr = curses.color_pair(self.C_WARN)
+                attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_warn_1", self.C_WARN, True)
             self.safe_addstr(self.stdscr, y1 + 2 + i, x1 + 2, line, attr)
 
         # Scroll indicator
         if max_scroll > 0:
             scroll_info = f" ↑{self._log_scroll}/{max_scroll} " if self._log_scroll else " (end) "
             self.safe_addstr(self.stdscr, y1 + 1, x2 - len(scroll_info) - 1,
-                        scroll_info, curses.color_pair(self.C_WARN))
+                        scroll_info, theme.attr(self, "main_jjdlpdashboard_draw_log_tab_warn_2", self.C_WARN, False))
 
-    def _draw_pipe_tab(self, y1, x1, y2, x2, title: str, lines: List[str],
-                       scroll: int = 0) -> int:
-        """Draw a pipe-output tab. Returns the clamped scroll value."""
-        sel_site = self.sites[self.selected_site_idx] if self.sites else None
-        tab_x    = x1 + 1
+    def _draw_pipe_tab_bar(self, y1, x1, x2) -> None:
+        """Draw the '  Site: <site> <site> ...' switcher row shared by the
+        Stdout/Stderr tabs."""
+        tab_x = x1 + 1
         self.safe_addstr(self.stdscr, y1, x1, "  Site: ",
-                    curses.color_pair(self.C_DIM))
+                    theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_bar_dim", self.C_NORMAL, True))
         tab_x += 8
         for i, site in enumerate(self.sites):
             lbl = site.get_cached_config().get("site_label",
                               os.path.basename(site.config_path))
             label = f" {lbl} "
-            attr  = (curses.color_pair(self.C_HILIGHT) | curses.A_BOLD
+            attr  = (theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_bar_hilight", self.C_HILIGHT, False)
                      if i == self.selected_site_idx
-                     else curses.color_pair(self.C_CHROME))
+                     else theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_bar_chrome", self.C_CHROME, True))
             self.safe_addstr(self.stdscr, y1, tab_x, label, attr)
             tab_x += len(label) + 1
 
-        self.draw_box(self.stdscr, y1 + 1, x1, y2, x2, self.C_DIM)
-        self.safe_addstr(self.stdscr, y1 + 1, x1 + 2, f" {title} ",
-                    curses.color_pair(self.C_DIM) | curses.A_BOLD)
+    def _draw_streamer_panel(self, y1, x1, y2, x2, site: Optional["SiteState"],
+                             is_active: bool = False) -> None:
+        """Draw the STREAMERS panel: 'All Streamers' plus one row per
+        streamer on the currently selected site. Selection is tracked in
+        self._streamer_panel_sel (0 = All Streamers, 1..N = streamer index).
+        """
+        border_pair = self.C_HILIGHT if is_active else self.C_DIM
+        self.draw_box(self.stdscr, y1, x1, y2, x2, border_pair)
+        title = " STREAMERS " if not is_active else " STREAMERS [  ] "
+        self.safe_addstr(self.stdscr, y1, x1 + 2, title,
+                    theme.attr(self, "main_jjdlpdashboard_draw_streamer_panel_border_pair", border_pair, False))
+
+        streamers = list(site.dash_all_streamers) if site is not None else []
+        # Clamp selection in case the streamer list shrank (e.g. one removed).
+        self._streamer_panel_sel = min(self._streamer_panel_sel, len(streamers))
+
+        rows = ["All Streamers"] + streamers
+        visible_rows = (y2 - y1) - 1
+        sel = self._streamer_panel_sel
+
+        max_scroll = max(0, len(rows) - visible_rows)
+        self._streamer_panel_scroll = min(self._streamer_panel_scroll, max_scroll)
+        if sel < self._streamer_panel_scroll:
+            self._streamer_panel_scroll = sel
+        elif sel >= self._streamer_panel_scroll + visible_rows:
+            self._streamer_panel_scroll = sel - visible_rows + 1
+
+        start = self._streamer_panel_scroll
+        view  = rows[start : start + visible_rows]
+        row_width = max(1, (x2 - x1) - 2)
+
+        for i, name in enumerate(view):
+            idx = start + i
+            label = name[:row_width].ljust(row_width)
+            if idx == sel:
+                attr = (theme.attr(self, "main_jjdlpdashboard_draw_streamer_panel_hilight", self.C_CHROME, False)
+                         | (curses.A_REVERSE if is_active else 0))
+            else:
+                attr = theme.attr(self, "main_jjdlpdashboard_draw_streamer_panel_dim", self.C_NORMAL, True)
+            self.safe_addstr(self.stdscr, y1 + 1 + i, x1 + 1, label, attr)
+
+    def _draw_pipe_tab(self, y1, x1, y2, x2, title: str, lines: List[str],
+                       scroll: int = 0, is_active: bool = False) -> int:
+        """Draw a pipe-output content box (STREAMERS panel is drawn
+        separately). Returns the clamped scroll value."""
+        sel_site = self.sites[self.selected_site_idx] if self.sites else None
+
+        border_pair = self.C_HILIGHT if is_active else self.C_DIM
+        self.draw_box(self.stdscr, y1, x1, y2, x2, border_pair)
+        title_suffix = " [  ]" if is_active else ""
+        self.safe_addstr(self.stdscr, y1, x1 + 2, f" {title}{title_suffix} ",
+                    theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_border_pair", border_pair, True))
 
         if sel_site is None:
             return 0
 
-        visible_rows = (y2 - y1) - 3
+        visible_rows = (y2 - y1) - 2
         line_width   = max(1, (x2 - x1) - 4)
 
         wrapped   = self._wrap_lines(lines, line_width)
@@ -4877,62 +5465,109 @@ class JJDlpDashboard:
         view  = wrapped[start : start + visible_rows]
 
         for i, line in enumerate(view):
-            self.safe_addstr(self.stdscr, y1 + 2 + i, x1 + 2, line,
-                        curses.color_pair(self.C_DIM))
+            self.safe_addstr(self.stdscr, y1 + 1 + i, x1 + 2, line,
+                        theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_dim", self.C_NORMAL, True))
 
         # Scroll indicator
         if max_scroll > 0:
             scroll_info = f" ↑{scroll}/{max_scroll} " if scroll else " (end) "
-            self.safe_addstr(self.stdscr, y1 + 1, x2 - len(scroll_info) - 1,
-                        scroll_info, curses.color_pair(self.C_WARN))
+            self.safe_addstr(self.stdscr, y1, x2 - len(scroll_info) - 1,
+                        scroll_info, theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_warn", self.C_WARN, True))
 
         return scroll
 
+    # Width of the STREAMERS panel on the Stdout/Stderr tabs.
+    _STREAMER_PANEL_W = 24
+
     def draw_stdout_tab(self, y1, x1, y2, x2):
         sel_site = self.sites[self.selected_site_idx] if self.sites else None
+
+        self._draw_pipe_tab_bar(y1, x1, x2)
+
+        panel_x2 = min(x2, x1 + self._STREAMER_PANEL_W)
+        self._draw_streamer_panel(y1 + 1, x1, y2, panel_x2, sel_site,
+                                   is_active=(self._pipe_focus == "streamers"))
+
+        streamers = list(sel_site.dash_all_streamers) if sel_site is not None else []
+        sel_idx   = self._streamer_panel_sel
+
         lines = []
         show_all = False
         if sel_site is not None:
-            show_all = sel_site.show_checker_stdout
-            with sel_site.dash_lock:
-                raw = list(sel_site.dash_stdout_lines)
-            if show_all:
-                # Strip the internal prefix tag before displaying
-                lines = [
-                    (ln[len(_CHECKER_STDOUT_PREFIX):] if ln.startswith(_CHECKER_STDOUT_PREFIX) else ln)
-                    for ln in raw
-                ]
+            if sel_idx == 0:
+                # All Streamers — unchanged behaviour, including the
+                # checker "Show All" toggle.
+                show_all = sel_site.show_checker_stdout
+                with sel_site.dash_lock:
+                    raw = list(sel_site.dash_stdout_lines)
+                if show_all:
+                    # Strip the internal prefix tag before displaying
+                    lines = [
+                        (ln[len(_CHECKER_STDOUT_PREFIX):] if ln.startswith(_CHECKER_STDOUT_PREFIX) else ln)
+                        for ln in raw
+                    ]
+                else:
+                    # Only downloader output (no checker prefix)
+                    lines = [ln for ln in raw if not ln.startswith(_CHECKER_STDOUT_PREFIX)]
             else:
-                # Only downloader output (no checker prefix)
-                lines = [ln for ln in raw if not ln.startswith(_CHECKER_STDOUT_PREFIX)]
-        title = " STDOUT — Show All: ON  (Press A to toggle) " if show_all else " STDOUT — Show All: OFF (Press A to toggle) "
+                # One specific streamer — its own yt-dlp output only, no
+                # checker JSON.
+                streamer = streamers[sel_idx - 1] if sel_idx - 1 < len(streamers) else ""
+                with sel_site.dash_lock:
+                    lines = list(sel_site.dash_stdout_lines_by_streamer.get(streamer, ()))
+
+        if sel_idx == 0:
+            title = " STDOUT — Show All: ON  (Press A to toggle) " if show_all else " STDOUT — Show All: OFF (Press A to toggle) "
+        else:
+            title = f" STDOUT — {streamers[sel_idx - 1] if sel_idx - 1 < len(streamers) else ''} "
         self._stdout_scroll = self._draw_pipe_tab(
-            y1, x1, y2, x2, title, lines, self._stdout_scroll)
+            y1 + 1, panel_x2 + 1, y2, x2, title, lines, self._stdout_scroll,
+            is_active=(self._pipe_focus == "content"))
 
     def draw_stderr_tab(self, y1, x1, y2, x2):
         sel_site = self.sites[self.selected_site_idx] if self.sites else None
+
+        self._draw_pipe_tab_bar(y1, x1, x2)
+
+        panel_x2 = min(x2, x1 + self._STREAMER_PANEL_W)
+        self._draw_streamer_panel(y1 + 1, x1, y2, panel_x2, sel_site,
+                                   is_active=(self._pipe_focus == "streamers"))
+
+        streamers = list(sel_site.dash_all_streamers) if sel_site is not None else []
+        sel_idx   = self._streamer_panel_sel
+
         lines = []
         show_all = False
         if sel_site is not None:
-            show_all = sel_site.show_checker_stderr
-            with sel_site.dash_lock:
-                raw = list(sel_site.dash_stderr_lines)
-            if show_all:
-                lines = [
-                    (ln[len(_CHECKER_STDERR_PREFIX):] if ln.startswith(_CHECKER_STDERR_PREFIX) else ln)
-                    for ln in raw
-                ]
+            if sel_idx == 0:
+                show_all = sel_site.show_checker_stderr
+                with sel_site.dash_lock:
+                    raw = list(sel_site.dash_stderr_lines)
+                if show_all:
+                    lines = [
+                        (ln[len(_CHECKER_STDERR_PREFIX):] if ln.startswith(_CHECKER_STDERR_PREFIX) else ln)
+                        for ln in raw
+                    ]
+                else:
+                    lines = [ln for ln in raw if not ln.startswith(_CHECKER_STDERR_PREFIX)]
             else:
-                lines = [ln for ln in raw if not ln.startswith(_CHECKER_STDERR_PREFIX)]
-        title = " STDERR — Show All: ON  (Press A to toggle) " if show_all else " STDERR — Show All: OFF (Press A to toggle) "
+                streamer = streamers[sel_idx - 1] if sel_idx - 1 < len(streamers) else ""
+                with sel_site.dash_lock:
+                    lines = list(sel_site.dash_stderr_lines_by_streamer.get(streamer, ()))
+
+        if sel_idx == 0:
+            title = " STDERR — Show All: ON  (Press A to toggle) " if show_all else " STDERR — Show All: OFF (Press A to toggle) "
+        else:
+            title = f" STDERR — {streamers[sel_idx - 1] if sel_idx - 1 < len(streamers) else ''} "
         self._stderr_scroll = self._draw_pipe_tab(
-            y1, x1, y2, x2, title, lines, self._stderr_scroll)
+            y1 + 1, panel_x2 + 1, y2, x2, title, lines, self._stderr_scroll,
+            is_active=(self._pipe_focus == "content"))
 
     # ── EventSub tab ─────────────────────────────────────────────────────────
     def draw_eventsub_tab(self, y1, x1, y2, x2):
         self.draw_box(self.stdscr, y1, x1, y2, x2, self.C_CHROME)
         self.safe_addstr(self.stdscr, y1, x1 + 2, " TWITCH EVENTSUB ",
-                    curses.color_pair(self.C_INVHEAD) | curses.A_BOLD)
+                    theme.attr(self, "main_jjdlpdashboard_draw_eventsub_tab_invhead_1", self.C_INVHEAD, True))
 
         row_y = y1 + 2
         for site in self.sites:
@@ -4941,13 +5576,13 @@ class JJDlpDashboard:
             lbl = site.get_cached_config().get("site_label",
                               os.path.basename(site.config_path))
             self.safe_addstr(self.stdscr, row_y, x1 + 2, f"-- {lbl} --",
-                        curses.color_pair(self.C_WARN) | curses.A_BOLD)
+                        theme.attr(self, "main_jjdlpdashboard_draw_eventsub_tab_warn", self.C_WARN, True))
             row_y += 1
 
             es = site.eventsub_state
             if es is None:
                 self.safe_addstr(self.stdscr, row_y, x1 + 4, "EventSub not available",
-                            curses.color_pair(self.C_DIM))
+                            theme.attr(self, "main_jjdlpdashboard_draw_eventsub_tab_dim", self.C_DIM, False))
                 row_y += 2
                 continue
 
@@ -4975,8 +5610,8 @@ class JJDlpDashboard:
                 if row_y >= y2 - 1:
                     break
                 self.safe_addstr(self.stdscr, row_y, x1 + 4,
-                            f"{label:<16}", curses.color_pair(self.C_INVHEAD))
-                self.safe_addstr(self.stdscr, row_y, x1 + 21, val, curses.color_pair(cpair))
+                            f"{label:<16}", theme.attr(self, "main_jjdlpdashboard_draw_eventsub_tab_invhead_2", self.C_INVHEAD, False))
+                self.safe_addstr(self.stdscr, row_y, x1 + 21, val, theme.attr(self, "main_jjdlpdashboard_draw_eventsub_tab_cpair", cpair, False))
                 row_y += 1
             row_y += 1
 
@@ -5002,50 +5637,66 @@ class JJDlpDashboard:
                 hints = (f"  LEFT/RIGHT: switch tabs"
                          f"  [: prev site  ]: next site"
                          f"  UP: scroll up  DOWN: scroll down"
-                         f"  C: colors  Q: quit  ")
+                         f"  C: Colors  Q: quit  ")
             elif current_tab == "Stdout":
                 sel_site = self.sites[self.selected_site_idx] if self.sites else None
                 show_all = sel_site.show_checker_stdout if sel_site else False
                 show_label = "ON " if show_all else "OFF"
-                hints = (f"  LEFT/RIGHT: switch tabs"
-                         f"  [: prev site  ]: next site"
-                         f"  UP: scroll up  DOWN: scroll down"
-                         f"  A: Show All [{show_label}]"
-                         f"  C: colors  Q: quit  ")
+                focus_hint = ("UP/DOWN: select streamer" if self._pipe_focus == "streamers"
+                               else "UP/DOWN: scroll")
+                if self._streamer_panel_sel == 0:
+                    hints = (f"  LEFT/RIGHT: switch tabs"
+                             f"  [: prev site  ]: next site"
+                             f"  Tab: switch panel  {focus_hint}"
+                             f"  A: Show All [{show_label}]"
+                             f"  C: Colors  Q: quit  ")
+                else:
+                    hints = (f"  LEFT/RIGHT: switch tabs"
+                             f"  [: prev site  ]: next site"
+                             f"  Tab: switch panel  {focus_hint}"
+                             f"  C: Colors  Q: quit  ")
             elif current_tab == "Stderr":
                 sel_site = self.sites[self.selected_site_idx] if self.sites else None
                 show_all = sel_site.show_checker_stderr if sel_site else False
                 show_label = "ON " if show_all else "OFF"
-                hints = (f"  LEFT/RIGHT: switch tabs"
-                         f"  [: prev site  ]: next site"
-                         f"  UP: scroll up  DOWN: scroll down"
-                         f"  A: Show All [{show_label}]"
-                         f"  C: colors  Q: quit  ")
+                focus_hint = ("UP/DOWN: select streamer" if self._pipe_focus == "streamers"
+                               else "UP/DOWN: scroll")
+                if self._streamer_panel_sel == 0:
+                    hints = (f"  LEFT/RIGHT: switch tabs"
+                             f"  [: prev site  ]: next site"
+                             f"  Tab: switch panel  {focus_hint}"
+                             f"  A: Show All [{show_label}]"
+                             f"  C: Colors  Q: quit  ")
+                else:
+                    hints = (f"  LEFT/RIGHT: switch tabs"
+                             f"  [: prev site  ]: next site"
+                             f"  Tab: switch panel  {focus_hint}"
+                             f"  C: Colors  Q: quit  ")
             elif current_tab == "Dashboard":
                 sort_lbl = self.sort_manager.current_sort_label
                 hints = (f"  LEFT/RIGHT: switch tabs"
                          f"  [: prev site  ]: next site"
                          f"  A: add/enable streamer R: remove streamer D: disable streamer"
                          f"  S: Sort"
-                         f"  C: colors  Q: quit  ")
+                         f"  C: Colors  Q: quit  ")
             elif current_tab == "Config":
                 hints = (f"  LEFT/RIGHT: switch tabs"
                          f"  [: prev site  ]: next site"
                          f"  Tab: Next Panel"
                          f"  G: Changelog"
-                         f"  C: colors  Q: quit  ")
+                         f"  C: Colors  N: Theme Manager  Q: quit  ")
             elif current_tab == "File Manager":
                 hints = (f"  \u2191\u2193: select  Enter: open  Space: show folder"
                          f"  DEL: delete  S: sort  T: toggle trash  M: more options"
-                         f"  C: colors  Q: quit  ")
+                         f"  C: Colors  Q: quit  ")
             else:
                 hints = (f"  LEFT/RIGHT: switch tabs"
                          f"  [: prev site  ]: next site"
                          f"  Tab: Next Panel"
-                         f"  C: colors  Q: quit  ")
+                         f"  C: Colors  Q: quit  ")
         self.safe_addstr(self.stdscr, h - 1, 0,
                     hints.ljust(w - 1)[:w - 1],
-                    curses.color_pair(self.C_INVHEAD))
+                    theme.attr(self, "main_jjdlpdashboard_draw_footer_invhead", self.C_INVHEAD, False))
 
     # ── Streamer management overlay ───────────────────────────────────────────
     def _mgmt_enabled_streamers(self, site) -> list:
@@ -5080,14 +5731,14 @@ class JJDlpDashboard:
         # Fill background
         for y in range(by1, by2 + 1):
             self.safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1),
-                        curses.color_pair(self.C_NORMAL))
+                        theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_normal_1", self.C_NORMAL, False))
 
         self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_WARN)
         title = f" {action.upper()} STREAMER "
         self.safe_addstr(self.stdscr, by1, bx1 + 2, title,
-                    curses.color_pair(self.C_WARN) | curses.A_BOLD)
+                    theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_warn_1", self.C_WARN, True))
         self.safe_addstr(self.stdscr, by1 + 1, bx1 + 2,
-                    f"Site: {site_lbl}", curses.color_pair(self.C_DIM))
+                    f"Site: {site_lbl}", theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_dim_1", self.C_DIM, False))
 
         if action in ("disable", "remove"):
             # ── List-picker mode: arrow up/down to select a streamer ──────────
@@ -5097,15 +5748,15 @@ class JJDlpDashboard:
             if self._mgmt_result:
                 self.safe_addstr(self.stdscr, by1 + 2, bx1 + 2,
                             self._mgmt_result[:box_w - 4],
-                            curses.color_pair(self.C_LIVE) | curses.A_BOLD)
+                            theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_live_1", self.C_LIVE, True))
 
             if not enabled:
                 self.safe_addstr(self.stdscr, by1 + 3, bx1 + 2,
                             "No enabled streamers.",
-                            curses.color_pair(self.C_DIM))
+                            theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_dim_2", self.C_DIM, False))
                 self.safe_addstr(self.stdscr, by2, bx1 + 2,
                             " Esc: Go back ",
-                            curses.color_pair(self.C_INVHEAD))
+                            theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_invhead_1", self.C_INVHEAD, False))
                 return
 
             # Clamp selection
@@ -5127,14 +5778,14 @@ class JJDlpDashboard:
                 row_y  = list_top + (i - self._mgmt_scroll)
                 is_sel = (i == self._mgmt_sel)
                 prefix = "> " if is_sel else "  "
-                attr   = (curses.color_pair(self.C_HILIGHT) | curses.A_BOLD
-                          if is_sel else curses.color_pair(self.C_NORMAL))
+                attr   = (theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_hilight_1", self.C_HILIGHT, True)
+                          if is_sel else theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_normal_2", self.C_NORMAL, False))
                 self.safe_addstr(self.stdscr, row_y, bx1 + 2,
                             (prefix + s)[:box_w - 4], attr)
 
             self.safe_addstr(self.stdscr, by2, bx1 + 2,
                         " \u2191\u2193: select  Enter: confirm  Esc: Go back ",
-                        curses.color_pair(self.C_INVHEAD))
+                        theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_invhead_2", self.C_INVHEAD, False))
 
         else:
             # ── ADD mode: disabled-streamer list + text input for new names ───
@@ -5144,7 +5795,7 @@ class JJDlpDashboard:
             if self._mgmt_result:
                 self.safe_addstr(self.stdscr, by1 + 2, bx1 + 2,
                             self._mgmt_result[:box_w - 4],
-                            curses.color_pair(self.C_LIVE) | curses.A_BOLD)
+                            theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_live_2", self.C_LIVE, True))
 
             # Fixed rows at the bottom for text input + legend
             input_row  = by2 - 2
@@ -5163,7 +5814,7 @@ class JJDlpDashboard:
             if disabled:
                 self.safe_addstr(self.stdscr, list_header, bx1 + 2,
                             "Re-enable disabled:",
-                            curses.color_pair(self.C_CHROME))
+                            theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_chrome", self.C_CHROME, False))
 
                 # Clamp selection (-1 = text input focused, >=0 = list item)
                 if self._mgmt_sel >= 0:
@@ -5181,21 +5832,21 @@ class JJDlpDashboard:
                     row_y  = list_top + (i - self._mgmt_scroll)
                     is_sel = (self._mgmt_sel == i)
                     prefix = "> " if is_sel else "  "
-                    attr   = (curses.color_pair(self.C_HILIGHT) | curses.A_BOLD
-                              if is_sel else curses.color_pair(self.C_DIM))
+                    attr   = (theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_hilight_2", self.C_HILIGHT, True)
+                              if is_sel else theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_dim_3", self.C_DIM, False))
                     self.safe_addstr(self.stdscr, row_y, bx1 + 2,
                                 (prefix + s)[:box_w - 4], attr)
             else:
                 self.safe_addstr(self.stdscr, list_top, bx1 + 2,
                             "No disabled streamers.",
-                            curses.color_pair(self.C_DIM))
+                            theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_dim_4", self.C_DIM, False))
 
             # Text input (always shown at bottom)
             self.safe_addstr(self.stdscr, input_row, bx1 + 2, "New username:",
-                        curses.color_pair(self.C_WARN) | curses.A_BOLD)
-            input_attr = (curses.color_pair(self.C_HILIGHT) | curses.A_BOLD
+                        theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_warn_2", self.C_WARN, True))
+            input_attr = (theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_hilight_3", self.C_HILIGHT, True)
                           if self._mgmt_sel == -1
-                          else curses.color_pair(self.C_NORMAL) | curses.A_BOLD)
+                          else theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_normal_3", self.C_NORMAL, True))
             self.safe_addstr(self.stdscr, input_row, bx1 + 16,
                         (self._mgmt_buf + "_")[:box_w - 18], input_attr)
 
@@ -5205,13 +5856,13 @@ class JJDlpDashboard:
                 legend = " Enter: add  Esc: Go back "
             self.safe_addstr(self.stdscr, legend_row, bx1 + 2,
                         legend[:box_w - 4],
-                        curses.color_pair(self.C_INVHEAD))
+                        theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_invhead_3", self.C_INVHEAD, False))
 
     # ── Full screen refresh ───────────────────────────────────────────────────
     def refresh_screen(self):
         self.stdscr.erase()
         h, w = self.stdscr.getmaxyx()
-        self.stdscr.bkgd(" ", curses.color_pair(self.C_NORMAL))
+        self.stdscr.bkgd(" ", theme.attr(self, "main_jjdlpdashboard_refresh_screen_normal", self.C_NORMAL, False))
 
         # Logo (6 lines tall, starts at row 1)
         self.draw_logo(1, 2)
@@ -5228,7 +5879,7 @@ class JJDlpDashboard:
         # System time top-right
         sys_time_str = datetime.now().strftime("%Y-%m-%d  %H:%M:%S")
         self.safe_addstr(self.stdscr, 1, w - len(sys_time_str) - 3, sys_time_str,
-                    curses.color_pair(self.C_CHROME))
+                    theme.attr(self, "main_jjdlpdashboard_refresh_screen_chrome_1", self.C_CHROME, False))
 
         # Track the next available row on the right side
         next_right_row = 2
@@ -5238,20 +5889,20 @@ class JJDlpDashboard:
             if UPDATE_AVAILABLE:
                 update_str = "Update Available"
                 self.safe_addstr(self.stdscr, next_right_row, w - len(update_str) - 3, update_str,
-                            curses.color_pair(self.C_WARN) | curses.A_BOLD)
+                            theme.attr(self, "main_jjdlpdashboard_refresh_screen_warn", self.C_WARN, True))
                 next_right_row += 1
         
         # App version indicator (Below Update Available, or directly below time)
         version_str = f"v{__version__}"
         self.safe_addstr(self.stdscr, next_right_row, w - len(version_str) - 3, version_str,
-                    curses.color_pair(self.C_DIM))
+                    theme.attr(self, "main_jjdlpdashboard_refresh_screen_dim", self.C_DIM, False))
 
         # Blank line after logo (row 7), then tab bar at row 8
         # (Logo occupies rows 1-6, row 7 is blank, tabs at row 8)
         self.draw_tabs(8, 2)
 
         # Separator
-        self.safe_addstr(self.stdscr, 9, 1, "-" * (w - 2), curses.color_pair(self.C_CHROME))
+        self.safe_addstr(self.stdscr, 9, 1, "-" * (w - 2), theme.attr(self, "main_jjdlpdashboard_refresh_screen_chrome_2", self.C_CHROME, False))
 
         # Content area starts at row 10
         content_y1 = 10
@@ -5301,6 +5952,10 @@ class JJDlpDashboard:
         # File Manager popups (sort / File Options / Fixup) — drawn on top when active.
         if hasattr(self, 'file_manager') and self.file_manager.any_popup_open():
             self.file_manager.draw_popups(self.stdscr)
+
+        # Theme popup — drawn on top of sort/file-manager popups if both somehow open.
+        if self.theme_manager.popup_open:
+            self.theme_manager.draw_popup(self.stdscr)
 
         # Changelog popup — drawn on top of sort popup if both somehow open.
         if self._changelog_popup_open:
@@ -5360,6 +6015,10 @@ class JJDlpDashboard:
         if self._mgmt_mode:
             return self._handle_mgmt_key(key)
 
+        # Theme popup intercepts all keys while open.
+        if self.theme_manager.popup_open:
+            return self.theme_manager.handle_key(key)
+
         # Sort popup intercepts all keys while open.
         if self.sort_manager.popup_open:
             return self.sort_manager.handle_key(key)
@@ -5393,41 +6052,65 @@ class JJDlpDashboard:
             self.selected_site_idx = (self.selected_site_idx + 1) % max(1, len(self.sites))
             # Reset scroll when switching sites
             self._log_scroll = self._stdout_scroll = self._stderr_scroll = 0
+            self._streamer_panel_sel = self._streamer_panel_scroll = 0
             self.config_editor.notify_site_changed(self.selected_site_idx)
         elif key in (ord('['), curses.KEY_PPAGE):   # prev site
             self.selected_site_idx = (self.selected_site_idx - 1) % max(1, len(self.sites))
             # Reset scroll when switching sites
             self._log_scroll = self._stdout_scroll = self._stderr_scroll = 0
+            self._streamer_panel_sel = self._streamer_panel_scroll = 0
             self.config_editor.notify_site_changed(self.selected_site_idx)
-        elif key in (curses.KEY_UP, ord('k')):
+        elif key == ord('\t') and current_tab_name in ("Stdout", "Stderr"):
+            # Cycle focus between the STREAMERS panel and the content pane,
+            # the same way Tab cycles panels on the Config tab.
+            self._pipe_focus = "content" if self._pipe_focus == "streamers" else "streamers"
+        elif key == curses.KEY_UP:
             tab = self.TABS[self.selected_tab]
             if tab == "Log":
                 self._log_scroll += 1
-            elif tab == "Stdout":
-                self._stdout_scroll += 1
-            elif tab == "Stderr":
-                self._stderr_scroll += 1
-        elif key in (curses.KEY_DOWN, ord('j')):
+            elif tab in ("Stdout", "Stderr"):
+                if self._pipe_focus == "streamers":
+                    self._streamer_panel_sel = max(0, self._streamer_panel_sel - 1)
+                elif tab == "Stdout":
+                    self._stdout_scroll += 1
+                else:
+                    self._stderr_scroll += 1
+        elif key == curses.KEY_DOWN:
             tab = self.TABS[self.selected_tab]
             if tab == "Log":
                 self._log_scroll = max(0, self._log_scroll - 1)
-            elif tab == "Stdout":
-                self._stdout_scroll = max(0, self._stdout_scroll - 1)
-            elif tab == "Stderr":
-                self._stderr_scroll = max(0, self._stderr_scroll - 1)
+            elif tab in ("Stdout", "Stderr"):
+                if self._pipe_focus == "streamers":
+                    sel_site = self.sites[self.selected_site_idx] if self.sites else None
+                    max_idx  = len(sel_site.dash_all_streamers) if sel_site is not None else 0
+                    self._streamer_panel_sel = min(max_idx, self._streamer_panel_sel + 1)
+                elif tab == "Stdout":
+                    self._stdout_scroll = max(0, self._stdout_scroll - 1)
+                else:
+                    self._stderr_scroll = max(0, self._stderr_scroll - 1)
+        elif key == ord('k'):   # Log tab only — Stdout/Stderr use Tab + arrow keys
+            if self.TABS[self.selected_tab] == "Log":
+                self._log_scroll += 1
+        elif key == ord('j'):
+            if self.TABS[self.selected_tab] == "Log":
+                self._log_scroll = max(0, self._log_scroll - 1)
         elif key in (ord('a'), ord('A')):
             if current_tab_name == "Log" and self.sites:
                 sel = self.sites[self.selected_site_idx]
                 sel.show_debug_log = not sel.show_debug_log
                 self._log_scroll = 0
             elif current_tab_name == "Stdout" and self.sites:
-                sel = self.sites[self.selected_site_idx]
-                sel.show_checker_stdout = not sel.show_checker_stdout
-                self._stdout_scroll = 0
+                # "Show All" only means anything on the All Streamers view —
+                # a specific streamer never has checker JSON to show.
+                if self._streamer_panel_sel == 0:
+                    sel = self.sites[self.selected_site_idx]
+                    sel.show_checker_stdout = not sel.show_checker_stdout
+                    self._stdout_scroll = 0
             elif current_tab_name == "Stderr" and self.sites:
-                sel = self.sites[self.selected_site_idx]
-                sel.show_checker_stderr = not sel.show_checker_stderr
-                self._stderr_scroll = 0
+                if self._streamer_panel_sel == 0:
+                    sel = self.sites[self.selected_site_idx]
+                    sel.show_checker_stderr = not sel.show_checker_stderr
+                    self._stderr_scroll = 0
             else:
                 self._start_mgmt("add")
         elif key in (ord('r'), ord('R')):
@@ -5436,6 +6119,8 @@ class JJDlpDashboard:
             self._start_mgmt("disable")
         elif key in (ord('c'), ord('C')):
             self.randomize_colors()
+        elif key in (ord('n'), ord('N')):
+            self.theme_manager.open_popup()
         elif key in (ord('s'), ord('S')):
             if current_tab_name == "Dashboard":
                 self.sort_manager.open_popup()
@@ -5694,7 +6379,7 @@ class JJDlpDashboard:
             self._write_failure_alert_open = False
             return
 
-        alert_attr = curses.color_pair(self.C_DELETE) | curses.A_BOLD
+        alert_attr = theme.attr(self, "main_jjdlpdashboard_draw_write_failure_a_delete", self.C_DELETE, True)
 
         title = " ‼ RECORDING FAILURE ‼ "
         message = "The following streamer(s) are NOT being recorded:"
@@ -5720,7 +6405,7 @@ class JJDlpDashboard:
         for i, line in enumerate(names_lines):
             self.safe_addstr(self.stdscr, by1 + 4 + i, bx1 + 2, line[:box_w - 4], alert_attr)
         self.safe_addstr(self.stdscr, by2 - 1, bx1 + max(0, (box_w - len(legend)) // 2),
-                    legend[:box_w - 2], curses.color_pair(self.C_INVHEAD))
+                    legend[:box_w - 2], theme.attr(self, "main_jjdlpdashboard_draw_write_failure_a_invhead", self.C_INVHEAD, False))
 
     def _open_exit_confirm(self) -> None:
         """Open the 'Are you sure you want to exit?' popup, 'Yes' selected by default."""
@@ -5765,31 +6450,31 @@ class JJDlpDashboard:
         # Fill background
         for y in range(by1, by2 + 1):
             self.safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1),
-                        curses.color_pair(self.C_NORMAL))
+                        theme.attr(self, "main_jjdlpdashboard_draw_exit_confirm_po_normal_1", self.C_NORMAL, False))
 
         self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_WARN)
         title = " CONFIRM EXIT "
         self.safe_addstr(self.stdscr, by1, bx1 + 2, title,
-                    curses.color_pair(self.C_WARN) | curses.A_BOLD)
+                    theme.attr(self, "main_jjdlpdashboard_draw_exit_confirm_po_warn", self.C_WARN, True))
 
         self.safe_addstr(self.stdscr, by1 + 2, bx1 + max(0, (box_w - len(message)) // 2),
-                    message, curses.color_pair(self.C_NORMAL) | curses.A_BOLD)
+                    message, theme.attr(self, "main_jjdlpdashboard_draw_exit_confirm_po_normal_2", self.C_NORMAL, True))
 
         yes_label = " Yes "
         no_label  = " No "
         gap = 4
         buttons_w = len(yes_label) + len(no_label) + gap
         start_x = bx1 + max(0, (box_w - buttons_w) // 2)
-        yes_attr = (curses.color_pair(self.C_HILIGHT) | curses.A_BOLD) if self._exit_confirm_sel == 0 \
-                   else curses.color_pair(self.C_NORMAL)
-        no_attr  = (curses.color_pair(self.C_HILIGHT) | curses.A_BOLD) if self._exit_confirm_sel == 1 \
-                   else curses.color_pair(self.C_NORMAL)
+        yes_attr = (theme.attr(self, "main_jjdlpdashboard_draw_exit_confirm_po_hilight_1", self.C_HILIGHT, True)) if self._exit_confirm_sel == 0 \
+                   else theme.attr(self, "main_jjdlpdashboard_draw_exit_confirm_po_normal_3", self.C_NORMAL, False)
+        no_attr  = (theme.attr(self, "main_jjdlpdashboard_draw_exit_confirm_po_hilight_2", self.C_HILIGHT, True)) if self._exit_confirm_sel == 1 \
+                   else theme.attr(self, "main_jjdlpdashboard_draw_exit_confirm_po_normal_4", self.C_NORMAL, False)
         self.safe_addstr(self.stdscr, by1 + 3, start_x, yes_label, yes_attr)
         self.safe_addstr(self.stdscr, by1 + 3, start_x + len(yes_label) + gap, no_label, no_attr)
 
         self.safe_addstr(self.stdscr, by2, bx1 + max(0, (box_w - len(legend)) // 2),
                     legend[:max(0, box_w - 2)],
-                    curses.color_pair(self.C_INVHEAD))
+                    theme.attr(self, "main_jjdlpdashboard_draw_exit_confirm_po_invhead", self.C_INVHEAD, False))
 
     def draw_changelog_popup(self) -> None:
         """Draw the scrollable changelog popup centred on screen."""
@@ -5807,12 +6492,12 @@ class JJDlpDashboard:
         # Fill background
         for y in range(by1, by2 + 1):
             self.safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1),
-                        curses.color_pair(self.C_NORMAL))
+                        theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_normal_1", self.C_NORMAL, False))
 
         self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_CHROME)
         title = " WHAT'S NEW "
         self.safe_addstr(self.stdscr, by1, bx1 + 2, title,
-                    curses.color_pair(self.C_HILIGHT) | curses.A_BOLD)
+                    theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_hilight", self.C_HILIGHT, True))
 
         content_width = max(1, box_w - 4)
         wrapped = self._wrap_lines(self._changelog_lines, content_width)
@@ -5826,7 +6511,7 @@ class JJDlpDashboard:
 
         for i, line in enumerate(view):
             self.safe_addstr(self.stdscr, by1 + 1 + i, bx1 + 2, line,
-                        curses.color_pair(self.C_NORMAL))
+                        theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_normal_2", self.C_NORMAL, False))
 
         # Scroll indicator
         if max_scroll > 0:
@@ -5837,7 +6522,7 @@ class JJDlpDashboard:
         legend = f" Q/Esc: close {scroll_info}"
         self.safe_addstr(self.stdscr, by2, bx1 + 2,
                     legend[:box_w - 4],
-                    curses.color_pair(self.C_INVHEAD))
+                    theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_invhead", self.C_INVHEAD, False))
 
     # ── Run loop ──────────────────────────────────────────────────────────────
     def run(self):
@@ -5933,24 +6618,24 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
     while True:
         stdscr.erase()
         h, w = stdscr.getmaxyx()
-        stdscr.bkgd(" ", curses.color_pair(0))
+        stdscr.bkgd(" ", theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum0", 0, False))
 
         # Logo
         for i, line in enumerate(ASCII_LOGO):
-            JJDlpDashboard.safe_addstr(stdscr, 1 + i, 2, line, curses.color_pair(6) | curses.A_BOLD)
+            JJDlpDashboard.safe_addstr(stdscr, 1 + i, 2, line, theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum6", 6, True))
 
         ts = time.strftime("%Y-%m-%d  %H:%M:%S")
-        JJDlpDashboard.safe_addstr(stdscr, 1, w - len(ts) - 3, ts, curses.color_pair(1))
-        JJDlpDashboard.safe_addstr(stdscr, 7, 2, "-" * (w - 4), curses.color_pair(1))
+        JJDlpDashboard.safe_addstr(stdscr, 1, w - len(ts) - 3, ts, theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum1_1", 1, False))
+        JJDlpDashboard.safe_addstr(stdscr, 7, 2, "-" * (w - 4), theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum1_2", 1, False))
 
         # Title
         title = "SELECT CONFIG FILE(S)"
-        JJDlpDashboard.safe_addstr(stdscr, 9, 2, title, curses.color_pair(5) | curses.A_BOLD)
+        JJDlpDashboard.safe_addstr(stdscr, 9, 2, title, theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum5_1", 5, True))
 
         # Instructions
         JJDlpDashboard.safe_addstr(stdscr, 10, 2,
                     "Space = toggle [x]   Enter = confirm   Q = quit",
-                    curses.color_pair(3))
+                    theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum3_1", 3, False))
 
         # File list
         for i, name in enumerate(found):
@@ -5958,17 +6643,17 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
             checked = "[x]" if i in selected else "[ ]"
             is_cur  = i == cursor
             if is_cur:
-                attr = curses.color_pair(2) | curses.A_BOLD
+                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum2", 2, True)
             elif i in selected:
-                attr = curses.color_pair(4) | curses.A_BOLD
+                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum4", 4, True)
             else:
-                attr = curses.color_pair(1)
+                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum1_3", 1, False)
             JJDlpDashboard.safe_addstr(stdscr, row, 4, f"  {checked}  {name}", attr)
 
         # "Do not show again" checkbox
         dna_row = 12 + n + 1
         dna_box = "[x]" if do_not_show_config else "[ ]"
-        dna_attr = curses.color_pair(3) | curses.A_BOLD if do_not_show_config else curses.color_pair(3)
+        dna_attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum3_2", 3, True) if do_not_show_config else theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum3_3", 3, False)
         JJDlpDashboard.safe_addstr(stdscr, dna_row, 4,
                     f"  {dna_box}  Do not show again (press D to toggle)",
                     dna_attr)
@@ -5979,7 +6664,7 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
                   f"↑/↓ navigate  Space toggle  Enter confirm  D do not show  ")
         JJDlpDashboard.safe_addstr(stdscr, h - 1, 0,
                     footer.ljust(w - 1)[:w - 1],
-                    curses.color_pair(5) | curses.A_BOLD)
+                    theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum5_2", 5, True))
 
         stdscr.refresh()
         key = stdscr.getch()
@@ -6055,27 +6740,27 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
     while True:
         stdscr.erase()
         h, w = stdscr.getmaxyx()
-        stdscr.bkgd(" ", curses.color_pair(0))
+        stdscr.bkgd(" ", theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum0", 0, False))
 
         # Logo
         for i, line in enumerate(ASCII_LOGO):
-            JJDlpDashboard.safe_addstr(stdscr, 1 + i, 2, line, curses.color_pair(6) | curses.A_BOLD)
+            JJDlpDashboard.safe_addstr(stdscr, 1 + i, 2, line, theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum6", 6, True))
 
         ts = time.strftime("%Y-%m-%d  %H:%M:%S")
-        JJDlpDashboard.safe_addstr(stdscr, 1, w - len(ts) - 3, ts, curses.color_pair(1))
-        JJDlpDashboard.safe_addstr(stdscr, 7, 2, "-" * (w - 4), curses.color_pair(1))
+        JJDlpDashboard.safe_addstr(stdscr, 1, w - len(ts) - 3, ts, theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum1_1", 1, False))
+        JJDlpDashboard.safe_addstr(stdscr, 7, 2, "-" * (w - 4), theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum1_2", 1, False))
 
         # Browser sub-title
         br_title_row = 9
         JJDlpDashboard.safe_addstr(stdscr, br_title_row, 2,
                     "SELECT BROWSER",
-                    curses.color_pair(5) | curses.A_BOLD)
+                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum5_1", 5, True))
         JJDlpDashboard.safe_addstr(stdscr, br_title_row + 1, 2,
                     "Select your browser for the yt-dlp --cookies-from-browser option.",
-                    curses.color_pair(3))
+                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_1", 3, False))
         JJDlpDashboard.safe_addstr(stdscr, br_title_row + 2, 2,
                     "Note: Chrome based browsers are not supported. Firefox is recommended.",
-                    curses.color_pair(3))
+                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_2", 3, False))
         applies_to_labels = [
             file_cfgs[fname].get("site_label")
             for fname in chosen_files
@@ -6083,7 +6768,7 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
         ]
         JJDlpDashboard.safe_addstr(stdscr, br_title_row + 4, 2,
                     f"Applies to: {', '.join(applies_to_labels)}",
-                    curses.color_pair(4))
+                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum4", 4, False))
 
         # Browser list (single-select radio buttons)
         list_start_row = br_title_row + 6
@@ -6092,16 +6777,16 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
             dot    = "(*)" if i == br_cursor else "( )"
             is_cur = i == br_cursor
             if is_cur:
-                attr = curses.color_pair(2) | curses.A_BOLD
+                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum2", 2, True)
             else:
-                attr = curses.color_pair(1)
+                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum1_3", 1, False)
             label = f"  {dot}  {br}" + ("  ← remove cookies option" if br == "disabled" else "")
             JJDlpDashboard.safe_addstr(stdscr, row, 4, label, attr)
 
         # "Do not show again" checkbox (below the browser list)
         dna_row  = list_start_row + nb + 1
         dna_box  = "[x]" if do_not_show else "[ ]"
-        dna_attr = curses.color_pair(3) | curses.A_BOLD if do_not_show else curses.color_pair(3)
+        dna_attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_3", 3, True) if do_not_show else theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_4", 3, False)
         JJDlpDashboard.safe_addstr(stdscr, dna_row, 4,
                     f"  {dna_box}  Do not show again (press D to toggle)",
                     dna_attr)
@@ -6110,7 +6795,7 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
         footer = "  ↑/↓ navigate  Enter = confirm  D = do not show again  Q = quit  "
         JJDlpDashboard.safe_addstr(stdscr, h - 1, 0,
                     footer.ljust(w - 1)[:w - 1],
-                    curses.color_pair(5) | curses.A_BOLD)
+                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum5_2", 5, True))
 
         stdscr.refresh()
         key = stdscr.getch()
