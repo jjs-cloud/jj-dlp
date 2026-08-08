@@ -4488,7 +4488,37 @@ class JJDlpDashboard:
          curses.COLOR_CYAN,    curses.COLOR_BLACK,   curses.COLOR_GREEN,
          curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_MAGENTA,
          curses.COLOR_WHITE,   curses.COLOR_RED),
+        # 6: DOS Blue (classic QBasic/EDIT-style white-on-blue screen)
+        (curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_CYAN,
+         curses.COLOR_YELLOW,  curses.COLOR_GREEN,   curses.COLOR_BLUE,
+         curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_RED,
+         curses.COLOR_CYAN,    curses.COLOR_BLACK,   curses.COLOR_GREEN,
+         curses.COLOR_WHITE,   curses.COLOR_CYAN,    curses.COLOR_YELLOW,
+         curses.COLOR_WHITE,   curses.COLOR_RED),
+        # 7: DOS Red
+        (curses.COLOR_WHITE,   curses.COLOR_WHITE,   curses.COLOR_BLACK,
+         curses.COLOR_YELLOW,  curses.COLOR_GREEN,   curses.COLOR_RED,
+         curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_WHITE,
+         curses.COLOR_MAGENTA, curses.COLOR_BLACK,   curses.COLOR_GREEN,
+         curses.COLOR_WHITE,   curses.COLOR_MAGENTA, curses.COLOR_YELLOW,
+         curses.COLOR_WHITE,   curses.COLOR_BLACK),
+        # 8: DOS White (classic light-background word-processor screen)
+        (curses.COLOR_BLUE,    curses.COLOR_WHITE,   curses.COLOR_BLUE,
+         curses.COLOR_RED,     curses.COLOR_GREEN,   curses.COLOR_WHITE,
+         curses.COLOR_BLUE,    curses.COLOR_MAGENTA, curses.COLOR_RED,
+         curses.COLOR_CYAN,    curses.COLOR_WHITE,   curses.COLOR_GREEN,
+         curses.COLOR_BLACK,   curses.COLOR_CYAN,    curses.COLOR_BLUE,
+         curses.COLOR_WHITE,   curses.COLOR_RED),
     ]
+
+    # Main dashboard background for each scheme (index-aligned with
+    # COLOR_SCHEMES). Defaults to COLOR_BLACK when not listed here — the
+    # DOS Blue/Red/White schemes override this to recolor the whole screen.
+    _SCHEME_BACKGROUND = {
+        6: curses.COLOR_BLUE,
+        7: curses.COLOR_RED,
+        8: curses.COLOR_WHITE,
+    }
 
     def randomize_colors(self):
         """Cycle to the next color scheme."""
@@ -4501,18 +4531,19 @@ class JJDlpDashboard:
          invhead_fg, invhead_bg, logo_fg, rec_fg, dim_fg,
          livebadge_fg, livebadge_bg, normal_fg, disabled_fg, system_fg,
          delete_fg, delete_bg) = s
-        curses.init_pair(self.C_CHROME,    chrome_fg,    curses.COLOR_BLACK)
+        bg = self._SCHEME_BACKGROUND.get(self._color_scheme_idx, curses.COLOR_BLACK)
+        curses.init_pair(self.C_CHROME,    chrome_fg,    bg)
         curses.init_pair(self.C_HILIGHT,   hilight_fg,   hilight_bg)
-        curses.init_pair(self.C_WARN,      warn_fg,      curses.COLOR_BLACK)
-        curses.init_pair(self.C_LIVE,      live_fg,      curses.COLOR_BLACK)
+        curses.init_pair(self.C_WARN,      warn_fg,      bg)
+        curses.init_pair(self.C_LIVE,      live_fg,      bg)
         curses.init_pair(self.C_INVHEAD,   invhead_fg,   invhead_bg)
-        curses.init_pair(self.C_LOGO,      logo_fg,      curses.COLOR_BLACK)
-        curses.init_pair(self.C_REC,       rec_fg,       curses.COLOR_BLACK)
-        curses.init_pair(self.C_DIM,       dim_fg,       curses.COLOR_BLACK)
+        curses.init_pair(self.C_LOGO,      logo_fg,      bg)
+        curses.init_pair(self.C_REC,       rec_fg,       bg)
+        curses.init_pair(self.C_DIM,       dim_fg,       bg)
         curses.init_pair(self.C_LIVEBADGE, livebadge_fg, livebadge_bg)
-        curses.init_pair(self.C_NORMAL,    normal_fg,    curses.COLOR_BLACK)
-        curses.init_pair(self.C_DISABLED,  disabled_fg,  curses.COLOR_BLACK)
-        curses.init_pair(self.C_SYSTEM,    system_fg,    curses.COLOR_BLACK)
+        curses.init_pair(self.C_NORMAL,    normal_fg,    bg)
+        curses.init_pair(self.C_DISABLED,  disabled_fg,  bg)
+        curses.init_pair(self.C_SYSTEM,    system_fg,    bg)
         curses.init_pair(self.C_DELETE,   delete_fg,   delete_bg)
 
     def setup_colors(self):

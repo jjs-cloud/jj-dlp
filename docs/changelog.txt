@@ -1,5 +1,7 @@
+v1.25.24
+
 - fixed the "‼ RECORDING FAILURE ‼" notification
-- stdout and stderr tab can now be filtered by streamer
+- stdout and stderr tab can now be filtered by streamer.  Log files are now separated by streamer.
 
 ====================
 ====================
