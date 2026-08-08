@@ -4540,7 +4540,7 @@ class JJDlpDashboard:
         scheme. self._color_scheme_idx is kept in sync with theme's saved
         base_scheme_idx so existing readers (e.g. the DOS Red bold-tabs
         check in draw_tabs) keep working unchanged."""
-        self._color_scheme_idx = theme.get_state().get('base_scheme_idx', theme.DEFAULT_BASE_SCHEME_IDX) % len(self.COLOR_SCHEMES)
+        self._color_scheme_idx = theme.get_state().get('base_scheme_idx', 0) % len(self.COLOR_SCHEMES)
         theme.apply_palette(self)
 
     def setup_colors(self):
