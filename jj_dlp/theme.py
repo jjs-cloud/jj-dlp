@@ -254,7 +254,7 @@ SITE_REGISTRY = {
     'file_manager_filemanagertab_draw_menu_popup_chrome': {'file': 'file_manager.py', 'line': 930, 'label': 'File Options Menu Popup — Title', 'default_role': 'CHROME', 'default_bold': True},
     'file_manager_filemanagertab_draw_menu_popup_invhead': {'file': 'file_manager.py', 'line': 933, 'label': 'File Options Menu Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
     'file_manager_filemanagertab_draw_menu_popup_hilight': {'file': 'file_manager.py', 'line': 939, 'label': 'File Options Menu Popup — Menu Option (Selected)', 'default_role': 'INVHEAD', 'default_bold': False},
-    'file_manager_filemanagertab_draw_menu_popup_normal_2': {'file': 'file_manager.py', 'line': 940, 'label': 'File Options Menu Popup — Menu Option (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_menu_popup_normal_2': {'file': 'file_manager.py', 'line': 940, 'label': 'File Options Menu Popup — Menu Option (Unselected)', 'default_role': 'NORMAL', 'default_bold': True},
     'file_manager_filemanagertab_draw_fixup_popup_normal_1': {'file': 'file_manager.py', 'line': 992, 'label': 'Fixup Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
     'file_manager_filemanagertab_draw_fixup_popup_chrome': {'file': 'file_manager.py', 'line': 996, 'label': 'Fixup Popup — Title', 'default_role': 'CHROME', 'default_bold': True},
     'file_manager_filemanagertab_draw_fixup_popup_invhead': {'file': 'file_manager.py', 'line': 999, 'label': 'Fixup Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},

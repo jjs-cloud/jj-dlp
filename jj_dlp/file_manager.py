@@ -937,7 +937,7 @@ class FileManagerTab:
             is_sel = (i == self._menu_sel)
             prefix = "> " if is_sel else "  "
             attr = (theme.attr(db, "file_manager_filemanagertab_draw_menu_popup_hilight", db.C_INVHEAD, False)) if is_sel \
-                else theme.attr(db, "file_manager_filemanagertab_draw_menu_popup_normal_2", db.C_NORMAL, False)
+                else theme.attr(db, "file_manager_filemanagertab_draw_menu_popup_normal_2", db.C_NORMAL, True)
             db.safe_addstr(stdscr, row_y, bx1 + 2,
                            (prefix + label)[:box_w - 4], attr)
 
