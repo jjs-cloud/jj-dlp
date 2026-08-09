@@ -5,13 +5,19 @@ WHAT THIS DOES
 ───────────────
 Every `curses.color_pair(...)` [`| curses.A_BOLD`] expression in main.py,
 config_editor.py, and file_manager.py has been rewritten to go through
-`theme.attr(owner, tag)` (or `theme.attr(owner, tag, runtime_pair)` for the
-handful of sites whose pair is a runtime variable rather than a fixed role —
-see SITE_REGISTRY's `default_role: None` entries). SITE_REGISTRY in this file
-is the single source of truth for each site's default role and bold — call
-sites no longer carry their own default pair/bold literals, so there's only
-ever one place to edit a site's default. `attr()` looks up `tag` in the
-user's saved overrides (theme.json) and, if found, uses the overridden
+`theme.attr(owner, tag)` — or `theme.attr(owner, tag, runtime_pair)` for the
+small number of sites whose pair legitimately varies at runtime (a stat value
+colored by its current state, a border highlighted when focused, etc.). Every
+SITE_REGISTRY entry has a fixed `default_role`, so every site behaves the same
+way: an override role always wins, otherwise a passed runtime_pair wins (for
+the dynamic sites), otherwise the default_role applies. The splash/picker
+screens pass owner=None (they run before any dashboard exists); their roles
+resolve through the module-level ROLE_PAIR_NUM table instead of a dashboard's
+C_* constants, so they are editable exactly like every other site. SITE_REGISTRY
+in this file is the single source of truth for each site's default role and
+bold — call sites no longer carry their own default pair/bold literals, so
+there's only ever one place to edit a site's default. `attr()` looks up `tag`
+in the user's saved overrides (theme.json) and, if found, uses the overridden
 pair/bold instead of the registry default. If nothing is overridden for that
 tag, behavior is 100% identical to the original inline `curses.color_pair(...)`
 expression — this module is pure opt-in indirection.
@@ -38,6 +44,13 @@ so baking either layer only ever touches this one file:
 Site overrides are resolved AFTER role colors, so a site pointed at C_REC
 picks up whatever C_REC currently resolves to (base scheme or custom role
 color), not a frozen snapshot.
+
+One deliberate non-theme exception: the STREAMERS panel's selected row gets a
+focus cue (`curses.A_REVERSE`, only while that sub-panel has keyboard focus) at
+its call site in main.py. That's a focus/cursor indicator like the '>' row
+markers, not a color or bold decision, and a static per-site flag can't express
+"reverse only while focused", so it stays at the call site; the site's
+role/bold are still fully theme-editable.
 
 SITE_REGISTRY is maintained by hand. If call sites are added, removed, or
 moved in the source files, update the corresponding entries here to match.
@@ -202,10 +215,11 @@ _SCHEME_BACKGROUND = {
 # site's default role/bold — call sites in the source files just pass their
 # tag (and, for runtime-variable sites, their runtime pair) to theme.attr();
 # they no longer carry their own default pair/bold literals.
-# default_role is None for sites whose pair argument is a runtime variable or
-# a raw numeric literal outside the 13-role system (mostly the
-# splash/browser-picker screens) — those sites can still have their bold flag
-# overridden, but not be repointed to a role by number.
+# Every entry has a default_role, so every site is editable (role + bold) the
+# same way. Sites whose pair genuinely varies at runtime (stat values colored
+# by state, borders highlighted when focused) keep passing a runtime pair,
+# which attr() lets win over the default_role; the splash/picker screens pass
+# owner=None and no pair, so their default_role resolves through ROLE_PAIR_NUM.
 # ─────────────────────────────────────────────────────────────────────────
 SITE_REGISTRY = {
     'config_editor_priorityeditor_draw_live_1': {'file': 'config_editor.py', 'label': 'Priority Editor — Title (STREAMER SETTINGS)', 'default_role': 'LIVE', 'default_bold': True},
@@ -424,15 +438,15 @@ SITE_REGISTRY = {
     'file_manager_filemanagertab_draw_delete': {'file': 'file_manager.py', 'label': 'File Manager — Delete-Mode Info (Permanent)', 'default_role': 'DELETE', 'default_bold': True},
     'file_manager_filemanagertab_draw_dim_4': {'file': 'file_manager.py', 'label': 'File Manager — Delete-Mode Info (Trash)', 'default_role': 'DIM', 'default_bold': False},
     'file_manager_filemanagertab_draw_warn': {'file': 'file_manager.py', 'label': 'File Manager — Status Message Line', 'default_role': 'WARN', 'default_bold': True},
-    'main_jjdlpdashboard_safe_ch_pair': {'file': 'main.py', 'label': 'Box Border (generic, all panels)', 'default_role': None, 'default_bold': False},
+    'main_jjdlpdashboard_safe_ch_pair': {'file': 'main.py', 'label': 'Box Border (generic, all panels)', 'default_role': 'CHROME', 'default_bold': False},
     'main_jjdlpdashboard_draw_logo_logo': {'file': 'main.py', 'label': 'Main Logo Banner', 'default_role': 'LOGO', 'default_bold': True},
-    'main_jjdlpdashboard_draw_christmas_easte_pair': {'file': 'main.py', 'label': 'Christmas Easter Egg — Tree', 'default_role': None, 'default_bold': True},
+    'main_jjdlpdashboard_draw_christmas_easte_pair': {'file': 'main.py', 'label': 'Christmas Easter Egg — Tree', 'default_role': 'LIVE', 'default_bold': True},
     'main_jjdlpdashboard_draw_christmas_easte_live': {'file': 'main.py', 'label': 'Christmas Easter Egg — \'Merry Christmas!\' Text', 'default_role': 'LIVE', 'default_bold': True},
     'main_jjdlpdashboard_draw_tabs_hilight': {'file': 'main.py', 'label': 'Tab Bar — Selected Tab', 'default_role': 'INVHEAD', 'default_bold': False},
     'main_jjdlpdashboard_draw_tabs_invhead': {'file': 'main.py', 'label': 'Tab Bar — Unselected Tab', 'default_role': 'CHROME', 'default_bold': True},
     'main_jjdlpdashboard_draw_system_panel_system': {'file': 'main.py', 'label': 'SYSTEM', 'default_role': 'SYSTEM', 'default_bold': True},
     'main_jjdlpdashboard_split_after_rows_dim': {'file': 'main.py', 'label': 'System Panel — Stat Row Label', 'default_role': 'NORMAL', 'default_bold': True},
-    'main_jjdlpdashboard_split_after_rows_cpair': {'file': 'main.py', 'label': 'System Panel — Stat Row Value (color varies by stat)', 'default_role': None, 'default_bold': True},
+    'main_jjdlpdashboard_split_after_rows_cpair': {'file': 'main.py', 'label': 'System Panel — Stat Row Value (color varies by stat)', 'default_role': 'NORMAL', 'default_bold': True},
     'main_jjdlpdashboard_split_after_rows_rec_1': {'file': 'main.py', 'label': 'System Panel — \'ffmpeg errors\' Section Header', 'default_role': 'REC', 'default_bold': False},
     'main_jjdlpdashboard_split_after_rows_rec_2': {'file': 'main.py', 'label': 'System Panel — ffmpeg Error Streamer Name', 'default_role': 'REC', 'default_bold': False},
     'main_jjdlpdashboard_split_after_rows_rec_3': {'file': 'main.py', 'label': 'System Panel — ffmpeg Error Count', 'default_role': 'REC', 'default_bold': False},
@@ -442,7 +456,7 @@ SITE_REGISTRY = {
     'main_jjdlpdashboard_split_after_rows_warn_1': {'file': 'main.py', 'label': 'System Panel — \'ads\' Section Header', 'default_role': 'WARN', 'default_bold': True},
     'main_jjdlpdashboard_split_after_rows_warn_2': {'file': 'main.py', 'label': 'Ad detected', 'default_role': 'WARN', 'default_bold': True},
     'main_jjdlpdashboard_update_disk_usage_system': {'file': 'main.py', 'label': 'System Panel — \'Disk\' Section Header', 'default_role': 'SYSTEM', 'default_bold': True},
-    'main_jjdlpdashboard_update_disk_usage_color': {'file': 'main.py', 'label': 'System Panel — Per-Drive Usage Line', 'default_role': None, 'default_bold': True},
+    'main_jjdlpdashboard_update_disk_usage_color': {'file': 'main.py', 'label': 'System Panel — Per-Drive Usage Line', 'default_role': 'LIVE', 'default_bold': True},
     'main_jjdlpdashboard_update_disk_usage_chrome': {'file': 'main.py', 'label': 'System Panel — Uptime Line', 'default_role': 'CHROME', 'default_bold': True},
     'main_jjdlpdashboard_draw_site_panel_border_hilight': {'file': 'main.py', 'label': 'Site Panel — Border (Selected)', 'default_role': 'HILIGHT', 'default_bold': False},
     'main_jjdlpdashboard_draw_site_panel_border_chrome': {'file': 'main.py', 'label': 'Site Panel — Border (Unselected)', 'default_role': 'CHROME', 'default_bold': False},
@@ -493,17 +507,17 @@ SITE_REGISTRY = {
     'main_jjdlpdashboard_draw_pipe_tab_bar_dim': {'file': 'main.py', 'label': 'Stdout/Stderr Tabs — \'Site:\' Label', 'default_role': 'NORMAL', 'default_bold': True},
     'main_jjdlpdashboard_draw_pipe_tab_bar_hilight': {'file': 'main.py', 'label': 'Stdout/Stderr Tabs — Site Tab (Selected)', 'default_role': 'HILIGHT', 'default_bold': False},
     'main_jjdlpdashboard_draw_pipe_tab_bar_chrome': {'file': 'main.py', 'label': 'Stdout/Stderr Tabs — Site Tab (Unselected)', 'default_role': 'CHROME', 'default_bold': True},
-    'main_jjdlpdashboard_draw_streamer_panel_border_pair': {'file': 'main.py', 'label': 'STREAMERS', 'default_role': None, 'default_bold': False},
+    'main_jjdlpdashboard_draw_streamer_panel_border_pair': {'file': 'main.py', 'label': 'STREAMERS', 'default_role': 'HILIGHT', 'default_bold': False},
     'main_jjdlpdashboard_draw_streamer_panel_hilight': {'file': 'main.py', 'label': 'Streamer Sub-Tab List — Selected Row', 'default_role': 'CHROME', 'default_bold': False},
     'main_jjdlpdashboard_draw_streamer_panel_dim': {'file': 'main.py', 'label': 'Streamer Sub-Tab List — Unselected Row', 'default_role': 'NORMAL', 'default_bold': True},
-    'main_jjdlpdashboard_draw_pipe_tab_border_pair': {'file': 'main.py', 'label': '{title}{title_suffix}', 'default_role': None, 'default_bold': True},
+    'main_jjdlpdashboard_draw_pipe_tab_border_pair': {'file': 'main.py', 'label': '{title}{title_suffix}', 'default_role': 'HILIGHT', 'default_bold': True},
     'main_jjdlpdashboard_draw_pipe_tab_dim': {'file': 'main.py', 'label': 'Stdout/Stderr Panel — Content Line', 'default_role': 'NORMAL', 'default_bold': True},
     'main_jjdlpdashboard_draw_pipe_tab_warn': {'file': 'main.py', 'label': 'Stdout/Stderr Panel — Scroll Indicator', 'default_role': 'WARN', 'default_bold': True},
     'main_jjdlpdashboard_draw_eventsub_tab_invhead_1': {'file': 'main.py', 'label': 'TWITCH EVENTSUB', 'default_role': 'INVHEAD', 'default_bold': True},
     'main_jjdlpdashboard_draw_eventsub_tab_warn': {'file': 'main.py', 'label': 'EventSub Tab — Site Header (\'-- {label} --\')', 'default_role': 'WARN', 'default_bold': True},
     'main_jjdlpdashboard_draw_eventsub_tab_dim': {'file': 'main.py', 'label': 'EventSub not available', 'default_role': 'DIM', 'default_bold': False},
     'main_jjdlpdashboard_draw_eventsub_tab_invhead_2': {'file': 'main.py', 'label': 'EventSub Tab — Stat Row Label', 'default_role': 'INVHEAD', 'default_bold': False},
-    'main_jjdlpdashboard_draw_eventsub_tab_cpair': {'file': 'main.py', 'label': 'EventSub Tab — Stat Row Value (color varies by stat)', 'default_role': None, 'default_bold': False},
+    'main_jjdlpdashboard_draw_eventsub_tab_cpair': {'file': 'main.py', 'label': 'EventSub Tab — Stat Row Value (color varies by stat)', 'default_role': 'NORMAL', 'default_bold': False},
     'main_jjdlpdashboard_draw_footer_invhead': {'file': 'main.py', 'label': 'Bottom Footer / Key Legend Bar', 'default_role': 'INVHEAD', 'default_bold': False},
     'main_jjdlpdashboard_draw_mgmt_overlay_normal_1': {'file': 'main.py', 'label': 'Add/Remove/Disable Overlay — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
     'main_jjdlpdashboard_draw_mgmt_overlay_warn_1': {'file': 'main.py', 'label': 'Add/Remove/Disable Overlay — Title', 'default_role': 'WARN', 'default_bold': True},
@@ -542,31 +556,31 @@ SITE_REGISTRY = {
     'main_jjdlpdashboard_draw_changelog_popup_hilight': {'file': 'main.py', 'label': 'Changelog Popup — Title', 'default_role': 'HILIGHT', 'default_bold': True},
     'main_jjdlpdashboard_draw_changelog_popup_normal_2': {'file': 'main.py', 'label': 'Changelog Popup — Content Line', 'default_role': 'NORMAL', 'default_bold': False},
     'main_jjdlpdashboard_draw_changelog_popup_invhead': {'file': 'main.py', 'label': 'Changelog Popup — Scroll Indicator / Legend', 'default_role': 'INVHEAD', 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_config_pairnum0': {'file': 'main.py', 'label': 'Config Picker Splash — Full-Screen Background', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_config_pairnum6': {'file': 'main.py', 'label': 'Config Picker Splash — Logo', 'default_role': None, 'default_bold': True},
-    'main_jjdlpdashboard_curses_choose_config_pairnum1_1': {'file': 'main.py', 'label': 'Config Picker Splash — System Clock', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_config_pairnum1_2': {'file': 'main.py', 'label': 'Config Picker Splash — Separator Line', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_config_pairnum5_1': {'file': 'main.py', 'label': 'Config Picker Splash — Title', 'default_role': None, 'default_bold': True},
-    'main_jjdlpdashboard_curses_choose_config_pairnum3_1': {'file': 'main.py', 'label': 'Config Picker Splash — Instructions Line', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_config_pairnum2': {'file': 'main.py', 'label': 'Config Picker Splash — File Row (Cursor)', 'default_role': None, 'default_bold': True},
-    'main_jjdlpdashboard_curses_choose_config_pairnum4': {'file': 'main.py', 'label': 'Config Picker Splash — File Row (Checked)', 'default_role': None, 'default_bold': True},
-    'main_jjdlpdashboard_curses_choose_config_pairnum1_3': {'file': 'main.py', 'label': 'Config Picker Splash — File Row (Unchecked)', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_config_pairnum3_2': {'file': 'main.py', 'label': 'Config Picker Splash — \'Do Not Show Again\' (Checked)', 'default_role': None, 'default_bold': True},
-    'main_jjdlpdashboard_curses_choose_config_pairnum3_3': {'file': 'main.py', 'label': 'Config Picker Splash — \'Do Not Show Again\' (Unchecked)', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_config_pairnum5_2': {'file': 'main.py', 'label': 'Config Picker Splash — Footer', 'default_role': None, 'default_bold': True},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum0': {'file': 'main.py', 'label': 'Browser Picker Splash — Full-Screen Background', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum6': {'file': 'main.py', 'label': 'Browser Picker Splash — Logo', 'default_role': None, 'default_bold': True},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum1_1': {'file': 'main.py', 'label': 'Browser Picker Splash — System Clock', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum1_2': {'file': 'main.py', 'label': 'Browser Picker Splash — Separator Line', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum5_1': {'file': 'main.py', 'label': 'Browser Picker Splash — Title', 'default_role': None, 'default_bold': True},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum3_1': {'file': 'main.py', 'label': 'Browser Picker Splash — Instructions Line', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum3_2': {'file': 'main.py', 'label': 'Browser Picker Splash — Chrome-Unsupported Warning', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum4': {'file': 'main.py', 'label': 'Browser Picker Splash — \'Applies to:\' Line', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum2': {'file': 'main.py', 'label': 'Browser Picker Splash — Browser Row (Cursor)', 'default_role': None, 'default_bold': True},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum1_3': {'file': 'main.py', 'label': 'Browser Picker Splash — Browser Row (Not Cursor)', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum3_3': {'file': 'main.py', 'label': 'Browser Picker Splash — \'Do Not Show Again\' (Checked)', 'default_role': None, 'default_bold': True},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum3_4': {'file': 'main.py', 'label': 'Browser Picker Splash — \'Do Not Show Again\' (Unchecked)', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum5_2': {'file': 'main.py', 'label': 'Browser Picker Splash — Footer', 'default_role': None, 'default_bold': True},
+    'main_jjdlpdashboard_curses_choose_config_pairnum0': {'file': 'main.py', 'label': 'Config Picker Splash — Full-Screen Background', 'default_role': 'NORMAL', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_config_pairnum6': {'file': 'main.py', 'label': 'Config Picker Splash — Logo', 'default_role': 'LOGO', 'default_bold': True},
+    'main_jjdlpdashboard_curses_choose_config_pairnum1_1': {'file': 'main.py', 'label': 'Config Picker Splash — System Clock', 'default_role': 'CHROME', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_config_pairnum1_2': {'file': 'main.py', 'label': 'Config Picker Splash — Separator Line', 'default_role': 'CHROME', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_config_pairnum5_1': {'file': 'main.py', 'label': 'Config Picker Splash — Title', 'default_role': 'INVHEAD', 'default_bold': True},
+    'main_jjdlpdashboard_curses_choose_config_pairnum3_1': {'file': 'main.py', 'label': 'Config Picker Splash — Instructions Line', 'default_role': 'WARN', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_config_pairnum2': {'file': 'main.py', 'label': 'Config Picker Splash — File Row (Cursor)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'main_jjdlpdashboard_curses_choose_config_pairnum4': {'file': 'main.py', 'label': 'Config Picker Splash — File Row (Checked)', 'default_role': 'LIVE', 'default_bold': True},
+    'main_jjdlpdashboard_curses_choose_config_pairnum1_3': {'file': 'main.py', 'label': 'Config Picker Splash — File Row (Unchecked)', 'default_role': 'CHROME', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_config_pairnum3_2': {'file': 'main.py', 'label': 'Config Picker Splash — \'Do Not Show Again\' (Checked)', 'default_role': 'WARN', 'default_bold': True},
+    'main_jjdlpdashboard_curses_choose_config_pairnum3_3': {'file': 'main.py', 'label': 'Config Picker Splash — \'Do Not Show Again\' (Unchecked)', 'default_role': 'WARN', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_config_pairnum5_2': {'file': 'main.py', 'label': 'Config Picker Splash — Footer', 'default_role': 'INVHEAD', 'default_bold': True},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum0': {'file': 'main.py', 'label': 'Browser Picker Splash — Full-Screen Background', 'default_role': 'NORMAL', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum6': {'file': 'main.py', 'label': 'Browser Picker Splash — Logo', 'default_role': 'LOGO', 'default_bold': True},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum1_1': {'file': 'main.py', 'label': 'Browser Picker Splash — System Clock', 'default_role': 'CHROME', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum1_2': {'file': 'main.py', 'label': 'Browser Picker Splash — Separator Line', 'default_role': 'CHROME', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum5_1': {'file': 'main.py', 'label': 'Browser Picker Splash — Title', 'default_role': 'INVHEAD', 'default_bold': True},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum3_1': {'file': 'main.py', 'label': 'Browser Picker Splash — Instructions Line', 'default_role': 'WARN', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum3_2': {'file': 'main.py', 'label': 'Browser Picker Splash — Chrome-Unsupported Warning', 'default_role': 'WARN', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum4': {'file': 'main.py', 'label': 'Browser Picker Splash — \'Applies to:\' Line', 'default_role': 'LIVE', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum2': {'file': 'main.py', 'label': 'Browser Picker Splash — Browser Row (Cursor)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum1_3': {'file': 'main.py', 'label': 'Browser Picker Splash — Browser Row (Not Cursor)', 'default_role': 'CHROME', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum3_3': {'file': 'main.py', 'label': 'Browser Picker Splash — \'Do Not Show Again\' (Checked)', 'default_role': 'WARN', 'default_bold': True},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum3_4': {'file': 'main.py', 'label': 'Browser Picker Splash — \'Do Not Show Again\' (Unchecked)', 'default_role': 'WARN', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum5_2': {'file': 'main.py', 'label': 'Browser Picker Splash — Footer', 'default_role': 'INVHEAD', 'default_bold': True},
 }
 
 
@@ -648,43 +662,55 @@ def set_state(data):
 # ─────────────────────────────────────────────────────────────────────────
 # The core indirection function every call site now goes through.
 # ─────────────────────────────────────────────────────────────────────────
+def _role_to_pair(owner, role, fallback=0):
+    """Resolve a role name to a curses pair number. With a real owner
+    (dashboard) use its C_<ROLE> constant — that's what actually defines the
+    pair. With owner=None (the standalone splash/picker screens that run
+    before any dashboard exists) fall back to the module-level ROLE_PAIR_NUM
+    table, so role overrides work there exactly like everywhere else."""
+    if owner is not None:
+        return getattr(owner, f'C_{role}', fallback)
+    return ROLE_PAIR_NUM.get(role, fallback)
+
+
 def attr(owner, tag, runtime_pair=None):
     """Return the curses attribute (color pair | optional bold) to use for a
     given call site.
 
     owner:          the object whose C_* constants resolve a role name to a
-                     pair number (self / db / self.dashboard / the
-                     JJDlpDashboard class / None).
-    tag:             the stable site identifier (see SITE_REGISTRY), which is
-                     the single source of truth for this site's default role
-                     and bold — call sites no longer pass their own defaults.
-    runtime_pair:    only needed for sites whose SITE_REGISTRY entry has
-                     default_role=None (the pair is a runtime variable/literal
-                     outside the 13-role system). Ignored for sites with a
-                     fixed default_role.
+                    pair number (self / db / self.dashboard / the
+                    JJDlpDashboard class), or None for the standalone
+                    splash/picker screens that run before any dashboard
+                    exists (role pairs then come from ROLE_PAIR_NUM).
+    tag:            the stable site identifier (see SITE_REGISTRY), which is
+                    the single source of truth for this site's default role
+                    and bold — call sites no longer pass their own defaults.
+    runtime_pair:   optional pair number the call site computes at runtime
+                    (e.g. a stat value colored by its current state). It wins
+                    over the site's default_role — the role only kicks in as
+                    a fallback. A saved per-site override role always wins
+                    over both.
+
+    Resolution order: override role → runtime_pair → default_role → pair 0.
+    Every SITE_REGISTRY entry has a default_role, so every site is editable
+    (role + bold) in the theme editor the same way.
     """
     entry = SITE_REGISTRY.get(tag, {})
     default_role = entry.get('default_role')
     default_bold = entry.get('default_bold', False)
 
-    if default_role is not None and owner is not None:
-        default_pair = getattr(owner, f'C_{default_role}', runtime_pair)
-    else:
-        default_pair = runtime_pair
+    ov = _state.get('site_overrides', {}).get(tag)
 
-    overrides = _state.get('site_overrides', {})
-    ov = overrides.get(tag)
-
-    if ov is None:
-        pair_num = default_pair
-        bold = default_bold
+    if ov is not None and ov.get('role'):
+        pair_num = _role_to_pair(owner, ov['role'],
+                                 runtime_pair if runtime_pair is not None else 0)
+    elif runtime_pair is not None:
+        pair_num = runtime_pair
+    elif default_role is not None:
+        pair_num = _role_to_pair(owner, default_role, 0)
     else:
-        role = ov.get('role')
-        if role and owner is not None:
-            pair_num = getattr(owner, f'C_{role}', default_pair)
-        else:
-            pair_num = default_pair
-        bold = ov.get('bold', default_bold)
+        pair_num = 0
+    bold = ov.get('bold', default_bold) if ov is not None else default_bold
 
     result = curses.color_pair(pair_num)
     if bold:

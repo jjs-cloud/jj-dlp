@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.5"
+__version__ = "1.26.6"
 
 import subprocess
 import time
@@ -4525,17 +4525,14 @@ class JJDlpDashboard:
 
     # ── Tab bar ──────────────────────────────────────────────────────────────
     def draw_tabs(self, y, x):
-        dos_red = (self._color_scheme_idx == 7)  # DOS Red: bold tab headers
         for i, tab in enumerate(self.TABS):
             label = f"  {tab}  "
             if i == self.selected_tab:
                 self.safe_addstr(self.stdscr, y, x, label,
                             theme.attr(self, "main_jjdlpdashboard_draw_tabs_hilight"))
             else:
-                attr = theme.attr(self, "main_jjdlpdashboard_draw_tabs_invhead")
-                if dos_red:
-                    attr |= curses.A_BOLD
-                self.safe_addstr(self.stdscr, y, x, label, attr)
+                self.safe_addstr(self.stdscr, y, x, label,
+                            theme.attr(self, "main_jjdlpdashboard_draw_tabs_invhead"))
             x += len(label) + 1
 
     # ── System status sidebar ────────────────────────────────────────────────
@@ -6635,12 +6632,7 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
     """
     curses.start_color()
     curses.use_default_colors()
-    curses.init_pair(1, curses.COLOR_CYAN,    curses.COLOR_BLACK)
-    curses.init_pair(2, curses.COLOR_WHITE,   curses.COLOR_BLUE)
-    curses.init_pair(3, curses.COLOR_YELLOW,  curses.COLOR_BLACK)
-    curses.init_pair(4, curses.COLOR_GREEN,   curses.COLOR_BLACK)
-    curses.init_pair(5, curses.COLOR_WHITE,   curses.COLOR_CYAN)
-    curses.init_pair(6, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
+    theme.apply_palette(None)   # pairs 1-13 follow the active theme, like the dashboard
 
     curses.curs_set(0)
     stdscr.keypad(True)
@@ -6654,24 +6646,24 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
     while True:
         stdscr.erase()
         h, w = stdscr.getmaxyx()
-        stdscr.bkgd(" ", theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum0", 0))
+        stdscr.bkgd(" ", theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum0"))
 
         # Logo
         for i, line in enumerate(ASCII_LOGO):
-            JJDlpDashboard.safe_addstr(stdscr, 1 + i, 2, line, theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum6", 6))
+            JJDlpDashboard.safe_addstr(stdscr, 1 + i, 2, line, theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum6"))
 
         ts = time.strftime("%Y-%m-%d  %H:%M:%S")
-        JJDlpDashboard.safe_addstr(stdscr, 1, w - len(ts) - 3, ts, theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum1_1", 1))
-        JJDlpDashboard.safe_addstr(stdscr, 7, 2, "-" * (w - 4), theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum1_2", 1))
+        JJDlpDashboard.safe_addstr(stdscr, 1, w - len(ts) - 3, ts, theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum1_1"))
+        JJDlpDashboard.safe_addstr(stdscr, 7, 2, "-" * (w - 4), theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum1_2"))
 
         # Title
         title = "SELECT CONFIG FILE(S)"
-        JJDlpDashboard.safe_addstr(stdscr, 9, 2, title, theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum5_1", 5))
+        JJDlpDashboard.safe_addstr(stdscr, 9, 2, title, theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum5_1"))
 
         # Instructions
         JJDlpDashboard.safe_addstr(stdscr, 10, 2,
                     "Space = toggle [x]   Enter = confirm   Q = quit",
-                    theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum3_1", 3))
+                    theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum3_1"))
 
         # File list
         for i, name in enumerate(found):
@@ -6679,17 +6671,17 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
             checked = "[x]" if i in selected else "[ ]"
             is_cur  = i == cursor
             if is_cur:
-                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum2", 2)
+                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum2")
             elif i in selected:
-                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum4", 4)
+                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum4")
             else:
-                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum1_3", 1)
+                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum1_3")
             JJDlpDashboard.safe_addstr(stdscr, row, 4, f"  {checked}  {name}", attr)
 
         # "Do not show again" checkbox
         dna_row = 12 + n + 1
         dna_box = "[x]" if do_not_show_config else "[ ]"
-        dna_attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum3_2", 3) if do_not_show_config else theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum3_3", 3)
+        dna_attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum3_2") if do_not_show_config else theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum3_3")
         JJDlpDashboard.safe_addstr(stdscr, dna_row, 4,
                     f"  {dna_box}  Do not show again (press D to toggle)",
                     dna_attr)
@@ -6700,7 +6692,7 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
                   f"↑/↓ navigate  Space toggle  Enter confirm  D do not show  ")
         JJDlpDashboard.safe_addstr(stdscr, h - 1, 0,
                     footer.ljust(w - 1)[:w - 1],
-                    theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum5_2", 5))
+                    theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum5_2"))
 
         stdscr.refresh()
         key = stdscr.getch()
@@ -6742,12 +6734,7 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
     """
     curses.start_color()
     curses.use_default_colors()
-    curses.init_pair(1, curses.COLOR_CYAN,    curses.COLOR_BLACK)
-    curses.init_pair(2, curses.COLOR_WHITE,   curses.COLOR_BLUE)
-    curses.init_pair(3, curses.COLOR_YELLOW,  curses.COLOR_BLACK)
-    curses.init_pair(4, curses.COLOR_GREEN,   curses.COLOR_BLACK)
-    curses.init_pair(5, curses.COLOR_WHITE,   curses.COLOR_CYAN)
-    curses.init_pair(6, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
+    theme.apply_palette(None)   # pairs 1-13 follow the active theme, like the dashboard
 
     curses.curs_set(0)
     stdscr.keypad(True)
@@ -6776,27 +6763,27 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
     while True:
         stdscr.erase()
         h, w = stdscr.getmaxyx()
-        stdscr.bkgd(" ", theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum0", 0))
+        stdscr.bkgd(" ", theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum0"))
 
         # Logo
         for i, line in enumerate(ASCII_LOGO):
-            JJDlpDashboard.safe_addstr(stdscr, 1 + i, 2, line, theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum6", 6))
+            JJDlpDashboard.safe_addstr(stdscr, 1 + i, 2, line, theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum6"))
 
         ts = time.strftime("%Y-%m-%d  %H:%M:%S")
-        JJDlpDashboard.safe_addstr(stdscr, 1, w - len(ts) - 3, ts, theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum1_1", 1))
-        JJDlpDashboard.safe_addstr(stdscr, 7, 2, "-" * (w - 4), theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum1_2", 1))
+        JJDlpDashboard.safe_addstr(stdscr, 1, w - len(ts) - 3, ts, theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum1_1"))
+        JJDlpDashboard.safe_addstr(stdscr, 7, 2, "-" * (w - 4), theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum1_2"))
 
         # Browser sub-title
         br_title_row = 9
         JJDlpDashboard.safe_addstr(stdscr, br_title_row, 2,
                     "SELECT BROWSER",
-                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum5_1", 5))
+                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum5_1"))
         JJDlpDashboard.safe_addstr(stdscr, br_title_row + 1, 2,
                     "Select your browser for the yt-dlp --cookies-from-browser option.",
-                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_1", 3))
+                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_1"))
         JJDlpDashboard.safe_addstr(stdscr, br_title_row + 2, 2,
                     "Note: Chrome based browsers are not supported. Firefox is recommended.",
-                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_2", 3))
+                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_2"))
         applies_to_labels = [
             file_cfgs[fname].get("site_label")
             for fname in chosen_files
@@ -6804,7 +6791,7 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
         ]
         JJDlpDashboard.safe_addstr(stdscr, br_title_row + 4, 2,
                     f"Applies to: {', '.join(applies_to_labels)}",
-                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum4", 4))
+                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum4"))
 
         # Browser list (single-select radio buttons)
         list_start_row = br_title_row + 6
@@ -6813,16 +6800,16 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
             dot    = "(*)" if i == br_cursor else "( )"
             is_cur = i == br_cursor
             if is_cur:
-                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum2", 2)
+                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum2")
             else:
-                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum1_3", 1)
+                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum1_3")
             label = f"  {dot}  {br}" + ("  ← remove cookies option" if br == "disabled" else "")
             JJDlpDashboard.safe_addstr(stdscr, row, 4, label, attr)
 
         # "Do not show again" checkbox (below the browser list)
         dna_row  = list_start_row + nb + 1
         dna_box  = "[x]" if do_not_show else "[ ]"
-        dna_attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_3", 3) if do_not_show else theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_4", 3)
+        dna_attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_3") if do_not_show else theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_4")
         JJDlpDashboard.safe_addstr(stdscr, dna_row, 4,
                     f"  {dna_box}  Do not show again (press D to toggle)",
                     dna_attr)
@@ -6831,7 +6818,7 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
         footer = "  ↑/↓ navigate  Enter = confirm  D = do not show again  Q = quit  "
         JJDlpDashboard.safe_addstr(stdscr, h - 1, 0,
                     footer.ljust(w - 1)[:w - 1],
-                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum5_2", 5))
+                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum5_2"))
 
         stdscr.refresh()
         key = stdscr.getch()
