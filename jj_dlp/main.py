@@ -4426,6 +4426,10 @@ class JJDlpDashboard:
         self._changelog_lines: List[str] = []
         self._changelog_popup_queued = False   # will be set to True after first frame
 
+        # ── Bake-to-source popup state (dev feature, hidden 'W' hotkey) ──────
+        self._bake_popup_open   = False
+        self._bake_popup_lines: List[str] = []
+
         # ── Exit-confirmation popup state ─────────────────────────────────────
         self._exit_confirm_open      = False
         self._exit_confirm_sel       = 0   # 0 = Yes (default), 1 = No
@@ -5993,6 +5997,10 @@ class JJDlpDashboard:
         if self._changelog_popup_open:
             self.draw_changelog_popup()
 
+        # Bake-to-source popup (dev feature) — drawn above the changelog.
+        if self._bake_popup_open:
+            self.draw_bake_popup()
+
         # Exit-confirmation popup — drawn on top of everything else.
         if self._exit_confirm_open:
             self.draw_exit_confirm_popup()
@@ -6042,6 +6050,13 @@ class JJDlpDashboard:
                 h, _ = self.stdscr.getmaxyx()
                 page = max(1, min(h - 4, 40) - 3)
                 self._changelog_scroll += page   # clamped in draw method
+            return True
+
+        # Bake-to-source popup intercepts all keys while open.
+        if self._bake_popup_open:
+            if key in (ord('q'), ord('Q'), 27,
+                       ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
+                self._bake_popup_open = False
             return True
 
         if self._mgmt_mode:
@@ -6157,6 +6172,10 @@ class JJDlpDashboard:
             self.randomize_colors()
         elif key in (ord('n'), ord('N')):
             self.theme_manager.open_popup()
+        elif key in (ord('w'), ord('W')):
+            # Dev feature: bake the current customizations into the source
+            # files (main.py COLOR_SCHEMES + call sites, theme.py SITE_REGISTRY).
+            self.open_bake_popup()
         elif key in (ord('s'), ord('S')):
             if current_tab_name == "Dashboard":
                 self.sort_manager.open_popup()
@@ -6558,6 +6577,63 @@ class JJDlpDashboard:
         legend = f" Q/Esc: close {scroll_info}"
         self.safe_addstr(self.stdscr, by2, bx1 + 2,
                     legend[:box_w - 4],
+                    theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_invhead", self.C_INVHEAD, False))
+
+    # ── Bake-to-source popup (dev feature, hidden 'W' hotkey) ────────────────
+    def open_bake_popup(self) -> None:
+        """Write the current theme customizations into the source files and
+        show a summary popup. NOTE: the next app update overwrites these edits."""
+        result = theme.bake_to_source(self)
+        lines = []
+        if not result['ok']:
+            lines.append("BAKE TO SOURCE — FAILED")
+            lines.append(result.get('error') or "Unknown error.")
+        else:
+            lines.append("BAKE TO SOURCE — OK")
+            if result['schemes']:
+                schemes = ", ".join(str(i) for i in result['schemes'])
+                lines.append(f"  main.py: COLOR_SCHEMES {schemes} updated")
+            if result['role_sites'] or result['bold_sites']:
+                parts = []
+                if result['role_sites']:
+                    parts.append(f"{result['role_sites']} role repoint(s)")
+                if result['bold_sites']:
+                    parts.append(f"{result['bold_sites']} bold toggle(s)")
+                lines.append("  Call sites rewritten: " + ", ".join(parts))
+            if result['files']:
+                lines.append("  Files written: " + ", ".join(result['files']))
+            lines.append("NOTE: app updates overwrite these edits.")
+        self._bake_popup_lines = lines
+        self._bake_popup_open = True
+
+    def draw_bake_popup(self) -> None:
+        """Draw the bake-to-source result popup centred on screen."""
+        if not self._bake_popup_open:
+            return
+        h, w = self.stdscr.getmaxyx()
+        content = self._bake_popup_lines
+        box_h = min(h - 4, len(content) + 4)
+        box_w = min(w - 4, 64)
+        by1 = max(0, (h - box_h) // 2)
+        bx1 = max(0, (w - box_w) // 2)
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            self.safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1),
+                        theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_normal_1", self.C_NORMAL, False))
+
+        self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_CHROME)
+        title = " THEME \u2192 SOURCE "
+        self.safe_addstr(self.stdscr, by1, bx1 + 2, title,
+                    theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_hilight", self.C_HILIGHT, True))
+
+        for i, line in enumerate(content[:max(0, box_h - 3)]):
+            self.safe_addstr(self.stdscr, by1 + 2 + i, bx1 + 2, line[:box_w - 4],
+                        theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_normal_2", self.C_NORMAL, False))
+
+        legend = " Q/Esc: close "
+        self.safe_addstr(self.stdscr, by2, bx1 + 2, legend[:box_w - 4],
                     theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_invhead", self.C_INVHEAD, False))
 
     # ── Run loop ──────────────────────────────────────────────────────────────

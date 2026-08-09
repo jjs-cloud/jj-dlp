@@ -38,6 +38,7 @@ moved in the source files, update the corresponding entries here to match.
 import curses
 import json
 import os
+import re
 import time
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -586,19 +587,21 @@ def role_overrides_for(scheme_idx=None):
 # ─────────────────────────────────────────────────────────────────────────
 # Applying role fg/bg overrides on top of a base COLOR_SCHEMES tuple.
 # ─────────────────────────────────────────────────────────────────────────
-def resolve_scheme_values(dashboard):
+def resolve_scheme_values(dashboard, scheme_idx=None):
     """Return a dict {role: {'fg': curses.COLOR_*, 'bg': curses.COLOR_* or
-    None}} for all 13 roles, combining the active base scheme with any saved
-    role_overrides for that scheme. bg is None for roles that share the
-    ambient background."""
-    scheme = dashboard.COLOR_SCHEMES[_state.get('base_scheme_idx', 0) % len(dashboard.COLOR_SCHEMES)]
+    None}} for all 13 roles, combining a base scheme with any saved
+    role_overrides for it (defaulting to the active base scheme). bg is None
+    for roles that share the ambient background."""
+    if scheme_idx is None:
+        scheme_idx = _state.get('base_scheme_idx', 0)
+    scheme = dashboard.COLOR_SCHEMES[scheme_idx % len(dashboard.COLOR_SCHEMES)]
     values = {}
     for role in ROLE_ORDER:
         values[role] = {'fg': None, 'bg': None}
     for (role, field), value in zip(SCHEME_TUPLE_FIELDS, scheme):
         values[role][field] = value
 
-    for role, ov in role_overrides_for().items():
+    for role, ov in role_overrides_for(scheme_idx).items():
         if role not in values:
             continue
         if ov.get('fg'):
@@ -641,6 +644,251 @@ def apply_palette(dashboard):
             stdscr.clearok(True)
         except curses.error:
             pass
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Bake-to-source — DEV FEATURE (hidden 'W' hotkey).
+#
+# Writes the currently-active customizations directly into the source files:
+#   • role fg/bg overrides  → the COLOR_SCHEMES tuple for that scheme in main.py
+#   • per-site role/bold    → the theme.attr(...) call site in the owning file
+#                             AND that site's default_role/default_bold in
+#                             SITE_REGISTRY (so the theme editor stays in sync)
+#
+# This is a snapshot convenience: runtime behavior is unchanged (theme.json
+# keeps winning), and the next app update overwrites these edits.
+# ─────────────────────────────────────────────────────────────────────────
+_SOURCE_FILES = ('main.py', 'config_editor.py', 'file_manager.py', 'theme.py')
+
+_SCHEME_TUPLE_TOKEN_RE = re.compile(r'curses\.COLOR_[A-Z]+')
+_ROLE_OWNED_PAIR_RE = re.compile(r'^(.+)\.C_[A-Z_]+$')
+_REG_DEFAULT_ROLE_RE = re.compile(r"'default_role':\s*(None|'[A-Z]+')")
+_REG_DEFAULT_BOLD_RE = re.compile(r"'default_bold':\s*(True|False)")
+
+
+def _call_site_pattern(tag):
+    return re.compile(
+        r'(theme\.attr\(\s*[^,]+?,\s*")' + re.escape(tag) +
+        r'("\s*,\s*)([^,]+?)(\s*,\s*)(True|False)(\s*\))'
+    )
+
+
+def _source_file_path(name):
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+
+
+def _read_source_file(name):
+    try:
+        with open(_source_file_path(name), 'r', encoding='utf-8') as f:
+            return f.read()
+    except Exception:
+        return None
+
+
+def _atomic_write_text(path, text):
+    """Atomically write a text file (tmp + os.replace), matching save_theme."""
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        return True
+    except Exception:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+        return False
+
+
+def _effective_scheme_colors(dashboard, scheme_idx):
+    """List of effective fg/bg curses color constants (in SCHEME_TUPLE_FIELDS
+    order) for the given scheme index, base tuple + role overrides applied."""
+    values = resolve_scheme_values(dashboard, scheme_idx)
+    return [values[role][field] for role, field in SCHEME_TUPLE_FIELDS]
+
+
+def _rewrite_scheme_tuple(main_text, scheme_idx, color_values):
+    """Rewrite the scheme_idx-th tuple inside COLOR_SCHEMES = [...] so each
+    curses.COLOR_X token (in SCHEME_TUPLE_FIELDS order) matches color_values.
+    Returns (new_text, changed)."""
+    lines = main_text.splitlines(keepends=True)
+
+    start = None
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith('COLOR_SCHEMES = ['):
+            start = i
+            break
+    if start is None:
+        return main_text, False
+
+    end = None
+    for i in range(start, len(lines)):
+        if lines[i].strip() == ']':
+            end = i
+            break
+    if end is None:
+        return main_text, False
+
+    group_starts = [i for i in range(start, end)
+                    if lines[i].lstrip().startswith('(curses.COLOR_')]
+    if scheme_idx >= len(group_starts):
+        return main_text, False
+
+    gs = group_starts[scheme_idx]
+    ge = gs
+    while ge <= end and ')' not in lines[ge]:
+        ge += 1
+    if ge > end:
+        return main_text, False
+
+    by_line = {}
+    for li in range(gs, ge + 1):
+        segs = [(m.start(), m.end()) for m in _SCHEME_TUPLE_TOKEN_RE.finditer(lines[li])]
+        if segs:
+            by_line[li] = segs
+    token_count = sum(len(segs) for segs in by_line.values())
+    if token_count != len(SCHEME_TUPLE_FIELDS):
+        return main_text, False
+
+    new_names = [_color_const_to_name(v) for v in color_values]
+    name_idx = 0
+    changed = False
+    for li in sorted(by_line):
+        parts = []
+        cursor = 0
+        for s, e in by_line[li]:
+            name = new_names[name_idx]
+            name_idx += 1
+            parts.append(lines[li][cursor:s])
+            parts.append(f'curses.COLOR_{name}')
+            cursor = e
+        parts.append(lines[li][cursor:])
+        rebuilt = ''.join(parts)
+        if rebuilt != lines[li]:
+            lines[li] = rebuilt
+            changed = True
+    return (''.join(lines), True) if changed else (main_text, False)
+
+
+def _rewrite_call_site(file_text, tag, ov):
+    """Rewrite the theme.attr(...) call site that references *tag* so its pair
+    argument and/or bold flag match the override. Returns (new_text, changed)."""
+    m = _call_site_pattern(tag).search(file_text)
+    if not m:
+        return file_text, False
+    g1, g2, pair, g4, bold, g6 = m.groups()
+
+    new_pair = pair
+    new_bold = bold
+    if ov.get('role'):
+        pm = _ROLE_OWNED_PAIR_RE.match(pair)
+        if pm:
+            new_pair = f"{pm.group(1)}.C_{ov['role']}"
+    if 'bold' in ov:
+        new_bold = str(ov['bold'])
+
+    if new_pair == pair and new_bold == bold:
+        return file_text, False
+    replacement = g1 + tag + g2 + new_pair + g4 + new_bold + g6
+    return file_text[:m.start()] + replacement + file_text[m.end():], True
+
+
+def _rewrite_registry_entry(theme_text, tag, ov):
+    """Rewrite a SITE_REGISTRY entry's default_role/default_bold to match the
+    override. Returns (new_text, changed)."""
+    lines = theme_text.splitlines(keepends=True)
+    target = None
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("'" + tag + "':"):
+            target = i
+            break
+    if target is None:
+        return theme_text, False
+
+    new_line = lines[target]
+    if ov.get('role'):
+        new_line = _REG_DEFAULT_ROLE_RE.sub(
+            f"'default_role': '{ov['role']}'", new_line, count=1)
+    if 'bold' in ov:
+        new_line = _REG_DEFAULT_BOLD_RE.sub(
+            f"'default_bold': {ov['bold']}", new_line, count=1)
+
+    if new_line == lines[target]:
+        return theme_text, False
+    lines[target] = new_line
+    return ''.join(lines), True
+
+
+def bake_to_source(dashboard):
+    """Write the currently-active customizations into the source files.
+
+    Dev feature bound to the hidden 'W' hotkey. Returns a summary dict:
+      {'ok': bool, 'error': str|None, 'schemes': [idx, ...],
+       'role_sites': int, 'bold_sites': int, 'files': [name, ...]}
+    """
+    summary = {'ok': True, 'error': None, 'schemes': [],
+               'role_sites': 0, 'bold_sites': 0, 'files': []}
+
+    files_text = {}
+    for name in _SOURCE_FILES:
+        text = _read_source_file(name)
+        if text is None:
+            summary['ok'] = False
+            summary['error'] = f"Could not read {name}"
+            return summary
+        files_text[name] = text
+
+    dirty = set()
+
+    # 1. Role color overrides → COLOR_SCHEMES tuples in main.py
+    role_overrides = _state.get('role_overrides', {})
+    for idx in sorted(int(k) for k in role_overrides if str(k).isdigit()):
+        colors = _effective_scheme_colors(dashboard, idx)
+        new_text, changed = _rewrite_scheme_tuple(files_text['main.py'], idx, colors)
+        if changed:
+            files_text['main.py'] = new_text
+            dirty.add('main.py')
+            summary['schemes'].append(idx)
+
+    # 2. Per-site overrides → call sites in owning files + SITE_REGISTRY
+    site_overrides = _state.get('site_overrides', {})
+    for tag, ov in sorted(site_overrides.items()):
+        entry = SITE_REGISTRY.get(tag)
+        if entry is None:
+            continue
+        if not ov.get('role') and 'bold' not in ov:
+            continue
+        fname = entry['file']
+        new_text, changed = _rewrite_call_site(files_text[fname], tag, ov)
+        if changed:
+            files_text[fname] = new_text
+            dirty.add(fname)
+            if ov.get('role'):
+                summary['role_sites'] += 1
+            if 'bold' in ov:
+                summary['bold_sites'] += 1
+        new_text, changed = _rewrite_registry_entry(files_text['theme.py'], tag, ov)
+        if changed:
+            files_text['theme.py'] = new_text
+            dirty.add('theme.py')
+
+    if not dirty:
+        summary['ok'] = False
+        summary['error'] = "Nothing to bake — no role or site overrides are active."
+        return summary
+
+    for name in sorted(dirty):
+        if _atomic_write_text(_source_file_path(name), files_text[name]):
+            summary['files'].append(name)
+        else:
+            summary['ok'] = False
+            summary['error'] = f"Failed to write {name}"
+            break
+
+    return summary
 
 
 # ─────────────────────────────────────────────────────────────────────────
