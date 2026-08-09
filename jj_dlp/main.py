@@ -5828,7 +5828,7 @@ class JJDlpDashboard:
         # enough to fit it without colliding with the top-right indicators.
         if self._is_christmas_day():
             _logo_w = max(len(_l) for _l in ASCII_LOGO)
-            _egg_x = 2 + _logo_w + 4
+            _egg_x = 2 + _logo_w + 20
             if w - _egg_x > 30:
                 self.draw_christmas_easter_egg(1, _egg_x)
 
