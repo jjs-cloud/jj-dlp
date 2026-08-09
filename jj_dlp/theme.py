@@ -293,6 +293,8 @@ SITE_REGISTRY = {
     'file_manager_filemanagertab_draw_dim_2': {'file': 'file_manager.py', 'line': 1776, 'label': 'File Manager — \'Empty\' Placeholder Row', 'default_role': 'DIM', 'default_bold': False},
     'file_manager_filemanagertab_draw_hilight': {'file': 'file_manager.py', 'line': 1796, 'label': 'File Manager — File Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
     'file_manager_filemanagertab_draw_live': {'file': 'file_manager.py', 'line': 1798, 'label': 'File Manager — File Row (Writing)', 'default_role': 'LIVE', 'default_bold': True},
+    'file_manager_filemanagertab_draw_live_2': {'file': 'file_manager.py', 'line': 1830, 'label': 'File Manager — Scroll-Up Arrow', 'default_role': 'LIVE', 'default_bold': True},
+    'file_manager_filemanagertab_draw_live_3': {'file': 'file_manager.py', 'line': 1833, 'label': 'File Manager — Scroll-Down Arrow', 'default_role': 'LIVE', 'default_bold': True},
     'file_manager_filemanagertab_draw_dim_3': {'file': 'file_manager.py', 'line': 1800, 'label': 'File Manager — File Row (Idle)', 'default_role': 'DIM', 'default_bold': False},
     'file_manager_filemanagertab_draw_system_2': {'file': 'file_manager.py', 'line': 1817, 'label': 'File Manager — Subfolder Path Prefix', 'default_role': 'SYSTEM', 'default_bold': False},
     'file_manager_filemanagertab_draw_delete': {'file': 'file_manager.py', 'line': 1830, 'label': 'File Manager — Delete-Mode Info (Permanent)', 'default_role': 'DELETE', 'default_bold': True},

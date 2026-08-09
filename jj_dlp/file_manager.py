@@ -1767,7 +1767,8 @@ class FileManagerTab:
         self._scroll = max(min_scroll, min(self._scroll, max(0, len(self._rows) - visible)))
 
         row_y = list_y1
-        for i in range(self._scroll, min(len(self._rows), self._scroll + visible)):
+        loop_end = min(len(self._rows), self._scroll + visible)
+        for i in range(self._scroll, loop_end):
             kind, payload, rec = self._rows[i]
             if kind == "header":
                 db.safe_addstr(stdscr, row_y, x1 + 1, ("\u2500 " + payload)[:avail_w],
@@ -1823,6 +1824,14 @@ class FileManagerTab:
                 db.safe_addstr(stdscr, row_y, col_mod_x, mod_txt.ljust(mod_w)[:mod_w], row_attr)
                 db.safe_addstr(stdscr, row_y, col_size_x, size_txt.rjust(size_w)[:size_w], row_attr)
                 db.safe_addstr(stdscr, row_y, col_rate_x, rate_txt.rjust(rate_w)[:rate_w], row_attr)
+
+            # --- Add Scroll Arrows ---
+            if i == self._scroll and self._scroll > 0:
+                db.safe_addstr(stdscr, row_y, x2 - 2, "\u25b2",
+                               theme.attr(db, "file_manager_filemanagertab_draw_live_2", db.C_LIVE, True))
+            if i == loop_end - 1 and loop_end < len(self._rows):
+                db.safe_addstr(stdscr, row_y, x2 - 2, "\u25bc",
+                               theme.attr(db, "file_manager_filemanagertab_draw_live_3", db.C_LIVE, True))
             row_y += 1
 
         delete_lbl = "Trash" if self._delete_mode == DELETE_MODE_TRASH else "Permanent Delete"
