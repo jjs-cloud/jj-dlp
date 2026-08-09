@@ -227,7 +227,7 @@ SITE_REGISTRY = {
     'config_editor_configeditor_draw_tab_live_1': {'file': 'config_editor.py', 'line': 3155, 'label': 'Site Settings Panel — Mode Indicator Badge', 'default_role': 'LIVE', 'default_bold': True},
     'config_editor_configeditor_draw_tab_live_2': {'file': 'config_editor.py', 'line': 3166, 'label': 'No configurable items found. #1', 'default_role': 'LIVE', 'default_bold': True},
     'config_editor_configeditor_draw_tab_dim_3': {'file': 'config_editor.py', 'line': 3171, 'label': 'No configurable items found. #2', 'default_role': 'DIM', 'default_bold': False},
-    'config_editor_configeditor_draw_tab_hilight_2': {'file': 'config_editor.py', 'line': 3180, 'label': 'Site Settings Panel — Item Row (Selected)', 'default_role': 'WARN', 'default_bold': False},
+    'config_editor_configeditor_draw_tab_hilight_2': {'file': 'config_editor.py', 'line': 3180, 'label': 'Site Settings Panel — Item Row (Selected)', 'default_role': 'INVHEAD', 'default_bold': False},
     'config_editor_configeditor_draw_tab_warn_1': {'file': 'config_editor.py', 'line': 3184, 'label': 'Site Settings Panel — Section Header Row (Unselected)', 'default_role': 'WARN', 'default_bold': True},
     'config_editor_configeditor_draw_tab_normal': {'file': 'config_editor.py', 'line': 3185, 'label': 'Site Settings Panel — Regular Item Row (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
     'config_editor_configeditor_draw_tab_hilight_3': {'file': 'config_editor.py', 'line': 3189, 'label': 'Site Settings Panel — Section Header (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
