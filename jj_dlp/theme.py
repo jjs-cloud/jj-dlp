@@ -1212,12 +1212,6 @@ class ThemeManager:
                     ROLE_ORDER.index(current_role) if current_role in ROLE_ORDER else 0
                 )
                 self.mode = self.MODE_SITE_EDIT
-        elif key in (ord('x'), ord('X')):
-            # Clear override for the currently-selected site.
-            if n:
-                tag = self._site_filtered[self._site_sel]
-                _state.get('site_overrides', {}).pop(tag, None)
-                save_theme(_state)
         elif 32 <= key < 127:
             self._site_filter += chr(key)
             self._recompute_site_filter()
@@ -1417,7 +1411,7 @@ class ThemeManager:
             db.safe_addstr(stdscr, by1 + 3 + row, bx1 + 2, (prefix + label)[:w - 4], attr_)
 
         db.safe_addstr(stdscr, by2, bx1 + 2,
-                        " Enter:Edit  x:Clear  Type:Filter  Esc:Back ",
+                        " Enter:Edit  Type:Filter  Esc:Back ",
                         curses.color_pair(db.C_INVHEAD))
 
     def _draw_site_edit(self, stdscr):
