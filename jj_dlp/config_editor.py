@@ -530,11 +530,11 @@ class PriorityEditor:
         title = " STREAMER SETTINGS "
         
         db.safe_addstr(stdscr, y1, x1 + 2, title,
-                       theme.attr(db, "config_editor_priorityeditor_draw_live_1", db.C_LIVE, True))
+                       theme.attr(db, "config_editor_priorityeditor_draw_live_1"))
         if is_active:
             mode_str = " [  ] "
             db.safe_addstr(stdscr, y1, x2 - len(mode_str) - 1, mode_str,
-                           theme.attr(db, "config_editor_priorityeditor_draw_live_2", db.C_LIVE, True))
+                           theme.attr(db, "config_editor_priorityeditor_draw_live_2"))
 
         row_y = y1 + 1
         hints = [
@@ -545,14 +545,14 @@ class PriorityEditor:
             "Enter:More Settings"
         ]
         for hint in hints:
-            db.safe_addstr(stdscr, row_y, x1 + 2, hint, theme.attr(db, "config_editor_priorityeditor_draw_dim_1", db.C_NORMAL, True))
+            db.safe_addstr(stdscr, row_y, x1 + 2, hint, theme.attr(db, "config_editor_priorityeditor_draw_dim_1"))
             row_y += 1
         
         row_y += 2
 
         if not self._entries:
             db.safe_addstr(stdscr, row_y, x1 + 2, "No streamers.",
-                           theme.attr(db, "config_editor_priorityeditor_draw_dim_2", db.C_DIM, True))
+                           theme.attr(db, "config_editor_priorityeditor_draw_dim_2"))
             return
 
         # usable character columns inside box (reduced by 1 to guarantee space for the arrow)
@@ -576,21 +576,21 @@ class PriorityEditor:
 
             if entry.bypass:
                 # Always-record streamers rendered in green (C_LIVE).
-                attr = (theme.attr(db, "config_editor_priorityeditor_draw_hilight_1", db.C_INVHEAD, False)
+                attr = (theme.attr(db, "config_editor_priorityeditor_draw_hilight_1")
                         if is_sel
-                        else theme.attr(db, "config_editor_priorityeditor_draw_live_3", db.C_LIVE, True))
+                        else theme.attr(db, "config_editor_priorityeditor_draw_live_3"))
             else:
-                attr = (theme.attr(db, "config_editor_priorityeditor_draw_hilight_2", db.C_INVHEAD, False)
+                attr = (theme.attr(db, "config_editor_priorityeditor_draw_hilight_2")
                         if is_sel
-                        else theme.attr(db, "config_editor_priorityeditor_draw_normal", db.C_NORMAL, True))
+                        else theme.attr(db, "config_editor_priorityeditor_draw_normal"))
 
             db.safe_addstr(stdscr, row_y, x1 + 1, prefix + label, attr)
 
             # --- Add Scroll Arrows ---
             if i == self._scroll_offset and self._scroll_offset > 0:
-                db.safe_addstr(stdscr, row_y, x2 - 2, "\u25b2", theme.attr(db, "config_editor_priorityeditor_draw_live_4", db.C_LIVE, True))
+                db.safe_addstr(stdscr, row_y, x2 - 2, "\u25b2", theme.attr(db, "config_editor_priorityeditor_draw_live_4"))
             if i == loop_end - 1 and loop_end < len(self._entries):
-                db.safe_addstr(stdscr, row_y, x2 - 2, "\u25bc", theme.attr(db, "config_editor_priorityeditor_draw_live_5", db.C_LIVE, True))
+                db.safe_addstr(stdscr, row_y, x2 - 2, "\u25bc", theme.attr(db, "config_editor_priorityeditor_draw_live_5"))
 
             row_y += 1
 
@@ -725,21 +725,21 @@ class StreamerSettingsPopup:
         bx2 = bx1 + box_w
         
         for y in range(by1, by2 + 1):
-            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_streamersettingspopu_draw_normal", db.C_NORMAL, False))
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_streamersettingspopu_draw_normal"))
             
         db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
         title = f" {self.entry.streamer.upper()} SETTINGS "
-        db.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(db, "config_editor_streamersettingspopu_draw_system", db.C_SYSTEM, True))
+        db.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(db, "config_editor_streamersettingspopu_draw_system"))
         
         row = by1 + 2
         for i, opt in enumerate(self.options):
             is_sel = (i == self._sel)
             prefix = "> " if is_sel else "  "
-            attr = (theme.attr(db, "config_editor_streamersettingspopu_draw_hilight", db.C_HILIGHT, True)) if is_sel else (theme.attr(db, "config_editor_streamersettingspopu_draw_warn", db.C_WARN, True))
+            attr = (theme.attr(db, "config_editor_streamersettingspopu_draw_hilight")) if is_sel else (theme.attr(db, "config_editor_streamersettingspopu_draw_warn"))
             db.safe_addstr(stdscr, row, bx1 + 2, prefix + opt, attr)
             row += 2
             
-        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Select  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_streamersettingspopu_draw_invhead", db.C_INVHEAD, False))
+        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Select  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_streamersettingspopu_draw_invhead"))
 
 
 class QualitySettingsPopup:
@@ -820,17 +820,17 @@ class QualitySettingsPopup:
         bx2 = bx1 + box_w
         
         for y in range(by1, by2 + 1):
-            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_qualitysettingspopup_draw_normal", db.C_NORMAL, False))
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_qualitysettingspopup_draw_normal"))
             
         db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
         title = f" {self.entry.streamer.upper()} SETTINGS "
-        db.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(db, "config_editor_qualitysettingspopup_draw_system", db.C_SYSTEM, True))
+        db.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(db, "config_editor_qualitysettingspopup_draw_system"))
         
         val_str = "[x]" if self.lq_enabled else "[ ]"
-        db.safe_addstr(stdscr, by1 + 2, bx1 + 2, "> Low Quality Enabled: ", theme.attr(db, "config_editor_qualitysettingspopup_draw_hilight_1", db.C_HILIGHT, True))
-        db.safe_addstr(stdscr, by1 + 2, bx1 + 25, val_str, theme.attr(db, "config_editor_qualitysettingspopup_draw_hilight_2", db.C_HILIGHT, True))
+        db.safe_addstr(stdscr, by1 + 2, bx1 + 2, "> Low Quality Enabled: ", theme.attr(db, "config_editor_qualitysettingspopup_draw_hilight_1"))
+        db.safe_addstr(stdscr, by1 + 2, bx1 + 25, val_str, theme.attr(db, "config_editor_qualitysettingspopup_draw_hilight_2"))
             
-        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space:Toggle  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_qualitysettingspopup_draw_invhead", db.C_INVHEAD, False))
+        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space:Toggle  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_qualitysettingspopup_draw_invhead"))
 
 
 class NotificationSettingsPopup:
@@ -949,15 +949,15 @@ class NotificationSettingsPopup:
         bx2 = bx1 + box_w
         
         for y in range(by1, by2 + 1):
-            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_notificationsettings_draw_normal_1", db.C_NORMAL, False))
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_notificationsettings_draw_normal_1"))
             
         db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
         title = f" {self.entry.streamer.upper()} SETTINGS "
-        db.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(db, "config_editor_notificationsettings_draw_system", db.C_SYSTEM, True))
+        db.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(db, "config_editor_notificationsettings_draw_system"))
 
         state_label = {"inherit": "< Inherit >", "on": "< On >", "off": "< Off >"}[self.state]
-        db.safe_addstr(stdscr, by1 + 2, bx1 + 2, "> ntfy Notifications: ", theme.attr(db, "config_editor_notificationsettings_draw_hilight_1", db.C_HILIGHT, True))
-        db.safe_addstr(stdscr, by1 + 2, bx1 + 24, state_label, theme.attr(db, "config_editor_notificationsettings_draw_hilight_2", db.C_HILIGHT, True))
+        db.safe_addstr(stdscr, by1 + 2, bx1 + 2, "> ntfy Notifications: ", theme.attr(db, "config_editor_notificationsettings_draw_hilight_1"))
+        db.safe_addstr(stdscr, by1 + 2, bx1 + 24, state_label, theme.attr(db, "config_editor_notificationsettings_draw_hilight_2"))
 
         site_default = self._site_default()
         if self.state == "inherit":
@@ -965,10 +965,10 @@ class NotificationSettingsPopup:
         else:
             effective = (self.state == "on")
         eff_str = "ON" if effective else "OFF"
-        db.safe_addstr(stdscr, by1 + 4, bx1 + 2, "Effective: ", theme.attr(db, "config_editor_notificationsettings_draw_normal_2", db.C_NORMAL, False))
-        db.safe_addstr(stdscr, by1 + 4, bx1 + 13, eff_str, theme.attr(db, "config_editor_notificationsettings_draw_warn", db.C_WARN, True))
+        db.safe_addstr(stdscr, by1 + 4, bx1 + 2, "Effective: ", theme.attr(db, "config_editor_notificationsettings_draw_normal_2"))
+        db.safe_addstr(stdscr, by1 + 4, bx1 + 13, eff_str, theme.attr(db, "config_editor_notificationsettings_draw_warn"))
 
-        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_notificationsettings_draw_invhead", db.C_INVHEAD, False))
+        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_notificationsettings_draw_invhead"))
 
 
 class SplitSettingsPopup:
@@ -1197,20 +1197,20 @@ class SplitSettingsPopup:
         bx2 = bx1 + box_w
 
         for y in range(by1, by2 + 1):
-            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_splitsettingspopup_draw_normal_1", db.C_NORMAL, False))
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_splitsettingspopup_draw_normal_1"))
 
         db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
         title = f" {self.entry.streamer.upper()} SETTINGS "
-        db.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(db, "config_editor_splitsettingspopup_draw_system", db.C_SYSTEM, True))
+        db.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(db, "config_editor_splitsettingspopup_draw_system"))
 
         row = by1 + 2
         for i, (label, val_str, field_key) in enumerate(fields):
             is_sel     = (i == self._sel)
             prefix     = "> " if is_sel else "  "
-            label_attr = (theme.attr(db, "config_editor_splitsettingspopup_draw_hilight_1", db.C_HILIGHT, True)
-                          if is_sel else theme.attr(db, "config_editor_splitsettingspopup_draw_warn_1", db.C_WARN, True))
-            val_attr   = (theme.attr(db, "config_editor_splitsettingspopup_draw_hilight_2", db.C_HILIGHT, True)
-                          if is_sel else theme.attr(db, "config_editor_splitsettingspopup_draw_normal_2", db.C_NORMAL, False))
+            label_attr = (theme.attr(db, "config_editor_splitsettingspopup_draw_hilight_1")
+                          if is_sel else theme.attr(db, "config_editor_splitsettingspopup_draw_warn_1"))
+            val_attr   = (theme.attr(db, "config_editor_splitsettingspopup_draw_hilight_2")
+                          if is_sel else theme.attr(db, "config_editor_splitsettingspopup_draw_normal_2"))
 
             full_label = f"{prefix}{label}: "
             db.safe_addstr(stdscr, row, bx1 + 2, full_label, label_attr)
@@ -1233,16 +1233,16 @@ class SplitSettingsPopup:
             effective_str = "No split"
         else:
             effective_str = f"{self.split_after}m" if self.split_after > 0 else "No split"
-        db.safe_addstr(stdscr, row, bx1 + 2, "Effective: ", theme.attr(db, "config_editor_splitsettingspopup_draw_normal_3", db.C_NORMAL, False))
-        db.safe_addstr(stdscr, row, bx1 + 13, effective_str, theme.attr(db, "config_editor_splitsettingspopup_draw_warn_2", db.C_WARN, True))
+        db.safe_addstr(stdscr, row, bx1 + 2, "Effective: ", theme.attr(db, "config_editor_splitsettingspopup_draw_normal_3"))
+        db.safe_addstr(stdscr, row, bx1 + 13, effective_str, theme.attr(db, "config_editor_splitsettingspopup_draw_warn_2"))
         row += 1
 
         if self._error:
             db.safe_addstr(stdscr, by2 - 1, bx1 + 2, self._error[:box_w - 4],
-                           theme.attr(db, "config_editor_splitsettingspopup_draw_warn_3", db.C_WARN, True))
+                           theme.attr(db, "config_editor_splitsettingspopup_draw_warn_3"))
 
         footer = " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "
-        db.safe_addstr(stdscr, by2, bx1 + 2, footer[:box_w - 4], theme.attr(db, "config_editor_splitsettingspopup_draw_invhead", db.C_INVHEAD, False))
+        db.safe_addstr(stdscr, by2, bx1 + 2, footer[:box_w - 4], theme.attr(db, "config_editor_splitsettingspopup_draw_invhead"))
 
 
 class IntroDelaySettingsPopup:
@@ -1448,20 +1448,20 @@ class IntroDelaySettingsPopup:
         bx2 = bx1 + box_w
 
         for y in range(by1, by2 + 1):
-            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_introdelaysettingspo_draw_normal_1", db.C_NORMAL, False))
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_introdelaysettingspo_draw_normal_1"))
 
         db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
         title = f" {self.entry.streamer.upper()} SETTINGS "
-        db.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(db, "config_editor_introdelaysettingspo_draw_system", db.C_SYSTEM, True))
+        db.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(db, "config_editor_introdelaysettingspo_draw_system"))
 
         row = by1 + 2
         for i, (label, val_str, field_key) in enumerate(fields):
             is_sel     = (i == self._sel)
             prefix     = "> " if is_sel else "  "
-            label_attr = (theme.attr(db, "config_editor_introdelaysettingspo_draw_hilight_1", db.C_HILIGHT, True)
-                          if is_sel else theme.attr(db, "config_editor_introdelaysettingspo_draw_warn_1", db.C_WARN, True))
-            val_attr   = (theme.attr(db, "config_editor_introdelaysettingspo_draw_hilight_2", db.C_HILIGHT, True)
-                          if is_sel else theme.attr(db, "config_editor_introdelaysettingspo_draw_normal_2", db.C_NORMAL, False))
+            label_attr = (theme.attr(db, "config_editor_introdelaysettingspo_draw_hilight_1")
+                          if is_sel else theme.attr(db, "config_editor_introdelaysettingspo_draw_warn_1"))
+            val_attr   = (theme.attr(db, "config_editor_introdelaysettingspo_draw_hilight_2")
+                          if is_sel else theme.attr(db, "config_editor_introdelaysettingspo_draw_normal_2"))
 
             full_label = f"{prefix}{label}: "
             db.safe_addstr(stdscr, row, bx1 + 2, full_label, label_attr)
@@ -1483,16 +1483,16 @@ class IntroDelaySettingsPopup:
             effective_str = f"Delay {self.minutes}m, split into separate file"
         else:
             effective_str = f"Delay {self.minutes}m, no split"
-        db.safe_addstr(stdscr, row, bx1 + 2, "Effective: ", theme.attr(db, "config_editor_introdelaysettingspo_draw_normal_3", db.C_NORMAL, False))
-        db.safe_addstr(stdscr, row, bx1 + 13, effective_str[:box_w - 15], theme.attr(db, "config_editor_introdelaysettingspo_draw_warn_2", db.C_WARN, True))
+        db.safe_addstr(stdscr, row, bx1 + 2, "Effective: ", theme.attr(db, "config_editor_introdelaysettingspo_draw_normal_3"))
+        db.safe_addstr(stdscr, row, bx1 + 13, effective_str[:box_w - 15], theme.attr(db, "config_editor_introdelaysettingspo_draw_warn_2"))
         row += 1
 
         if self._error:
             db.safe_addstr(stdscr, by2 - 1, bx1 + 2, self._error[:box_w - 4],
-                           theme.attr(db, "config_editor_introdelaysettingspo_draw_warn_3", db.C_WARN, True))
+                           theme.attr(db, "config_editor_introdelaysettingspo_draw_warn_3"))
 
         footer = " Enter:Save  Space:Toggle/Edit  Esc:Cancel "
-        db.safe_addstr(stdscr, by2, bx1 + 2, footer[:box_w - 4], theme.attr(db, "config_editor_introdelaysettingspo_draw_invhead", db.C_INVHEAD, False))
+        db.safe_addstr(stdscr, by2, bx1 + 2, footer[:box_w - 4], theme.attr(db, "config_editor_introdelaysettingspo_draw_invhead"))
 
 
 class ScheduleSettingsPopup:
@@ -1796,12 +1796,12 @@ class ScheduleSettingsPopup:
         # Clear background area
         for y in range(by1, by2 + 1):
             db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1),
-                           theme.attr(db, "config_editor_schedulesettingspopu_draw_normal_1", db.C_NORMAL, False))
+                           theme.attr(db, "config_editor_schedulesettingspopu_draw_normal_1"))
 
         db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
         title = f" {self.entry.streamer.upper()} SETTINGS "
         db.safe_addstr(stdscr, by1, bx1 + 2, title,
-                       theme.attr(db, "config_editor_schedulesettingspopu_draw_system", db.C_SYSTEM, True))
+                       theme.attr(db, "config_editor_schedulesettingspopu_draw_system"))
 
         # Draw each field
         row = by1 + 2
@@ -1810,10 +1810,10 @@ class ScheduleSettingsPopup:
                 break
             is_sel     = (i == self._sel)
             prefix     = "> " if is_sel else "  "
-            label_attr = (theme.attr(db, "config_editor_schedulesettingspopu_draw_hilight_1", db.C_HILIGHT, True)
-                          if is_sel else theme.attr(db, "config_editor_schedulesettingspopu_draw_warn_1", db.C_WARN, True))
-            val_attr   = (theme.attr(db, "config_editor_schedulesettingspopu_draw_hilight_2", db.C_HILIGHT, True)
-                          if is_sel else theme.attr(db, "config_editor_schedulesettingspopu_draw_normal_2", db.C_NORMAL, False))
+            label_attr = (theme.attr(db, "config_editor_schedulesettingspopu_draw_hilight_1")
+                          if is_sel else theme.attr(db, "config_editor_schedulesettingspopu_draw_warn_1"))
+            val_attr   = (theme.attr(db, "config_editor_schedulesettingspopu_draw_hilight_2")
+                          if is_sel else theme.attr(db, "config_editor_schedulesettingspopu_draw_normal_2"))
 
             full_label = f"{prefix}{label}: "
             db.safe_addstr(stdscr, row, bx1 + 2, full_label, label_attr)
@@ -1828,11 +1828,11 @@ class ScheduleSettingsPopup:
                     is_dc     = (di == self._day_cursor)
                     day_str   = f"[{day_lbl}]" if is_active else f" {day_lbl} "
                     if is_dc:
-                        day_attr = theme.attr(db, "config_editor_schedulesettingspopu_draw_hilight_3", db.C_HILIGHT, True)
+                        day_attr = theme.attr(db, "config_editor_schedulesettingspopu_draw_hilight_3")
                     elif is_active:
-                        day_attr = theme.attr(db, "config_editor_schedulesettingspopu_draw_live", db.C_LIVE, True)
+                        day_attr = theme.attr(db, "config_editor_schedulesettingspopu_draw_live")
                     else:
-                        day_attr = theme.attr(db, "config_editor_schedulesettingspopu_draw_dim", db.C_DIM, False)
+                        day_attr = theme.attr(db, "config_editor_schedulesettingspopu_draw_dim")
                     if dx + len(day_str) < bx2:
                         db.safe_addstr(stdscr, row, dx, day_str, day_attr)
                     dx += len(day_str) + 1
@@ -1841,7 +1841,7 @@ class ScheduleSettingsPopup:
                                     self._FIELD_REC_START, self._FIELD_REC_END)):
                 db.safe_addstr(stdscr, row, val_x,
                                (self._edit_buf + "_")[:max_len],
-                               theme.attr(db, "config_editor_schedulesettingspopu_draw_normal_3", db.C_NORMAL, True))
+                               theme.attr(db, "config_editor_schedulesettingspopu_draw_normal_3"))
             else:
                 db.safe_addstr(stdscr, row, val_x, val_str[:max_len], val_attr)
 
@@ -1851,14 +1851,14 @@ class ScheduleSettingsPopup:
         if self._error:
             db.safe_addstr(stdscr, by2, bx1 + 2,
                            f" {self._error} "[:box_w - 4],
-                           theme.attr(db, "config_editor_schedulesettingspopu_draw_warn_2", db.C_WARN, True))
+                           theme.attr(db, "config_editor_schedulesettingspopu_draw_warn_2"))
         else:
             if self._editing:
                 hint = " Enter:Commit  Esc:Cancel edit "
             else:
                 hint = " Enter:Save  Esc:Cancel  Space:Toggle/Edit  \u2190\u2192:Mode/Days "
             db.safe_addstr(stdscr, by2, bx1 + 2, hint[:box_w - 4],
-                           theme.attr(db, "config_editor_schedulesettingspopu_draw_invhead", db.C_INVHEAD, False))
+                           theme.attr(db, "config_editor_schedulesettingspopu_draw_invhead"))
 
 
 def apply_sort_to_streamers(
@@ -2020,14 +2020,14 @@ class SiteSortManager:
 
         for y in range(by1, by2 + 1):
             db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1),
-                           theme.attr(db, "config_editor_sitesortmanager_draw_popup_normal_1", db.C_NORMAL, False))
+                           theme.attr(db, "config_editor_sitesortmanager_draw_popup_normal_1"))
 
         db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_CHROME)
         db.safe_addstr(stdscr, by1, bx1 + 2, self._POPUP_TITLE,
-                       theme.attr(db, "config_editor_sitesortmanager_draw_popup_chrome", db.C_CHROME, True))
+                       theme.attr(db, "config_editor_sitesortmanager_draw_popup_chrome"))
         db.safe_addstr(stdscr, by2, bx1 + 2,
                        " Enter: Select  Esc: Cancel ",
-                       theme.attr(db, "config_editor_sitesortmanager_draw_popup_invhead", db.C_INVHEAD, False))
+                       theme.attr(db, "config_editor_sitesortmanager_draw_popup_invhead"))
 
         visible = box_h - 3   # rows between border+title and legend row
 
@@ -2044,11 +2044,11 @@ class SiteSortManager:
             is_cur = (sort_key == self._current_sort)
             prefix = "> " if is_sel else ("* " if is_cur else "  ")
             if is_sel:
-                attr = theme.attr(db, "config_editor_sitesortmanager_draw_popup_hilight", db.C_HILIGHT, True)
+                attr = theme.attr(db, "config_editor_sitesortmanager_draw_popup_hilight")
             elif is_cur:
-                attr = theme.attr(db, "config_editor_sitesortmanager_draw_popup_live", db.C_LIVE, True)
+                attr = theme.attr(db, "config_editor_sitesortmanager_draw_popup_live")
             else:
-                attr = theme.attr(db, "config_editor_sitesortmanager_draw_popup_normal_2", db.C_NORMAL, False)
+                attr = theme.attr(db, "config_editor_sitesortmanager_draw_popup_normal_2")
             db.safe_addstr(stdscr, row_y, bx1 + 2,
                            (prefix + label)[:box_w - 4], attr)
 
@@ -2531,24 +2531,24 @@ class GlobalConfigEditor:
         bx2        = bx1 + box_w
 
         for y in range(by1, by2 + 1):
-            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_globalconfigeditor_draw_destinations_po_normal_1", db.C_NORMAL, False))
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_globalconfigeditor_draw_destinations_po_normal_1"))
         db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
         db.safe_addstr(stdscr, by1, bx1 + 2, " DESTINATIONS ",
-                       theme.attr(db, "config_editor_globalconfigeditor_draw_destinations_po_system", db.C_SYSTEM, True))
+                       theme.attr(db, "config_editor_globalconfigeditor_draw_destinations_po_system"))
 
         row = by1 + 1
         if comment_lines:
             for cl in comment_lines:
-                db.safe_addstr(stdscr, row, bx1 + 2, cl, theme.attr(db, "config_editor_globalconfigeditor_draw_destinations_po_dim_1", db.C_DIM, False))
+                db.safe_addstr(stdscr, row, bx1 + 2, cl, theme.attr(db, "config_editor_globalconfigeditor_draw_destinations_po_dim_1"))
                 row += 1
             row += 1  # blank separator
 
-        db.safe_addstr(stdscr, row, bx1 + 2, "Paths:", theme.attr(db, "config_editor_globalconfigeditor_draw_destinations_po_dim_2", db.C_DIM, False))
+        db.safe_addstr(stdscr, row, bx1 + 2, "Paths:", theme.attr(db, "config_editor_globalconfigeditor_draw_destinations_po_dim_2"))
         row += 1
 
         avail_rows = max(1, (by2 - row) - 2)   # reserve 2 lines for the input row + legend
         if not self._destinations_list:
-            db.safe_addstr(stdscr, row, bx1 + 2, "(none yet)", theme.attr(db, "config_editor_globalconfigeditor_draw_destinations_po_dim_3", db.C_DIM, False))
+            db.safe_addstr(stdscr, row, bx1 + 2, "(none yet)", theme.attr(db, "config_editor_globalconfigeditor_draw_destinations_po_dim_3"))
             row += 1
         else:
             if n_dest >= self._destinations_scroll + avail_rows:
@@ -2557,19 +2557,19 @@ class GlobalConfigEditor:
             for i in range(scroll, min(n_dest, scroll + avail_rows)):
                 path = self._destinations_list[i]
                 disp = path if len(path) <= box_w - 4 else path[:box_w - 5] + "\u25ba"
-                db.safe_addstr(stdscr, row, bx1 + 2, disp, theme.attr(db, "config_editor_globalconfigeditor_draw_destinations_po_normal_2", db.C_NORMAL, False))
+                db.safe_addstr(stdscr, row, bx1 + 2, disp, theme.attr(db, "config_editor_globalconfigeditor_draw_destinations_po_normal_2"))
                 row += 1
 
         input_row = by2 - 1
         db.safe_addstr(stdscr, input_row, bx1 + 2, "New path:",
-                       theme.attr(db, "config_editor_globalconfigeditor_draw_destinations_po_warn", db.C_WARN, True))
+                       theme.attr(db, "config_editor_globalconfigeditor_draw_destinations_po_warn"))
         db.safe_addstr(stdscr, input_row, bx1 + 12,
                        (self._destinations_buf + "_")[:box_w - 14],
-                       theme.attr(db, "config_editor_globalconfigeditor_draw_destinations_po_normal_3", db.C_NORMAL, True))
+                       theme.attr(db, "config_editor_globalconfigeditor_draw_destinations_po_normal_3"))
 
         db.safe_addstr(stdscr, by2, bx1 + 2,
                        " Enter: Add path (blank Enter: Done)  Esc: Done ",
-                       theme.attr(db, "config_editor_globalconfigeditor_draw_destinations_po_invhead", db.C_INVHEAD, False))
+                       theme.attr(db, "config_editor_globalconfigeditor_draw_destinations_po_invhead"))
 
     def _draw_msg_filters_popup(self, stdscr) -> None:
         """Draw the per-message toggle popup for a single tag."""
@@ -2589,10 +2589,10 @@ class GlobalConfigEditor:
         bx2   = bx1 + box_w
 
         for y in range(by1, by2 + 1):
-            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_normal_1", db.C_NORMAL, False))
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_normal_1"))
         db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
         title = f" [{self._msg_filters_tag}] MESSAGES "
-        db.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_system", db.C_SYSTEM, True))
+        db.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_system"))
 
         row = by1 + 2
 
@@ -2601,21 +2601,21 @@ class GlobalConfigEditor:
         prefix   = "> " if is_sel else "  "
         enabled  = self._debug_tags_state.get(self._msg_filters_tag, False)
         val_disp = "[ ON]" if enabled else "[OFF]"
-        row_attr = (theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_hilight_1", db.C_HILIGHT, True)
-                    if is_sel else theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_normal_2", db.C_NORMAL, False))
-        val_attr = (theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_hilight_2", db.C_HILIGHT, True)
+        row_attr = (theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_hilight_1")
+                    if is_sel else theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_normal_2"))
+        val_attr = (theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_hilight_2")
                     if is_sel
-                    else (theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_live_1", db.C_LIVE, False) if enabled else theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_warn", db.C_WARN, False)))
+                    else (theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_live_1") if enabled else theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_warn")))
         db.safe_addstr(stdscr, row, bx1 + 2, prefix + f"{'Tag Enabled:':<18}", row_attr)
         db.safe_addstr(stdscr, row, bx1 + 22, val_disp, val_attr | curses.A_BOLD)
         row += 2
 
-        db.safe_addstr(stdscr, row, bx1 + 2, "Messages:", theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_dim_1", db.C_DIM, False))
+        db.safe_addstr(stdscr, row, bx1 + 2, "Messages:", theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_dim_1"))
         row += 1
 
         if not self._msg_filters_keys:
             db.safe_addstr(stdscr, row, bx1 + 2, "(no dbg() calls found for this tag)",
-                           theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_dim_2", db.C_DIM, False))
+                           theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_dim_2"))
         else:
             avail_rows = (by2 - row) - 2   # reserve 2 lines for legend at bottom
             msg_sel = self._msg_filters_sel - 1
@@ -2634,11 +2634,11 @@ class GlobalConfigEditor:
                 is_sel   = (self._msg_filters_sel == i + 1)
                 prefix   = "> " if is_sel else "  "
                 val_str  = "[ ON]" if msg_on else "[OFF]"
-                row_attr = (theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_hilight_3", db.C_HILIGHT, True)
-                            if is_sel else theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_normal_3", db.C_NORMAL, False))
-                val_attr = (theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_hilight_4", db.C_HILIGHT, True)
+                row_attr = (theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_hilight_3")
+                            if is_sel else theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_normal_3"))
+                val_attr = (theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_hilight_4")
                             if is_sel
-                            else (theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_live_2", db.C_LIVE, False) if msg_on else theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_dim_3", db.C_DIM, False)))
+                            else (theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_live_2") if msg_on else theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_dim_3")))
                 disp = label if len(label) <= label_w else label[:label_w - 1] + "\u25ba"
                 db.safe_addstr(stdscr, row, bx1 + 2, prefix + disp, row_attr)
                 db.safe_addstr(stdscr, row, bx2 - 7, val_str, val_attr | curses.A_BOLD)
@@ -2646,7 +2646,7 @@ class GlobalConfigEditor:
 
         db.safe_addstr(stdscr, by2, bx1 + 2,
                        " Space:Toggle  Enter:Save  Esc:Back ",
-                       theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_invhead", db.C_INVHEAD, False))
+                       theme.attr(db, "config_editor_globalconfigeditor_draw_msg_filters_pop_invhead"))
 
     def _draw_debug_tags_popup(self, stdscr) -> None:
         """Draw the combined bool-toggle + per-tag-toggle popup for DEBUG_LOGS."""
@@ -2668,10 +2668,10 @@ class GlobalConfigEditor:
         # Clear background
         for y in range(by1, by2 + 1):
             db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1),
-                           theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_normal_1", db.C_NORMAL, False))
+                           theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_normal_1"))
         db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
         db.safe_addstr(stdscr, by1, bx1 + 2, " DEBUG LOGGING ",
-                       theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_system", db.C_SYSTEM, True))
+                       theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_system"))
 
         row = by1 + 2
 
@@ -2680,13 +2680,13 @@ class GlobalConfigEditor:
         prefix    = "> " if is_sel else "  "
         bool_val  = self._debug_tags_bool.lower()
         bool_disp = "[ ON]" if bool_val == "true" else "[OFF]"
-        row_attr  = (theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_hilight_1", db.C_HILIGHT, True)
-                     if is_sel else theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_normal_2", db.C_NORMAL, False))
-        val_attr  = (theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_hilight_2", db.C_HILIGHT, True)
+        row_attr  = (theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_hilight_1")
+                     if is_sel else theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_normal_2"))
+        val_attr  = (theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_hilight_2")
                      if is_sel
-                     else (theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_live_1", db.C_LIVE, False)
+                     else (theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_live_1")
                            if bool_val == "true"
-                           else theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_warn", db.C_WARN, False)))
+                           else theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_warn")))
         db.safe_addstr(stdscr, row, bx1 + 2,
                        prefix + f"{'Enable Logging:':<18}", row_attr)
         db.safe_addstr(stdscr, row, bx1 + 22, bool_disp,
@@ -2695,7 +2695,7 @@ class GlobalConfigEditor:
 
         # ── "Tag Filters:" section header ─────────────────────────────────────
         db.safe_addstr(stdscr, row, bx1 + 2, "Tag Filters:",
-                       theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_dim_1", db.C_DIM, False))
+                       theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_dim_1"))
         row += 1
 
         # ── Scrollable tag rows (selection indices 1 … n_tags) ───────────────
@@ -2716,13 +2716,13 @@ class GlobalConfigEditor:
             is_sel  = (self.debug_tags_sel == i + 1)
             prefix  = "> " if is_sel else "  "
             val_str = "[ ON]" if enabled else "[OFF]"
-            row_attr = (theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_hilight_3", db.C_HILIGHT, True)
-                        if is_sel else theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_normal_3", db.C_NORMAL, False))
-            val_attr = (theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_hilight_4", db.C_HILIGHT, True)
+            row_attr = (theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_hilight_3")
+                        if is_sel else theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_normal_3"))
+            val_attr = (theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_hilight_4")
                         if is_sel
-                        else (theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_live_2", db.C_LIVE, False)
+                        else (theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_live_2")
                               if enabled
-                              else theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_dim_2", db.C_DIM, False)))
+                              else theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_dim_2")))
             db.safe_addstr(stdscr, row, bx1 + 2,
                            prefix + f"{tag:<18}", row_attr)
             db.safe_addstr(stdscr, row, bx1 + 22, val_str,
@@ -2733,7 +2733,7 @@ class GlobalConfigEditor:
         legend = (" Space:Toggle  Enter:Save  Esc:Cancel "
                   if self.debug_tags_sel == 0 else
                   " Space:Messages  Enter:Save  Esc:Cancel ")
-        db.safe_addstr(stdscr, by2, bx1 + 2, legend, theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_invhead", db.C_INVHEAD, False))
+        db.safe_addstr(stdscr, by2, bx1 + 2, legend, theme.attr(db, "config_editor_globalconfigeditor_draw_debug_tags_popu_invhead"))
 
     def save(self):
         """Write self.lines back to global.conf with a backup."""
@@ -2865,11 +2865,11 @@ class GlobalConfigEditor:
         self.dashboard.draw_box(stdscr, y1, x1, y2, x2, db.C_SYSTEM)
         title = " GLOBAL SETTINGS "
             
-        self.dashboard.safe_addstr(stdscr, y1, x1 + 2, title, theme.attr(db, "config_editor_globalconfigeditor_draw_live_1", db.C_LIVE, True))
+        self.dashboard.safe_addstr(stdscr, y1, x1 + 2, title, theme.attr(db, "config_editor_globalconfigeditor_draw_live_1"))
         if is_active:
             mode_str = " [  ] "
             self.dashboard.safe_addstr(stdscr, y1, x2 - len(mode_str) - 1, mode_str,
-                        theme.attr(db, "config_editor_globalconfigeditor_draw_live_2", db.C_LIVE, True))
+                        theme.attr(db, "config_editor_globalconfigeditor_draw_live_2"))
 
         row_y = y1 + 1
         loop_end = min(len(self.items), self.scroll_offset + visible_rows)
@@ -2877,10 +2877,10 @@ class GlobalConfigEditor:
             item = self.items[i]
             is_sel = is_active and (i == self.selected_idx)
             prefix = "> " if is_sel else "  "
-            key_attr = (theme.attr(db, "config_editor_globalconfigeditor_draw_hilight_1", db.C_INVHEAD, False)
-                        if is_sel else theme.attr(db, "config_editor_globalconfigeditor_draw_warn", db.C_WARN, True))
-            val_attr = (theme.attr(db, "config_editor_globalconfigeditor_draw_hilight_2", db.C_INVHEAD, False)
-                        if is_sel else theme.attr(db, "config_editor_globalconfigeditor_draw_live_3", db.C_NORMAL, True))
+            key_attr = (theme.attr(db, "config_editor_globalconfigeditor_draw_hilight_1")
+                        if is_sel else theme.attr(db, "config_editor_globalconfigeditor_draw_warn"))
+            val_attr = (theme.attr(db, "config_editor_globalconfigeditor_draw_hilight_2")
+                        if is_sel else theme.attr(db, "config_editor_globalconfigeditor_draw_live_3"))
             self.dashboard.safe_addstr(stdscr, row_y, x1 + 1, prefix + f"{item.key:<22}", key_attr)
             val_str = "= " + str(item.value)
             
@@ -2895,9 +2895,9 @@ class GlobalConfigEditor:
             
             # --- Add Scroll Arrows ---
             if i == self.scroll_offset and self.scroll_offset > 0:
-                self.dashboard.safe_addstr(stdscr, row_y, x2 - 2, "\u25b2", theme.attr(db, "config_editor_globalconfigeditor_draw_live_4", db.C_LIVE, True))
+                self.dashboard.safe_addstr(stdscr, row_y, x2 - 2, "\u25b2", theme.attr(db, "config_editor_globalconfigeditor_draw_live_4"))
             if i == loop_end - 1 and loop_end < len(self.items):
-                self.dashboard.safe_addstr(stdscr, row_y, x2 - 2, "\u25bc", theme.attr(db, "config_editor_globalconfigeditor_draw_live_5", db.C_LIVE, True))
+                self.dashboard.safe_addstr(stdscr, row_y, x2 - 2, "\u25bc", theme.attr(db, "config_editor_globalconfigeditor_draw_live_5"))
                 
             row_y += 1
 
@@ -2930,32 +2930,32 @@ class GlobalConfigEditor:
         by2 = by1 + box_h
         bx2 = bx1 + box_w
         for y in range(by1, by2 + 1):
-            self.dashboard.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_globalconfigeditor_draw_popup_normal_1", db.C_NORMAL, False))
+            self.dashboard.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_globalconfigeditor_draw_popup_normal_1"))
         self.dashboard.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
         self.dashboard.safe_addstr(stdscr, by1, bx1 + 2, " EDIT GLOBAL VALUE ",
-                    theme.attr(db, "config_editor_globalconfigeditor_draw_popup_system_1", db.C_SYSTEM, True))
+                    theme.attr(db, "config_editor_globalconfigeditor_draw_popup_system_1"))
         row = by1 + 2
         self.dashboard.safe_addstr(stdscr, row, bx1 + 2,
                     f"Key: {self.editing_item.key}{_managed_key_note(self.editing_item.key)}",
-                    theme.attr(db, "config_editor_globalconfigeditor_draw_popup_chrome", db.C_CHROME, False))
+                    theme.attr(db, "config_editor_globalconfigeditor_draw_popup_chrome"))
         row += 1
         if comment_lines:
             for cl in comment_lines:
-                self.dashboard.safe_addstr(stdscr, row, bx1 + 2, cl, theme.attr(db, "config_editor_globalconfigeditor_draw_popup_dim", db.C_DIM, False))
+                self.dashboard.safe_addstr(stdscr, row, bx1 + 2, cl, theme.attr(db, "config_editor_globalconfigeditor_draw_popup_dim"))
                 row += 1
             row += 1
         else:
             row += 1
         self.dashboard.safe_addstr(stdscr, row, bx1 + 2, "New Value:",
-                    theme.attr(db, "config_editor_globalconfigeditor_draw_popup_system_2", db.C_SYSTEM, True))
+                    theme.attr(db, "config_editor_globalconfigeditor_draw_popup_system_2"))
         self.dashboard.safe_addstr(stdscr, row, bx1 + 13, (self.popup_buf + "_")[:box_w - 15],
-                    theme.attr(db, "config_editor_globalconfigeditor_draw_popup_normal_2", db.C_NORMAL, True))
+                    theme.attr(db, "config_editor_globalconfigeditor_draw_popup_normal_2"))
         if self.popup_error:
             self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, f" Error: {self.popup_error} ",
-                        theme.attr(db, "config_editor_globalconfigeditor_draw_popup_warn", db.C_WARN, True))
+                        theme.attr(db, "config_editor_globalconfigeditor_draw_popup_warn"))
         else:
             self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel ",
-                        theme.attr(db, "config_editor_globalconfigeditor_draw_popup_invhead", db.C_INVHEAD, False))
+                        theme.attr(db, "config_editor_globalconfigeditor_draw_popup_invhead"))
 
 
 class ConfigEditor:
@@ -3133,18 +3133,18 @@ class ConfigEditor:
         # ── Site selector tabs above the site box ─────────────────────────────
         tab_x = site_x1 + 1
         self.dashboard.safe_addstr(stdscr, content_y1, site_x1, "  Site: ",
-                    theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_dim_1", self.dashboard.C_DIM, False))
+                    theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_dim_1"))
         tab_x += 8
         for i, site in enumerate(self.sites):
             lbl = os.path.basename(site.config_path)
             label = f" {lbl} "
-            attr = (theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_hilight_1", self.dashboard.C_HILIGHT, True)
+            attr = (theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_hilight_1")
                     if i == self.selected_site_idx
-                    else theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_chrome", self.dashboard.C_CHROME, False))
+                    else theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_chrome"))
             self.dashboard.safe_addstr(stdscr, content_y1, tab_x, label, attr)
             tab_x += len(label) + 1
 
-        self.dashboard.safe_addstr(stdscr, content_y1, tab_x + 2, "[: prev site  ]: next site  Tab: Next Panel", theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_dim_2", self.dashboard.C_DIM, False))
+        self.dashboard.safe_addstr(stdscr, content_y1, tab_x + 2, "[: prev site  ]: next site  Tab: Next Panel", theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_dim_2"))
 
         # ── Draw SITE SETTINGS box (left column) ──────────────────────────────
         site_box_y1 = content_y1 + 1
@@ -3152,7 +3152,7 @@ class ConfigEditor:
         if self._focus == "site":
             mode_str = " [  ] "
             self.dashboard.safe_addstr(stdscr, site_box_y1, site_x2 - len(mode_str) - 1, mode_str,
-                        theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_live_1", self.dashboard.C_LIVE, True))
+                        theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_live_1"))
                         
         title = " SITE SETTINGS "
         if self.items:
@@ -3163,12 +3163,12 @@ class ConfigEditor:
                 self.scroll_offset = self.selected_idx - visible_rows + 1
 
         self.dashboard.safe_addstr(stdscr, site_box_y1, site_x1 + 2, title,
-                    theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_live_2", self.dashboard.C_LIVE, True))
+                    theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_live_2"))
 
         if not self.items:
             self.dashboard.safe_addstr(stdscr, site_box_y1 + 2, site_x1 + 4,
                         "No configurable items found.",
-                        theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_dim_3", self.dashboard.C_DIM, False))
+                        theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_dim_3"))
         else:
             row_y = site_box_y1 + 1
             loop_end = min(len(self.items), self.scroll_offset + visible_rows)
@@ -3177,23 +3177,23 @@ class ConfigEditor:
                 is_selected = self._focus == "site" and (i == self.selected_idx)
 
                 if is_selected:
-                    attr = theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_hilight_2", self.dashboard.C_INVHEAD, False)
+                    attr = theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_hilight_2")
                     prefix = "> "
                 else:
                     prefix = "  "
-                    attr = (theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_warn_1", self.dashboard.C_WARN, True)
-                            if item.is_section else theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_normal", self.dashboard.C_NORMAL, False))
+                    attr = (theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_warn_1")
+                            if item.is_section else theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_normal"))
 
                 if item.is_section:
                     disp_text = f"[{item.key}]"
-                    sec_attr = (theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_hilight_3", self.dashboard.C_HILIGHT, True)
-                                if is_selected else theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_warn_2", self.dashboard.C_WARN, True))
+                    sec_attr = (theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_hilight_3")
+                                if is_selected else theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_warn_2"))
                     self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 2, prefix + disp_text, sec_attr)
                 else:
                     key_attr = (attr if is_selected
-                                else theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_warn_3", self.dashboard.C_WARN, True))
+                                else theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_warn_3"))
                     val_attr = (attr if is_selected
-                                else theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_live_3", self.dashboard.C_NORMAL, True))
+                                else theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_live_3"))
                     self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 2, prefix + f"{item.key:<25}", key_attr)
                     if item.has_equals:
                         val_str = "= " + str(item.value)
@@ -3209,9 +3209,9 @@ class ConfigEditor:
                 
                 # --- Add Scroll Arrows ---
                 if i == self.scroll_offset and self.scroll_offset > 0:
-                    self.dashboard.safe_addstr(stdscr, row_y, site_x2 - 2, "\u25b2", theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_live_4", self.dashboard.C_LIVE, True))
+                    self.dashboard.safe_addstr(stdscr, row_y, site_x2 - 2, "\u25b2", theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_live_4"))
                 if i == loop_end - 1 and loop_end < len(self.items):
-                    self.dashboard.safe_addstr(stdscr, row_y, site_x2 - 2, "\u25bc", theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_live_5", self.dashboard.C_LIVE, True))
+                    self.dashboard.safe_addstr(stdscr, row_y, site_x2 - 2, "\u25bc", theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_live_5"))
                     
                 row_y += 1
 
@@ -3248,33 +3248,33 @@ class ConfigEditor:
         bx2 = bx1 + box_w
 
         for y in range(by1, by2 + 1):
-            self.dashboard.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_normal_1", self.dashboard.C_NORMAL, False))
+            self.dashboard.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_normal_1"))
 
         self.dashboard.draw_box(stdscr, by1, bx1, by2, bx2, self.dashboard.C_WARN)
         title = " EDIT CONFIG VALUE "
-        self.dashboard.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_warn_1", self.dashboard.C_WARN, True))
+        self.dashboard.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_warn_1"))
 
         row = by1 + 2
         self.dashboard.safe_addstr(stdscr, row, bx1 + 2,
                     f"Key: {self.editing_item.key}{_managed_key_note(self.editing_item.key)}",
-                    theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_chrome", self.dashboard.C_CHROME, False))
+                    theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_chrome"))
         row += 1
 
         if comment_lines:
             for cl in comment_lines:
-                self.dashboard.safe_addstr(stdscr, row, bx1 + 2, cl, theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_dim", self.dashboard.C_DIM, False))
+                self.dashboard.safe_addstr(stdscr, row, bx1 + 2, cl, theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_dim"))
                 row += 1
             row += 1
         else:
             row += 1
 
-        self.dashboard.safe_addstr(stdscr, row, bx1 + 2, "New Value:", theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_warn_2", self.dashboard.C_WARN, True))
-        self.dashboard.safe_addstr(stdscr, row, bx1 + 13, (self.popup_buf + "_")[:box_w - 15], theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_normal_2", self.dashboard.C_NORMAL, True))
+        self.dashboard.safe_addstr(stdscr, row, bx1 + 2, "New Value:", theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_warn_2"))
+        self.dashboard.safe_addstr(stdscr, row, bx1 + 13, (self.popup_buf + "_")[:box_w - 15], theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_normal_2"))
 
         if self.popup_error:
-            self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, f" Error: {self.popup_error} ", theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_warn_3", self.dashboard.C_WARN, True))
+            self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, f" Error: {self.popup_error} ", theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_warn_3"))
         else:
-            self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel ", theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_invhead", self.dashboard.C_INVHEAD, False))
+            self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel ", theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_invhead"))
 
     def handle_key(self, key) -> bool:
         """Returns True if the key was consumed by the editor."""

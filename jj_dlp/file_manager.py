@@ -822,14 +822,14 @@ class FileManagerTab:
 
         for y in range(by1, by2 + 1):
             db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1),
-                           theme.attr(db, "file_manager_filemanagertab_draw_popup_normal_1", db.C_NORMAL, False))
+                           theme.attr(db, "file_manager_filemanagertab_draw_popup_normal_1"))
 
         db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_CHROME)
         db.safe_addstr(stdscr, by1, bx1 + 2, " SORT FILES ",
-                       theme.attr(db, "file_manager_filemanagertab_draw_popup_chrome", db.C_CHROME, True))
+                       theme.attr(db, "file_manager_filemanagertab_draw_popup_chrome"))
         db.safe_addstr(stdscr, by2, bx1 + 2,
                        " Enter: Select  Esc: Cancel ",
-                       theme.attr(db, "file_manager_filemanagertab_draw_popup_invhead", db.C_INVHEAD, False))
+                       theme.attr(db, "file_manager_filemanagertab_draw_popup_invhead"))
 
         visible = box_h - 3
 
@@ -845,11 +845,11 @@ class FileManagerTab:
             is_cur = (sort_key == self._sort_key)
             prefix = "> " if is_sel else ("* " if is_cur else "  ")
             if is_sel:
-                attr = theme.attr(db, "file_manager_filemanagertab_draw_popup_hilight", db.C_HILIGHT, True)
+                attr = theme.attr(db, "file_manager_filemanagertab_draw_popup_hilight")
             elif is_cur:
-                attr = theme.attr(db, "file_manager_filemanagertab_draw_popup_live", db.C_LIVE, True)
+                attr = theme.attr(db, "file_manager_filemanagertab_draw_popup_live")
             else:
-                attr = theme.attr(db, "file_manager_filemanagertab_draw_popup_normal_2", db.C_NORMAL, False)
+                attr = theme.attr(db, "file_manager_filemanagertab_draw_popup_normal_2")
             db.safe_addstr(stdscr, row_y, bx1 + 2,
                            (prefix + label)[:box_w - 4], attr)
 
@@ -923,21 +923,21 @@ class FileManagerTab:
 
         for y in range(by1, by2 + 1):
             db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1),
-                           theme.attr(db, "file_manager_filemanagertab_draw_menu_popup_normal_1", db.C_NORMAL, False))
+                           theme.attr(db, "file_manager_filemanagertab_draw_menu_popup_normal_1"))
 
         db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_CHROME)
         db.safe_addstr(stdscr, by1, bx1 + 2, " FILE OPTIONS ",
-                       theme.attr(db, "file_manager_filemanagertab_draw_menu_popup_chrome", db.C_CHROME, True))
+                       theme.attr(db, "file_manager_filemanagertab_draw_menu_popup_chrome"))
         db.safe_addstr(stdscr, by2, bx1 + 2,
                        " Enter: Select  Esc: Cancel ",
-                       theme.attr(db, "file_manager_filemanagertab_draw_menu_popup_invhead", db.C_INVHEAD, False))
+                       theme.attr(db, "file_manager_filemanagertab_draw_menu_popup_invhead"))
 
         for i, (_action_key, label) in enumerate(FILE_MENU_OPTIONS):
             row_y = by1 + 1 + i
             is_sel = (i == self._menu_sel)
             prefix = "> " if is_sel else "  "
-            attr = (theme.attr(db, "file_manager_filemanagertab_draw_menu_popup_hilight", db.C_INVHEAD, False)) if is_sel \
-                else theme.attr(db, "file_manager_filemanagertab_draw_menu_popup_normal_2", db.C_NORMAL, True)
+            attr = (theme.attr(db, "file_manager_filemanagertab_draw_menu_popup_hilight")) if is_sel \
+                else theme.attr(db, "file_manager_filemanagertab_draw_menu_popup_normal_2")
             db.safe_addstr(stdscr, row_y, bx1 + 2,
                            (prefix + label)[:box_w - 4], attr)
 
@@ -989,19 +989,19 @@ class FileManagerTab:
 
         for y in range(by1, by2 + 1):
             db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1),
-                           theme.attr(db, "file_manager_filemanagertab_draw_fixup_popup_normal_1", db.C_NORMAL, False))
+                           theme.attr(db, "file_manager_filemanagertab_draw_fixup_popup_normal_1"))
 
         db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_CHROME)
         db.safe_addstr(stdscr, by1, bx1 + 2, " FIXUP ",
-                       theme.attr(db, "file_manager_filemanagertab_draw_fixup_popup_chrome", db.C_CHROME, True))
+                       theme.attr(db, "file_manager_filemanagertab_draw_fixup_popup_chrome"))
         db.safe_addstr(stdscr, by2, bx1 + 2,
                        " Space: Toggle  Enter: Run  Esc: Cancel ",
-                       theme.attr(db, "file_manager_filemanagertab_draw_fixup_popup_invhead", db.C_INVHEAD, False))
+                       theme.attr(db, "file_manager_filemanagertab_draw_fixup_popup_invhead"))
 
         target_name = os.path.basename(self._fixup_target or "")
         db.safe_addstr(stdscr, by1 + 1, bx1 + 2,
                        target_name[:box_w - 4],
-                       theme.attr(db, "file_manager_filemanagertab_draw_fixup_popup_dim", db.C_DIM, False))
+                       theme.attr(db, "file_manager_filemanagertab_draw_fixup_popup_dim"))
 
         for i, (check_key, label) in enumerate(FIXUP_CHECK_ITEMS):
             row_y = by1 + 3 + i
@@ -1009,8 +1009,8 @@ class FileManagerTab:
             checked = self._fixup_checks.get(check_key, False)
             box = "[x]" if checked else "[ ]"
             prefix = "> " if is_sel else "  "
-            attr = (theme.attr(db, "file_manager_filemanagertab_draw_fixup_popup_hilight", db.C_HILIGHT, True)) if is_sel \
-                else theme.attr(db, "file_manager_filemanagertab_draw_fixup_popup_normal_2", db.C_NORMAL, False)
+            attr = (theme.attr(db, "file_manager_filemanagertab_draw_fixup_popup_hilight")) if is_sel \
+                else theme.attr(db, "file_manager_filemanagertab_draw_fixup_popup_normal_2")
             db.safe_addstr(stdscr, row_y, bx1 + 2,
                            f"{prefix}{box} {label}"[:box_w - 4], attr)
 
@@ -1105,33 +1105,33 @@ class FileManagerTab:
         bx2 = bx1 + box_w
 
         for y in range(by1, by2 + 1):
-            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "file_manager_filemanagertab_draw_move_popup_normal_1", db.C_NORMAL, False))
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "file_manager_filemanagertab_draw_move_popup_normal_1"))
         db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_CHROME)
         db.safe_addstr(stdscr, by1, bx1 + 2, " MOVE ",
-                       theme.attr(db, "file_manager_filemanagertab_draw_move_popup_chrome", db.C_CHROME, True))
+                       theme.attr(db, "file_manager_filemanagertab_draw_move_popup_chrome"))
         db.safe_addstr(stdscr, by2, bx1 + 2,
                        " Enter: Select  Space: Toggle  Esc: Cancel ",
-                       theme.attr(db, "file_manager_filemanagertab_draw_move_popup_invhead", db.C_INVHEAD, False))
+                       theme.attr(db, "file_manager_filemanagertab_draw_move_popup_invhead"))
 
         row = by1 + 1
         db.safe_addstr(stdscr, row, bx1 + 2, "Select a destination:",
-                       theme.attr(db, "file_manager_filemanagertab_draw_move_popup_dim", db.C_DIM, False))
+                       theme.attr(db, "file_manager_filemanagertab_draw_move_popup_dim"))
         row += 1
 
         configure_idx = n_dest
         for i in range(n_dest):
             is_sel = (self._move_cursor == i)
             prefix = "> " if is_sel else "  "
-            attr = (theme.attr(db, "file_manager_filemanagertab_draw_move_popup_hilight_1", db.C_HILIGHT, True)) if is_sel \
-                else theme.attr(db, "file_manager_filemanagertab_draw_move_popup_normal_2", db.C_NORMAL, False)
+            attr = (theme.attr(db, "file_manager_filemanagertab_draw_move_popup_hilight_1")) if is_sel \
+                else theme.attr(db, "file_manager_filemanagertab_draw_move_popup_normal_2")
             label = self._move_destinations[i]
             db.safe_addstr(stdscr, row, bx1 + 2, (prefix + label)[:box_w - 4], attr)
             row += 1
 
         is_sel = (self._move_cursor == configure_idx)
         prefix = "> " if is_sel else "  "
-        attr = (theme.attr(db, "file_manager_filemanagertab_draw_move_popup_hilight_2", db.C_HILIGHT, True)) if is_sel \
-            else theme.attr(db, "file_manager_filemanagertab_draw_move_popup_system", db.C_SYSTEM, False)
+        attr = (theme.attr(db, "file_manager_filemanagertab_draw_move_popup_hilight_2")) if is_sel \
+            else theme.attr(db, "file_manager_filemanagertab_draw_move_popup_system")
         db.safe_addstr(stdscr, row, bx1 + 2,
                        (prefix + "Configure a new destination")[:box_w - 4], attr)
         row += 2
@@ -1142,8 +1142,8 @@ class FileManagerTab:
             checked = self._move_checks.get(check_key, False)
             box = "[x]" if checked else "[ ]"
             prefix = "> " if is_sel else "  "
-            attr = (theme.attr(db, "file_manager_filemanagertab_draw_move_popup_hilight_3", db.C_HILIGHT, True)) if is_sel \
-                else theme.attr(db, "file_manager_filemanagertab_draw_move_popup_normal_3", db.C_NORMAL, False)
+            attr = (theme.attr(db, "file_manager_filemanagertab_draw_move_popup_hilight_3")) if is_sel \
+                else theme.attr(db, "file_manager_filemanagertab_draw_move_popup_normal_3")
             db.safe_addstr(stdscr, row, bx1 + 2,
                            f"{prefix}{box} {label}"[:box_w - 4], attr)
             row += 1
@@ -1215,28 +1215,28 @@ class FileManagerTab:
         bx2 = bx1 + box_w
 
         for y in range(by1, by2 + 1):
-            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "file_manager_filemanagertab_draw_move_filename_p_normal_1", db.C_NORMAL, False))
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "file_manager_filemanagertab_draw_move_filename_p_normal_1"))
         db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_CHROME)
         db.safe_addstr(stdscr, by1, bx1 + 2, " MOVE ",
-                       theme.attr(db, "file_manager_filemanagertab_draw_move_filename_p_chrome", db.C_CHROME, True))
+                       theme.attr(db, "file_manager_filemanagertab_draw_move_filename_p_chrome"))
         db.safe_addstr(stdscr, by2, bx1 + 2,
                        " Enter: Start Move  Esc: Cancel ",
-                       theme.attr(db, "file_manager_filemanagertab_draw_move_filename_p_invhead", db.C_INVHEAD, False))
+                       theme.attr(db, "file_manager_filemanagertab_draw_move_filename_p_invhead"))
 
         row = by1 + 1
         db.safe_addstr(stdscr, row, bx1 + 2,
                        f"Streamer: {self._move_filename_streamer}",
-                       theme.attr(db, "file_manager_filemanagertab_draw_move_filename_p_dim", db.C_DIM, False))
+                       theme.attr(db, "file_manager_filemanagertab_draw_move_filename_p_dim"))
         row += 2
         db.safe_addstr(stdscr, row, bx1 + 2, "Filename:",
-                       theme.attr(db, "file_manager_filemanagertab_draw_move_filename_p_warn", db.C_WARN, True))
+                       theme.attr(db, "file_manager_filemanagertab_draw_move_filename_p_warn"))
         row += 1
         buf = self._move_filename_buf
         cur = self._move_filename_cursor
         display = buf[:cur] + "_" + buf[cur:]
         db.safe_addstr(stdscr, row, bx1 + 2,
                        display[:box_w - 4],
-                       theme.attr(db, "file_manager_filemanagertab_draw_move_filename_p_normal_2", db.C_NORMAL, True))
+                       theme.attr(db, "file_manager_filemanagertab_draw_move_filename_p_normal_2"))
 
     # ── Move job (runs on a background thread; mirrors the Fixup job) ───────
 
@@ -1640,19 +1640,19 @@ class FileManagerTab:
 
         for y in range(by1, by2 + 1):
             db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1),
-                           theme.attr(db, "file_manager_filemanagertab_draw_trim_popup_normal_1", db.C_NORMAL, False))
+                           theme.attr(db, "file_manager_filemanagertab_draw_trim_popup_normal_1"))
 
         db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_CHROME)
         db.safe_addstr(stdscr, by1, bx1 + 2, " TRIM ",
-                       theme.attr(db, "file_manager_filemanagertab_draw_trim_popup_chrome", db.C_CHROME, True))
+                       theme.attr(db, "file_manager_filemanagertab_draw_trim_popup_chrome"))
         db.safe_addstr(stdscr, by2, bx1 + 2,
                        " Enter: Trim  Space: Toggle  Esc: Cancel ",
-                       theme.attr(db, "file_manager_filemanagertab_draw_trim_popup_invhead", db.C_INVHEAD, False))
+                       theme.attr(db, "file_manager_filemanagertab_draw_trim_popup_invhead"))
 
         target_name = os.path.basename(self._trim_target or "")
         db.safe_addstr(stdscr, by1 + 1, bx1 + 2,
                        target_name[:box_w - 4],
-                       theme.attr(db, "file_manager_filemanagertab_draw_trim_popup_dim", db.C_DIM, False))
+                       theme.attr(db, "file_manager_filemanagertab_draw_trim_popup_dim"))
 
         rows = [
             ("Start:", self._trim_start_buf),
@@ -1662,8 +1662,8 @@ class FileManagerTab:
             row_y = by1 + 3 + i
             is_sel = (self._trim_cursor == i)
             prefix = "> " if is_sel else "  "
-            attr = (theme.attr(db, "file_manager_filemanagertab_draw_trim_popup_hilight_1", db.C_HILIGHT, True)) if is_sel \
-                else theme.attr(db, "file_manager_filemanagertab_draw_trim_popup_normal_2", db.C_NORMAL, False)
+            attr = (theme.attr(db, "file_manager_filemanagertab_draw_trim_popup_hilight_1")) if is_sel \
+                else theme.attr(db, "file_manager_filemanagertab_draw_trim_popup_normal_2")
             if is_sel:
                 cur = self._trim_field_cursor
                 display = buf[:cur] + "_" + buf[cur:]
@@ -1684,8 +1684,8 @@ class FileManagerTab:
             checked = getattr(self, attr_name)
             box = "[x]" if checked else "[ ]"
             prefix = "> " if is_sel else "  "
-            attr = (theme.attr(db, "file_manager_filemanagertab_draw_trim_popup_hilight_2", db.C_HILIGHT, True)) if is_sel \
-                else theme.attr(db, "file_manager_filemanagertab_draw_trim_popup_normal_3", db.C_NORMAL, False)
+            attr = (theme.attr(db, "file_manager_filemanagertab_draw_trim_popup_hilight_2")) if is_sel \
+                else theme.attr(db, "file_manager_filemanagertab_draw_trim_popup_normal_3")
             db.safe_addstr(stdscr, check_row, bx1 + 2,
                            f"{prefix}{box} {label}"[:box_w - 4], attr)
 
@@ -1933,22 +1933,22 @@ class FileManagerTab:
 
             for y in range(by1, by2 + 1):
                 db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1),
-                               theme.attr(db, "file_manager_filemanagertab_draw_split_popup_normal_1", db.C_NORMAL, False))
+                               theme.attr(db, "file_manager_filemanagertab_draw_split_popup_normal_1"))
 
             db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_CHROME)
             db.safe_addstr(stdscr, by1, bx1 + 2, " SPLIT ",
-                           theme.attr(db, "file_manager_filemanagertab_draw_split_popup_chrome_1", db.C_CHROME, True))
+                           theme.attr(db, "file_manager_filemanagertab_draw_split_popup_chrome_1"))
             db.safe_addstr(stdscr, by2, bx1 + 2,
                            " Enter: Stop Job  Esc: Cancel ",
-                           theme.attr(db, "file_manager_filemanagertab_draw_split_popup_invhead_1", db.C_INVHEAD, False))
+                           theme.attr(db, "file_manager_filemanagertab_draw_split_popup_invhead_1"))
 
             target_name = os.path.basename(path or "")
             db.safe_addstr(stdscr, by1 + 1, bx1 + 2,
                            target_name[:box_w - 4],
-                           theme.attr(db, "file_manager_filemanagertab_draw_split_popup_dim_1", db.C_DIM, False))
+                           theme.attr(db, "file_manager_filemanagertab_draw_split_popup_dim_1"))
             db.safe_addstr(stdscr, by1 + 3, bx1 + 2,
                            "> Stop Job"[:box_w - 4],
-                           theme.attr(db, "file_manager_filemanagertab_draw_split_popup_hilight_1", db.C_HILIGHT, True))
+                           theme.attr(db, "file_manager_filemanagertab_draw_split_popup_hilight_1"))
             return
 
         box_w = min(60, w - 4)
@@ -1960,25 +1960,25 @@ class FileManagerTab:
 
         for y in range(by1, by2 + 1):
             db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1),
-                           theme.attr(db, "file_manager_filemanagertab_draw_split_popup_normal_2", db.C_NORMAL, False))
+                           theme.attr(db, "file_manager_filemanagertab_draw_split_popup_normal_2"))
 
         db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_CHROME)
         db.safe_addstr(stdscr, by1, bx1 + 2, " SPLIT ",
-                       theme.attr(db, "file_manager_filemanagertab_draw_split_popup_chrome_2", db.C_CHROME, True))
+                       theme.attr(db, "file_manager_filemanagertab_draw_split_popup_chrome_2"))
         db.safe_addstr(stdscr, by2, bx1 + 2,
                        " Enter: Start  Esc: Cancel ",
-                       theme.attr(db, "file_manager_filemanagertab_draw_split_popup_invhead_2", db.C_INVHEAD, False))
+                       theme.attr(db, "file_manager_filemanagertab_draw_split_popup_invhead_2"))
 
         target_name = os.path.basename(path or "")
         db.safe_addstr(stdscr, by1 + 1, bx1 + 2,
                        target_name[:box_w - 4],
-                       theme.attr(db, "file_manager_filemanagertab_draw_split_popup_dim_2", db.C_DIM, False))
+                       theme.attr(db, "file_manager_filemanagertab_draw_split_popup_dim_2"))
 
         rec = self._records.get(path, {})
         mode_lbl = "Catch-up" if rec.get("status") == "WRITING" else "Instant"
         db.safe_addstr(stdscr, by1 + 2, bx1 + 2,
                        f"Mode: {mode_lbl}"[:box_w - 4],
-                       theme.attr(db, "file_manager_filemanagertab_draw_split_popup_system", db.C_SYSTEM, False))
+                       theme.attr(db, "file_manager_filemanagertab_draw_split_popup_system"))
 
         bufs = [self._split_len_buf, self._split_overlap_buf,
                 self._split_first_buf, self._split_offset_buf, self._split_outdir_buf]
@@ -1986,8 +1986,8 @@ class FileManagerTab:
             row_y = by1 + 4 + i
             is_sel = (self._split_cursor == i)
             prefix = "> " if is_sel else "  "
-            attr = (theme.attr(db, "file_manager_filemanagertab_draw_split_popup_hilight_2", db.C_HILIGHT, True)) if is_sel \
-                else theme.attr(db, "file_manager_filemanagertab_draw_split_popup_normal_3", db.C_NORMAL, False)
+            attr = (theme.attr(db, "file_manager_filemanagertab_draw_split_popup_hilight_2")) if is_sel \
+                else theme.attr(db, "file_manager_filemanagertab_draw_split_popup_normal_3")
             if is_sel:
                 cur = self._split_field_cursor
                 display = buf[:cur] + "_" + buf[cur:]
@@ -1999,8 +1999,8 @@ class FileManagerTab:
         stop_row_y = by1 + 4 + len(SPLIT_FIELD_LABELS) + 1
         is_sel = (self._split_cursor == SPLIT_ROW_STOP)
         prefix = "> " if is_sel else "  "
-        attr = (theme.attr(db, "file_manager_filemanagertab_draw_split_popup_hilight_3", db.C_HILIGHT, True)) if is_sel \
-            else theme.attr(db, "file_manager_filemanagertab_draw_split_popup_normal_4", db.C_NORMAL, False)
+        attr = (theme.attr(db, "file_manager_filemanagertab_draw_split_popup_hilight_3")) if is_sel \
+            else theme.attr(db, "file_manager_filemanagertab_draw_split_popup_normal_4")
         db.safe_addstr(stdscr, stop_row_y, bx1 + 2,
                        f"{prefix}Stop Job"[:box_w - 4], attr)
 
@@ -2041,17 +2041,17 @@ class FileManagerTab:
 
         for y in range(by1, by2 + 1):
             db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1),
-                           theme.attr(db, "file_manager_filemanagertab_draw_split_confirm_normal", db.C_NORMAL, False))
+                           theme.attr(db, "file_manager_filemanagertab_draw_split_confirm_normal"))
 
         db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_CHROME)
         db.safe_addstr(stdscr, by1, bx1 + 2, " CONFIRM ",
-                       theme.attr(db, "file_manager_filemanagertab_draw_split_confirm_chrome", db.C_CHROME, True))
+                       theme.attr(db, "file_manager_filemanagertab_draw_split_confirm_chrome"))
         db.safe_addstr(stdscr, by2, bx1 + 2,
                        " Y: Yes  N/Esc: No ",
-                       theme.attr(db, "file_manager_filemanagertab_draw_split_confirm_invhead", db.C_INVHEAD, False))
+                       theme.attr(db, "file_manager_filemanagertab_draw_split_confirm_invhead"))
         db.safe_addstr(stdscr, by1 + 2, bx1 + 3,
                        msg[:box_w - 6],
-                       theme.attr(db, "file_manager_filemanagertab_draw_split_confirm_warn", db.C_WARN, True))
+                       theme.attr(db, "file_manager_filemanagertab_draw_split_confirm_warn"))
 
     # ── Split job (runs ffmpeg on a background thread; killed, not waited,
     #    on Stop Job) ───────────────────────────────────────────────────────
@@ -2212,13 +2212,13 @@ class FileManagerTab:
         db = self.dashboard
         db.draw_box(stdscr, y1, x1, y2, x2, db.C_CHROME)
         db.safe_addstr(stdscr, y1, x1 + 2, " FILE MANAGER \u2014 (Press M for File Options) ",
-                       theme.attr(db, "file_manager_filemanagertab_draw_chrome", db.C_CHROME, True))
+                       theme.attr(db, "file_manager_filemanagertab_draw_chrome"))
 
         dirs = self._get_output_dirs()
         if not dirs:
             db.safe_addstr(stdscr, y1 + 2, x1 + 2,
                            "No OUTPUT_DIR configured on any site.",
-                           theme.attr(db, "file_manager_filemanagertab_draw_dim_1", db.C_DIM, False))
+                           theme.attr(db, "file_manager_filemanagertab_draw_dim_1"))
             return
 
         avail_w = (x2 - x1) - 3
@@ -2235,7 +2235,7 @@ class FileManagerTab:
         col_rate_x   = col_size_x + size_w + 1
 
         header_y = y1 + 1
-        header_attr = theme.attr(db, "file_manager_filemanagertab_draw_normal", db.C_NORMAL, True)
+        header_attr = theme.attr(db, "file_manager_filemanagertab_draw_normal")
         db.safe_addstr(stdscr, header_y, x1 + 2, "File".ljust(name_w)[:name_w], header_attr)
         db.safe_addstr(stdscr, header_y, col_status_x, "Status".ljust(status_w)[:status_w], header_attr)
         db.safe_addstr(stdscr, header_y, col_mod_x, "Date Modified".ljust(mod_w)[:mod_w], header_attr)
@@ -2273,10 +2273,10 @@ class FileManagerTab:
             kind, payload, rec = self._rows[i]
             if kind == "header":
                 db.safe_addstr(stdscr, row_y, x1 + 1, ("\u2500 " + payload)[:avail_w],
-                               theme.attr(db, "file_manager_filemanagertab_draw_system_1", db.C_SYSTEM, True))
+                               theme.attr(db, "file_manager_filemanagertab_draw_system_1"))
             elif kind == "empty":
                 db.safe_addstr(stdscr, row_y, x1 + 3, payload[:avail_w],
-                               theme.attr(db, "file_manager_filemanagertab_draw_dim_2", db.C_DIM, False))
+                               theme.attr(db, "file_manager_filemanagertab_draw_dim_2"))
             else:
                 path = payload
                 group_path = rec.get("group_path")
@@ -2298,11 +2298,11 @@ class FileManagerTab:
 
                 is_sel = (path == self._selected_path)
                 if is_sel:
-                    row_attr = theme.attr(db, "file_manager_filemanagertab_draw_hilight", db.C_INVHEAD, False)
+                    row_attr = theme.attr(db, "file_manager_filemanagertab_draw_hilight")
                 elif status == "WRITING":
-                    row_attr = theme.attr(db, "file_manager_filemanagertab_draw_live", db.C_LIVE, True)
+                    row_attr = theme.attr(db, "file_manager_filemanagertab_draw_live")
                 else:
-                    row_attr = theme.attr(db, "file_manager_filemanagertab_draw_dim_3", db.C_NORMAL, True)
+                    row_attr = theme.attr(db, "file_manager_filemanagertab_draw_dim_3")
 
                 # Subfolder-relative paths (e.g. "StreamerName/file.mp4") get
                 # their directory part drawn in a distinct color so nested
@@ -2319,7 +2319,7 @@ class FileManagerTab:
                     pf = name_col[:len(sub_prefix)]
                     rest = name_col[len(sub_prefix):]
                     db.safe_addstr(stdscr, row_y, x1 + 2, pf,
-                                   theme.attr(db, "file_manager_filemanagertab_draw_system_2", db.C_WARN, False))
+                                   theme.attr(db, "file_manager_filemanagertab_draw_system_2"))
                     db.safe_addstr(stdscr, row_y, x1 + 2 + len(pf), rest, row_attr)
                 else:
                     db.safe_addstr(stdscr, row_y, x1 + 2, name_col, row_attr)
@@ -2331,18 +2331,18 @@ class FileManagerTab:
             # --- Add Scroll Arrows ---
             if i == self._scroll and self._scroll > 0:
                 db.safe_addstr(stdscr, row_y, x2 - 2, "\u25b2",
-                               theme.attr(db, "file_manager_filemanagertab_draw_live_2", db.C_LIVE, True))
+                               theme.attr(db, "file_manager_filemanagertab_draw_live_2"))
             if i == loop_end - 1 and loop_end < len(self._rows):
                 db.safe_addstr(stdscr, row_y, x2 - 2, "\u25bc",
-                               theme.attr(db, "file_manager_filemanagertab_draw_live_3", db.C_LIVE, True))
+                               theme.attr(db, "file_manager_filemanagertab_draw_live_3"))
             row_y += 1
 
         delete_lbl = "Trash" if self._delete_mode == DELETE_MODE_TRASH else "Permanent Delete"
         info = (f" Delete mode: {delete_lbl} (T to toggle)   "
                 f"Sort: {_FM_SORT_LABELS.get(self._sort_key, self._sort_key)} ")
-        info_attr = theme.attr(db, "file_manager_filemanagertab_draw_delete", db.C_DELETE, True) if self._delete_mode == DELETE_MODE_PERMANENT else theme.attr(db, "file_manager_filemanagertab_draw_dim_4", db.C_DIM, False)
+        info_attr = theme.attr(db, "file_manager_filemanagertab_draw_delete") if self._delete_mode == DELETE_MODE_PERMANENT else theme.attr(db, "file_manager_filemanagertab_draw_dim_4")
         db.safe_addstr(stdscr, y2, x1 + 2, info[:avail_w], info_attr)
 
         if self._status_msg and (time.time() - self._status_msg_ts) < STATUS_MSG_TTL_S:
             db.safe_addstr(stdscr, y1 + 2, x1 + 2, self._status_msg[:avail_w],
-                           theme.attr(db, "file_manager_filemanagertab_draw_warn", db.C_WARN, True))
+                           theme.attr(db, "file_manager_filemanagertab_draw_warn"))
