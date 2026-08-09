@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.7"
+__version__ = "1.26.8"
 
 import subprocess
 import time
@@ -6643,6 +6643,15 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
     n         = len(found)
     do_not_show_config = False
 
+    # Display the SITE_LABEL of each config instead of its path.
+    site_labels = {}
+    for _name in found:
+        try:
+            site_labels[_name] = load_config(os.path.join(os.getcwd(), _name)).get(
+                "site_label", os.path.basename(_name))
+        except (SystemExit, Exception):
+            site_labels[_name] = os.path.basename(_name)
+
     while True:
         stdscr.erase()
         h, w = stdscr.getmaxyx()
@@ -6657,7 +6666,7 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
         JJDlpDashboard.safe_addstr(stdscr, 7, 2, "-" * (w - 4), theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum1_2"))
 
         # Title
-        title = "SELECT CONFIG FILE(S)"
+        title = "SELECT SITES"
         JJDlpDashboard.safe_addstr(stdscr, 9, 2, title, theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum5_1"))
 
         # Instructions
@@ -6676,7 +6685,7 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
                 attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum4")
             else:
                 attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum1_3")
-            JJDlpDashboard.safe_addstr(stdscr, row, 4, f"  {checked}  {name}", attr)
+            JJDlpDashboard.safe_addstr(stdscr, row, 4, f"  {checked}  {site_labels.get(name, name)}", attr)
 
         # "Do not show again" checkbox
         dna_row = 12 + n + 1
@@ -6688,7 +6697,7 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
 
         # Footer
         sel_count = len(selected)
-        footer = (f"  {sel_count} file(s) selected  "
+        footer = (f"  {sel_count} site(s) selected  "
                   f"↑/↓ navigate  Space toggle  Enter confirm  D do not show  ")
         JJDlpDashboard.safe_addstr(stdscr, h - 1, 0,
                     footer.ljust(w - 1)[:w - 1],
@@ -6968,52 +6977,50 @@ def main() -> None:
                 sys.exit(1)
             config_paths.append(ap)
     else:
-        default_path = os.path.abspath("jj-dlp.conf")
-        if os.path.isfile(default_path):
-            config_paths = [default_path]
+        cwd   = os.getcwd()
+        configs_dir = os.path.join(cwd, "configs")
+        if not os.path.isdir(configs_dir):
+            print(f"ERROR: No 'configs/' directory found in {cwd}. "
+                  "Pass --config <path> or create a configs/ folder.",
+                  file=sys.stderr)
+            sys.exit(1)
+
+        found = []
+        for f in os.listdir(configs_dir):
+            if f.endswith(".conf") and os.path.isfile(os.path.join(configs_dir, f)):
+                # global.conf is always loaded silently; never shown in the chooser
+                if f == _GLOBAL_CONF_NAME:
+                    continue
+                rel = os.path.relpath(os.path.join(configs_dir, f), cwd)
+                if rel not in found:
+                    found.append(rel)
+        found.sort()
+
+        if not found:
+            print(f"ERROR: No .conf files found in {configs_dir}. "
+                  "Pass --config <path> or place a config file in configs/.",
+                  file=sys.stderr)
+            sys.exit(1)
+
+        if len(found) == 1:
+            print(f"Using: {found[0]}")
+            chosen = [found[0]]
         else:
-            cwd   = os.getcwd()
-            search_dirs = []
-            if os.path.isdir(os.path.join(cwd, "configs")):
-                search_dirs.append(os.path.join(cwd, "configs"))
-            search_dirs.append(cwd)
+            # Load global.conf to check if we should show the UI
+            global_cfg = load_global_config()
+            ask_for_config = global_cfg.get("ask_for_config", True)
 
-            found = []
-            for d in search_dirs:
-                for f in os.listdir(d):
-                    if f.endswith(".conf") and os.path.isfile(os.path.join(d, f)):
-                        # global.conf is always loaded silently; never shown in the chooser
-                        if f == _GLOBAL_CONF_NAME:
-                            continue
-                        rel = os.path.relpath(os.path.join(d, f), cwd)
-                        if rel not in found:
-                            found.append(rel)
-            found.sort()
+            # Load global.json to see if we have saved configs
+            global_data = _load_global_json()
+            saved_configs = global_data.get("startup_configs", [])
 
-            if not found:
-                print(f"ERROR: No .conf files found in {cwd} or configs/. "
-                      "Pass --config <path> or place a jj-dlp.conf here.",
-                      file=sys.stderr)
-                sys.exit(1)
-            if len(found) == 1:
-                print(f"Using: {found[0]}")
-                chosen = [found[0]]
+            if not ask_for_config and saved_configs and all(c in found for c in saved_configs):
+                chosen = saved_configs
             else:
-                # Load global.conf to check if we should show the UI
-                global_cfg = load_global_config()
-                ask_for_config = global_cfg.get("ask_for_config", True)
-                
-                # Load global.json to see if we have saved configs
-                global_data = _load_global_json()
-                saved_configs = global_data.get("startup_configs", [])
-                
-                if not ask_for_config and saved_configs and all(c in found for c in saved_configs):
-                    chosen = saved_configs
-                else:
-                    # Multi-select chooser
-                    chosen = curses.wrapper(_curses_choose_config, found)
+                # Multi-select chooser
+                chosen = curses.wrapper(_curses_choose_config, found)
 
-            config_paths = [os.path.join(cwd, f) for f in chosen]
+        config_paths = [os.path.join(cwd, f) for f in chosen]
 
     # ASK_FOR_BROWSER logic
     _global_cfg = load_global_config()
