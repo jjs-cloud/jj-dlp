@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.8"
+__version__ = "1.26.9"
 
 import subprocess
 import time
@@ -43,7 +43,7 @@ from .browser_config import (
     _write_ask_for_browser_to_config,
 )
 from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS, _compute_config_id, SiteSortManager, SORT_OPTIONS, _SORT_LABELS
-from .file_manager import FileManagerTab
+from .file_manager import FileManagerTab, human_rate
 from . import simulation as _simulation
 
 import curses  # noqa: E402
@@ -4818,7 +4818,12 @@ class JJDlpDashboard:
                 threading.Thread(target=_update_disk_usage, args=(drives,), daemon=True).start()
 
             if disk_row_y < y2 - 1:
-                self.safe_addstr(self.stdscr, disk_row_y, x1 + 2, "── Disk ──",
+                _rate_total = self.file_manager.total_write_rate()
+                _disk_header = "── Disk ──"
+                if _rate_total:
+                    _disk_header += f"  {human_rate(_rate_total)}"
+                self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
+                            _disk_header[:inner_w],
                             theme.attr(self, "main_jjdlpdashboard_update_disk_usage_system"))
                 disk_row_y += 1
             for drive, usage in self._disk_cache_results:
