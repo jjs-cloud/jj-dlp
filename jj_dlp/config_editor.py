@@ -576,11 +576,11 @@ class PriorityEditor:
 
             if entry.bypass:
                 # Always-record streamers rendered in green (C_LIVE).
-                attr = (theme.attr(db, "config_editor_priorityeditor_draw_hilight_1", db.C_HILIGHT, True)
+                attr = (theme.attr(db, "config_editor_priorityeditor_draw_hilight_1", db.C_INVHEAD, False)
                         if is_sel
                         else theme.attr(db, "config_editor_priorityeditor_draw_live_3", db.C_LIVE, True))
             else:
-                attr = (theme.attr(db, "config_editor_priorityeditor_draw_hilight_2", db.C_HILIGHT, True)
+                attr = (theme.attr(db, "config_editor_priorityeditor_draw_hilight_2", db.C_INVHEAD, False)
                         if is_sel
                         else theme.attr(db, "config_editor_priorityeditor_draw_normal", db.C_NORMAL, True))
 
@@ -2877,9 +2877,9 @@ class GlobalConfigEditor:
             item = self.items[i]
             is_sel = is_active and (i == self.selected_idx)
             prefix = "> " if is_sel else "  "
-            key_attr = (theme.attr(db, "config_editor_globalconfigeditor_draw_hilight_1", db.C_HILIGHT, True)
+            key_attr = (theme.attr(db, "config_editor_globalconfigeditor_draw_hilight_1", db.C_INVHEAD, False)
                         if is_sel else theme.attr(db, "config_editor_globalconfigeditor_draw_warn", db.C_WARN, True))
-            val_attr = (theme.attr(db, "config_editor_globalconfigeditor_draw_hilight_2", db.C_HILIGHT, True)
+            val_attr = (theme.attr(db, "config_editor_globalconfigeditor_draw_hilight_2", db.C_INVHEAD, False)
                         if is_sel else theme.attr(db, "config_editor_globalconfigeditor_draw_live_3", db.C_NORMAL, True))
             self.dashboard.safe_addstr(stdscr, row_y, x1 + 1, prefix + f"{item.key:<22}", key_attr)
             val_str = "= " + str(item.value)
@@ -3177,7 +3177,7 @@ class ConfigEditor:
                 is_selected = self._focus == "site" and (i == self.selected_idx)
 
                 if is_selected:
-                    attr = theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_hilight_2", self.dashboard.C_HILIGHT, True)
+                    attr = theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_hilight_2", self.dashboard.C_INVHEAD, False)
                     prefix = "> "
                 else:
                     prefix = "  "

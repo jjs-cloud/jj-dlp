@@ -336,6 +336,8 @@ SITE_REGISTRY = {
     'main_jjdlpdashboard_update_disk_usage_system': {'file': 'main.py', 'line': 4893, 'label': 'System Panel — \'Disk\' Section Header', 'default_role': 'SYSTEM', 'default_bold': False},
     'main_jjdlpdashboard_update_disk_usage_color': {'file': 'main.py', 'line': 4909, 'label': 'System Panel — Per-Drive Usage Line', 'default_role': None, 'default_bold': False},
     'main_jjdlpdashboard_update_disk_usage_chrome': {'file': 'main.py', 'line': 4917, 'label': 'System Panel — Uptime Line', 'default_role': 'CHROME', 'default_bold': False},
+    'main_jjdlpdashboard_draw_site_panel_border_hilight': {'file': 'main.py', 'line': 4931, 'label': 'Site Panel — Border (Selected)', 'default_role': 'HILIGHT', 'default_bold': False},
+    'main_jjdlpdashboard_draw_site_panel_border_chrome': {'file': 'main.py', 'line': 4931, 'label': 'Site Panel — Border (Unselected)', 'default_role': 'CHROME', 'default_bold': False},
     'main_jjdlpdashboard_draw_site_panel_chrome_1': {'file': 'main.py', 'line': 4975, 'label': '{cfg_label}', 'default_role': 'CHROME', 'default_bold': True},
     'main_jjdlpdashboard_draw_site_panel_live_1': {'file': 'main.py', 'line': 4981, 'label': 'LIVE:{live_cnt}', 'default_role': 'LIVE', 'default_bold': True},
     'main_jjdlpdashboard_draw_site_panel_rec_1': {'file': 'main.py', 'line': 4984, 'label': 'REC:{rec_cnt}', 'default_role': 'REC', 'default_bold': True},
@@ -654,7 +656,7 @@ class ThemeManager:
     MODE_SCHEME_SELECT = 'scheme'     # pick a base COLOR_SCHEMES entry
     MODE_ROLE_LIST = 'role_list'      # list of 13 roles
     MODE_ROLE_EDIT = 'role_edit'      # editing one role's fg/bg
-    MODE_SITE_LIST = 'site_list'      # browsable/searchable list of 337 sites
+    MODE_SITE_LIST = 'site_list'      # browsable/searchable list of 359 sites
     MODE_SITE_EDIT = 'site_edit'      # editing one site's role + bold
 
     SCHEME_NAMES = [

@@ -936,7 +936,7 @@ class FileManagerTab:
             row_y = by1 + 1 + i
             is_sel = (i == self._menu_sel)
             prefix = "> " if is_sel else "  "
-            attr = (theme.attr(db, "file_manager_filemanagertab_draw_menu_popup_hilight", db.C_HILIGHT, True)) if is_sel \
+            attr = (theme.attr(db, "file_manager_filemanagertab_draw_menu_popup_hilight", db.C_INVHEAD, False)) if is_sel \
                 else theme.attr(db, "file_manager_filemanagertab_draw_menu_popup_normal_2", db.C_NORMAL, False)
             db.safe_addstr(stdscr, row_y, bx1 + 2,
                            (prefix + label)[:box_w - 4], attr)
@@ -2298,7 +2298,7 @@ class FileManagerTab:
 
                 is_sel = (path == self._selected_path)
                 if is_sel:
-                    row_attr = theme.attr(db, "file_manager_filemanagertab_draw_hilight", db.C_HILIGHT, True)
+                    row_attr = theme.attr(db, "file_manager_filemanagertab_draw_hilight", db.C_INVHEAD, False)
                 elif status == "WRITING":
                     row_attr = theme.attr(db, "file_manager_filemanagertab_draw_live", db.C_LIVE, True)
                 else:

@@ -4311,12 +4311,12 @@ class JJDlpDashboard:
     """
 
     @staticmethod
-    def draw_box(stdscr, y1, x1, y2, x2, pair):
+    def draw_box(stdscr, y1, x1, y2, x2, pair, tag="main_jjdlpdashboard_safe_ch_pair"):
         h, w = stdscr.getmaxyx()
         def safe_ch(y, x, ch):
             if 0 <= y < h and 0 <= x < w - 1:
                 try:
-                    stdscr.addch(y, x, ch, theme.attr(JJDlpDashboard, "main_jjdlpdashboard_safe_ch_pair", pair, False))
+                    stdscr.addch(y, x, ch, theme.attr(JJDlpDashboard, tag, pair, False))
                 except curses.error:
                     pass
         for x in range(x1 + 1, x2):
@@ -4452,10 +4452,12 @@ class JJDlpDashboard:
     C_SYSTEM    = 12  # system panel header/border
     C_DELETE    = 13  # permanent delete warning (white on red)
 
-    # Color schemes: list of (chrome_fg, hilight_fg, hilight_bg, warn_fg, live_fg,
-    #                          invhead_fg, invhead_bg, logo_fg, rec_fg, dim_fg,
-    #                          livebadge_fg, livebadge_bg, normal_fg, disabled_fg, system_fg,
-    #                          delete_fg, delete_bg)
+    # Color schemes: list of (chrome_fg, hilight_fg, hilight_bg,
+    #                         warn_fg, live_fg, invhead_fg,
+    #                         invhead_bg, logo_fg, rec_fg,
+    #                         dim_fg, livebadge_fg, livebadge_bg,
+    #                         normal_fg, disabled_fg, system_fg,
+    #                         delete_fg, delete_bg)
     COLOR_SCHEMES = [
         # 0: Default (cyan/blue/green/magenta)
         (curses.COLOR_CYAN,    curses.COLOR_WHITE,   curses.COLOR_BLUE,
@@ -4500,7 +4502,7 @@ class JJDlpDashboard:
          curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_MAGENTA,
          curses.COLOR_WHITE,   curses.COLOR_RED),
         # 6: DOS Blue (classic QBasic/EDIT-style white-on-blue screen)
-        (curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_CYAN,
+        (curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_WHITE,
          curses.COLOR_YELLOW,  curses.COLOR_GREEN,   curses.COLOR_BLUE,
          curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_RED,
          curses.COLOR_CYAN,    curses.COLOR_BLACK,   curses.COLOR_GREEN,
@@ -4601,7 +4603,7 @@ class JJDlpDashboard:
             label = f"  {tab}  "
             if i == self.selected_tab:
                 self.safe_addstr(self.stdscr, y, x, label,
-                            theme.attr(self, "main_jjdlpdashboard_draw_tabs_hilight", self.C_HILIGHT, False))
+                            theme.attr(self, "main_jjdlpdashboard_draw_tabs_hilight", self.C_INVHEAD, False))
             else:
                 attr = theme.attr(self, "main_jjdlpdashboard_draw_tabs_invhead", self.C_CHROME, True)
                 if dos_red:
@@ -4928,7 +4930,9 @@ class JJDlpDashboard:
         now = time.time()
         #Pick border color based on selection
         border_pair = self.C_HILIGHT if is_selected else self.C_CHROME
-        self.draw_box(self.stdscr, y1, x1, y2, x2, border_pair)
+        border_tag = ("main_jjdlpdashboard_draw_site_panel_border_hilight"
+                      if is_selected else "main_jjdlpdashboard_draw_site_panel_border_chrome")
+        self.draw_box(self.stdscr, y1, x1, y2, x2, border_pair, border_tag)
 
         # ── Panel header ──
         _panel_cfg = site.get_cached_config()
