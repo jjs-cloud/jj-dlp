@@ -31,10 +31,8 @@ Site overrides are resolved AFTER role colors, so a site pointed at C_REC
 picks up whatever C_REC currently resolves to (base scheme or custom role
 color), not a frozen snapshot.
 
-SITE_REGISTRY is auto-generated (see the scan/tag/rewrite pipeline used to
-build this file) and should be treated as generated data — if call sites are
-added, removed, or moved in the source files, re-run that pipeline rather
-than hand-editing entries here.
+SITE_REGISTRY is maintained by hand. If call sites are added, removed, or
+moved in the source files, update the corresponding entries here to match.
 """
 
 import curses
@@ -95,7 +93,7 @@ PAIR_NUM_ROLE = {v: k for k, v in ROLE_PAIR_NUM.items()}
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# SITE_REGISTRY — auto-generated. tag -> {file, line, label, default_role,
+# SITE_REGISTRY — hand-maintained. tag -> {file, line, label, default_role,
 # default_bold}. default_role is None for sites whose default pair argument
 # is a runtime variable or a raw numeric literal outside the 13-role system
 # (mostly the splash/browser-picker screens) — those sites can still have
@@ -286,6 +284,24 @@ SITE_REGISTRY = {
     'file_manager_filemanagertab_draw_trim_popup_normal_2': {'file': 'file_manager.py', 'line': 1598, 'label': 'Trim Popup — Unselected Field', 'default_role': 'NORMAL', 'default_bold': False},
     'file_manager_filemanagertab_draw_trim_popup_hilight_2': {'file': 'file_manager.py', 'line': 1619, 'label': 'Trim Popup — Checkbox Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
     'file_manager_filemanagertab_draw_trim_popup_normal_3': {'file': 'file_manager.py', 'line': 1620, 'label': 'Trim Popup — Checkbox Row (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_split_popup_normal_1': {'file': 'file_manager.py', 'line': 1936, 'label': 'Split Popup — Background Fill (Job Running)', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_split_popup_chrome_1': {'file': 'file_manager.py', 'line': 1940, 'label': 'Split Popup — Title (Job Running)', 'default_role': 'CHROME', 'default_bold': True},
+    'file_manager_filemanagertab_draw_split_popup_invhead_1': {'file': 'file_manager.py', 'line': 1943, 'label': 'Split Popup — Legend Line (Job Running)', 'default_role': 'INVHEAD', 'default_bold': False},
+    'file_manager_filemanagertab_draw_split_popup_dim_1': {'file': 'file_manager.py', 'line': 1948, 'label': 'Split Popup — Target Filename (Job Running)', 'default_role': 'DIM', 'default_bold': False},
+    'file_manager_filemanagertab_draw_split_popup_hilight_1': {'file': 'file_manager.py', 'line': 1951, 'label': 'Split Popup — Stop Job Row (Job Running)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'file_manager_filemanagertab_draw_split_popup_normal_2': {'file': 'file_manager.py', 'line': 1963, 'label': 'Split Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_split_popup_chrome_2': {'file': 'file_manager.py', 'line': 1967, 'label': 'Split Popup — Title', 'default_role': 'CHROME', 'default_bold': True},
+    'file_manager_filemanagertab_draw_split_popup_invhead_2': {'file': 'file_manager.py', 'line': 1970, 'label': 'Split Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
+    'file_manager_filemanagertab_draw_split_popup_dim_2': {'file': 'file_manager.py', 'line': 1975, 'label': 'Split Popup — Target Filename', 'default_role': 'DIM', 'default_bold': False},
+    'file_manager_filemanagertab_draw_split_popup_system': {'file': 'file_manager.py', 'line': 1981, 'label': 'Split Popup — Mode Line', 'default_role': 'SYSTEM', 'default_bold': False},
+    'file_manager_filemanagertab_draw_split_popup_hilight_2': {'file': 'file_manager.py', 'line': 1989, 'label': 'Split Popup — Field Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'file_manager_filemanagertab_draw_split_popup_normal_3': {'file': 'file_manager.py', 'line': 1990, 'label': 'Split Popup — Field Row (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_split_popup_hilight_3': {'file': 'file_manager.py', 'line': 2002, 'label': 'Split Popup — Stop Job Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'file_manager_filemanagertab_draw_split_popup_normal_4': {'file': 'file_manager.py', 'line': 2003, 'label': 'Split Popup — Stop Job Row (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_split_confirm_normal': {'file': 'file_manager.py', 'line': 2044, 'label': 'Split Stop Confirm — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_split_confirm_chrome': {'file': 'file_manager.py', 'line': 2048, 'label': 'Split Stop Confirm — Title', 'default_role': 'CHROME', 'default_bold': True},
+    'file_manager_filemanagertab_draw_split_confirm_invhead': {'file': 'file_manager.py', 'line': 2051, 'label': 'Split Stop Confirm — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
+    'file_manager_filemanagertab_draw_split_confirm_warn': {'file': 'file_manager.py', 'line': 2054, 'label': 'Split Stop Confirm — Confirmation Message', 'default_role': 'WARN', 'default_bold': True},
     'file_manager_filemanagertab_draw_chrome': {'file': 'file_manager.py', 'line': 1713, 'label': 'FILE MANAGER', 'default_role': 'CHROME', 'default_bold': True},
     'file_manager_filemanagertab_draw_dim_1': {'file': 'file_manager.py', 'line': 1719, 'label': 'No OUTPUT_DIR configured on any site.', 'default_role': 'DIM', 'default_bold': False},
     'file_manager_filemanagertab_draw_normal': {'file': 'file_manager.py', 'line': 1736, 'label': 'File Manager — Column Header Row', 'default_role': 'NORMAL', 'default_bold': True},

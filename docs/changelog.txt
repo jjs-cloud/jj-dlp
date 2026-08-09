@@ -4,6 +4,7 @@
     - arrows indicating more files at the top and bottom of the file manager list
     - page up/down jumps to the top/bottom of the file manager list
     - when sorting by date modified in the file manager, files will no longer jump around when they are actively recording
+- Added a new File Option called "Split" in the File Manager tab.  This allows you to split files into parts. (In case you forgot to enable SPLIT_AFTER in SITE SETTINGS or STREAMER SETTINGS) It works on files that are currently IDLE, as well as files that are currently WRITING. It will create the next part automatically as the livestream progresses. 
 
 ====================
 ====================

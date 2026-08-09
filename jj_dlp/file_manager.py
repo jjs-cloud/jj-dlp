@@ -64,6 +64,15 @@ MP4" is checked). Trim runs in a background thread so the UI doesn't
 freeze while ffmpeg works, and the original is only removed (via the
 current Delete mode) once the trimmed file has been written successfully.
 
+Selecting "Split" opens a popup with editable fields: Part length
+(minutes), Overlap (seconds), First part number, Part number offset, and
+Output directory (defaults to a "video_parts" folder beside the source
+file). Mode is automatic: IDLE files use Instant Mode, WRITING files use
+Catch-up Mode. Split runs on a background thread via ffmpeg. A file with
+a job running shows a "*" to its left. Opening Split again on that file
+offers "Stop Job" (kills ffmpeg immediately, no wait, after a Yes/No
+confirmation); with no job running it reports "Error: No job running".
+
 Delete mode
 -----------
 Controlled by the ``file_manager.delete_mode`` key in global.json, one of:
@@ -133,7 +142,18 @@ FILE_MENU_OPTIONS = [
     ("fixup", "Fixup"),
     ("move",  "Move"),
     ("trim",  "Trim"),
+    ("split", "Split"),
 ]
+
+# ── "Split" popup field rows (index order matters; see _split_active_buf) ──
+SPLIT_FIELD_LABELS = [
+    "Part length (minutes):",
+    "Overlap (seconds):",
+    "First part number:",
+    "Part number offset:",
+    "Output directory:",
+]
+SPLIT_ROW_STOP = len(SPLIT_FIELD_LABELS)  # trailing "Stop Job" row
 
 # ── "Fixup" checkbox popup ──────────────────────────────────────────────────
 FIXUP_CHECK_ITEMS = [
@@ -375,6 +395,24 @@ class FileManagerTab:
         self._trim_convert_mp4 = False
         self._trim_busy = False
         self._trim_lock = threading.Lock()
+
+        # "Split" popup (fields + Stop Job row) + background job state.
+        # self._split_jobs maps path -> {"proc": Popen|None, "stop": bool}.
+        self._split_open = False
+        self._split_target = None
+        self._split_cursor = 0           # 0-3=fields, 4=output dir, 5=Stop Job
+        self._split_field_cursor = 0
+        self._split_len_buf = "30"
+        self._split_overlap_buf = "5"
+        self._split_first_buf = "1"
+        self._split_offset_buf = "1"
+        self._split_outdir_buf = ""
+        self._split_jobs = {}
+        self._split_jobs_lock = threading.Lock()
+
+        # "Split" stop confirmation popup
+        self._split_confirm_open = False
+        self._split_confirm_target = None
 
     # ── Settings persistence (global.json) ─────────────────────────────────
 
@@ -637,6 +675,10 @@ class FileManagerTab:
             return self._handle_move_popup_key(key)
         if self._trim_open:
             return self._handle_trim_popup_key(key)
+        if self._split_confirm_open:
+            return self._handle_split_confirm_key(key)
+        if self._split_open:
+            return self._handle_split_popup_key(key)
         if self._menu_open:
             return self._handle_menu_popup_key(key)
 
@@ -817,7 +859,7 @@ class FileManagerTab:
         """True if any of this tab's popups (sort / menu / fixup / move) is open."""
         return (self.popup_open or self._menu_open or self._fixup_open
                 or self._move_open or self._move_filename_open
-                or self._trim_open)
+                or self._trim_open or self._split_open or self._split_confirm_open)
 
     def draw_popups(self, stdscr) -> None:
         """Draw whichever of this tab's popups is currently open."""
@@ -833,6 +875,10 @@ class FileManagerTab:
             self.draw_move_popup(stdscr)
         elif self._trim_open:
             self.draw_trim_popup(stdscr)
+        elif self._split_confirm_open:
+            self.draw_split_confirm_popup(stdscr)
+        elif self._split_open:
+            self.draw_split_popup(stdscr)
 
     def open_menu_popup(self):
         self._menu_sel = 0
@@ -858,6 +904,8 @@ class FileManagerTab:
                 self.open_move_popup()
             elif action_key == "trim":
                 self.open_trim_popup()
+            elif action_key == "split":
+                self.open_split_popup()
         # All other keys are consumed so nothing leaks to the dashboard.
         return True
 
@@ -1724,12 +1772,446 @@ class FileManagerTab:
 
         return True, f"Trim complete: {os.path.basename(work_path)}"
 
+    # ── "Split" popup ────────────────────────────────────────────────────────
+
+    def open_split_popup(self):
+        if not self._selected_path:
+            return
+        path = self._selected_path
+        self._split_target = path
+        if path in self._split_jobs:
+            # A job is already running for this file - the popup will only
+            # offer "Stop Job" (see draw_split_popup/_handle_split_popup_key).
+            self._split_open = True
+            return
+        self._split_len_buf = "30"
+        self._split_overlap_buf = "5"
+        self._split_first_buf = "1"
+        self._split_offset_buf = "1"
+        self._split_outdir_buf = os.path.join(os.path.dirname(path), "video_parts")
+        self._split_cursor = 0
+        self._split_field_cursor = len(self._split_len_buf)
+        self._split_open = True
+
+    def close_split_popup(self):
+        self._split_open = False
+        self._split_target = None
+
+    def _split_active_buf(self):
+        """Return (buf, attr_name) for the field row currently focused, or
+        (None, None) when the "Stop Job" row is focused instead."""
+        mapping = {
+            0: "_split_len_buf",
+            1: "_split_overlap_buf",
+            2: "_split_first_buf",
+            3: "_split_offset_buf",
+            4: "_split_outdir_buf",
+        }
+        attr_name = mapping.get(self._split_cursor)
+        if attr_name is None:
+            return None, None
+        return getattr(self, attr_name), attr_name
+
+    def _handle_split_popup_key(self, key) -> bool:
+        path = self._split_target
+        running = path in self._split_jobs
+
+        if key == 27:  # Esc -> cancel
+            self.close_split_popup()
+            return True
+
+        if running:
+            # Only action available: Stop Job.
+            if key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459, ord(' ')):
+                self.close_split_popup()
+                self.open_split_confirm_popup(path)
+            return True
+
+        if key == curses.KEY_UP:
+            self._split_cursor = max(0, self._split_cursor - 1)
+            buf, _ = self._split_active_buf()
+            self._split_field_cursor = len(buf) if buf is not None else 0
+            return True
+        if key == curses.KEY_DOWN:
+            self._split_cursor = min(SPLIT_ROW_STOP, self._split_cursor + 1)
+            buf, _ = self._split_active_buf()
+            self._split_field_cursor = len(buf) if buf is not None else 0
+            return True
+        if key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
+            if self._split_cursor == SPLIT_ROW_STOP:
+                self.close_split_popup()
+                self.open_split_confirm_popup(path)
+            else:
+                self._submit_split_popup()
+            return True
+
+        buf, attr_name = self._split_active_buf()
+        if attr_name is not None:
+            cur = self._split_field_cursor
+            is_outdir = (self._split_cursor == 4)
+            if key in (curses.KEY_BACKSPACE, 127, 8):
+                if cur > 0:
+                    buf = buf[:cur - 1] + buf[cur:]
+                    self._split_field_cursor = cur - 1
+                    setattr(self, attr_name, buf)
+            elif key == curses.KEY_DC:
+                if cur < len(buf):
+                    buf = buf[:cur] + buf[cur + 1:]
+                    setattr(self, attr_name, buf)
+            elif key == curses.KEY_LEFT:
+                if cur > 0:
+                    self._split_field_cursor = cur - 1
+            elif key == curses.KEY_RIGHT:
+                if cur < len(buf):
+                    self._split_field_cursor = cur + 1
+            elif key == curses.KEY_HOME:
+                self._split_field_cursor = 0
+            elif key == curses.KEY_END:
+                self._split_field_cursor = len(buf)
+            elif is_outdir and 32 <= key <= 126:
+                # Output dir accepts any printable path character.
+                buf = buf[:cur] + chr(key) + buf[cur:]
+                self._split_field_cursor = cur + 1
+                setattr(self, attr_name, buf)
+            elif not is_outdir and 48 <= key <= 57:
+                # Numeric fields: digits only.
+                buf = buf[:cur] + chr(key) + buf[cur:]
+                self._split_field_cursor = cur + 1
+                setattr(self, attr_name, buf)
+        # All other keys are consumed so nothing leaks to the dashboard.
+        return True
+
+    def _submit_split_popup(self):
+        def _pos_int(buf):
+            try:
+                return int(buf.strip())
+            except ValueError:
+                return None
+
+        length = _pos_int(self._split_len_buf)
+        overlap = _pos_int(self._split_overlap_buf)
+        first_part = _pos_int(self._split_first_buf)
+        offset = _pos_int(self._split_offset_buf)
+        outdir = self._split_outdir_buf.strip()
+
+        if length is None or length <= 0:
+            self._set_status("Split failed: Part length must be a positive number")
+            return
+        if overlap is None or overlap < 0:
+            self._set_status("Split failed: Overlap must be zero or greater")
+            return
+        if overlap >= length * 60:
+            self._set_status("Split failed: Overlap must be shorter than part length")
+            return
+        if first_part is None or first_part <= 0:
+            self._set_status("Split failed: First part number must be a positive number")
+            return
+        if offset is None or offset < 1:
+            self._set_status("Split failed: Part number offset must be 1 or greater")
+            return
+        if not outdir:
+            self._set_status("Split failed: Output directory cannot be empty")
+            return
+
+        target = self._split_target
+        self.close_split_popup()
+        self._start_split(target, length, overlap, first_part, offset, outdir)
+
+    def draw_split_popup(self, stdscr) -> None:
+        db = self.dashboard
+        h, w = stdscr.getmaxyx()
+        path = self._split_target
+        running = path in self._split_jobs
+
+        if running:
+            box_w = min(46, w - 4)
+            box_h = min(5, h - 4)
+            by1 = (h - box_h) // 2
+            bx1 = (w - box_w) // 2
+            by2 = by1 + box_h
+            bx2 = bx1 + box_w
+
+            for y in range(by1, by2 + 1):
+                db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1),
+                               theme.attr(db, "file_manager_filemanagertab_draw_split_popup_normal_1", db.C_NORMAL, False))
+
+            db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_CHROME)
+            db.safe_addstr(stdscr, by1, bx1 + 2, " SPLIT ",
+                           theme.attr(db, "file_manager_filemanagertab_draw_split_popup_chrome_1", db.C_CHROME, True))
+            db.safe_addstr(stdscr, by2, bx1 + 2,
+                           " Enter: Stop Job  Esc: Cancel ",
+                           theme.attr(db, "file_manager_filemanagertab_draw_split_popup_invhead_1", db.C_INVHEAD, False))
+
+            target_name = os.path.basename(path or "")
+            db.safe_addstr(stdscr, by1 + 1, bx1 + 2,
+                           target_name[:box_w - 4],
+                           theme.attr(db, "file_manager_filemanagertab_draw_split_popup_dim_1", db.C_DIM, False))
+            db.safe_addstr(stdscr, by1 + 3, bx1 + 2,
+                           "> Stop Job"[:box_w - 4],
+                           theme.attr(db, "file_manager_filemanagertab_draw_split_popup_hilight_1", db.C_HILIGHT, True))
+            return
+
+        box_w = min(60, w - 4)
+        box_h = min(12, h - 4)
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1),
+                           theme.attr(db, "file_manager_filemanagertab_draw_split_popup_normal_2", db.C_NORMAL, False))
+
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_CHROME)
+        db.safe_addstr(stdscr, by1, bx1 + 2, " SPLIT ",
+                       theme.attr(db, "file_manager_filemanagertab_draw_split_popup_chrome_2", db.C_CHROME, True))
+        db.safe_addstr(stdscr, by2, bx1 + 2,
+                       " Enter: Start  Esc: Cancel ",
+                       theme.attr(db, "file_manager_filemanagertab_draw_split_popup_invhead_2", db.C_INVHEAD, False))
+
+        target_name = os.path.basename(path or "")
+        db.safe_addstr(stdscr, by1 + 1, bx1 + 2,
+                       target_name[:box_w - 4],
+                       theme.attr(db, "file_manager_filemanagertab_draw_split_popup_dim_2", db.C_DIM, False))
+
+        rec = self._records.get(path, {})
+        mode_lbl = "Catch-up" if rec.get("status") == "WRITING" else "Instant"
+        db.safe_addstr(stdscr, by1 + 2, bx1 + 2,
+                       f"Mode: {mode_lbl}"[:box_w - 4],
+                       theme.attr(db, "file_manager_filemanagertab_draw_split_popup_system", db.C_SYSTEM, False))
+
+        bufs = [self._split_len_buf, self._split_overlap_buf,
+                self._split_first_buf, self._split_offset_buf, self._split_outdir_buf]
+        for i, (label, buf) in enumerate(zip(SPLIT_FIELD_LABELS, bufs)):
+            row_y = by1 + 4 + i
+            is_sel = (self._split_cursor == i)
+            prefix = "> " if is_sel else "  "
+            attr = (theme.attr(db, "file_manager_filemanagertab_draw_split_popup_hilight_2", db.C_HILIGHT, True)) if is_sel \
+                else theme.attr(db, "file_manager_filemanagertab_draw_split_popup_normal_3", db.C_NORMAL, False)
+            if is_sel:
+                cur = self._split_field_cursor
+                display = buf[:cur] + "_" + buf[cur:]
+            else:
+                display = buf
+            db.safe_addstr(stdscr, row_y, bx1 + 2,
+                           f"{prefix}{label} {display}"[:box_w - 4], attr)
+
+        stop_row_y = by1 + 4 + len(SPLIT_FIELD_LABELS) + 1
+        is_sel = (self._split_cursor == SPLIT_ROW_STOP)
+        prefix = "> " if is_sel else "  "
+        attr = (theme.attr(db, "file_manager_filemanagertab_draw_split_popup_hilight_3", db.C_HILIGHT, True)) if is_sel \
+            else theme.attr(db, "file_manager_filemanagertab_draw_split_popup_normal_4", db.C_NORMAL, False)
+        db.safe_addstr(stdscr, stop_row_y, bx1 + 2,
+                       f"{prefix}Stop Job"[:box_w - 4], attr)
+
+    # ── "Split" stop confirmation popup ─────────────────────────────────────
+
+    def open_split_confirm_popup(self, path):
+        if path not in self._split_jobs:
+            self._set_status("Error: No job running")
+            return
+        self._split_confirm_target = path
+        self._split_confirm_open = True
+
+    def close_split_confirm_popup(self):
+        self._split_confirm_open = False
+        self._split_confirm_target = None
+
+    def _handle_split_confirm_key(self, key) -> bool:
+        if key in (27, ord('n'), ord('N')):  # Esc / No -> cancel
+            self.close_split_confirm_popup()
+        elif key in (ord('y'), ord('Y'), ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
+            path = self._split_confirm_target
+            self.close_split_confirm_popup()
+            self._stop_split(path)
+        # All other keys are consumed so nothing leaks to the dashboard.
+        return True
+
+    def draw_split_confirm_popup(self, stdscr) -> None:
+        db = self.dashboard
+        h, w = stdscr.getmaxyx()
+        msg = "Are you sure you want to cancel the splitting job?"
+
+        box_w = min(len(msg) + 6, w - 4)
+        box_h = min(5, h - 4)
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1),
+                           theme.attr(db, "file_manager_filemanagertab_draw_split_confirm_normal", db.C_NORMAL, False))
+
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_CHROME)
+        db.safe_addstr(stdscr, by1, bx1 + 2, " CONFIRM ",
+                       theme.attr(db, "file_manager_filemanagertab_draw_split_confirm_chrome", db.C_CHROME, True))
+        db.safe_addstr(stdscr, by2, bx1 + 2,
+                       " Y: Yes  N/Esc: No ",
+                       theme.attr(db, "file_manager_filemanagertab_draw_split_confirm_invhead", db.C_INVHEAD, False))
+        db.safe_addstr(stdscr, by1 + 2, bx1 + 3,
+                       msg[:box_w - 6],
+                       theme.attr(db, "file_manager_filemanagertab_draw_split_confirm_warn", db.C_WARN, True))
+
+    # ── Split job (runs ffmpeg on a background thread; killed, not waited,
+    #    on Stop Job) ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _probe_duration_seconds(path):
+        """Return the media duration of *path* in seconds (float), or None."""
+        try:
+            from .main import _resolve_ffprobe_path
+            ffprobe_path = _resolve_ffprobe_path()
+        except Exception:
+            ffprobe_path = None
+        if not ffprobe_path:
+            return None
+        run_kwargs = {"capture_output": True, "text": True, "timeout": 15}
+        if IS_WINDOWS:
+            run_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        try:
+            result = subprocess.run(
+                [ffprobe_path, "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", path],
+                **run_kwargs,
+            )
+            return float(result.stdout.strip())
+        except Exception:
+            return None
+
+    def _start_split(self, path, length_min, overlap_s, first_part, offset, outdir):
+        if not path or not os.path.isfile(path):
+            self._set_status("Split failed: file no longer exists")
+            return
+        with self._split_jobs_lock:
+            if path in self._split_jobs:
+                self._set_status("A Split job is already running for this file")
+                return
+        found, ffmpeg_path = check_ffmpeg()
+        if not found or not ffmpeg_path:
+            self._set_status("Split failed: ffmpeg not found")
+            return
+        try:
+            os.makedirs(outdir, exist_ok=True)
+        except OSError as exc:
+            self._set_status(f"Split failed: could not create output directory ({exc})")
+            return
+
+        rec = self._records.get(path, {})
+        mode = "catchup" if rec.get("status") == "WRITING" else "instant"
+
+        job = {"proc": None, "stop": False}
+        with self._split_jobs_lock:
+            self._split_jobs[path] = job
+        t = threading.Thread(
+            target=self._split_worker,
+            args=(path, length_min * 60, overlap_s, first_part, offset,
+                  outdir, mode, ffmpeg_path, job),
+            daemon=True,
+        )
+        job["thread"] = t
+        t.start()
+        self._set_status("The splitting job has been started.  "
+                          "Cancel the job from the File Options menu.")
+
+    def _stop_split(self, path):
+        with self._split_jobs_lock:
+            job = self._split_jobs.pop(path, None)
+        if not job:
+            self._set_status("Error: No job running")
+            return
+        job["stop"] = True
+        proc = job.get("proc")
+        if proc is not None:
+            try:
+                proc.kill()  # don't wait for ffmpeg to finish
+            except Exception:
+                pass
+        self._set_status(f"Splitting job cancelled: {os.path.basename(path)}")
+
+    def _split_worker(self, path, part_length_s, overlap_s, first_part, offset,
+                       outdir, mode, ffmpeg_path, job):
+        try:
+            self._run_split_job(path, part_length_s, overlap_s, first_part,
+                                 offset, outdir, mode, ffmpeg_path, job)
+        except Exception as exc:
+            if not job.get("stop"):
+                self._set_status(f"Split failed: {exc}")
+        finally:
+            with self._split_jobs_lock:
+                # Only remove ourselves - Stop Job already pops the entry.
+                if self._split_jobs.get(path) is job:
+                    self._split_jobs.pop(path, None)
+
+    def _run_split_job(self, path, part_length_s, overlap_s, first_part, offset,
+                        outdir, mode, ffmpeg_path, job):
+        part_index = first_part
+        start_time = 0.0
+        step = max(1, part_length_s - overlap_s)
+
+        while not job.get("stop"):
+            duration = self._probe_duration_seconds(path)
+            if duration is None:
+                if mode == "instant":
+                    self._set_status(f"Split failed: could not read {os.path.basename(path)}")
+                    return
+                time.sleep(2.0)
+                continue
+
+            remaining = duration - start_time
+            if remaining <= 0:
+                self._set_status(f"Split complete: {os.path.basename(path)}")
+                return
+
+            if mode == "catchup" and remaining < part_length_s:
+                rec = self._records.get(path, {})
+                if rec.get("status") == "WRITING":
+                    time.sleep(2.0)   # not enough buffered yet - wait for more
+                    continue
+                # Source stopped writing: flush the final (short) part below.
+
+            this_len = min(part_length_s, remaining)
+            display_part = part_index + offset - 1
+            out_file = os.path.join(
+                outdir,
+                f"{os.path.basename(path).rsplit('.', 1)[0]}_part{display_part}.mp4",
+            )
+            cmd = [ffmpeg_path, "-y", "-ss", str(start_time), "-i", path,
+                   "-c", "copy", "-t", str(this_len), out_file]
+            run_kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+            if IS_WINDOWS:
+                si = subprocess.STARTUPINFO()
+                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                si.wShowWindow = subprocess.SW_HIDE
+                run_kwargs["startupinfo"] = si
+
+            proc = subprocess.Popen(cmd, **run_kwargs)
+            job["proc"] = proc
+            proc.wait()
+            job["proc"] = None
+
+            if job.get("stop"):
+                try:
+                    if os.path.isfile(out_file):
+                        os.remove(out_file)
+                except OSError:
+                    pass
+                return
+
+            if proc.returncode != 0 or not os.path.isfile(out_file) or os.path.getsize(out_file) == 0:
+                self._set_status(f"Split failed on part {display_part} "
+                                  f"(ffmpeg exited {proc.returncode})")
+                return
+
+            part_index += 1
+            start_time += step
+
     # ── Drawing ──────────────────────────────────────────────────────────────
 
     def draw(self, stdscr, y1, x1, y2, x2) -> None:
         db = self.dashboard
         db.draw_box(stdscr, y1, x1, y2, x2, db.C_CHROME)
-        db.safe_addstr(stdscr, y1, x1 + 2, " FILE MANAGER ",
+        db.safe_addstr(stdscr, y1, x1 + 2, " FILE MANAGER \u2014 (Press M for File Options) ",
                        theme.attr(db, "file_manager_filemanagertab_draw_chrome", db.C_CHROME, True))
 
         dirs = self._get_output_dirs()
@@ -1805,6 +2287,8 @@ class FileManagerTab:
                     name = os.path.relpath(path, group_path).replace(os.sep, "/")
                 else:
                     name = os.path.basename(path)
+                if path in self._split_jobs:
+                    name = "*" + name  # a Split job is running for this file
                 status = rec.get("status", "IDLE")
                 size_txt = human_size(rec.get("size"))
                 rate_txt = human_rate(rec.get("rate")) if status == "WRITING" else "\u2014"
