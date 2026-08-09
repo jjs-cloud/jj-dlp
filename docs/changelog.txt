@@ -1,5 +1,8 @@
 - when scrolled up on the log, stdout, and stderr tabs, output now freezes so you can read it
 - fixed some visual bugs
+- minor ui/ux improvements
+    - arrows indicating more files at the top and bottom of the file manager list
+    - page up/down jumps to the top/bottom of the file manager list
 
 ====================
 ====================

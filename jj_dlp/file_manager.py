@@ -610,6 +610,19 @@ class FileManagerTab:
             pos = max(0, min(len(file_indices) - 1, pos))
         self._selected_path = self._rows[file_indices[pos]][1]
 
+    def jump_to_list_edge(self, edge):
+        """Jump the selection to the first/last file row (PageUp/PageDown)."""
+        file_indices = [i for i, r in enumerate(self._rows) if r[0] == "file"]
+        if not file_indices:
+            self._selected_path = None
+            return
+        if edge == "top":
+            self._selected_path = self._rows[file_indices[0]][1]
+            self._at_top = True
+        else:
+            self._selected_path = self._rows[file_indices[-1]][1]
+            self._at_top = False
+
     # ── Key handling ─────────────────────────────────────────────────────────
 
     def handle_key(self, key) -> bool:
@@ -627,6 +640,12 @@ class FileManagerTab:
         if self._menu_open:
             return self._handle_menu_popup_key(key)
 
+        if key in (curses.KEY_PPAGE,):
+            self.jump_to_list_edge("top")
+            return True
+        if key in (curses.KEY_NPAGE,):
+            self.jump_to_list_edge("bottom")
+            return True
         if key in (curses.KEY_UP,):
             self.move_selection(-1)
             file_indices = [i for i, r in enumerate(self._rows) if r[0] == "file"]

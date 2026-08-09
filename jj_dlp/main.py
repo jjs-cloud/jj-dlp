@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.2"
+__version__ = "1.26.3"
 
 import subprocess
 import time
@@ -6063,7 +6063,7 @@ class JJDlpDashboard:
 
         if current_tab_name == "File Manager":
             # Pass keys to FileManagerTab first. Still allow global tab/site switching.
-            excluded = [ord(']'), curses.KEY_NPAGE, ord('['), curses.KEY_PPAGE]
+            excluded = [ord(']'), ord('[')]
             if not self.file_manager._move_filename_open:
                 excluded += [curses.KEY_LEFT, ord('h'), curses.KEY_RIGHT, ord('l')]
             if key not in excluded:
