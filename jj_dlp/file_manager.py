@@ -540,7 +540,7 @@ class FileManagerTab:
         if key in ("status_writing", "status_idle"):
             return 0 if rec.get("status") == "WRITING" else 1
         if key in ("modified_new", "modified_old"):
-            return rec.get("mtime", 0)
+            return int(rec.get("mtime", 0)) // 60 * 60
         if key in ("size_desc", "size_asc"):
             return rec.get("size", 0)
         if key in ("rate_desc", "rate_asc"):
