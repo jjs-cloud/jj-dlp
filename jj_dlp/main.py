@@ -4311,12 +4311,13 @@ class JJDlpDashboard:
     """
 
     @staticmethod
-    def draw_box(stdscr, y1, x1, y2, x2, pair, tag="main_jjdlpdashboard_safe_ch_pair"):
+    def draw_box(stdscr, y1, x1, y2, x2, pair, tag="main_jjdlpdashboard_safe_ch_pair",
+                 bold=False):
         h, w = stdscr.getmaxyx()
         def safe_ch(y, x, ch):
             if 0 <= y < h and 0 <= x < w - 1:
                 try:
-                    stdscr.addch(y, x, ch, theme.attr(JJDlpDashboard, tag, pair, False))
+                    stdscr.addch(y, x, ch, theme.attr(JJDlpDashboard, tag, pair, bold))
                 except curses.error:
                     pass
         for x in range(x1 + 1, x2):
@@ -4936,7 +4937,8 @@ class JJDlpDashboard:
         border_pair = self.C_HILIGHT if is_selected else self.C_CHROME
         border_tag = ("main_jjdlpdashboard_draw_site_panel_border_hilight"
                       if is_selected else "main_jjdlpdashboard_draw_site_panel_border_chrome")
-        self.draw_box(self.stdscr, y1, x1, y2, x2, border_pair, border_tag)
+        border_bold = (False if is_selected else False)
+        self.draw_box(self.stdscr, y1, x1, y2, x2, border_pair, border_tag, border_bold)
 
         # ── Panel header ──
         _panel_cfg = site.get_cached_config()

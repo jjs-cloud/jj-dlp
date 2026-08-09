@@ -3177,7 +3177,7 @@ class ConfigEditor:
                 is_selected = self._focus == "site" and (i == self.selected_idx)
 
                 if is_selected:
-                    attr = theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_hilight_2", self.dashboard.C_INVHEAD, False)
+                    attr = theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_hilight_2", self.dashboard.C_WARN, False)
                     prefix = "> "
                 else:
                     prefix = "  "
