@@ -1,4 +1,5 @@
 - when scrolled up on the log, stdout, and stderr tabs, output now freezes so you can read it
+- fixed some visual bugs
 
 ====================
 ====================

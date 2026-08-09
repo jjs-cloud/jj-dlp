@@ -613,6 +613,17 @@ def apply_palette(dashboard):
         except curses.error:
             pass
 
+    # clearok(True) forces the next refresh() on this window
+    # to do a full, uncached repaint, so the freshly defined pair colors
+    # actually reach the terminal instead of staying stuck until unrelated
+    # content happens to change.
+    stdscr = getattr(dashboard, 'stdscr', None)
+    if stdscr is not None:
+        try:
+            stdscr.clearok(True)
+        except curses.error:
+            pass
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # ThemeManager — owns the theme popup (base scheme picker, role color editor,
