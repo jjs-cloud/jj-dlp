@@ -4485,17 +4485,21 @@ class JJDlpDashboard:
         self._disk_cache_results: list = []  # list of (drive, usage) or (drive, None) on error
 
         # ── Top-bar disk-rate sparkline ──────────────────────────────────────
-        # One bar per GRAPH_SCALE seconds (default 1 = one bar per second),
-        # taken straight from file_manager.total_write_rate_raw() (which reads
-        # each file's Δsize/Δt since the last poll, so a single sample per bar
-        # is a true average over that whole window). It counts only files that
-        # are actively being recorded by yt-dlp (per each site's
-        # recording_output_paths registry), never File Manager artifact files
-        # (Move/Fixup/Trim/Split output). History is kept far longer than any
-        # realistic terminal width so widening the window doesn't lose data.
+        # One bar per GRAPH_SCALE seconds. Each bar is an *instantaneous*
+        # spot reading from file_manager.instantaneous_total_write_rate()
+        # (a Δsize/Δt over the last _GRAPH_SUBSAMPLE_S sub-sample, ~0.5s),
+        # not a delta averaged over the whole GRAPH_SCALE window — so the
+        # bars jump around with the bursty way yt-dlp flushes to disk instead
+        # of coming out flat. It counts only files that are actively being
+        # recorded by yt-dlp (per each site's recording_output_paths
+        # registry), never File Manager artifact files (Move/Fixup/Trim/Split
+        # output). History is kept far longer than any realistic terminal
+        # width so widening the window doesn't lose data.
         self.graph_scale: int = max(1, int(self.global_cfg.get("graph_scale", 1)))
         self.disk_rate_history: deque = deque(maxlen=2000)
         self._disk_graph_last_tick: float = 0.0
+        self._disk_graph_last_subsample: float = 0.0
+        self._disk_graph_instant_rate: float = 0.0
         # Bars persisted to global.json on the previous run are restored here
         # so the graph comes back with its recent history instead of starting
         # empty.
@@ -4589,29 +4593,39 @@ class JJDlpDashboard:
     def _tick_disk_rate_history(self):
         """Append one disk-rate bar once every GRAPH_SCALE seconds.
 
-        A forced maybe_poll() runs here (and only here, plus the File Manager
-        tab's own 1s poll while it's focused), so the directory scan cadence
-        scales with GRAPH_SCALE — at GRAPH_SCALE=600 the rescan drops from
-        once/sec to once/10min. Each file's rate is computed as Δsize/Δt since
-        its last poll, so the single sample taken here is a true average over
-        the whole GRAPH_SCALE window, not an instantaneous spot reading.
+        The fast sub-sampler below keeps a fresh instantaneous aggregate rate
+        ready (measured over a ~_GRAPH_SUBSAMPLE_S window), running on every
+        frame regardless of GRAPH_SCALE. Each bar then pushes the most recent
+        spot reading, so a bar is the bursty, point-in-time write rate at the
+        moment it falls — not an average accumulated over the whole window.
+        The longer GRAPH_SCALE, the more each bar is just an independent
+        random sample of the instantaneous rate, which is what makes tall
+        bars show up scattered among near-empty ones.
         """
         now = time.time()
+        # Fast sub-sampler: only stats the actively-recording files, so it
+        # can run at a sub-second cadence without re-walking the OUTPUT_DIRs.
+        if now - self._disk_graph_last_subsample >= self._GRAPH_SUBSAMPLE_S:
+            self._disk_graph_last_subsample = now
+            try:
+                self._disk_graph_instant_rate = self.file_manager.instantaneous_total_write_rate()
+            except Exception:
+                self._disk_graph_instant_rate = 0.0
         if now - self._disk_graph_last_tick < self.graph_scale:
             return
         self._disk_graph_last_tick = now
-        try:
-            self.file_manager.maybe_poll(force=True)
-            rate = self.file_manager.total_write_rate_raw()
-        except Exception:
-            rate = 0.0
-        self.disk_rate_history.append(max(0.0, rate))
+        self.disk_rate_history.append(max(0.0, self._disk_graph_instant_rate))
 
     # Density ramp for the disk-rate bars, faintest to most solid. All are
     # standard codepage-437 glyphs (confirmed against supported_characters.txt),
     # so — unlike the eighth-block chars — these are safe on cmd.exe/PowerShell
     # as well as real terminals. Index 0 is "empty".
     _GRAPH_RAMP = [" ", "\u2591", "\u2592", "\u2593", "\u2584", "\u2588"]  # ' ░▒▓▄█'
+    # Cadence (seconds) of the instantaneous-rate sub-sampler feeding the
+    # top-bar graph. Smaller = burstier/more random bars (each bar becomes a
+    # point reading over a shorter window); larger = smoother. Only the
+    # actively-recording files are statted, so sub-second values are cheap.
+    _GRAPH_SUBSAMPLE_S = 0.5
     # Body density levels (ramp indices). The half-block (▄) is excluded from
     # bodies — a body of ▄ would read as a half-height bar — so it only ever
     # caps a solid (█) bar.

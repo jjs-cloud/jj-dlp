@@ -326,6 +326,10 @@ class FileManagerTab:
         # path -> {size, last_change, rate, mtime, last_poll, status,
         #          group_path, group_label}
         self._records = {}
+        # path -> (size, time) — fine-grained size samples of the actively
+        # recording files, used by instantaneous_total_write_rate() to derive
+        # a bursty, point-in-time rate without re-walking the OUTPUT_DIRs.
+        self._inst_rate_samples = {}
         # Flattened, already-sorted rows ready to draw:
         #   ("header", label_text, None)
         #   ("empty",  text,       None)
@@ -592,33 +596,36 @@ class FileManagerTab:
             pass
         return paths
 
-    def total_write_rate_raw(self) -> float:
-        """Sum of per-file *instantaneous* write rates across all
-        currently-WRITING files, read straight from each file's latest raw
-        ``rate`` (Δsize/Δt since its last poll). Used by the top-bar
-        sparkline (and its current-max-rate tracker) as well as any other
-        caller that wants a fast-moving, per-second reading rather than a
-        smoothed one.
+    def instantaneous_total_write_rate(self) -> float:
+        """Sum of per-file write rates across all currently-WRITING files,
+        measured as an *instantaneous* spot reading over a short sub-sample
+        window rather than the long directory-poll interval.
 
-        Only files that are actively being recorded by yt-dlp (per each
-        site's ``recording_output_paths`` registry) are counted — File
-        Manager artifact files (Move destinations, Fixup scratch/remux
-        output, Trim output, Split parts) growing in an OUTPUT_DIR are
-        excluded, so the graph reflects true download bandwidth, not local
-        ffmpeg post-processing.
+        Only the files currently being recorded by yt-dlp (per each site's
+        ``recording_output_paths`` registry) are sampled, and sampling is a
+        single getsize() per file — no os.walk, no _rebuild_rows — so this
+        can be called at a fast sub-second cadence from the top-bar graph
+        tick. Each path tracks its own (size, time) pair; the rate is
+        Δsize/Δt between consecutive samples, so consecutive readings jump
+        with the bursty way yt-dlp flushes data to disk (near-zero between
+        flushes, spiking right after one) instead of smoothing out over the
+        whole GRAPH_SCALE window.
         """
         active = self._active_recording_paths()
+        now = time.time()
         total = 0.0
-        for path, rec in self._records.items():
-            if rec.get("status") != "WRITING":
-                continue
+        for path in active:
             try:
-                norm = os.path.normcase(os.path.abspath(path))
-            except Exception:
+                size = os.path.getsize(path)
+            except OSError:
                 continue
-            if norm not in active:
-                continue
-            total += max(0.0, rec.get("rate", 0.0))
+            prev = self._inst_rate_samples.get(path)
+            if prev is not None:
+                dt = max(now - prev[1], 0.001)
+                total += max(0.0, (size - prev[0]) / dt)
+            self._inst_rate_samples[path] = (size, now)
+        if len(self._inst_rate_samples) > len(active) * 2 + 16:
+            self._inst_rate_samples = {p: v for p, v in self._inst_rate_samples.items() if p in active}
         return total
 
     # ── Sorting / row layout ────────────────────────────────────────────────
