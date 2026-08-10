@@ -312,7 +312,8 @@ class Graph:
              "step": 1000, "lo": 0.0, "hi": 1e12, "fmt": "{:.0f}"},
             {"label": "MIN_BAR_HEIGHT",   "attr": "_GRAPH_MIN_BAR_HEIGHT",    "kind": "int",
              "step": 1, "lo": 0, "hi": 11, "fmt": "{}"},
-            {"label": "Reload graph.py",  "attr": None, "kind": "action"},
+            {"label": "Clear graph bars", "attr": None, "kind": "action", "action": "clear"},
+            {"label": "Reload graph.py",  "attr": None, "kind": "action", "action": "reload"},
         ]
 
     def _popup_set(self, row, value):
@@ -345,6 +346,24 @@ class Graph:
             self._popup_set(row, choices[(idx + delta) % len(choices)])
         else:
             self._popup_set(row, getattr(self, row["attr"]) + delta * row["step"])
+
+    def clear_all_bars(self) -> None:
+        """Clear every bar from the top-bar disk-rate graph — in memory and
+        out of global.json — so no stale history comes back on the next
+        launch.
+
+        Persisting the empty history is delegated to main.py's existing
+        _save_disk_rate_history (lazily imported: only graph.py hot-reloads
+        via the 'p' popup, main.py does not). Writing [] is equivalent to
+        removing the key — _load_disk_rate_history reads it back as no bars.
+        """
+        self.disk_rate_history.clear()
+        try:
+            from . import main as _main
+            _main._save_disk_rate_history([])
+            self.popup_status = "graph bars cleared"
+        except Exception as _e:
+            self.popup_status = f"clear failed: {_e}"
 
     def handle_key(self, key) -> bool:
         rows = self._knob_rows()
@@ -384,10 +403,15 @@ class Graph:
         elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
             row = rows[self.popup_sel]
             if row["kind"] == "action":
-                # Hot-reload this module. On success the dashboard swaps in a
-                # fresh Graph (popup closes); on failure the popup stays open
-                # and the legend shows the error.
-                self.dashboard.reload_graph_module()
+                if row.get("action") == "clear":
+                    # Clear every bar from the on-screen graph and from
+                    # global.json so no history comes back on restart.
+                    self.clear_all_bars()
+                else:
+                    # Hot-reload this module. On success the dashboard swaps
+                    # in a fresh Graph (popup closes); on failure the popup
+                    # stays open and the legend shows the error.
+                    self.dashboard.reload_graph_module()
             elif row["kind"] == "enum":
                 self._popup_step(1)
             else:
@@ -424,7 +448,8 @@ class Graph:
         for i in range(self.popup_scroll, min(len(rows), self.popup_scroll + vis)):
             row = rows[i]
             if row["kind"] == "action":
-                val_txt = "Enter to reload"
+                val_txt = ("Enter to clear" if row.get("action") == "clear"
+                           else "Enter to reload")
             else:
                 cur = getattr(self, row["attr"])
                 if row["kind"] == "enum":
