@@ -4611,6 +4611,8 @@ class JJDlpDashboard:
                 ch = tip_char if r == height - 1 else body_char
                 self.safe_addstr(self.stdscr, row, col, ch, attr)
 
+        return scale_max
+
     # ── Christmas Day easter egg ────────────────────────────────────────────
     @staticmethod
     def _is_christmas_day() -> bool:
@@ -5979,7 +5981,16 @@ class JJDlpDashboard:
         _graph_x1 = time_x - 2
         _graph_y1 = 1 + len(ASCII_LOGO) - 1
         if _graph_x1 > _graph_x0:
-            self.draw_disk_rate_graph(1, _graph_x0, _graph_x1, _graph_y1)
+            _scale_max = self.draw_disk_rate_graph(1, _graph_x0, _graph_x1, _graph_y1)
+            # Y-axis label above the graph's right edge: the fastest rate
+            # currently on screen. The scale is auto-resizing, so this gives
+            # the top of the axis a concrete value.
+            if _scale_max is not None:
+                _label = human_rate(_scale_max)
+                _label_x = _graph_x1 - len(_label) + 1
+                if _label_x >= _graph_x0:
+                    self.safe_addstr(self.stdscr, 0, _label_x, _label,
+                                theme.attr(self, "main_jjdlpdashboard_draw_disk_rate_graph"))
 
         # Track the next available row on the right side
         next_right_row = 2
