@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.12"
+__version__ = "1.26.13"
 
 import subprocess
 import time
@@ -755,6 +755,14 @@ class SiteState:
         # Used purely to gate the recording_resolution fallback in the
         # dashboard renderer.
         self.recording_attempt_started: Dict[str, float] = {}
+        # streamer -> absolute path of the file yt-dlp is currently writing
+        # for that recording. Guarded by self.lock. Published by
+        # record_stream() once the active output file resolves (and whenever a
+        # SPLIT_AFTER segment switch happens); cleared when the recording
+        # ends. Used by the File Manager's top-bar disk-rate graph so it only
+        # counts files actually being recorded by yt-dlp, never File Manager
+        # artifacts (Move/Fixup/Trim/Split output files).
+        self.recording_output_paths: Dict[str, str] = {}
         self.recording_threads:   List[threading.Thread] = []
         self.known_streamers:     Set[str] = set()
         self.trigger_event        = threading.Event()
@@ -860,6 +868,23 @@ class SiteState:
         """Remove a subprocess from the registry (after it exits)."""
         with self._procs_lock:
             self._active_procs.pop(streamer, None)
+
+    def set_recording_output(self, streamer: str, path: str) -> None:
+        """Publish the absolute path of the file *streamer*'s yt-dlp process
+        is currently writing (see recording_output_paths)."""
+        with self.lock:
+            self.recording_output_paths[streamer] = path
+
+    def clear_recording_output(self, streamer: str) -> None:
+        """Forget *streamer*'s active recording output path (recording ended)."""
+        with self.lock:
+            self.recording_output_paths.pop(streamer, None)
+
+    def recording_output_paths_snapshot(self) -> Set[str]:
+        """Absolute paths of every file currently being written by yt-dlp,
+        across all streamers on this site. Thread-safe copy."""
+        with self.lock:
+            return set(self.recording_output_paths.values())
 
     def kill_proc_for_streamer(self, streamer: str) -> None:
         with self._procs_lock:
@@ -2960,6 +2985,14 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 except Exception as e:
                     dbg(f"[STALL] json fallback failed: {e}", site_name=streamer)
 
+            # Publish the resolved output file so the top-bar disk-rate graph
+            # can count exactly which file(s) yt-dlp is actively recording
+            # (and only those — never File Manager Move/Fixup/Trim/Split
+            # output). If resolution failed, nothing is published and the
+            # graph reads zero until the file resolves.
+            if active_file:
+                site.set_recording_output(streamer, active_file)
+
             last_size, _, _, _ = get_streamer_file_size(
                 output_dir,
                 streamer,
@@ -3313,6 +3346,12 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                                 close_logs = next_close_logs
                                 proc_start_time = next_proc_start_time
                                 active_file = next_file
+                                # Republish the switched-to segment as the
+                                # active recording output so the disk-rate
+                                # graph follows the new file (the previous
+                                # segment has stopped growing).
+                                if active_file:
+                                    site.set_recording_output(streamer, active_file)
                                 # Use next_proc_start_time (not time.time()) so the
                                 # split timer accounts for time already spent verifying
                                 # the new file. time.time() here would let each segment
@@ -3615,6 +3654,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
     finally:
         with site.lock:
             site.currently_recording.discard(streamer)
+            # Stop treating this streamer's file as an active recording so
+            # the top-bar disk-rate graph drops it the moment recording ends.
+            site.recording_output_paths.pop(streamer, None)
             # Clear the UPGRADE_QUALITY baseline along with currently_recording
             # so the next time this streamer starts recording (fresh or
             # restarted-for-quality) gets a clean baseline rather than
@@ -4446,9 +4488,11 @@ class JJDlpDashboard:
         # One bar per GRAPH_SCALE seconds (default 1 = one bar per second),
         # taken straight from file_manager.total_write_rate_raw() (which reads
         # each file's Δsize/Δt since the last poll, so a single sample per bar
-        # is a true average over that whole window). History is kept far longer
-        # than any realistic terminal width so widening the window doesn't lose
-        # data.
+        # is a true average over that whole window). It counts only files that
+        # are actively being recorded by yt-dlp (per each site's
+        # recording_output_paths registry), never File Manager artifact files
+        # (Move/Fixup/Trim/Split output). History is kept far longer than any
+        # realistic terminal width so widening the window doesn't lose data.
         self.graph_scale: int = max(1, int(self.global_cfg.get("graph_scale", 1)))
         self.disk_rate_history: deque = deque(maxlen=2000)
         self._disk_graph_last_tick: float = 0.0

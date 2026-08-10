@@ -574,6 +574,24 @@ class FileManagerTab:
 
         self._rebuild_rows(dirs)
 
+    def _active_recording_paths(self) -> set:
+        """Absolute paths of every file currently being actively recorded by
+        yt-dlp, gathered from each site's ``recording_output_paths`` registry
+        (published by record_stream). Paths are normalized (abspath +
+        normcase) so they line up with this tab's scan-derived ``_records``
+        keys even across drive-letter case differences on Windows."""
+        paths = set()
+        try:
+            for site in self.dashboard.sites:
+                for p in site.recording_output_paths_snapshot():
+                    try:
+                        paths.add(os.path.normcase(os.path.abspath(p)))
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        return paths
+
     def total_write_rate_raw(self) -> float:
         """Sum of per-file *instantaneous* write rates across all
         currently-WRITING files, read straight from each file's latest raw
@@ -581,14 +599,24 @@ class FileManagerTab:
         sparkline (and its current-max-rate tracker) as well as any other
         caller that wants a fast-moving, per-second reading rather than a
         smoothed one.
+
+        Only files that are actively being recorded by yt-dlp (per each
+        site's ``recording_output_paths`` registry) are counted — File
+        Manager artifact files (Move destinations, Fixup scratch/remux
+        output, Trim output, Split parts) growing in an OUTPUT_DIR are
+        excluded, so the graph reflects true download bandwidth, not local
+        ffmpeg post-processing.
         """
+        active = self._active_recording_paths()
         total = 0.0
-        for rec in self._records.values():
+        for path, rec in self._records.items():
             if rec.get("status") != "WRITING":
                 continue
-            total += max(0.0, rec.get("rate", 0.0))
-        for rec in self._moving_records.values():
-            if rec.get("status") != "WRITING":
+            try:
+                norm = os.path.normcase(os.path.abspath(path))
+            except Exception:
+                continue
+            if norm not in active:
                 continue
             total += max(0.0, rec.get("rate", 0.0))
         return total
