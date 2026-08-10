@@ -5985,7 +5985,7 @@ class JJDlpDashboard:
             # Y-axis label above the graph's right edge: the fastest rate
             # currently on screen. The scale is auto-resizing, so this gives
             # the top of the axis a concrete value.
-            if _scale_max is not None:
+            if _scale_max is not None and _scale_max >= 5.0:
                 _label = f"max {human_rate(_scale_max)}"
                 _label_x = _graph_x1 - len(_label) + 1
                 if _label_x >= _graph_x0:
