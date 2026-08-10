@@ -4944,10 +4944,7 @@ class JJDlpDashboard:
                 threading.Thread(target=_update_disk_usage, args=(drives,), daemon=True).start()
 
             if disk_row_y < y2 - 1:
-                _rate_total = self.file_manager.total_write_rate()
                 _disk_header = "── Disk ──"
-                if _rate_total:
-                    _disk_header += f"  {human_rate(_rate_total)}"
                 self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
                             _disk_header[:inner_w],
                             theme.attr(self, "main_jjdlpdashboard_update_disk_usage_system"))
@@ -5974,6 +5971,9 @@ class JJDlpDashboard:
             # the top of the axis a concrete value.
             if _scale_max is not None and _scale_max >= 5.0:
                 _label = f"max {human_rate(_scale_max)}"
+                _avg_rate = self.file_manager.total_write_rate()
+                if _avg_rate:
+                    _label = f"avg {human_rate(_avg_rate)}  {_label}"
                 _label_x = _graph_x1 - len(_label) + 1
                 if _label_x >= _graph_x0:
                     self.safe_addstr(self.stdscr, 0, _label_x, _label,
