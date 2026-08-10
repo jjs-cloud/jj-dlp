@@ -4456,6 +4456,22 @@ class JJDlpDashboard:
         # the graph comes back with its recent history instead of starting empty.
         self.disk_rate_history.extend(_load_disk_rate_history())
 
+        # ── Current-max-rate tracking (see _tick_rate_sampler / _tick_disk_rate_history) ──
+        # Parallel to disk_rate_history: True for any bar whose value came from
+        # a new all-time-high rate rather than an ordinary end-of-window sample.
+        self.disk_rate_special: deque = deque(maxlen=2000)
+        self.disk_rate_special.extend([False] * len(self.disk_rate_history))
+        # Running max write rate ever observed this session, sampled once per
+        # second regardless of GRAPH_SCALE. Seeded from restored history so a
+        # restart doesn't immediately re-trigger a "new max" on old data.
+        self.current_max_rate: float = max(self.disk_rate_history) if self.disk_rate_history else 0.0
+        self._rate_sample_last_tick: float = 0.0
+        # Set to the new record rate the instant it's observed by
+        # _tick_rate_sampler; consumed (and cleared) by the next
+        # _tick_disk_rate_history() bar so that bar reflects the spike even
+        # if GRAPH_SCALE is large and the spike only lasted a few seconds.
+        self._pending_new_max: Optional[float] = None
+
         from .config_editor import ConfigEditor
         self.config_editor = ConfigEditor(self)
 
@@ -4541,26 +4557,64 @@ class JJDlpDashboard:
                         theme.attr(self, "main_jjdlpdashboard_draw_logo_logo"))
 
     # ── Top-bar disk-rate sparkline ─────────────────────────────────────────
+    def _tick_rate_sampler(self):
+        """Sample the current write rate once per second and track the
+        running max (self.current_max_rate), independent of GRAPH_SCALE.
+
+        This is what lets a large GRAPH_SCALE (e.g. 600) still catch a brief
+        spike: without a per-second sample, a rate that was only high for a
+        handful of seconds out of a 600s window would never be observed at
+        all, since _tick_disk_rate_history() only looks once per window.
+        Whenever a new all-time-high is seen, it's stashed in
+        _pending_new_max for the *next* bar appended by
+        _tick_disk_rate_history() to pick up — that's the "special bar".
+
+        Runs a real (non-forced) maybe_poll() every second, so — unlike the
+        old GRAPH_SCALE-gated poll — the directory rescan cadence no longer
+        drops off at high GRAPH_SCALE values; catching spikes requires it.
+        """
+        now = time.time()
+        if now - self._rate_sample_last_tick < 1.0:
+            return
+        self._rate_sample_last_tick = now
+        try:
+            self.file_manager.maybe_poll(min_interval=1.0)
+            rate = max(0.0, self.file_manager.total_write_rate_raw())
+        except Exception:
+            rate = 0.0
+        if rate > self.current_max_rate:
+            self.current_max_rate = rate
+            self._pending_new_max = rate
+
     def _tick_disk_rate_history(self):
         """Append one disk-rate bar once every GRAPH_SCALE seconds.
 
-        A forced maybe_poll() runs here (and only here, plus the File Manager
-        tab's own 1s poll while it's focused), so the directory scan cadence
-        scales with GRAPH_SCALE — at GRAPH_SCALE=600 the rescan drops from
-        once/sec to once/10min. Each file's rate is computed as Δsize/Δt since
-        its last poll, so the single sample taken here is a true average over
-        the whole GRAPH_SCALE window, not an instantaneous spot reading.
+        Normally the bar's value is just the write rate at this instant. But
+        if a new record-high rate was observed at any point during this
+        window (see _tick_rate_sampler, sampling once per second regardless
+        of GRAPH_SCALE), that peak is used for the bar instead, and the bar
+        is flagged "special" (self.disk_rate_special) so the graph can draw
+        it distinctly — this is how a 5-second spike inside a 600-second
+        GRAPH_SCALE window still shows up on the graph.
         """
         now = time.time()
         if now - self._disk_graph_last_tick < self.graph_scale:
             return
         self._disk_graph_last_tick = now
-        try:
-            self.file_manager.maybe_poll(force=True)
-            rate = self.file_manager.total_write_rate_raw()
-        except Exception:
-            rate = 0.0
-        self.disk_rate_history.append(max(0.0, rate))
+
+        if self._pending_new_max is not None:
+            rate = self._pending_new_max
+            is_special = True
+        else:
+            try:
+                rate = max(0.0, self.file_manager.total_write_rate_raw())
+            except Exception:
+                rate = 0.0
+            is_special = False
+        self._pending_new_max = None
+
+        self.disk_rate_history.append(rate)
+        self.disk_rate_special.append(is_special)
 
     # Density ramp for the disk-rate bars, faintest to most solid. All are
     # standard codepage-437 glyphs (confirmed against supported_characters.txt),
@@ -4598,7 +4652,10 @@ class JJDlpDashboard:
         color tiering. That single attr is theme-editable (see SITE_REGISTRY
         in theme.py: 'main_jjdlpdashboard_draw_disk_rate_graph') — it shows
         up in the in-app theme manager as "Top-Bar Disk-Rate Graph" and
-        defaults to the SYSTEM role, bold.
+        defaults to the SYSTEM role, bold. The one exception is a "special"
+        bar (self.disk_rate_special) marking a new current-max-rate — those
+        are drawn with a second, distinct attr (defaults to the WARN role)
+        so a fresh record stands out from the rest of the graph.
         """
         graph_w = max(0, x1 - x0 + 1)
         graph_h = max(1, y1 - y0 + 1)
@@ -4606,6 +4663,7 @@ class JJDlpDashboard:
             return
 
         visible = list(self.disk_rate_history)[-graph_w:]
+        visible_special = list(self.disk_rate_special)[-graph_w:]
         # Auto-scale to the loudest sample currently visible, so the graph
         # always uses its full height instead of being capped by a constant.
         # A small floor avoids a single near-zero screen looking artificially
@@ -4617,6 +4675,10 @@ class JJDlpDashboard:
         # Theme-editable — appears in the theme manager (n) as "Top-Bar
         # Disk-Rate Graph"; defaults to the SYSTEM role, bold.
         attr = theme.attr(self, "main_jjdlpdashboard_draw_disk_rate_graph")
+        # Theme-editable — appears in the theme manager (n) as "Top-Bar
+        # Disk-Rate Graph — New Max Bar"; defaults to the WARN role, bold.
+        special_attr = theme.attr(self, "main_jjdlpdashboard_draw_disk_rate_graph_special",
+                                   self.C_WARN)
 
         n = len(visible)
         for i, rate in enumerate(visible):
@@ -4639,12 +4701,14 @@ class JJDlpDashboard:
             body_char = self._GRAPH_RAMP[self._GRAPH_BODY_LEVELS[bidx]]
             tip_char = self._GRAPH_RAMP[local - self._GRAPH_BODY_STARTS[bidx] + 1]
 
+            bar_attr = special_attr if (i < len(visible_special) and visible_special[i]) else attr
+
             for r in range(height):
                 row = y1 - r
                 if row < y0:
                     break
                 ch = tip_char if r == height - 1 else body_char
-                self.safe_addstr(self.stdscr, row, col, ch, attr)
+                self.safe_addstr(self.stdscr, row, col, ch, bar_attr)
 
         return scale_max
 
@@ -5987,6 +6051,7 @@ class JJDlpDashboard:
 
         # Disk-rate sparkline — fills the gap between the logo and the clock,
         # same height as the logo (rows 1-6).
+        self._tick_rate_sampler()
         self._tick_disk_rate_history()
         _logo_w = max(len(_l) for _l in ASCII_LOGO)
         _graph_x0 = 2 + _logo_w + 3
@@ -5999,9 +6064,6 @@ class JJDlpDashboard:
             # the top of the axis a concrete value.
             if _scale_max is not None and _scale_max >= 5.0:
                 _label = f"max {human_rate(_scale_max)}"
-                _avg_rate = self.file_manager.total_write_rate()
-                if _avg_rate:
-                    _label = f"avg {human_rate(_avg_rate)}  {_label}"
                 _label_x = _graph_x1 - len(_label) + 1
                 if _label_x >= _graph_x0:
                     self.safe_addstr(self.stdscr, 0, _label_x, _label,

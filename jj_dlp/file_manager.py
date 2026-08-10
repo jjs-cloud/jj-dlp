@@ -116,12 +116,6 @@ POLL_INTERVAL_S = 1.0      # how often we re-scan OUTPUT_DIRs
 IDLE_THRESHOLD_S = 3.0     # size unchanged for this long => IDLE
 STATUS_MSG_TTL_S = 4.0     # how long an inline status/error message lingers
 
-# How many recent rate samples each file keeps to smooth its write rate.
-# At the 1s poll this is roughly a 20-second moving average. Tune here if
-# the aggregate rate still jumps around too much (raise it) or reacts too
-# slowly to real speed changes (lower it).
-RATE_SAMPLES_MAX = 60
-
 DELETE_MODE_TRASH = "trash"
 DELETE_MODE_PERMANENT = "permanent"
 DELETE_MODE_DEFAULT = DELETE_MODE_TRASH
@@ -542,7 +536,6 @@ class FileManagerTab:
             elif size != rec["size"]:
                 dt = max(now - rec.get("last_poll", now - POLL_INTERVAL_S), 0.001)
                 rec["rate"] = (size - rec["size"]) / dt
-                rec.setdefault("rate_samples", deque(maxlen=RATE_SAMPLES_MAX)).append(max(0.0, rec["rate"]))
                 rec["size"] = size
                 rec["last_change"] = now
             else:
@@ -570,7 +563,6 @@ class FileManagerTab:
                 if size != rec["size"]:
                     dt = max(now - rec.get("last_poll", now - POLL_INTERVAL_S), 0.001)
                     rec["rate"] = (size - rec["size"]) / dt
-                    rec.setdefault("rate_samples", deque(maxlen=RATE_SAMPLES_MAX)).append(max(0.0, rec["rate"]))
                     rec["size"] = size
                     rec["last_change"] = now
                 rec["last_poll"] = now
@@ -582,44 +574,13 @@ class FileManagerTab:
 
         self._rebuild_rows(dirs)
 
-    def total_write_rate(self) -> float:
-        """Sum of per-file averaged write rates across all currently-WRITING files.
-
-        Each file's rate jumps around between polls, so the average of its
-        recent ``rate_samples`` (a ~RATE_SAMPLES_MAX-second moving average) is
-        used instead of the raw instantaneous rate before summing. Only files
-        whose status is WRITING are counted (the same condition under which the
-        File Manager shows a rate), which also covers any in-progress Move
-        destination file tracked in ``_moving_records``.
-        """
-        total = 0.0
-        for rec in self._records.values():
-            if rec.get("status") != "WRITING":
-                continue
-            samples = rec.get("rate_samples")
-            if samples:
-                total += sum(samples) / len(samples)
-        for rec in self._moving_records.values():
-            if rec.get("status") != "WRITING":
-                continue
-            samples = rec.get("rate_samples")
-            if samples:
-                total += sum(samples) / len(samples)
-        return total
-
     def total_write_rate_raw(self) -> float:
-        """Sum of per-file *instantaneous* (unsmoothed) write rates across all
-        currently-WRITING files.
-
-        Unlike total_write_rate(), this bypasses the RATE_SAMPLES_MAX moving
-        average and reads each file's latest raw ``rate`` directly. That
-        average is great for a steady numeric readout (the File Manager tab
-        uses total_write_rate() for exactly that reason) but it changes so
-        slowly second-to-second that anything sampling it once/sec — like the
-        top-bar sparkline — ends up redrawing nearly the same value 10-15
-        times in a row, i.e. flat plateaus instead of varied bars. This is
-        the higher-resolution, jumpier source for callers that want that
-        variation instead of a smooth number.
+        """Sum of per-file *instantaneous* write rates across all
+        currently-WRITING files, read straight from each file's latest raw
+        ``rate`` (Δsize/Δt since its last poll). Used by the top-bar
+        sparkline (and its current-max-rate tracker) as well as any other
+        caller that wants a fast-moving, per-second reading rather than a
+        smoothed one.
         """
         total = 0.0
         for rec in self._records.values():
