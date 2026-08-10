@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.10"
+__version__ = "1.26.11"
 
 import subprocess
 import time
@@ -362,6 +362,7 @@ def load_global_config() -> dict:
         update_interval   – int
         update_branch     – str   ("main", "testing", or "experimental")
         ask_for_browser   – bool
+        graph_scale       – int   (seconds per bar on the top disk-rate graph)
     """
     path = get_global_conf_path()
     parser = configparser.ConfigParser(allow_no_value=True, interpolation=None, delimiters=('=',))
@@ -423,6 +424,7 @@ def load_global_config() -> dict:
         "web_ui_port":        _int("WEB_UI_PORT", 8765),
         "web_ui_user":        general.get("WEB_UI_USER", "").strip().strip('"\''),
         "web_ui_pass":        general.get("WEB_UI_PASS", "").strip().strip('"\''),
+        "graph_scale":        max(1, _int("GRAPH_SCALE", 1)),
     }
 
 def _write_global_conf_key(key: str, value: str) -> None:
@@ -613,6 +615,40 @@ def _save_last_live_cache(config_path: str, last_live: Dict[str, float]) -> None
         global_data["sites"][site_key]["last_live"] = {
             streamer: timestamp for streamer, timestamp in last_live.items()
         }
+        _save_global_json(global_data)
+
+
+# How many of the most recent disk-rate graph bars to persist across restarts.
+# Deliberately larger than any realistic terminal width so a wider window on
+# relaunch still shows a full graph.
+_GRAPH_PERSIST_BARS: int = 500
+
+
+def _load_disk_rate_history() -> List[float]:
+    """Return the persisted top-graph disk-rate bars from global.json."""
+    with _global_json_lock:
+        global_data = _load_global_json()
+    raw = global_data.get("disk_rate_history", [])
+    if not isinstance(raw, list):
+        return []
+    bars: List[float] = []
+    for v in raw[-_GRAPH_PERSIST_BARS:]:
+        try:
+            bars.append(float(v))
+        except (TypeError, ValueError):
+            continue
+    return bars
+
+
+def _save_disk_rate_history(bars) -> None:
+    """Persist the most recent disk-rate graph bars into global.json.
+
+    Merges with any existing data so other keys are preserved.  Keeps at most
+    _GRAPH_PERSIST_BARS entries.
+    """
+    with _global_json_lock:
+        global_data = _load_global_json()
+        global_data["disk_rate_history"] = [float(b) for b in bars][-_GRAPH_PERSIST_BARS:]
         _save_global_json(global_data)
 
 
@@ -4407,14 +4443,18 @@ class JJDlpDashboard:
         self._disk_cache_results: list = []  # list of (drive, usage) or (drive, None) on error
 
         # ── Top-bar disk-rate sparkline ──────────────────────────────────────
-        # One sample per second, taken straight from file_manager.total_write_rate()
-        # (which already applies the RATE_SAMPLES_MAX moving-average window in
-        # file_manager.py — we deliberately don't add a second layer of smoothing
-        # on top of that here, so the bars stay as varied/reactive as that window
-        # allows). History is kept far longer than any realistic terminal width
-        # so widening the window doesn't lose data.
+        # One bar per GRAPH_SCALE seconds (default 1 = one bar per second),
+        # taken straight from file_manager.total_write_rate_raw() (which reads
+        # each file's Δsize/Δt since the last poll, so a single sample per bar
+        # is a true average over that whole window). History is kept far longer
+        # than any realistic terminal width so widening the window doesn't lose
+        # data.
+        self.graph_scale: int = max(1, int(self.global_cfg.get("graph_scale", 1)))
         self.disk_rate_history: deque = deque(maxlen=2000)
         self._disk_graph_last_tick: float = 0.0
+        # Bars persisted to global.json on the previous run are restored here so
+        # the graph comes back with its recent history instead of starting empty.
+        self.disk_rate_history.extend(_load_disk_rate_history())
 
         from .config_editor import ConfigEditor
         self.config_editor = ConfigEditor(self)
@@ -4502,26 +4542,21 @@ class JJDlpDashboard:
 
     # ── Top-bar disk-rate sparkline ─────────────────────────────────────────
     def _tick_disk_rate_history(self):
-        """Append one disk-rate sample about once per second.
+        """Append one disk-rate bar once every GRAPH_SCALE seconds.
 
-        Uses file_manager.total_write_rate_raw() — the *unsmoothed*
-        instantaneous rate, not total_write_rate()'s RATE_SAMPLES_MAX moving
-        average. The averaged number is great for the File Manager tab's
-        numeric readout, but it moves too slowly second-to-second for a
-        graph sampled once/sec: it would just redraw nearly the same value
-        many times in a row (flat plateaus). The raw sum gives each bar its
-        own real per-second value instead.
+        A forced maybe_poll() runs here (and only here, plus the File Manager
+        tab's own 1s poll while it's focused), so the directory scan cadence
+        scales with GRAPH_SCALE — at GRAPH_SCALE=600 the rescan drops from
+        once/sec to once/10min. Each file's rate is computed as Δsize/Δt since
+        its last poll, so the single sample taken here is a true average over
+        the whole GRAPH_SCALE window, not an instantaneous spot reading.
         """
         now = time.time()
-        if now - self._disk_graph_last_tick < 1.0:
+        if now - self._disk_graph_last_tick < self.graph_scale:
             return
         self._disk_graph_last_tick = now
         try:
-            # No throttle override — every caller of maybe_poll() (this,
-            # draw_system_panel, the File Manager tab) now shares the same
-            # cadence, so the underlying file records stay consistently
-            # fresh regardless of which tab is active.
-            self.file_manager.maybe_poll()
+            self.file_manager.maybe_poll(force=True)
             rate = self.file_manager.total_write_rate_raw()
         except Exception:
             rate = 0.0
@@ -4657,13 +4692,6 @@ class JJDlpDashboard:
     # ── System status sidebar ────────────────────────────────────────────────
     def draw_system_panel(self, y1, x1, y2, x2):
         """Draws the SYSTEM info panel (from demo). Placed in the sidebar."""
-        # Keep the sidebar's write-rate figure fresh even when the File
-        # Manager tab isn't focused. No throttle override here — this shares
-        # the same 1s cadence as every other caller of maybe_poll(), so the
-        # underlying file records (and anything reading them, like the
-        # top-bar disk graph) stay consistently fresh regardless of which
-        # tab is active.
-        self.file_manager.maybe_poll()
         self.draw_box(self.stdscr, y1, x1, y2, x2, self.C_SYSTEM)
         self.safe_addstr(self.stdscr, y1, x1 + 2, " SYSTEM ",
                     theme.attr(self, "main_jjdlpdashboard_draw_system_panel_system"))
@@ -6414,6 +6442,23 @@ class JJDlpDashboard:
                 f"{_new_thresh_raw!r} — keeping current threshold"
             )
 
+        # ── GRAPH_SCALE ───────────────────────────────────────────────────────
+        # Apply the new seconds-per-bar value immediately so the top graph's
+        # cadence (and the disk-directory scan it drives) picks it up without
+        # a restart.
+        try:
+            _new_scale = max(1, int(new_cfg.get("GRAPH_SCALE", "1").strip()))
+            if _new_scale != self.graph_scale:
+                self.graph_scale = _new_scale
+                _logger.dbg(
+                    f"[CONFIG] apply_global_cfg: GRAPH_SCALE updated to {_new_scale}"
+                )
+        except (ValueError, TypeError):
+            _logger.dbg(
+                f"[CONFIG] apply_global_cfg: invalid GRAPH_SCALE value "
+                f"{new_cfg.get('GRAPH_SCALE', '1')!r} — keeping current scale"
+            )
+
     # ── Changelog popup helpers ───────────────────────────────────────────────
     def _should_show_changelog(self) -> bool:
         """Return True when the changelog should be shown at startup.
@@ -6709,6 +6754,17 @@ class JJDlpDashboard:
                     theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_invhead"))
 
     # ── Run loop ──────────────────────────────────────────────────────────────
+    def _persist_graph_history(self) -> None:
+        """Persist the current disk-rate graph bars to global.json.
+
+        Called on shutdown so the graph comes back with its history on the
+        next launch.  Best-effort — failures are swallowed.
+        """
+        try:
+            _save_disk_rate_history(list(self.disk_rate_history))
+        except Exception as _e:
+            dbg(f"[GRAPH] _persist_graph_history failed: {_e!r}")
+
     def run(self):
         curses.curs_set(0)
         self.stdscr.nodelay(True)
@@ -6745,6 +6801,7 @@ class JJDlpDashboard:
                     should_quit = True
                     break
             if should_quit:
+                self._persist_graph_history()
                 break
             self.tick += 1
             curses.napms(50)
@@ -7316,6 +7373,7 @@ def main() -> None:
         _dash_log(msg)
 
     # ── Launch curses dashboard ───────────────────────────────────────────────
+    dashboard = None
     try:
         def _run_dashboard(stdscr):
             h, w = stdscr.getmaxyx()
@@ -7327,14 +7385,24 @@ def main() -> None:
                     f"(currently {w}×{h}). Resize and re-run.")
                 stdscr.refresh()
                 stdscr.getch()
-                return
-            JJDlpDashboard(stdscr, sites, global_cfg=global_cfg).run()
+                return None
+            dash = JJDlpDashboard(stdscr, sites, global_cfg=global_cfg)
+            dash.run()
+            return dash
 
-        curses.wrapper(_run_dashboard)
+        dashboard = curses.wrapper(_run_dashboard)
 
     except KeyboardInterrupt:
         pass
     finally:
+        # Persist the disk-rate graph history on any shutdown path (normal
+        # quit persists inside run(); this covers Ctrl-C / KeyboardInterrupt).
+        if dashboard is not None:
+            try:
+                dashboard._persist_graph_history()
+            except Exception:
+                pass
+
         for site in sites:
             site.stop()
             if site.eventsub is not None:

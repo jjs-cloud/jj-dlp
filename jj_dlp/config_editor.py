@@ -60,6 +60,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("LQ_DOWNLOADER",         "global", "false", True,  "When any recording reaches the ffmpeg error threshold (FF_ERR_THRESH) lower the video quality of the lowest priority streamer, freeing up bandwidth for the remaining streamers."),
     _KeyDef("FF_ERR_THRESH",         "global", "200",   True,  'Restart the download if we see this many ffmpeg errors ("timestamp discontinuity", "Packet corrupt") default: 200'),
     _KeyDef("SUBFOLDERS",            "global", "false", True,  "Save recordings into a subfolder named after the streamer inside OUTPUT_DIR (true/false)."),
+    _KeyDef("GRAPH_SCALE",           "global", "1",     True,  "The number of seconds each bar in the graph represents. (default = 600)."),
     _KeyDef("DESTINATIONS",          "global", "",      True,  "A list of destination paths where you might want to move your files.  Used in the File Manager tab. (e.g. C:\\My Recordings  OR /home/greg/twitch)"),
     _KeyDef("NTFY_TOPIC",            "global", "",      True,  "The topic name to use for ntfy.sh notifications. (example: jj-dlp-fj48dh734fk) Refer to docs/ntfy-setup.md for a detailed setup guide. (blank = disabled)"),
     _KeyDef("NOTIFY_CONFIRM_FILE",   "global", "true",  True,  "Confirm the recording has actually started before sending a live notification.  Note: When enabled, the notifications will be delayed by a few seconds until the file has been confirmed."),
@@ -2124,7 +2125,8 @@ def _validate_value(key: str, value: str) -> tuple[bool, str]:
     int_keys = {"UPDATE_INTERVAL", "SITE_ORDER", "CHECK_INTERVAL", "COOLDOWN_AFTER_RECORDING",
                 "SPLIT_AFTER", "STALL_CHECK_INTERVAL", "STALL_TIMEOUT", "CONFIG_CHECK_INTERVAL",
                 "POPUP_TIMEOUT", "POPUP_COOLDOWN", "PROGRESS_BAR_MAX_HOURS", "PROGRESS_BAR_WIDTH",
-                "LAST_LIVE_HIGHLIGHT", "MAX_CONCURRENT_REC", "FF_ERR_THRESH", "WEB_UI_PORT"}
+                "LAST_LIVE_HIGHLIGHT", "MAX_CONCURRENT_REC", "FF_ERR_THRESH", "WEB_UI_PORT",
+                "GRAPH_SCALE"}
     if key in bool_keys:
         if value.lower() not in ("true", "false", "yes", "no", "1", "0"):
             return False, "Must be true or false"
@@ -2133,6 +2135,12 @@ def _validate_value(key: str, value: str) -> tuple[bool, str]:
             val = int(value)
             if val < 0 and key != "SITE_ORDER":
                 return False, "Must be >= 0"
+        except ValueError:
+            return False, "Must be an integer"
+    if key == "GRAPH_SCALE":
+        try:
+            if int(value) < 1:
+                return False, "Must be >= 1"
         except ValueError:
             return False, "Must be an integer"
     if key == "SITE_SORT":
