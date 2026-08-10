@@ -4517,6 +4517,11 @@ class JJDlpDashboard:
             return
         self._disk_graph_last_tick = now
         try:
+            # No throttle override — every caller of maybe_poll() (this,
+            # draw_system_panel, the File Manager tab) now shares the same
+            # cadence, so the underlying file records stay consistently
+            # fresh regardless of which tab is active.
+            self.file_manager.maybe_poll()
             rate = self.file_manager.total_write_rate_raw()
         except Exception:
             rate = 0.0
@@ -4637,11 +4642,12 @@ class JJDlpDashboard:
     def draw_system_panel(self, y1, x1, y2, x2):
         """Draws the SYSTEM info panel (from demo). Placed in the sidebar."""
         # Keep the sidebar's write-rate figure fresh even when the File
-        # Manager tab isn't focused. Throttled to a coarse 5s cadence here
-        # (vs. the File Manager tab's own snappier 1s poll) since the
-        # sidebar only needs a rough rate, not a per-frame-accurate one —
-        # this avoids a full OUTPUT_DIR rescan on every dashboard redraw.
-        self.file_manager.maybe_poll(min_interval=5.0)
+        # Manager tab isn't focused. No throttle override here — this shares
+        # the same 1s cadence as every other caller of maybe_poll(), so the
+        # underlying file records (and anything reading them, like the
+        # top-bar disk graph) stay consistently fresh regardless of which
+        # tab is active.
+        self.file_manager.maybe_poll()
         self.draw_box(self.stdscr, y1, x1, y2, x2, self.C_SYSTEM)
         self.safe_addstr(self.stdscr, y1, x1 + 2, " SYSTEM ",
                     theme.attr(self, "main_jjdlpdashboard_draw_system_panel_system"))
