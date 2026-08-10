@@ -4406,6 +4406,16 @@ class JJDlpDashboard:
         self._disk_cache_drives: list = []
         self._disk_cache_results: list = []  # list of (drive, usage) or (drive, None) on error
 
+        # ── Top-bar disk-rate sparkline ──────────────────────────────────────
+        # One sample per second, taken straight from file_manager.total_write_rate()
+        # (which already applies the RATE_SAMPLES_MAX moving-average window in
+        # file_manager.py — we deliberately don't add a second layer of smoothing
+        # on top of that here, so the bars stay as varied/reactive as that window
+        # allows). History is kept far longer than any realistic terminal width
+        # so widening the window doesn't lose data.
+        self.disk_rate_history: deque = deque(maxlen=2000)
+        self._disk_graph_last_tick: float = 0.0
+
         from .config_editor import ConfigEditor
         self.config_editor = ConfigEditor(self)
 
@@ -4489,6 +4499,75 @@ class JJDlpDashboard:
         for i, line in enumerate(ASCII_LOGO):
             self.safe_addstr(self.stdscr, y + i, x, line,
                         theme.attr(self, "main_jjdlpdashboard_draw_logo_logo"))
+
+    # ── Top-bar disk-rate sparkline ─────────────────────────────────────────
+    def _tick_disk_rate_history(self):
+        """Append one disk-rate sample about once per second.
+
+        Reuses file_manager.total_write_rate(), which already applies the
+        RATE_SAMPLES_MAX moving-average window (see file_manager.py) — no
+        additional smoothing is layered on here, so the graph stays as
+        reactive/varied as that window allows.
+        """
+        now = time.time()
+        if now - self._disk_graph_last_tick < 1.0:
+            return
+        self._disk_graph_last_tick = now
+        try:
+            rate = self.file_manager.total_write_rate()
+        except Exception:
+            rate = 0.0
+        self.disk_rate_history.append(max(0.0, rate))
+
+    def draw_disk_rate_graph(self, y0: int, x0: int, x1: int, y1: int):
+        """Draw the growing/scrolling disk-rate sparkline between the logo
+        and the system-time clock.
+
+        (y0, x0) is the top-left, (x1, y1) the bottom-right (inclusive) of
+        the available area. The graph fills right-to-left as new samples
+        arrive, then scrolls once it reaches the logo. Height is auto-scaled
+        to the tallest sample currently on screen (not a fixed constant) so
+        the bars use the full available height and stay as visually varied
+        as possible.
+        """
+        graph_w = max(0, x1 - x0 + 1)
+        graph_h = max(1, y1 - y0 + 1)
+        if graph_w <= 0 or not self.disk_rate_history:
+            return
+
+        visible = list(self.disk_rate_history)[-graph_w:]
+        # Auto-scale to the loudest sample currently visible, so the graph
+        # always uses its full height instead of being capped by a constant.
+        # A small floor avoids a single near-zero screen looking artificially
+        # "maxed out" from float noise.
+        scale_max = max(visible) if any(v > 0.01 for v in visible) else 1.0
+
+        n = len(visible)
+        for i, rate in enumerate(visible):
+            col = x1 - (n - 1 - i)
+            if col < x0:
+                continue
+            units = int(round((rate / scale_max) * graph_h)) if scale_max > 0 else 0
+            units = max(0, min(graph_h, units))
+            frac = units / graph_h
+            if frac < 0.25:
+                pair = self.C_SYSTEM
+                bold = False
+            elif frac < 0.55:
+                pair = self.C_SYSTEM
+                bold = True
+            elif frac < 0.8:
+                pair = self.C_LIVE
+                bold = True
+            else:
+                pair = self.C_WARN
+                bold = True
+            attr = curses.color_pair(pair) | (curses.A_BOLD if bold else 0)
+            for r in range(units):
+                row = y1 - r
+                if row < y0:
+                    break
+                self.safe_addstr(self.stdscr, row, col, "\u2588", attr)
 
     # ── Christmas Day easter egg ────────────────────────────────────────────
     @staticmethod
@@ -5845,8 +5924,19 @@ class JJDlpDashboard:
 
         # System time top-right
         sys_time_str = datetime.now().strftime("%Y-%m-%d  %H:%M:%S")
-        self.safe_addstr(self.stdscr, 1, w - len(sys_time_str) - 3, sys_time_str,
+        time_x = w - len(sys_time_str) - 3
+        self.safe_addstr(self.stdscr, 1, time_x, sys_time_str,
                     theme.attr(self, "main_jjdlpdashboard_refresh_screen_chrome_1"))
+
+        # Disk-rate sparkline — fills the gap between the logo and the clock,
+        # same height as the logo (rows 1-6).
+        self._tick_disk_rate_history()
+        _logo_w = max(len(_l) for _l in ASCII_LOGO)
+        _graph_x0 = 2 + _logo_w + 3
+        _graph_x1 = time_x - 2
+        _graph_y1 = 1 + len(ASCII_LOGO) - 1
+        if _graph_x1 > _graph_x0:
+            self.draw_disk_rate_graph(1, _graph_x0, _graph_x1, _graph_y1)
 
         # Track the next available row on the right side
         next_right_row = 2
