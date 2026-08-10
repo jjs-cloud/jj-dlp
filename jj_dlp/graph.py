@@ -36,20 +36,18 @@ class Graph:
     """
 
     # Density ramp for the disk-rate bars, ordered by actual visual ink
-    # coverage (not by codepoint): ' '=0%, ░=25%, ▒=50%, ▄=50%, ▓=75%, █=100%.
-    # ▄ (LOWER HALF BLOCK) is a *solid* half-fill, so to the eye it reads as
-    # roughly the same weight as ▒ (a 50% dither) — it is NOT denser than ▓.
-    # It used to sit between ▓ and █ in this list, which meant a bar's tip
-    # could land on a *lighter-looking* glyph (▄) to represent a value that
-    # was actually higher than another bar's tip landing on ▓ — i.e. a
-    # shorter/lighter-looking bar could legitimately represent a higher
-    # rate than a taller one. Placing ▄ at its correct weight (tied with ▒,
-    # ahead of ▓) fixes that: density now only ever increases (or ties) as
-    # you move up the ramp. All glyphs are standard codepage-437 glyphs
-    # (confirmed against supported_characters.txt), so — unlike the
-    # eighth-block chars — these are safe on cmd.exe/PowerShell as well as
-    # real terminals. Index 0 is "empty".
-    _GRAPH_RAMP = [" ", "\u2591", "\u2592", "\u2584", "\u2593", "\u2588"]  # ' ░▒▄▓█'
+    # coverage (not by codepoint): ' '=0%, ░=25%, ▄=50%, ▒=50%, ▓=75%, █=100%.
+    # ▄ (LOWER HALF BLOCK) and ▒ (a 25%-ish dither... actually a checkerboard
+    # ~50% dither) have the same *ink coverage*, but ▄ reads as visually
+    # lighter/lower — it's a flat half-fill sitting in the bottom half of the
+    # cell — while ▒'s even speckle reads as more "filled in". So of the two
+    # tied-weight glyphs, ▄ is placed first (the lighter-reading one) and ▒
+    # second, so a rate increase always moves toward a glyph that looks at
+    # least as full, never one that looks emptier. All glyphs are standard
+    # codepage-437 glyphs (confirmed against supported_characters.txt), so —
+    # unlike the eighth-block chars — these are safe on cmd.exe/PowerShell as
+    # well as real terminals. Index 0 is "empty".
+    _GRAPH_RAMP = [" ", "\u2591", "\u2584", "\u2592", "\u2593", "\u2588"]  # ' ░▄▒▓█'
     # Cadence (seconds) of the instantaneous-rate sub-sampler feeding the
     # top-bar graph. Smaller = burstier/more random bars (each bar becomes a
     # point reading over a shorter window); larger = smoother. Only the
@@ -98,12 +96,12 @@ class Graph:
     # blank column. Set to 0 for strict auto-scaling.
     _GRAPH_MIN_BAR_HEIGHT = 0
     # Body density levels (ramp indices into the reordered _GRAPH_RAMP
-    # above: ' '=0 ░=1 ▒=2 ▄=3 ▓=4 █=5). The half-block (▄, index 3) is
+    # above: ' '=0 ░=1 ▄=2 ▒=3 ▓=4 █=5). The half-block (▄, index 2) is
     # excluded from bodies — a body of ▄ would read as a half-height bar —
     # so it only ever appears as a *tip* glyph, picked up automatically by
     # the tip formula in draw() because it now sits at its correct weight
-    # inside the ramp.
-    _GRAPH_BODY_LEVELS = [1, 2, 4, 5]  # ░ ▒ ▓ █
+    # (and correct visual ordering relative to ▒) inside the ramp.
+    _GRAPH_BODY_LEVELS = [1, 3, 4, 5]  # ░ ▒ ▓ █
     _GRAPH_BODY_STARTS = [0, 1, 3, 6]  # state offset of each body level
 
     def __init__(self, dashboard):
@@ -222,12 +220,12 @@ class Graph:
         tip's density (the topmost row, which is capped at the body's density).
         That gives 11 distinguishable sub-states per row instead of 1. The
         half-block (▄) never appears as a body (a body of ▄ would read as a
-        half-height bar) — only as a tip glyph, at its correct visual weight
-        in _GRAPH_RAMP (tied with ▒, below ▓) so tip density is monotonic
-        with the underlying rate instead of a lighter-looking glyph ever
-        standing in for a higher value. This is the finest resolution
-        available without risking the eighth-block glyphs that don't render
-        on cmd.exe/PowerShell.
+        half-height bar) — only as a tip glyph. It's tied with ▒ in raw ink
+        coverage but visually reads as emptier, so it's placed just below ▒
+        in _GRAPH_RAMP: tip density is monotonic with the underlying rate,
+        and a rate increase never moves to a lighter-looking glyph. This is
+        the finest resolution available without risking the eighth-block
+        glyphs that don't render on cmd.exe/PowerShell.
 
         Monochrome — a single color/attr for the whole graph, no height-based
         color tiering. That single attr is theme-editable (see SITE_REGISTRY
