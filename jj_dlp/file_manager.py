@@ -120,7 +120,7 @@ STATUS_MSG_TTL_S = 4.0     # how long an inline status/error message lingers
 # At the 1s poll this is roughly a 20-second moving average. Tune here if
 # the aggregate rate still jumps around too much (raise it) or reacts too
 # slowly to real speed changes (lower it).
-RATE_SAMPLES_MAX = 1
+RATE_SAMPLES_MAX = 5
 
 DELETE_MODE_TRASH = "trash"
 DELETE_MODE_PERMANENT = "permanent"
@@ -605,6 +605,31 @@ class FileManagerTab:
             samples = rec.get("rate_samples")
             if samples:
                 total += sum(samples) / len(samples)
+        return total
+
+    def total_write_rate_raw(self) -> float:
+        """Sum of per-file *instantaneous* (unsmoothed) write rates across all
+        currently-WRITING files.
+
+        Unlike total_write_rate(), this bypasses the RATE_SAMPLES_MAX moving
+        average and reads each file's latest raw ``rate`` directly. That
+        average is great for a steady numeric readout (the File Manager tab
+        uses total_write_rate() for exactly that reason) but it changes so
+        slowly second-to-second that anything sampling it once/sec — like the
+        top-bar sparkline — ends up redrawing nearly the same value 10-15
+        times in a row, i.e. flat plateaus instead of varied bars. This is
+        the higher-resolution, jumpier source for callers that want that
+        variation instead of a smooth number.
+        """
+        total = 0.0
+        for rec in self._records.values():
+            if rec.get("status") != "WRITING":
+                continue
+            total += max(0.0, rec.get("rate", 0.0))
+        for rec in self._moving_records.values():
+            if rec.get("status") != "WRITING":
+                continue
+            total += max(0.0, rec.get("rate", 0.0))
         return total
 
     # ── Sorting / row layout ────────────────────────────────────────────────

@@ -4504,17 +4504,20 @@ class JJDlpDashboard:
     def _tick_disk_rate_history(self):
         """Append one disk-rate sample about once per second.
 
-        Reuses file_manager.total_write_rate(), which already applies the
-        RATE_SAMPLES_MAX moving-average window (see file_manager.py) — no
-        additional smoothing is layered on here, so the graph stays as
-        reactive/varied as that window allows.
+        Uses file_manager.total_write_rate_raw() — the *unsmoothed*
+        instantaneous rate, not total_write_rate()'s RATE_SAMPLES_MAX moving
+        average. The averaged number is great for the File Manager tab's
+        numeric readout, but it moves too slowly second-to-second for a
+        graph sampled once/sec: it would just redraw nearly the same value
+        many times in a row (flat plateaus). The raw sum gives each bar its
+        own real per-second value instead.
         """
         now = time.time()
         if now - self._disk_graph_last_tick < 1.0:
             return
         self._disk_graph_last_tick = now
         try:
-            rate = self.file_manager.total_write_rate()
+            rate = self.file_manager.total_write_rate_raw()
         except Exception:
             rate = 0.0
         self.disk_rate_history.append(max(0.0, rate))
@@ -4529,6 +4532,13 @@ class JJDlpDashboard:
         to the tallest sample currently on screen (not a fixed constant) so
         the bars use the full available height and stay as visually varied
         as possible.
+
+        Vertical resolution is doubled with half-block characters (▄) on top
+        of full blocks (█) — both are standard codepage-437 glyphs, so this
+        stays safe on cmd.exe/PowerShell (unlike the eighth-block chars,
+        which aren't). That gives 2 distinguishable levels per text row
+        instead of 1, so bars of similar-but-different rates are more likely
+        to render at visibly different heights.
         """
         graph_w = max(0, x1 - x0 + 1)
         graph_h = max(1, y1 - y0 + 1)
@@ -4542,14 +4552,17 @@ class JJDlpDashboard:
         # "maxed out" from float noise.
         scale_max = max(visible) if any(v > 0.01 for v in visible) else 1.0
 
+        # Half-row resolution: 2 levels per text row.
+        res_units = graph_h * 2
+
         n = len(visible)
         for i, rate in enumerate(visible):
             col = x1 - (n - 1 - i)
             if col < x0:
                 continue
-            units = int(round((rate / scale_max) * graph_h)) if scale_max > 0 else 0
-            units = max(0, min(graph_h, units))
-            frac = units / graph_h
+            units = int(round((rate / scale_max) * res_units)) if scale_max > 0 else 0
+            units = max(0, min(res_units, units))
+            frac = units / res_units
             if frac < 0.25:
                 pair = self.C_SYSTEM
                 bold = False
@@ -4563,11 +4576,17 @@ class JJDlpDashboard:
                 pair = self.C_WARN
                 bold = True
             attr = curses.color_pair(pair) | (curses.A_BOLD if bold else 0)
-            for r in range(units):
+
+            full_rows, half = divmod(units, 2)
+            for r in range(full_rows):
                 row = y1 - r
                 if row < y0:
                     break
-                self.safe_addstr(self.stdscr, row, col, "\u2588", attr)
+                self.safe_addstr(self.stdscr, row, col, "\u2588", attr)  # █
+            if half:
+                row = y1 - full_rows
+                if row >= y0:
+                    self.safe_addstr(self.stdscr, row, col, "\u2584", attr)  # ▄
 
     # ── Christmas Day easter egg ────────────────────────────────────────────
     @staticmethod
