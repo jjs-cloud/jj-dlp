@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.11"
+__version__ = "1.26.12"
 
 import subprocess
 import time
@@ -624,31 +624,49 @@ def _save_last_live_cache(config_path: str, last_live: Dict[str, float]) -> None
 _GRAPH_PERSIST_BARS: int = 500
 
 
-def _load_disk_rate_history() -> List[float]:
-    """Return the persisted top-graph disk-rate bars from global.json."""
+def _load_disk_rate_history() -> Tuple[List[float], List[bool]]:
+    """Return the persisted top-graph disk-rate bars (and their "new max"
+    special flags) from global.json, as a (bars, specials) pair of equal
+    length.
+    """
     with _global_json_lock:
         global_data = _load_global_json()
     raw = global_data.get("disk_rate_history", [])
+    raw_special = global_data.get("disk_rate_special", [])
     if not isinstance(raw, list):
-        return []
+        return [], []
+    if not isinstance(raw_special, list):
+        raw_special = []
     bars: List[float] = []
     for v in raw[-_GRAPH_PERSIST_BARS:]:
         try:
             bars.append(float(v))
         except (TypeError, ValueError):
             continue
-    return bars
+    specials: List[bool] = [bool(v) for v in raw_special[-_GRAPH_PERSIST_BARS:]]
+    # Guard against a mismatched/corrupt specials list (e.g. from an older
+    # global.json written before this field existed) by padding/truncating
+    # it to line up 1:1 with the restored bars rather than mis-assigning
+    # special-ness to the wrong bar.
+    if len(specials) < len(bars):
+        specials.extend([False] * (len(bars) - len(specials)))
+    elif len(specials) > len(bars):
+        specials = specials[-len(bars):] if bars else []
+    return bars, specials
 
 
-def _save_disk_rate_history(bars) -> None:
-    """Persist the most recent disk-rate graph bars into global.json.
+def _save_disk_rate_history(bars, specials) -> None:
+    """Persist the most recent disk-rate graph bars (and their "new max"
+    special flags) into global.json.
 
-    Merges with any existing data so other keys are preserved.  Keeps at most
-    _GRAPH_PERSIST_BARS entries.
+    Merges with any existing data so other keys are preserved. Keeps at most
+    _GRAPH_PERSIST_BARS entries, and keeps ``bars``/``specials`` aligned
+    1:1 so a restart doesn't lose which restored bars were record-setting.
     """
     with _global_json_lock:
         global_data = _load_global_json()
         global_data["disk_rate_history"] = [float(b) for b in bars][-_GRAPH_PERSIST_BARS:]
+        global_data["disk_rate_special"] = [bool(s) for s in specials][-_GRAPH_PERSIST_BARS:]
         _save_global_json(global_data)
 
 
@@ -4452,15 +4470,17 @@ class JJDlpDashboard:
         self.graph_scale: int = max(1, int(self.global_cfg.get("graph_scale", 1)))
         self.disk_rate_history: deque = deque(maxlen=2000)
         self._disk_graph_last_tick: float = 0.0
-        # Bars persisted to global.json on the previous run are restored here so
-        # the graph comes back with its recent history instead of starting empty.
-        self.disk_rate_history.extend(_load_disk_rate_history())
+        # Bars (and their "new max" special flags) persisted to global.json on
+        # the previous run are restored here so the graph comes back with its
+        # recent history instead of starting empty.
+        _restored_bars, _restored_specials = _load_disk_rate_history()
+        self.disk_rate_history.extend(_restored_bars)
 
         # ── Current-max-rate tracking (see _tick_rate_sampler / _tick_disk_rate_history) ──
         # Parallel to disk_rate_history: True for any bar whose value came from
         # a new all-time-high rate rather than an ordinary end-of-window sample.
         self.disk_rate_special: deque = deque(maxlen=2000)
-        self.disk_rate_special.extend([False] * len(self.disk_rate_history))
+        self.disk_rate_special.extend(_restored_specials)
         # Running max write rate ever observed this session, sampled once per
         # second regardless of GRAPH_SCALE. Seeded from restored history so a
         # restart doesn't immediately re-trigger a "new max" on old data.
@@ -6823,7 +6843,7 @@ class JJDlpDashboard:
         next launch.  Best-effort — failures are swallowed.
         """
         try:
-            _save_disk_rate_history(list(self.disk_rate_history))
+            _save_disk_rate_history(list(self.disk_rate_history), list(self.disk_rate_special))
         except Exception as _e:
             dbg(f"[GRAPH] _persist_graph_history failed: {_e!r}")
 
