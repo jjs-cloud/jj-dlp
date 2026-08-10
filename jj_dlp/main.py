@@ -4553,6 +4553,12 @@ class JJDlpDashboard:
         1 (or 2, with the earlier half-block-only approach). That's the
         finest resolution available without risking the eighth-block glyphs
         that don't render on cmd.exe/PowerShell.
+
+        Monochrome — a single color/attr for the whole graph, no height-based
+        color tiering. That single attr is theme-editable (see SITE_REGISTRY
+        in theme.py: 'main_jjdlpdashboard_draw_disk_rate_graph') — it shows
+        up in the in-app theme manager as "Top-Bar Disk-Rate Graph" and
+        defaults to the SYSTEM role, bold.
         """
         graph_w = max(0, x1 - x0 + 1)
         graph_h = max(1, y1 - y0 + 1)
@@ -4568,6 +4574,9 @@ class JJDlpDashboard:
 
         sublevels = len(self._GRAPH_SUBLEVELS)  # 5 sub-levels per row
         res_units = graph_h * sublevels
+        # Theme-editable — appears in the theme manager (n) as "Top-Bar
+        # Disk-Rate Graph"; defaults to the SYSTEM role, bold.
+        attr = theme.attr(self, "main_jjdlpdashboard_draw_disk_rate_graph")
 
         n = len(visible)
         for i, rate in enumerate(visible):
@@ -4576,20 +4585,6 @@ class JJDlpDashboard:
                 continue
             units = int(round((rate / scale_max) * res_units)) if scale_max > 0 else 0
             units = max(0, min(res_units, units))
-            frac = units / res_units
-            if frac < 0.25:
-                pair = self.C_SYSTEM
-                bold = False
-            elif frac < 0.55:
-                pair = self.C_SYSTEM
-                bold = True
-            elif frac < 0.8:
-                pair = self.C_LIVE
-                bold = True
-            else:
-                pair = self.C_WARN
-                bold = True
-            attr = curses.color_pair(pair) | (curses.A_BOLD if bold else 0)
 
             full_rows, remainder = divmod(units, sublevels)
             for r in range(full_rows):
