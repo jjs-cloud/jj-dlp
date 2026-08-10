@@ -4616,12 +4616,12 @@ class JJDlpDashboard:
     # ── Christmas Day easter egg ────────────────────────────────────────────
     @staticmethod
     def _is_christmas_day() -> bool:
-        """Return True only on December 25th (local system date)."""
+        """Return True on December 24th and 25th (local system date)."""
         _today = datetime.now()
-        return _today.month == 12 and _today.day == 25
+        return _today.month == 12 and _today.day in (24, 25)
 
     def draw_christmas_easter_egg(self, y, x):
-        """A small festive banner shown only on Christmas Day, next to the logo."""
+        """A small festive tree shown only on Christmas Eve/Day, below the version number."""
         tree = [
             "   *   ",
             "  /_\\  ",
@@ -4629,7 +4629,6 @@ class JJDlpDashboard:
             "/_____\\",
             "  | |  ",
         ]
-        greeting = "Merry Christmas!"
 
         for i, line in enumerate(tree):
             # Alternate red/green per row for a bit of festive sparkle;
@@ -4640,11 +4639,8 @@ class JJDlpDashboard:
                 pair = self.C_LIVE
             else:
                 pair = self.C_REC
-            self.safe_addstr(self.stdscr, y + i, x + 15, line,
+            self.safe_addstr(self.stdscr, y + i, x, line,
                         theme.attr(self, "main_jjdlpdashboard_draw_christmas_easte_pair", pair))
-
-        self.safe_addstr(self.stdscr, y + len(tree) + 1, x + 11, greeting,
-                    theme.attr(self, "main_jjdlpdashboard_draw_christmas_easte_live"))
 
     # ── Tab bar ──────────────────────────────────────────────────────────────
     def draw_tabs(self, y, x):
@@ -5958,15 +5954,6 @@ class JJDlpDashboard:
         # Logo (6 lines tall, starts at row 1)
         self.draw_logo(1, 2)
 
-        # Christmas Day easter egg — only appears on Dec 25th, sitting to the
-        # right of the logo. Skipped entirely if the terminal isn't wide
-        # enough to fit it without colliding with the top-right indicators.
-        if self._is_christmas_day():
-            _logo_w = max(len(_l) for _l in ASCII_LOGO)
-            _egg_x = 2 + _logo_w + 20
-            if w - _egg_x > 30:
-                self.draw_christmas_easter_egg(1, _egg_x)
-
         # System time top-right
         sys_time_str = datetime.now().strftime("%Y-%m-%d  %H:%M:%S")
         time_x = w - len(sys_time_str) - 3
@@ -6007,6 +5994,12 @@ class JJDlpDashboard:
         version_str = f"v{__version__}"
         self.safe_addstr(self.stdscr, next_right_row, w - len(version_str) - 3, version_str,
                     theme.attr(self, "main_jjdlpdashboard_refresh_screen_dim"))
+
+        # Christmas Day easter egg — tree below the version indicator, shown
+        # only on Dec 24th and 25th. Right-aligned to the same margin as the
+        # version number above it.
+        if self._is_christmas_day():
+            self.draw_christmas_easter_egg(next_right_row + 1, w - 3 - 7)
 
         # Blank line after logo (row 7), then tab bar at row 8
         # (Logo occupies rows 1-6, row 7 is blank, tabs at row 8)

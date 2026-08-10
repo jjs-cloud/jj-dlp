@@ -442,7 +442,6 @@ SITE_REGISTRY = {
     'main_jjdlpdashboard_draw_logo_logo': {'file': 'main.py', 'label': 'Main Logo Banner', 'default_role': 'LOGO', 'default_bold': True},
     'main_jjdlpdashboard_draw_disk_rate_graph': {'file': 'main.py', 'label': 'Top Bar Disk Rate Graph', 'default_role': 'SYSTEM', 'default_bold': True},
     'main_jjdlpdashboard_draw_christmas_easte_pair': {'file': 'main.py', 'label': 'Christmas Easter Egg — Tree', 'default_role': 'LIVE', 'default_bold': True},
-    'main_jjdlpdashboard_draw_christmas_easte_live': {'file': 'main.py', 'label': 'Christmas Easter Egg — \'Merry Christmas!\' Text', 'default_role': 'LIVE', 'default_bold': True},
     'main_jjdlpdashboard_draw_tabs_hilight': {'file': 'main.py', 'label': 'Tab Bar — Selected Tab', 'default_role': 'INVHEAD', 'default_bold': False},
     'main_jjdlpdashboard_draw_tabs_invhead': {'file': 'main.py', 'label': 'Tab Bar — Unselected Tab', 'default_role': 'CHROME', 'default_bold': True},
     'main_jjdlpdashboard_draw_system_panel_system': {'file': 'main.py', 'label': 'SYSTEM', 'default_role': 'SYSTEM', 'default_bold': True},
