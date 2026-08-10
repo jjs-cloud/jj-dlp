@@ -4527,6 +4527,15 @@ class JJDlpDashboard:
             rate = 0.0
         self.disk_rate_history.append(max(0.0, rate))
 
+    # Density ramp for the topmost (partial) row of each bar, faintest to
+    # most solid. All are standard codepage-437 glyphs (confirmed against
+    # supported_characters.txt), so — unlike the eighth-block chars — these
+    # are safe on cmd.exe/PowerShell as well as real terminals. Index 0 is
+    # "just barely reached this row" (empty), the last index (before a full
+    # block) is "almost a full row".
+    _GRAPH_SUBLEVELS = [" ", "\u2591", "\u2592", "\u2593", "\u2584"]  # ' ░▒▓▄'
+    _GRAPH_FULL = "\u2588"  # █
+
     def draw_disk_rate_graph(self, y0: int, x0: int, x1: int, y1: int):
         """Draw the growing/scrolling disk-rate sparkline between the logo
         and the system-time clock.
@@ -4538,12 +4547,12 @@ class JJDlpDashboard:
         the bars use the full available height and stay as visually varied
         as possible.
 
-        Vertical resolution is doubled with half-block characters (▄) on top
-        of full blocks (█) — both are standard codepage-437 glyphs, so this
-        stays safe on cmd.exe/PowerShell (unlike the eighth-block chars,
-        which aren't). That gives 2 distinguishable levels per text row
-        instead of 1, so bars of similar-but-different rates are more likely
-        to render at visibly different heights.
+        Each bar's topmost partial row is drawn with a shading ramp
+        (' ░▒▓▄' then a full block for a complete row) instead of just
+        on/off, giving 5 distinguishable sub-levels per text row instead of
+        1 (or 2, with the earlier half-block-only approach). That's the
+        finest resolution available without risking the eighth-block glyphs
+        that don't render on cmd.exe/PowerShell.
         """
         graph_w = max(0, x1 - x0 + 1)
         graph_h = max(1, y1 - y0 + 1)
@@ -4557,8 +4566,8 @@ class JJDlpDashboard:
         # "maxed out" from float noise.
         scale_max = max(visible) if any(v > 0.01 for v in visible) else 1.0
 
-        # Half-row resolution: 2 levels per text row.
-        res_units = graph_h * 2
+        sublevels = len(self._GRAPH_SUBLEVELS)  # 5 sub-levels per row
+        res_units = graph_h * sublevels
 
         n = len(visible)
         for i, rate in enumerate(visible):
@@ -4582,16 +4591,17 @@ class JJDlpDashboard:
                 bold = True
             attr = curses.color_pair(pair) | (curses.A_BOLD if bold else 0)
 
-            full_rows, half = divmod(units, 2)
+            full_rows, remainder = divmod(units, sublevels)
             for r in range(full_rows):
                 row = y1 - r
                 if row < y0:
                     break
-                self.safe_addstr(self.stdscr, row, col, "\u2588", attr)  # █
-            if half:
+                self.safe_addstr(self.stdscr, row, col, self._GRAPH_FULL, attr)
+            if remainder:
                 row = y1 - full_rows
                 if row >= y0:
-                    self.safe_addstr(self.stdscr, row, col, "\u2584", attr)  # ▄
+                    self.safe_addstr(self.stdscr, row, col,
+                                self._GRAPH_SUBLEVELS[remainder], attr)
 
     # ── Christmas Day easter egg ────────────────────────────────────────────
     @staticmethod

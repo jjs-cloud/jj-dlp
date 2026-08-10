@@ -120,7 +120,7 @@ STATUS_MSG_TTL_S = 4.0     # how long an inline status/error message lingers
 # At the 1s poll this is roughly a 20-second moving average. Tune here if
 # the aggregate rate still jumps around too much (raise it) or reacts too
 # slowly to real speed changes (lower it).
-RATE_SAMPLES_MAX = 5
+RATE_SAMPLES_MAX = 60
 
 DELETE_MODE_TRASH = "trash"
 DELETE_MODE_PERMANENT = "permanent"
