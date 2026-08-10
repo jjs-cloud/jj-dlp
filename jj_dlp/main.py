@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.9"
+__version__ = "1.26.10"
 
 import subprocess
 import time
@@ -4538,6 +4538,12 @@ class JJDlpDashboard:
     # ── System status sidebar ────────────────────────────────────────────────
     def draw_system_panel(self, y1, x1, y2, x2):
         """Draws the SYSTEM info panel (from demo). Placed in the sidebar."""
+        # Keep the sidebar's write-rate figure fresh even when the File
+        # Manager tab isn't focused. Throttled to a coarse 5s cadence here
+        # (vs. the File Manager tab's own snappier 1s poll) since the
+        # sidebar only needs a rough rate, not a per-frame-accurate one —
+        # this avoids a full OUTPUT_DIR rescan on every dashboard redraw.
+        self.file_manager.maybe_poll(min_interval=5.0)
         self.draw_box(self.stdscr, y1, x1, y2, x2, self.C_SYSTEM)
         self.safe_addstr(self.stdscr, y1, x1 + 2, " SYSTEM ",
                     theme.attr(self, "main_jjdlpdashboard_draw_system_panel_system"))
@@ -5897,6 +5903,9 @@ class JJDlpDashboard:
         elif current_tab_name == "Config":
             self.draw_config_tab(content_y1, 1, content_y2, content_x2)
         elif current_tab_name == "File Manager":
+            # Poll at the tab's normal (snappier) cadence while it's focused;
+            # draw_system_panel() also polls at a slower cadence so the
+            # sidebar rate stays fresh even when this tab isn't active.
             self.file_manager.maybe_poll()
             self.file_manager.draw(self.stdscr, content_y1, 1, content_y2, content_x2)
         _t_main_tab = time.time() - _t0

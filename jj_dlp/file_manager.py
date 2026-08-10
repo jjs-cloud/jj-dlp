@@ -478,11 +478,16 @@ class FileManagerTab:
 
     # ── Polling ─────────────────────────────────────────────────────────────
 
-    def maybe_poll(self, force=False):
-        """Re-scan OUTPUT_DIRs at most once every POLL_INTERVAL_S. Safe to
-        call every frame from the draw loop."""
+    def maybe_poll(self, force=False, min_interval=None):
+        """Re-scan OUTPUT_DIRs at most once every ``min_interval`` seconds
+        (defaults to POLL_INTERVAL_S). Safe to call every frame from the
+        draw loop — callers that only need a coarse rate figure (e.g. the
+        system panel sidebar) can pass a larger ``min_interval`` so they
+        don't force a full directory rescan on every redraw."""
+        if min_interval is None:
+            min_interval = POLL_INTERVAL_S
         now = time.time()
-        if not force and (now - self._last_poll) < POLL_INTERVAL_S:
+        if not force and (now - self._last_poll) < min_interval:
             return
         self._last_poll = now
 
