@@ -5986,7 +5986,7 @@ class JJDlpDashboard:
             # currently on screen. The scale is auto-resizing, so this gives
             # the top of the axis a concrete value.
             if _scale_max is not None:
-                _label = human_rate(_scale_max)
+                _label = f"max {human_rate(_scale_max)}"
                 _label_x = _graph_x1 - len(_label) + 1
                 if _label_x >= _graph_x0:
                     self.safe_addstr(self.stdscr, 0, _label_x, _label,
