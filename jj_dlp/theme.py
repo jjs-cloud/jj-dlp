@@ -441,7 +441,7 @@ SITE_REGISTRY = {
     'main_jjdlpdashboard_safe_ch_pair': {'file': 'main.py', 'label': 'Box Border (generic, all panels)', 'default_role': 'CHROME', 'default_bold': False},
     'main_jjdlpdashboard_draw_logo_logo': {'file': 'main.py', 'label': 'Main Logo Banner', 'default_role': 'LOGO', 'default_bold': True},
     'main_jjdlpdashboard_draw_disk_rate_graph': {'file': 'main.py', 'label': 'Top Bar Disk Rate Graph', 'default_role': 'NORMAL', 'default_bold': True},
-    'main_jjdlpdashboard_draw_disk_rate_graph_special': {'file': 'main.py', 'label': 'Top Bar Disk Rate Graph — New Max Bar', 'default_role': 'WARN', 'default_bold': True},
+    'main_jjdlpdashboard_draw_disk_rate_graph_special': {'file': 'main.py', 'label': 'Top Bar Disk Rate Graph — New Max Bar', 'default_role': 'REC', 'default_bold': True},
     'main_jjdlpdashboard_draw_christmas_easte_pair': {'file': 'main.py', 'label': 'Christmas Easter Egg — Tree', 'default_role': 'LIVE', 'default_bold': True},
     'main_jjdlpdashboard_draw_tabs_hilight': {'file': 'main.py', 'label': 'Tab Bar — Selected Tab', 'default_role': 'INVHEAD', 'default_bold': False},
     'main_jjdlpdashboard_draw_tabs_invhead': {'file': 'main.py', 'label': 'Tab Bar — Unselected Tab', 'default_role': 'CHROME', 'default_bold': True},
