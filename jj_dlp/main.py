@@ -43,7 +43,8 @@ from .browser_config import (
     _write_ask_for_browser_to_config,
 )
 from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS, _compute_config_id, SiteSortManager, SORT_OPTIONS, _SORT_LABELS
-from .file_manager import FileManagerTab, human_rate
+from .file_manager import FileManagerTab
+from . import graph as _graph
 from . import simulation as _simulation
 
 import curses  # noqa: E402
@@ -4485,35 +4486,20 @@ class JJDlpDashboard:
         self._disk_cache_results: list = []  # list of (drive, usage) or (drive, None) on error
 
         # ── Top-bar disk-rate sparkline ──────────────────────────────────────
-        # One bar per GRAPH_SCALE seconds. Each bar's value is derived from
-        # the fast sub-sampler (file_manager.sample_active_write_rates)
-        # according to the _GRAPH_MODE knob — window_average by default, so
-        # bars stop blanking out between yt-dlp's disk flushes. It counts
-        # only files that are actively being recorded by yt-dlp (per each
-        # site's recording_output_paths registry), never File Manager
-        # artifact files (Move/Fixup/Trim/Split output). History is kept far
-        # longer than any realistic terminal width so widening the window
-        # doesn't lose data.
+        # All graph state + logic now lives in graph.Graph (hot-swappable
+        # via the 'p' knob popup → "Reload graph.py"). GRAPH_SCALE (seconds
+        # per bar) stays here as dashboard-owned config the graph reads each
+        # tick. It counts only files that are actively being recorded by
+        # yt-dlp (per each site's recording_output_paths registry), never
+        # File Manager artifact files (Move/Fixup/Trim/Split output).
+        # History is kept far longer than any realistic terminal width so
+        # widening the window doesn't lose data.
         self.graph_scale: int = max(1, int(self.global_cfg.get("graph_scale", 1)))
-        self.disk_rate_history: deque = deque(maxlen=2000)
-        _graph_start = time.time()
-        self._disk_graph_last_tick: float = _graph_start
-        self._disk_graph_last_subsample: float = 0.0
-        self._disk_graph_instant_rate: float = 0.0
-        # Value-pipeline state for the selectable bar modes in
-        # _tick_disk_rate_history (see the _GRAPH_* knobs just above the
-        # draw method). _disk_graph_window_* accumulate across the current
-        # GRAPH_SCALE window; _disk_graph_bytes_ring holds the last
-        # N sub-sample byte-deltas for the rolling-average variant.
-        self._disk_graph_window_bytes: float = 0.0
-        self._disk_graph_window_start: float = _graph_start
-        self._disk_graph_window_peak: float = 0.0
-        self._disk_graph_held_rate: float = 0.0
-        self._disk_graph_bytes_ring: deque = deque(maxlen=self._GRAPH_AVG_SUBSAMPLES or 1)
+        self.graph = _graph.Graph(self)
         # Bars persisted to global.json on the previous run are restored here
         # so the graph comes back with its recent history instead of starting
         # empty.
-        self.disk_rate_history.extend(_load_disk_rate_history())
+        self.graph.disk_rate_history.extend(_load_disk_rate_history())
 
         from .config_editor import ConfigEditor
         self.config_editor = ConfigEditor(self)
@@ -4538,16 +4524,6 @@ class JJDlpDashboard:
         # ── Bake-to-source popup state (dev feature, hidden 'W' hotkey) ──────
         self._bake_popup_open   = False
         self._bake_popup_lines: List[str] = []
-
-        # ── Graph-knob popup state (dev feature, hidden 'p' hotkey) ─────────
-        # Lets you tune the top-bar disk-rate graph's _GRAPH_* knobs live
-        # (instance attrs shadow the class defaults) and see the result
-        # immediately, without restarting.
-        self._graph_popup_open   = False
-        self._graph_popup_sel    = 0
-        self._graph_popup_scroll = 0
-        self._graph_popup_edit       = None  # str buffer while typing a value
-        self._graph_popup_edit_idx   = 0
 
         # ── Exit-confirmation popup state ─────────────────────────────────────
         self._exit_confirm_open      = False
@@ -4609,199 +4585,6 @@ class JJDlpDashboard:
             self.safe_addstr(self.stdscr, y + i, x, line,
                         theme.attr(self, "main_jjdlpdashboard_draw_logo_logo"))
 
-    # ── Top-bar disk-rate sparkline ─────────────────────────────────────────
-    def _tick_disk_rate_history(self):
-        """Feed the top-bar disk-rate sparkline.
-
-        A fast sub-sampler stats only the actively-recording files every
-        ``_GRAPH_SUBSAMPLE_S`` seconds (cheap — no os.walk) and keeps a
-        running total of bytes grown plus the peak and instantaneous spot
-        rate for the current window. Once every GRAPH_SCALE seconds a bar
-        falls, derived from those accumulated sub-samples per
-        ``_GRAPH_MODE`` — so each bar can be an average, a spot reading, a
-        peak, or a decay-hold, whichever you set the knobs to.
-        """
-        now = time.time()
-        # Fast sub-sampler: only stats the actively-recording files, so it
-        # can run at a sub-second cadence without re-walking the OUTPUT_DIRs.
-        if now - self._disk_graph_last_subsample >= self._GRAPH_SUBSAMPLE_S:
-            self._disk_graph_last_subsample = now
-            try:
-                inst_rate, grown = self.file_manager.sample_active_write_rates()
-            except Exception:
-                inst_rate, grown = 0.0, 0.0
-            self._disk_graph_instant_rate = inst_rate
-            self._disk_graph_window_bytes += grown
-            if self._GRAPH_AVG_SUBSAMPLES > 0:
-                self._disk_graph_bytes_ring.append(grown)
-            if inst_rate > self._disk_graph_window_peak:
-                self._disk_graph_window_peak = inst_rate
-            self._disk_graph_held_rate = max(
-                inst_rate,
-                self._disk_graph_held_rate * self._GRAPH_DECAY_PER_SUBSAMPLE,
-            )
-        if now - self._disk_graph_last_tick < self.graph_scale:
-            return
-        elapsed = max(now - self._disk_graph_window_start, 0.001)
-        if self._GRAPH_MODE == "window_average":
-            if self._GRAPH_AVG_SUBSAMPLES > 0 and self._disk_graph_bytes_ring:
-                n = len(self._disk_graph_bytes_ring)
-                value = sum(self._disk_graph_bytes_ring) / (n * self._GRAPH_SUBSAMPLE_S)
-            else:
-                value = self._disk_graph_window_bytes / elapsed
-        elif self._GRAPH_MODE == "window_peak":
-            value = self._disk_graph_window_peak
-        elif self._GRAPH_MODE == "decay_hold":
-            value = self._disk_graph_held_rate
-        else:  # "instantaneous"
-            value = self._disk_graph_instant_rate
-        value = max(0.0, value)
-        self.disk_rate_history.append(value if value >= self._GRAPH_MIN_BAR_RATE else 0.0)
-        # Reset per-window accumulators for the next bar. The decay-hold
-        # carry-over is intentionally NOT reset — it keeps decaying across
-        # windows until the next flush raises it again.
-        self._disk_graph_window_bytes = 0.0
-        self._disk_graph_window_start = now
-        self._disk_graph_window_peak = 0.0
-        self._disk_graph_last_tick = now
-
-    # Density ramp for the disk-rate bars, faintest to most solid. All are
-    # standard codepage-437 glyphs (confirmed against supported_characters.txt),
-    # so — unlike the eighth-block chars — these are safe on cmd.exe/PowerShell
-    # as well as real terminals. Index 0 is "empty".
-    _GRAPH_RAMP = [" ", "\u2591", "\u2592", "\u2593", "\u2584", "\u2588"]  # ' ░▒▓▄█'
-    # Cadence (seconds) of the instantaneous-rate sub-sampler feeding the
-    # top-bar graph. Smaller = burstier/more random bars (each bar becomes a
-    # point reading over a shorter window); larger = smoother. Only the
-    # actively-recording files are statted, so sub-second values are cheap.
-    _GRAPH_SUBSAMPLE_S = 0.5
-
-    # ── Top-bar disk-rate bar value pipeline ──────────
-    # How each bar's value is derived from the sub-samples. One of:
-    #   "instantaneous"  – the raw spot rate at the moment the bar falls.
-    #                      Bursty/blank — it zeroes out between yt-dlp's
-    #                      disk flushes, so at long GRAPH_SCALE values most
-    #                      bars come up empty (that's the "blank bars"
-    #                      symptom). Unchanged legacy behavior.
-    #   "window_average" – mean write rate across the whole GRAPH_SCALE
-    #                      window (bytes grown ÷ elapsed). Never zero while
-    #                      anything is recording; the closest semantic match
-    #                      to the File Manager tab's Rate column.
-    #   "window_peak"    – the peak spot rate seen during the window. Keeps
-    #                      a spiky look and never blanks, but every bar is a
-    #                      max-flush spike, so heights run fairly uniform.
-    #   "decay_hold"     – per sub-sample: held = max(spot, held * decay).
-    #                      A flush jumps the bar up instantly, then it decays
-    #                      back toward zero between flushes. Only useful at
-    #                      short GRAPH_SCALE values — at 600s/bar it decays
-    #                      to ~zero long before the next bar falls.
-    _GRAPH_MODE = "window_average"
-
-    # decay_hold: multiplier applied to the held rate every sub-sample.
-    # Lower = the bar falls back toward zero faster after a flush.
-    # 0.9 per 0.5s sub-sample leaves ~35% of the peak after ~5s.
-    _GRAPH_DECAY_PER_SUBSAMPLE = 0.9
-
-    # window_average: if >0, average only the most recent N sub-samples
-    # (N × _GRAPH_SUBSAMPLE_S seconds) instead of the whole GRAPH_SCALE
-    # window. E.g. 2 → a ~1s rolling average — snappy, very File-Manager
-    # like; 0 → smooth average over the entire GRAPH_SCALE window.
-    _GRAPH_AVG_SUBSAMPLES = 0
-
-    # Bars below this rate (B/s) are recorded as 0 (drawn blank). Raise it
-    # to de-emphasize a slow trickle; keep at 0 to show every non-zero
-    # window.
-    _GRAPH_MIN_BAR_RATE = 0.0
-
-    # draw: minimum visual height (in 1/11-row ramp units) for any non-zero
-    # bar, so a tiny-but-real rate draws as a faint ░ instead of a fully
-    # blank column. Set to 0 for strict auto-scaling.
-    _GRAPH_MIN_BAR_HEIGHT = 0
-    # Body density levels (ramp indices). The half-block (▄) is excluded from
-    # bodies — a body of ▄ would read as a half-height bar — so it only ever
-    # caps a solid (█) bar.
-    _GRAPH_BODY_LEVELS = [1, 2, 3, 5]  # ░ ▒ ▓ █
-    _GRAPH_BODY_STARTS = [0, 1, 3, 6]  # state offset of each body level
-
-    def draw_disk_rate_graph(self, y0: int, x0: int, x1: int, y1: int):
-        """Draw the growing/scrolling disk-rate sparkline between the logo
-        and the system-time clock.
-
-        (y0, x0) is the top-left, (x1, y1) the bottom-right (inclusive) of
-        the available area. The graph fills right-to-left as new samples
-        arrive, then scrolls once it reaches the logo. Height is auto-scaled
-        to the tallest sample currently on screen (not a fixed constant) so
-        the bars use the full available height and stay as visually varied
-        as possible.
-
-        Each bar encodes rate along three independent axes: height (whole
-        rows), the body's density (a texture from the ramp picked per bar, so
-        two bars landing on the same height still read as distinct), and the
-        tip's density (the topmost row, which is capped at the body's density).
-        That gives 11 distinguishable sub-states per row instead of 1. The
-        half-block (▄) never appears as a body — only as the tip of a solid
-        (█) bar, where it reads as "this top row is half filled". This is the
-        finest resolution available without risking the eighth-block glyphs
-        that don't render on cmd.exe/PowerShell.
-
-        Monochrome — a single color/attr for the whole graph, no height-based
-        color tiering. That single attr is theme-editable (see SITE_REGISTRY
-        in theme.py: 'main_jjdlpdashboard_draw_disk_rate_graph') — it shows
-        up in the in-app theme manager as "Top-Bar Disk-Rate Graph" and
-        defaults to the SYSTEM role, bold.
-        """
-        graph_w = max(0, x1 - x0 + 1)
-        graph_h = max(1, y1 - y0 + 1)
-        if graph_w <= 0 or not self.disk_rate_history:
-            return
-
-        visible = list(self.disk_rate_history)[-graph_w:]
-        # Auto-scale to the loudest sample currently visible, so the graph
-        # always uses its full height instead of being capped by a constant.
-        # A small floor avoids a single near-zero screen looking artificially
-        # "maxed out" from float noise.
-        scale_max = max(visible) if any(v > 0.01 for v in visible) else 1.0
-
-        per_row = self._GRAPH_BODY_STARTS[-1] + len(self._GRAPH_RAMP) - 1  # 11 (body, tip) pairs per row
-        res_units = graph_h * per_row
-        # Theme-editable — appears in the theme manager (n) as "Top-Bar
-        # Disk-Rate Graph"; defaults to the SYSTEM role, bold.
-        attr = theme.attr(self, "main_jjdlpdashboard_draw_disk_rate_graph")
-
-        n = len(visible)
-        for i, rate in enumerate(visible):
-            col = x1 - (n - 1 - i)
-            if col < x0:
-                continue
-            units = int(round((rate / scale_max) * res_units)) if scale_max > 0 else 0
-            units = max(0, min(res_units, units))
-            if units <= 0:
-                # Keep tiny-but-real rates from blanking the column entirely
-                # (see _GRAPH_MIN_BAR_HEIGHT).
-                if rate > 0.01 and self._GRAPH_MIN_BAR_HEIGHT > 0:
-                    units = min(res_units, self._GRAPH_MIN_BAR_HEIGHT)
-                else:
-                    continue
-
-            # Height (whole rows) plus which (body, tip) density pair this
-            # exact value picked within that row's bucket.
-            height = min(graph_h, (units - 1) // per_row + 1)
-            local = (units - 1) % per_row
-            bidx = 0
-            while (bidx + 1 < len(self._GRAPH_BODY_STARTS)
-                   and self._GRAPH_BODY_STARTS[bidx + 1] <= local):
-                bidx += 1
-            body_char = self._GRAPH_RAMP[self._GRAPH_BODY_LEVELS[bidx]]
-            tip_char = self._GRAPH_RAMP[local - self._GRAPH_BODY_STARTS[bidx] + 1]
-
-            for r in range(height):
-                row = y1 - r
-                if row < y0:
-                    break
-                ch = tip_char if r == height - 1 else body_char
-                self.safe_addstr(self.stdscr, row, col, ch, attr)
-
-        return scale_max
 
     # ── Christmas Day easter egg ────────────────────────────────────────────
     @staticmethod
@@ -6141,23 +5924,15 @@ class JJDlpDashboard:
                     theme.attr(self, "main_jjdlpdashboard_refresh_screen_chrome_1"))
 
         # Disk-rate sparkline — fills the gap between the logo and the clock,
-        # same height as the logo (rows 1-6).
-        self._tick_disk_rate_history()
+        # same height as the logo (rows 1-6). Graph.draw also renders the
+        # "max …" scale label above the graph's right edge.
+        self.graph.tick()
         _logo_w = max(len(_l) for _l in ASCII_LOGO)
         _graph_x0 = 2 + _logo_w + 3
         _graph_x1 = time_x - 2
         _graph_y1 = 1 + len(ASCII_LOGO) - 1
         if _graph_x1 > _graph_x0:
-            _scale_max = self.draw_disk_rate_graph(1, _graph_x0, _graph_x1, _graph_y1)
-            # Y-axis label above the graph's right edge: the fastest rate
-            # currently on screen. The scale is auto-resizing, so this gives
-            # the top of the axis a concrete value.
-            if _scale_max is not None and _scale_max >= 5.0:
-                _label = f"max {human_rate(_scale_max)}"
-                _label_x = _graph_x1 - len(_label) + 1
-                if _label_x >= _graph_x0:
-                    self.safe_addstr(self.stdscr, 0, _label_x, _label,
-                                theme.attr(self, "main_jjdlpdashboard_draw_disk_rate_graph"))
+            self.graph.draw(1, _graph_x0, _graph_x1, _graph_y1)
 
         # Track the next available row on the right side
         next_right_row = 2
@@ -6253,8 +6028,8 @@ class JJDlpDashboard:
             self.draw_bake_popup()
 
         # Graph-knob popup (dev feature) — drawn above the bake popup.
-        if self._graph_popup_open:
-            self.draw_graph_popup()
+        if self.graph.popup_open:
+            self.graph.draw_popup()
 
         # Exit-confirmation popup — drawn on top of everything else.
         if self._exit_confirm_open:
@@ -6315,8 +6090,8 @@ class JJDlpDashboard:
             return True
 
         # Graph-knob popup intercepts all keys while open.
-        if self._graph_popup_open:
-            return self._handle_graph_popup_key(key)
+        if self.graph.popup_open:
+            return self.graph.handle_key(key)
 
         if self._mgmt_mode:
             return self._handle_mgmt_key(key)
@@ -6439,11 +6214,9 @@ class JJDlpDashboard:
             if current_tab_name == "Dashboard":
                 self.sort_manager.open_popup()
         elif key in (ord('p'), ord('P')):
-            # Dev feature: tune the top-bar disk-rate graph knobs live.
-            self._graph_popup_open = not self._graph_popup_open
-            self._graph_popup_sel = 0
-            self._graph_popup_scroll = 0
-            self._graph_popup_edit = None
+            # Dev feature: tune the top-bar disk-rate graph knobs live, or
+            # hot-reload graph.py from disk ("Reload graph.py" row).
+            self.graph.toggle_popup()
         elif key in (ord('g'), ord('G')):
             self.open_changelog_popup()
         return True
@@ -6919,146 +6692,49 @@ class JJDlpDashboard:
         self.safe_addstr(self.stdscr, by2, bx1 + 2, legend[:box_w - 4],
                     theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_invhead"))
 
-    # ── Graph-knob popup (dev feature, 'p' hotkey) ──────────────────────────
-    # Bare-bones live editor for the top-bar disk-rate graph's _GRAPH_*
-    # knobs. Setting them as instance attributes shadows the class defaults
-    # in the constants block, so the graph reflects changes on the very next
-    # frame — no restart needed. Nothing here is persisted; defaults in the
-    # code remain the source of truth across restarts.
-    def _graph_knob_rows(self):
-        """Row spec for each live-tunable graph knob."""
-        return [
-            {"label": "MODE",             "attr": "_GRAPH_MODE",               "kind": "enum",
-             "choices": ["instantaneous", "window_average", "window_peak", "decay_hold"]},
-            {"label": "SUBSAMPLE_S",      "attr": "_GRAPH_SUBSAMPLE_S",       "kind": "float",
-             "step": 0.1, "lo": 0.05, "hi": 5.0, "fmt": "{:.2f}"},
-            {"label": "DECAY_PER_SUB",    "attr": "_GRAPH_DECAY_PER_SUBSAMPLE", "kind": "float",
-             "step": 0.05, "lo": 0.0, "hi": 1.0, "fmt": "{:.2f}"},
-            {"label": "AVG_SUBSAMPLES",   "attr": "_GRAPH_AVG_SUBSAMPLES",    "kind": "int",
-             "step": 1, "lo": 0, "hi": 500, "fmt": "{}"},
-            {"label": "MIN_BAR_RATE",     "attr": "_GRAPH_MIN_BAR_RATE",      "kind": "float",
-             "step": 1000, "lo": 0.0, "hi": 1e12, "fmt": "{:.0f}"},
-            {"label": "MIN_BAR_HEIGHT",   "attr": "_GRAPH_MIN_BAR_HEIGHT",    "kind": "int",
-             "step": 1, "lo": 0, "hi": 11, "fmt": "{}"},
-        ]
+    # ── Graph module hot-reload (dev feature) ─────────────────────────────────
+    def reload_graph_module(self) -> None:
+        """Hot-reload jj_dlp/graph.py from disk (triggered by the "Reload
+        graph.py" row of the 'p' knob popup).
 
-    def _graph_popup_set(self, row, value):
-        """Clamp and store *value* for *row*, applying side effects (e.g.
-        resizing the rolling-average ring when AVG_SUBSAMPLES changes)."""
-        if row["kind"] == "enum":
-            setattr(self, row["attr"], value)
+        On success: re-executes the module, constructs a fresh ``Graph`` from
+        it (carrying over the disk-rate history and the transient sub-sampler
+        state; live-tuned _GRAPH_* knobs reset to the newly-loaded file
+        defaults) and swaps it in for ``self.graph``. The popup closes because
+        the fresh instance starts closed.
+
+        On failure: the current ``Graph`` keeps running untouched and the
+        error is recorded on it so the popup's legend can show it. A syntax
+        error in graph.py therefore never takes the app down.
+        """
+        try:
+            import importlib
+            import traceback
+            importlib.reload(_graph)
+        except Exception as _e:
+            _logger.dbg(f"[GRAPH] reload failed:\n{traceback.format_exc()}")
+            self.graph.popup_status = f"reload failed: {_e}"
             return
-        if row["kind"] == "int":
-            value = int(float(value))
-        else:
-            value = float(value)
-        lo, hi = row.get("lo"), row.get("hi")
-        if lo is not None:
-            value = max(lo, value)
-        if hi is not None:
-            value = min(hi, value)
-        setattr(self, row["attr"], value)
-        if row["attr"] == "_GRAPH_AVG_SUBSAMPLES":
-            self._disk_graph_bytes_ring = deque(maxlen=int(value) or 1)
-
-    def _graph_popup_step(self, delta):
-        row = self._graph_knob_rows()[self._graph_popup_sel]
-        if row["kind"] == "enum":
-            choices = row["choices"]
-            cur = getattr(self, row["attr"])
-            idx = choices.index(cur) if cur in choices else 0
-            self._graph_popup_set(row, choices[(idx + delta) % len(choices)])
-        else:
-            self._graph_popup_set(row, getattr(self, row["attr"]) + delta * row["step"])
-
-    def _handle_graph_popup_key(self, key) -> bool:
-        rows = self._graph_knob_rows()
-        if self._graph_popup_edit is not None:
-            if key == 27:  # Esc cancels the in-progress edit
-                self._graph_popup_edit = None
-            elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):  # Enter commits
-                try:
-                    if rows[self._graph_popup_edit_idx]["kind"] == "int":
-                        val = int(self._graph_popup_edit.strip())
-                    else:
-                        val = float(self._graph_popup_edit.strip())
-                    self._graph_popup_set(rows[self._graph_popup_edit_idx], val)
-                except ValueError:
-                    pass  # leave the buffer so the user can fix it
-                self._graph_popup_edit = None
-            elif key in (curses.KEY_BACKSPACE, 127, 8):
-                self._graph_popup_edit = self._graph_popup_edit[:-1]
-            elif 32 <= key < 127:
-                ch = chr(key)
-                if ch in "0123456789.":
-                    if ch == "." and "." in self._graph_popup_edit:
-                        return True
-                    self._graph_popup_edit += ch
-            return True
-
-        if key in (27, ord('q'), ord('Q')):  # Esc / Q closes the popup
-            self._graph_popup_open = False
-        elif key == curses.KEY_UP:
-            self._graph_popup_sel = max(0, self._graph_popup_sel - 1)
-        elif key == curses.KEY_DOWN:
-            self._graph_popup_sel = min(len(rows) - 1, self._graph_popup_sel + 1)
-        elif key in (curses.KEY_LEFT, ord('h')):
-            self._graph_popup_step(-1)
-        elif key in (curses.KEY_RIGHT, ord('l')):
-            self._graph_popup_step(1)
-        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
-            row = rows[self._graph_popup_sel]
-            if row["kind"] == "enum":
-                self._graph_popup_step(1)
-            else:
-                self._graph_popup_edit = ""
-                self._graph_popup_edit_idx = self._graph_popup_sel
-        return True
-
-    def draw_graph_popup(self) -> None:
-        if not self._graph_popup_open:
+        try:
+            _old = self.graph
+            _new = _graph.Graph(self)
+        except Exception as _e:
+            _logger.dbg(f"[GRAPH] reload failed (Graph construction):\n{traceback.format_exc()}")
+            self.graph.popup_status = f"reload failed: {_e}"
             return
-        h, w = self.stdscr.getmaxyx()
-        rows = self._graph_knob_rows()
-        box_w = min(w - 4, 60)
-        box_h = min(h - 4, len(rows) + 6)
-        by1 = max(0, (h - box_h) // 2)
-        bx1 = max(0, (w - box_w) // 2)
-        by2 = by1 + box_h
-        bx2 = bx1 + box_w
-
-        attr_bg = theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_normal_1")
-        for y in range(by1, by2 + 1):
-            self.safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1), attr_bg)
-        self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_CHROME)
-        self.safe_addstr(self.stdscr, by1, bx1 + 2, " GRAPH KNOBS ",
-                    theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_hilight"))
-
-        vis = max(1, box_h - 4)
-        if self._graph_popup_sel < self._graph_popup_scroll:
-            self._graph_popup_scroll = self._graph_popup_sel
-        elif self._graph_popup_sel >= self._graph_popup_scroll + vis:
-            self._graph_popup_scroll = self._graph_popup_sel - vis + 1
-
-        for i in range(self._graph_popup_scroll, min(len(rows), self._graph_popup_scroll + vis)):
-            row = rows[i]
-            cur = getattr(self, row["attr"])
-            if row["kind"] == "enum":
-                val_txt = str(cur)
-            else:
-                val_txt = row["fmt"].format(cur)
-            if self._graph_popup_edit is not None and self._graph_popup_edit_idx == i:
-                val_txt = self._graph_popup_edit + "_"
-            prefix = "> " if i == self._graph_popup_sel else "  "
-            attr = (theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_hilight")
-                    if i == self._graph_popup_sel
-                    else theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_normal_2"))
-            text = (prefix + row["label"].ljust(18) + val_txt)[:box_w - 4]
-            self.safe_addstr(self.stdscr, by1 + 2 + (i - self._graph_popup_scroll), bx1 + 2, text, attr)
-
-        legend = " \u2190/\u2192 step   Enter: type value   Esc: close "
-        self.safe_addstr(self.stdscr, by2, bx1 + 2, legend[:box_w - 4],
-                    theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_invhead"))
+        # Carry over history + transient pipeline state (knobs reset to the
+        # new defaults by the fresh instance).
+        _new.disk_rate_history.extend(_old.disk_rate_history)
+        _new._disk_graph_instant_rate = _old._disk_graph_instant_rate
+        _new._disk_graph_window_bytes = _old._disk_graph_window_bytes
+        _new._disk_graph_window_start = _old._disk_graph_window_start
+        _new._disk_graph_window_peak = _old._disk_graph_window_peak
+        _new._disk_graph_held_rate = _old._disk_graph_held_rate
+        _new._disk_graph_last_tick = _old._disk_graph_last_tick
+        _new._disk_graph_last_subsample = _old._disk_graph_last_subsample
+        _new._disk_graph_bytes_ring.extend(_old._disk_graph_bytes_ring)
+        self.graph = _new
+        _logger.dbg("[GRAPH] graph.py reloaded")
 
     # ── Run loop ──────────────────────────────────────────────────────────────
     def _persist_graph_history(self) -> None:
@@ -7068,7 +6744,7 @@ class JJDlpDashboard:
         next launch.  Best-effort — failures are swallowed.
         """
         try:
-            _save_disk_rate_history(list(self.disk_rate_history))
+            _save_disk_rate_history(list(self.graph.disk_rate_history))
         except Exception as _e:
             dbg(f"[GRAPH] _persist_graph_history failed: {_e!r}")
 
