@@ -327,8 +327,8 @@ class FileManagerTab:
         #          group_path, group_label}
         self._records = {}
         # path -> (size, time) — fine-grained size samples of the actively
-        # recording files, used by instantaneous_total_write_rate() to derive
-        # a bursty, point-in-time rate without re-walking the OUTPUT_DIRs.
+        # recording files, used by sample_active_write_rates() to derive
+        # spot rates / byte-deltas without re-walking the OUTPUT_DIRs.
         self._inst_rate_samples = {}
         # Flattened, already-sorted rows ready to draw:
         #   ("header", label_text, None)
@@ -596,24 +596,32 @@ class FileManagerTab:
             pass
         return paths
 
-    def instantaneous_total_write_rate(self) -> float:
-        """Sum of per-file write rates across all currently-WRITING files,
-        measured as an *instantaneous* spot reading over a short sub-sample
-        window rather than the long directory-poll interval.
+    def sample_active_write_rates(self) -> tuple:
+        """One combined sampling pass over every file currently being
+        actively recorded by yt-dlp.
 
-        Only the files currently being recorded by yt-dlp (per each site's
-        ``recording_output_paths`` registry) are sampled, and sampling is a
-        single getsize() per file — no os.walk, no _rebuild_rows — so this
-        can be called at a fast sub-second cadence from the top-bar graph
-        tick. Each path tracks its own (size, time) pair; the rate is
-        Δsize/Δt between consecutive samples, so consecutive readings jump
-        with the bursty way yt-dlp flushes data to disk (near-zero between
-        flushes, spiking right after one) instead of smoothing out over the
-        whole GRAPH_SCALE window.
+        Returns ``(inst_rate, bytes_grown)``:
+
+          inst_rate  – sum of per-file Δsize/Δt spot rates since the
+                       previous call, in bytes/sec. Bursty: near-zero
+                       between yt-dlp's disk flushes, spiking right after
+                       one — so a single spot reading frequently lands in a
+                       quiet gap and comes back 0.
+          bytes_grown – sum of positive per-file Δsize since the previous
+                       call, in bytes. This is the integral the top-bar
+                       graph can average over a whole GRAPH_SCALE window to
+                       get a rate that never blanks while data is flowing.
+
+        Sampling is a single getsize() per file — no os.walk, no
+        _rebuild_rows — so it can be called at a fast sub-second cadence
+        from the top-bar graph tick. Each path tracks its own (size, time)
+        pair. Callers must call this exactly once per sub-sample (the two
+        values share the same state); the graph tick does.
         """
         active = self._active_recording_paths()
         now = time.time()
-        total = 0.0
+        rate_total = 0.0
+        bytes_total = 0.0
         for path in active:
             try:
                 size = os.path.getsize(path)
@@ -622,11 +630,17 @@ class FileManagerTab:
             prev = self._inst_rate_samples.get(path)
             if prev is not None:
                 dt = max(now - prev[1], 0.001)
-                total += max(0.0, (size - prev[0]) / dt)
+                grown = max(0.0, size - prev[0])
+                rate_total += grown / dt
+                bytes_total += grown
             self._inst_rate_samples[path] = (size, now)
         if len(self._inst_rate_samples) > len(active) * 2 + 16:
             self._inst_rate_samples = {p: v for p, v in self._inst_rate_samples.items() if p in active}
-        return total
+        return rate_total, bytes_total
+
+    def instantaneous_total_write_rate(self) -> float:
+        """Backward-compatible wrapper: the instantaneous spot rate only."""
+        return self.sample_active_write_rates()[0]
 
     # ── Sorting / row layout ────────────────────────────────────────────────
 
