@@ -4527,14 +4527,16 @@ class JJDlpDashboard:
             rate = 0.0
         self.disk_rate_history.append(max(0.0, rate))
 
-    # Density ramp for the topmost (partial) row of each bar, faintest to
-    # most solid. All are standard codepage-437 glyphs (confirmed against
-    # supported_characters.txt), so — unlike the eighth-block chars — these
-    # are safe on cmd.exe/PowerShell as well as real terminals. Index 0 is
-    # "just barely reached this row" (empty), the last index (before a full
-    # block) is "almost a full row".
-    _GRAPH_SUBLEVELS = [" ", "\u2591", "\u2592", "\u2593", "\u2584"]  # ' ░▒▓▄'
-    _GRAPH_FULL = "\u2588"  # █
+    # Density ramp for the disk-rate bars, faintest to most solid. All are
+    # standard codepage-437 glyphs (confirmed against supported_characters.txt),
+    # so — unlike the eighth-block chars — these are safe on cmd.exe/PowerShell
+    # as well as real terminals. Index 0 is "empty".
+    _GRAPH_RAMP = [" ", "\u2591", "\u2592", "\u2593", "\u2584", "\u2588"]  # ' ░▒▓▄█'
+    # Body density levels (ramp indices). The half-block (▄) is excluded from
+    # bodies — a body of ▄ would read as a half-height bar — so it only ever
+    # caps a solid (█) bar.
+    _GRAPH_BODY_LEVELS = [1, 2, 3, 5]  # ░ ▒ ▓ █
+    _GRAPH_BODY_STARTS = [0, 1, 3, 6]  # state offset of each body level
 
     def draw_disk_rate_graph(self, y0: int, x0: int, x1: int, y1: int):
         """Draw the growing/scrolling disk-rate sparkline between the logo
@@ -4547,10 +4549,13 @@ class JJDlpDashboard:
         the bars use the full available height and stay as visually varied
         as possible.
 
-        Each bar's topmost partial row is drawn with a shading ramp
-        (' ░▒▓▄' then a full block for a complete row) instead of just
-        on/off, giving 5 distinguishable sub-levels per text row instead of
-        1 (or 2, with the earlier half-block-only approach). That's the
+        Each bar encodes rate along three independent axes: height (whole
+        rows), the body's density (a texture from the ramp picked per bar, so
+        two bars landing on the same height still read as distinct), and the
+        tip's density (the topmost row, which is capped at the body's density).
+        That gives 11 distinguishable sub-states per row instead of 1. The
+        half-block (▄) never appears as a body — only as the tip of a solid
+        (█) bar, where it reads as "this top row is half filled". This is the
         finest resolution available without risking the eighth-block glyphs
         that don't render on cmd.exe/PowerShell.
 
@@ -4572,8 +4577,8 @@ class JJDlpDashboard:
         # "maxed out" from float noise.
         scale_max = max(visible) if any(v > 0.01 for v in visible) else 1.0
 
-        sublevels = len(self._GRAPH_SUBLEVELS)  # 5 sub-levels per row
-        res_units = graph_h * sublevels
+        per_row = self._GRAPH_BODY_STARTS[-1] + len(self._GRAPH_RAMP) - 1  # 11 (body, tip) pairs per row
+        res_units = graph_h * per_row
         # Theme-editable — appears in the theme manager (n) as "Top-Bar
         # Disk-Rate Graph"; defaults to the SYSTEM role, bold.
         attr = theme.attr(self, "main_jjdlpdashboard_draw_disk_rate_graph")
@@ -4585,18 +4590,26 @@ class JJDlpDashboard:
                 continue
             units = int(round((rate / scale_max) * res_units)) if scale_max > 0 else 0
             units = max(0, min(res_units, units))
+            if units <= 0:
+                continue
 
-            full_rows, remainder = divmod(units, sublevels)
-            for r in range(full_rows):
+            # Height (whole rows) plus which (body, tip) density pair this
+            # exact value picked within that row's bucket.
+            height = min(graph_h, (units - 1) // per_row + 1)
+            local = (units - 1) % per_row
+            bidx = 0
+            while (bidx + 1 < len(self._GRAPH_BODY_STARTS)
+                   and self._GRAPH_BODY_STARTS[bidx + 1] <= local):
+                bidx += 1
+            body_char = self._GRAPH_RAMP[self._GRAPH_BODY_LEVELS[bidx]]
+            tip_char = self._GRAPH_RAMP[local - self._GRAPH_BODY_STARTS[bidx] + 1]
+
+            for r in range(height):
                 row = y1 - r
                 if row < y0:
                     break
-                self.safe_addstr(self.stdscr, row, col, self._GRAPH_FULL, attr)
-            if remainder:
-                row = y1 - full_rows
-                if row >= y0:
-                    self.safe_addstr(self.stdscr, row, col,
-                                self._GRAPH_SUBLEVELS[remainder], attr)
+                ch = tip_char if r == height - 1 else body_char
+                self.safe_addstr(self.stdscr, row, col, ch, attr)
 
     # ── Christmas Day easter egg ────────────────────────────────────────────
     @staticmethod
