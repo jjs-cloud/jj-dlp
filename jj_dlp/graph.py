@@ -35,11 +35,21 @@ class Graph:
     live-tuned knobs do not.
     """
 
-    # Density ramp for the disk-rate bars, faintest to most solid. All are
-    # standard codepage-437 glyphs (confirmed against supported_characters.txt),
-    # so — unlike the eighth-block chars — these are safe on cmd.exe/PowerShell
-    # as well as real terminals. Index 0 is "empty".
-    _GRAPH_RAMP = [" ", "\u2591", "\u2592", "\u2593", "\u2584", "\u2588"]  # ' ░▒▓▄█'
+    # Density ramp for the disk-rate bars, ordered by actual visual ink
+    # coverage (not by codepoint): ' '=0%, ░=25%, ▒=50%, ▄=50%, ▓=75%, █=100%.
+    # ▄ (LOWER HALF BLOCK) is a *solid* half-fill, so to the eye it reads as
+    # roughly the same weight as ▒ (a 50% dither) — it is NOT denser than ▓.
+    # It used to sit between ▓ and █ in this list, which meant a bar's tip
+    # could land on a *lighter-looking* glyph (▄) to represent a value that
+    # was actually higher than another bar's tip landing on ▓ — i.e. a
+    # shorter/lighter-looking bar could legitimately represent a higher
+    # rate than a taller one. Placing ▄ at its correct weight (tied with ▒,
+    # ahead of ▓) fixes that: density now only ever increases (or ties) as
+    # you move up the ramp. All glyphs are standard codepage-437 glyphs
+    # (confirmed against supported_characters.txt), so — unlike the
+    # eighth-block chars — these are safe on cmd.exe/PowerShell as well as
+    # real terminals. Index 0 is "empty".
+    _GRAPH_RAMP = [" ", "\u2591", "\u2592", "\u2584", "\u2593", "\u2588"]  # ' ░▒▄▓█'
     # Cadence (seconds) of the instantaneous-rate sub-sampler feeding the
     # top-bar graph. Smaller = burstier/more random bars (each bar becomes a
     # point reading over a shorter window); larger = smoother. Only the
@@ -87,10 +97,13 @@ class Graph:
     # bar, so a tiny-but-real rate draws as a faint ░ instead of a fully
     # blank column. Set to 0 for strict auto-scaling.
     _GRAPH_MIN_BAR_HEIGHT = 0
-    # Body density levels (ramp indices). The half-block (▄) is excluded from
-    # bodies — a body of ▄ would read as a half-height bar — so it only ever
-    # caps a solid (█) bar.
-    _GRAPH_BODY_LEVELS = [1, 2, 3, 5]  # ░ ▒ ▓ █
+    # Body density levels (ramp indices into the reordered _GRAPH_RAMP
+    # above: ' '=0 ░=1 ▒=2 ▄=3 ▓=4 █=5). The half-block (▄, index 3) is
+    # excluded from bodies — a body of ▄ would read as a half-height bar —
+    # so it only ever appears as a *tip* glyph, picked up automatically by
+    # the tip formula in draw() because it now sits at its correct weight
+    # inside the ramp.
+    _GRAPH_BODY_LEVELS = [1, 2, 4, 5]  # ░ ▒ ▓ █
     _GRAPH_BODY_STARTS = [0, 1, 3, 6]  # state offset of each body level
 
     def __init__(self, dashboard):
@@ -208,10 +221,13 @@ class Graph:
         two bars landing on the same height still read as distinct), and the
         tip's density (the topmost row, which is capped at the body's density).
         That gives 11 distinguishable sub-states per row instead of 1. The
-        half-block (▄) never appears as a body — only as the tip of a solid
-        (█) bar, where it reads as "this top row is half filled". This is the
-        finest resolution available without risking the eighth-block glyphs
-        that don't render on cmd.exe/PowerShell.
+        half-block (▄) never appears as a body (a body of ▄ would read as a
+        half-height bar) — only as a tip glyph, at its correct visual weight
+        in _GRAPH_RAMP (tied with ▒, below ▓) so tip density is monotonic
+        with the underlying rate instead of a lighter-looking glyph ever
+        standing in for a higher value. This is the finest resolution
+        available without risking the eighth-block glyphs that don't render
+        on cmd.exe/PowerShell.
 
         Monochrome — a single color/attr for the whole graph, no height-based
         color tiering. That single attr is theme-editable (see SITE_REGISTRY
@@ -312,6 +328,7 @@ class Graph:
              "step": 1000, "lo": 0.0, "hi": 1e12, "fmt": "{:.0f}"},
             {"label": "MIN_BAR_HEIGHT",   "attr": "_GRAPH_MIN_BAR_HEIGHT",    "kind": "int",
              "step": 1, "lo": 0, "hi": 11, "fmt": "{}"},
+            {"label": "Clear tallest bar", "attr": None, "kind": "action", "action": "clear_tallest"},
             {"label": "Clear graph bars", "attr": None, "kind": "action", "action": "clear"},
             {"label": "Reload graph.py",  "attr": None, "kind": "action", "action": "reload"},
         ]
@@ -365,6 +382,31 @@ class Graph:
         except Exception as _e:
             self.popup_status = f"clear failed: {_e}"
 
+    def clear_tallest_bar(self) -> None:
+        """Remove just the single tallest bar from the top-bar disk-rate
+        graph — in memory and in global.json — leaving the rest of the
+        history intact.
+
+        Useful for knocking out one freak spike (e.g. a brief burst that's
+        now permanently pinning the auto-scale ceiling) without wiping the
+        whole graph. If multiple bars are tied for tallest, only the first
+        one encountered is removed. No-op (with a status message) if the
+        graph is currently empty.
+        """
+        if not self.disk_rate_history:
+            self.popup_status = "graph is empty — nothing to clear"
+            return
+        bars = list(self.disk_rate_history)
+        tallest_idx = max(range(len(bars)), key=lambda i: bars[i])
+        removed = bars.pop(tallest_idx)
+        self.disk_rate_history = deque(bars, maxlen=self.disk_rate_history.maxlen)
+        try:
+            from . import main as _main
+            _main._save_disk_rate_history(bars)
+            self.popup_status = f"tallest bar cleared ({human_rate(removed)})"
+        except Exception as _e:
+            self.popup_status = f"clear tallest failed: {_e}"
+
     def handle_key(self, key) -> bool:
         rows = self._knob_rows()
         if self.popup_edit is not None:
@@ -403,7 +445,10 @@ class Graph:
         elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
             row = rows[self.popup_sel]
             if row["kind"] == "action":
-                if row.get("action") == "clear":
+                if row.get("action") == "clear_tallest":
+                    # Drop only the single tallest bar (in memory + on disk).
+                    self.clear_tallest_bar()
+                elif row.get("action") == "clear":
                     # Clear every bar from the on-screen graph and from
                     # global.json so no history comes back on restart.
                     self.clear_all_bars()
@@ -448,8 +493,13 @@ class Graph:
         for i in range(self.popup_scroll, min(len(rows), self.popup_scroll + vis)):
             row = rows[i]
             if row["kind"] == "action":
-                val_txt = ("Enter to clear" if row.get("action") == "clear"
-                           else "Enter to reload")
+                _action = row.get("action")
+                if _action == "clear_tallest":
+                    val_txt = "Enter to clear tallest"
+                elif _action == "clear":
+                    val_txt = "Enter to clear"
+                else:
+                    val_txt = "Enter to reload"
             else:
                 cur = getattr(self, row["attr"])
                 if row["kind"] == "enum":
