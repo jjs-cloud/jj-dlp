@@ -109,7 +109,7 @@ class Graph:
     # (1 + pct/100) × the tallest *other* visible bar — so a lone spike can
     # never tower over the normal bars. E.g. 40 with a tallest bar of 10 MB/s
     # lets a new bar reach at most 14 MB/s. Draw-time only; history stays raw.
-    _GRAPH_MAX_PCT_ABOVE_TALLEST = 0
+    _GRAPH_MAX_PCT_ABOVE_TALLEST = 20
 
     def __init__(self, dashboard):
         self.dashboard = dashboard

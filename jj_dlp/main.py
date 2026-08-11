@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.15"
+__version__ = "1.26.16"
 
 import subprocess
 import time
@@ -4559,7 +4559,7 @@ class JJDlpDashboard:
         """Cycle to the next color scheme. Bound to the 'c' key ('C' for
         Colors); the 'n' key opens the full theme editor popup instead,
         which offers the same scheme picker plus role/site customization."""
-        self._color_scheme_idx = (self._color_scheme_idx + 1) % len(theme.COLOR_SCHEMES)
+        self._color_scheme_idx = (self._color_scheme_idx + 1) % len(theme.SCHEME_NAMES)
         theme.get_state()['base_scheme_idx'] = self._color_scheme_idx
         self._apply_color_scheme()
         theme.save_theme(theme.get_state())
@@ -4570,7 +4570,7 @@ class JJDlpDashboard:
         scheme. self._color_scheme_idx is kept in sync with theme's saved
         base_scheme_idx so existing readers (e.g. the DOS Red bold-tabs
         check in draw_tabs) keep working unchanged."""
-        self._color_scheme_idx = theme.get_state().get('base_scheme_idx', theme.DEFAULT_SCHEME_IDX) % len(theme.COLOR_SCHEMES)
+        self._color_scheme_idx = theme.get_state().get('base_scheme_idx', theme.DEFAULT_SCHEME_IDX) % len(theme.SCHEME_NAMES)
         theme.apply_palette(self)
 
     def setup_colors(self):
