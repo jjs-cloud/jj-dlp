@@ -4567,7 +4567,7 @@ class JJDlpDashboard:
         self._apply_color_scheme()
         theme.save_theme(theme.get_state())
         # Flash the new scheme's name above the logo for a few seconds.
-        self._scheme_flash_until = time.time() + 3.0
+        self._scheme_flash_until = time.time() + 6.0
 
     def _apply_color_scheme(self):
         """Re-initialize all 13 curses pairs. Delegates to theme.py, which
