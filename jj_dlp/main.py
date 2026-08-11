@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.16"
+__version__ = "1.26.17"
 
 import subprocess
 import time
@@ -7125,6 +7125,7 @@ def main() -> None:
     # Kept inside main() (not at module scope) so that importing from this
     # module never triggers interactive prompts or sys.exit().
     ensure_curses()
+    theme.query_original_palette()
     if not plain_ffmpeg_check():
         print(f"\njj-dlp v{__version__}  ·  Aborted during ffmpeg check.")
         sys.exit(1)

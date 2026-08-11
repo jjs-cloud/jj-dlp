@@ -802,18 +802,29 @@ def resolve_scheme_values(dashboard=None, scheme_idx=None):
 #     scheme looks identical to its terminal twin.
 #
 # Switching schemes re-applies the right palette every time: "(RGB)"
-# schemes get the pinned Campbell values, terminal schemes get the
-# terminal's own palette back (so a pin left behind by an "(RGB)" scheme
-# is undone).
+# schemes get the pinned Campbell values; terminal schemes get the
+# terminal's own palette back via init_color(original) — but ONLY when
+# query_original_palette() captured the true originals before curses
+# started (see _PALETTE_FROM_QUERY). Without that guarantee, terminal
+# schemes simply leave every color index alone (already correct for a
+# fresh session with no prior RGB pinning).
 #
-# The terminal's palette stays modified for the whole session, so the
-# original values are saved once and written back on clean exit (atexit)
-# via raw OSC 4 sequences (they work after curses has already torn down).
+# The two-stage approach:
+#   1. query_original_palette() — called in main() BEFORE curses.wrapper().
+#      Sends OSC 4 queries (ESC ] 4 ; N ; ? ESC \) and reads back the
+#      terminal emulator's real RGB for each index 0-7 via stdin with a
+#      100 ms timeout.  Stores results in _ORIG_PALETTE, sets
+#      _PALETTE_FROM_QUERY = True, and registers the atexit restore.
+#   2. normalize_palette() — called on every apply_palette() inside curses.
+#      Uses _PALETTE_FROM_QUERY to decide whether it can safely restore.
+#
+# The terminal's palette stays modified while an RGB scheme is active, so
+# the atexit restore writes the true originals back via OSC 4 sequences
+# (they work after curses has already torn down).
 # If the process is SIGKILLed the palette lingers until `reset`.
 #
 # To tune the pinned colors, edit _PALETTE_RGB. To disable normalization
 # entirely (e.g. if it misbehaves on your terminal), set _PALETTE_RGB = {}.
-# See docs/color-scheme-options.txt for the alternative approaches.
 # ─────────────────────────────────────────────────────────────────────────
 # Windows Terminal "Campbell" palette (the default on Windows), hex ->
 # curses 0-1000 scale (value * 1000 / 255).
@@ -829,6 +840,9 @@ _PALETTE_RGB = {
 }
 
 _PALETTE_READY = False
+_PALETTE_FROM_QUERY = False   # True only when _ORIG_PALETTE was populated by OSC 4
+                               # query (pre-curses). False means we have no trustworthy
+                               # original to restore — terminal schemes leave palette alone.
 _ORIG_PALETTE = {}   # index -> (r, g, b) saved once, before any pinning
 
 
@@ -849,7 +863,7 @@ def _osc4_set(index, r, g, b):
 
 
 def _restore_palette():
-    global _PALETTE_READY
+    global _PALETTE_READY, _PALETTE_FROM_QUERY
     if not _PALETTE_READY:
         return
     for idx, (r, g, b) in _ORIG_PALETTE.items():
@@ -858,6 +872,103 @@ def _restore_palette():
         except Exception:
             pass
     _PALETTE_READY = False
+    _PALETTE_FROM_QUERY = False
+
+
+def query_original_palette():
+    """Capture the terminal's true factory palette via OSC 4 query sequences.
+
+    Must be called BEFORE curses.wrapper() — while the terminal is still in
+    cooked mode and can echo OSC 4 responses back on stdin.  Sends one
+    ``\\033]4;N;?\\033\\\\`` query for each of the 8 base color indices and
+    reads back the ``\\033]4;N;rgb:RRRR/GGGG/BBBB\\033\\\\`` responses with a
+    short timeout (100 ms total).  Responses are stored in ``_ORIG_PALETTE``
+    and ``_PALETTE_FROM_QUERY`` is set to True so normalize_palette() knows
+    it has trustworthy values to restore when a terminal scheme is active.
+
+    Skipped silently on Windows, when stdout/stdin are not a tty, or when
+    the terminal does not respond within the timeout.
+    """
+    global _PALETTE_FROM_QUERY, _PALETTE_READY
+    # Only useful on platforms where can_change_color is possible (Linux/Mac).
+    # On Windows, PDCurses never supports it so there's nothing to capture.
+    if os.name == 'nt':
+        return
+    if not sys.stdout.isatty() or not sys.stdin.isatty():
+        return
+    if _PALETTE_FROM_QUERY:
+        return   # already done (idempotent)
+
+    import select
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    # Save terminal state so we can restore it after reading the response.
+    try:
+        old_settings = termios.tcgetattr(fd)
+    except Exception:
+        return
+
+    responses = {}   # index -> (r, g, b) in 0-1000 scale
+
+    try:
+        # Switch to raw mode so we can read individual bytes without Enter.
+        tty.setraw(fd)
+
+        # Send all 8 queries at once to minimise round-trip latency.
+        query = ''.join(
+            '\x1b]4;%d;?\x1b\\' % i for i in range(8)
+        )
+        sys.stdout.write(query)
+        sys.stdout.flush()
+
+        # Read responses with a 100 ms total deadline.
+        buf = ''
+        import time as _time
+        deadline = _time.monotonic() + 0.10
+        while _time.monotonic() < deadline:
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                break
+            r_ready, _, _ = select.select([sys.stdin], [], [], remaining)
+            if not r_ready:
+                break
+            chunk = sys.stdin.read(1)
+            if chunk:
+                buf += chunk
+        # Parse all complete OSC 4 responses from buffer.
+        # Format: ESC ] 4 ; N ; rgb:RRRR/GGGG/BBBB ESC \
+        import re as _re
+        pattern = _re.compile(
+            r'\x1b\]4;(\d+);rgb:([0-9a-fA-F]+)/([0-9a-fA-F]+)/([0-9a-fA-F]+)\x1b\\'
+        )
+        for m in pattern.finditer(buf):
+            idx = int(m.group(1))
+            if 0 <= idx <= 7:
+                # Terminal reports on a 0-ffff scale; curses uses 0-1000.
+                r = int(m.group(2), 16) * 1000 // 0xffff
+                g = int(m.group(3), 16) * 1000 // 0xffff
+                b = int(m.group(4), 16) * 1000 // 0xffff
+                responses[idx] = (r, g, b)
+    except Exception:
+        pass
+    finally:
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        except Exception:
+            pass
+
+    if len(responses) == 8:
+        # Only trust the result when all 8 indices responded — a partial
+        # capture could leave some entries stale.
+        _ORIG_PALETTE.clear()
+        _ORIG_PALETTE.update(responses)
+        _PALETTE_FROM_QUERY = True
+        # Register the atexit restore now so it fires even if the user
+        # never switches to an RGB scheme (exit always restores the palette).
+        atexit.register(_restore_palette)
+        _PALETTE_READY = True
 
 
 def normalize_palette():
@@ -865,11 +976,13 @@ def normalize_palette():
 
     "(RGB)" schemes (idx >= NUM_TERMINAL_SCHEMES) get the pinned
     _PALETTE_RGB values — the exact colors the app shows on Windows.
-    Terminal schemes get the terminal's own palette back, undoing any pin
-    left behind by a previously-active "(RGB)" scheme. Runs on every
-    apply_palette (so scheme switches always land on the right palette),
-    but saves the original colors + registers the atexit restore only
-    once. No-op on Windows/PDCurses, multiplexers, and 8-color terminals
+    Terminal schemes restore the terminal's own palette via _ORIG_PALETTE,
+    but ONLY when _PALETTE_FROM_QUERY is True (query_original_palette() ran
+    successfully before curses started). Without that guarantee the palette
+    is left completely untouched for terminal schemes, so they render with
+    whatever the terminal currently has — already correct on a fresh session.
+
+    No-op on Windows/PDCurses, multiplexers, and 8-color terminals
     (can_change_color() is False there)."""
     global _PALETTE_READY
     if not _PALETTE_RGB or not curses.has_colors() or not curses.can_change_color():
@@ -877,18 +990,33 @@ def normalize_palette():
     idx = _state.get('base_scheme_idx', DEFAULT_SCHEME_IDX)
     rgb_scheme = idx >= NUM_TERMINAL_SCHEMES
     try:
-        if not _PALETTE_READY:
+        if rgb_scheme:
+            # RGB scheme: pin Campbell values.  The atexit restore was already
+            # registered by query_original_palette() when _PALETTE_FROM_QUERY
+            # became True.  _PALETTE_READY tracks whether curses has seen any
+            # init_color call yet (used by _restore_palette guard).
+            if not _PALETTE_READY and _PALETTE_FROM_QUERY:
+                _PALETTE_READY = True
             for i in range(8):
-                _ORIG_PALETTE[i] = curses.color_content(i)
-            _PALETTE_READY = True
-            atexit.register(_restore_palette)
-        targets = _PALETTE_RGB if rgb_scheme else _ORIG_PALETTE
-        for i in range(8):
-            try:
-                curses.init_color(i, *targets[i])
-            except curses.error:
-                pass
-        return rgb_scheme
+                try:
+                    curses.init_color(i, *_PALETTE_RGB[i])
+                except curses.error:
+                    pass
+            return True
+        else:
+            # Terminal scheme: restore original palette only when we have
+            # values captured before any init_color was called (OSC 4 query).
+            if _PALETTE_FROM_QUERY and _ORIG_PALETTE:
+                for i in range(8):
+                    if i in _ORIG_PALETTE:
+                        try:
+                            curses.init_color(i, *_ORIG_PALETTE[i])
+                        except curses.error:
+                            pass
+            # If _PALETTE_FROM_QUERY is False we have no trustworthy original;
+            # leave the palette completely alone so the terminal's own colors
+            # show through (correct for terminal schemes on a fresh session).
+            return False
     except curses.error:
         return False
 

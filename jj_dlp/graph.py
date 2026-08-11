@@ -111,6 +111,10 @@ class Graph:
     # lets a new bar reach at most 14 MB/s. Draw-time only; history stays raw.
     _GRAPH_MAX_PCT_ABOVE_TALLEST = 20
 
+    # Show the auto-scale "max …" label above the graph's right edge. Off by
+    # default; can be toggled live from the 'p' knob popup.
+    _GRAPH_SHOW_MAX_LABEL = "off"
+
     def __init__(self, dashboard):
         self.dashboard = dashboard
 
@@ -323,7 +327,7 @@ class Graph:
         # Y-axis label above the graph's right edge: the fastest rate
         # currently on screen. The scale is auto-resizing, so this gives
         # the top of the axis a concrete value.
-        if scale_max >= 5.0:
+        if self._GRAPH_SHOW_MAX_LABEL == "on" and scale_max >= 5.0:
             _label = f"max {human_rate(scale_max)}"
             _label_x = x1 - len(_label) + 1
             if _label_x >= x0:
@@ -363,6 +367,8 @@ class Graph:
              "step": 1, "lo": 0, "hi": 11, "fmt": "{}"},
             {"label": "PCT_ABOVE_TALLEST", "attr": "_GRAPH_MAX_PCT_ABOVE_TALLEST", "kind": "int",
              "step": 5, "lo": 0, "hi": 1000, "fmt": "{}"},
+            {"label": "MAX LABEL",         "attr": "_GRAPH_SHOW_MAX_LABEL",    "kind": "enum",
+             "choices": ["off", "on"]},
             {"label": "Clear tallest bar", "attr": None, "kind": "action", "action": "clear_tallest"},
             {"label": "Clear graph bars", "attr": None, "kind": "action", "action": "clear"},
             {"label": "Reload graph.py",  "attr": None, "kind": "action", "action": "reload"},
