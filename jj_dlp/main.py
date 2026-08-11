@@ -4460,6 +4460,8 @@ class JJDlpDashboard:
         self._mgmt_scroll = 0   # scroll offset for disable/remove list
         # Color scheme index for randomization
         self._color_scheme_idx = theme.DEFAULT_SCHEME_IDX
+        # When the 'c'-key scheme-list popup should stop being drawn (epoch secs).
+        self._scheme_popup_until = 0.0
         # Scroll offsets for log/stdout/stderr tabs (lines from bottom; 0 = newest at bottom)
         self._log_scroll    = 0
         self._stdout_scroll = 0
@@ -4563,6 +4565,7 @@ class JJDlpDashboard:
         theme.get_state()['base_scheme_idx'] = self._color_scheme_idx
         self._apply_color_scheme()
         theme.save_theme(theme.get_state())
+        self._scheme_popup_until = time.time() + 2.0
 
     def _apply_color_scheme(self):
         """Re-initialize all 13 curses pairs. Delegates to theme.py, which
@@ -4577,6 +4580,41 @@ class JJDlpDashboard:
         curses.start_color()
         curses.use_default_colors()
         self._apply_color_scheme()
+
+    def draw_scheme_popup(self) -> None:
+        """Display-only popup listing every color scheme (current one
+        highlighted). Shown for ~2s after the 'c' key cycles schemes."""
+        if time.time() >= self._scheme_popup_until:
+            return
+        h, w = self.stdscr.getmaxyx()
+        names = theme.SCHEME_NAMES
+        box_h = len(names) + 4
+        box_w = min(w - 4, 44)
+        by1 = max(0, (h - box_h) // 2)
+        bx1 = max(0, (w - box_w) // 2)
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            self.safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1),
+                        theme.attr(self, "main_jjdlpdashboard_draw_scheme_popup_normal_1"))
+
+        self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_CHROME)
+        self.safe_addstr(self.stdscr, by1, bx1 + 2, " COLOR SCHEMES ",
+                    theme.attr(self, "main_jjdlpdashboard_draw_scheme_popup_hilight"))
+
+        for i, name in enumerate(names):
+            if i == self._color_scheme_idx:
+                attr_ = theme.attr(self, "main_jjdlpdashboard_draw_scheme_popup_live")
+                prefix = "* "
+            else:
+                attr_ = theme.attr(self, "main_jjdlpdashboard_draw_scheme_popup_normal_2")
+                prefix = "  "
+            self.safe_addstr(self.stdscr, by1 + 2 + i, bx1 + 2,
+                        (prefix + name)[:box_w - 4], attr_)
+
+        self.safe_addstr(self.stdscr, by2, bx1 + 2, " c: next scheme ",
+                    theme.attr(self, "main_jjdlpdashboard_draw_scheme_popup_invhead"))
 
 
     # ── Logo ─────────────────────────────────────────────────────────────────
@@ -6030,6 +6068,10 @@ class JJDlpDashboard:
         # Graph-knob popup (dev feature) — drawn above the bake popup.
         if self.graph.popup_open:
             self.graph.draw_popup()
+
+        # Transient scheme-list popup ('c' key) — drawn above the other popups
+        # but below the exit-confirm / failure alerts.
+        self.draw_scheme_popup()
 
         # Exit-confirmation popup — drawn on top of everything else.
         if self._exit_confirm_open:

@@ -129,12 +129,12 @@ PAIR_NUM_ROLE = {v: k for k, v in ROLE_PAIR_NUM.items()}
 # see SCHEME_TUPLE_FIELDS above for the field order.
 # ─────────────────────────────────────────────────────────────────────────
 SCHEME_NAMES = [
-    "Default (cyan/blue/green/magenta)", "Amber terminal", "Green phosphor",
+    "Classic cyan", "Amber terminal", "Green phosphor",
     "Red alert", "Magenta/purple", "Ice blue", "DOS Blue", "DOS Red", "DOS White",
 ]
 
 COLOR_SCHEMES = [
-    # 0: Default (cyan/blue/green/magenta)
+    # 0: Classic cyan
     (curses.COLOR_CYAN,    curses.COLOR_WHITE,   curses.COLOR_BLUE,
      curses.COLOR_YELLOW,  curses.COLOR_GREEN,   curses.COLOR_BLACK,
      curses.COLOR_CYAN,    curses.COLOR_MAGENTA, curses.COLOR_RED,
@@ -209,7 +209,7 @@ _SCHEME_BACKGROUND = {
 }
 
 # Default base scheme index: DOS Blue (6) on Windows, the original
-# Default (0) scheme everywhere else. Used as the fallback whenever
+# Classic cyan (0) scheme everywhere else. Used as the fallback whenever
 # theme.json doesn't specify a base_scheme_idx.
 DEFAULT_SCHEME_IDX = 6 if os.name == 'nt' else 0
 
@@ -561,6 +561,11 @@ SITE_REGISTRY = {
     'main_jjdlpdashboard_draw_changelog_popup_hilight': {'file': 'main.py', 'label': 'Changelog Popup — Title', 'default_role': 'HILIGHT', 'default_bold': True},
     'main_jjdlpdashboard_draw_changelog_popup_normal_2': {'file': 'main.py', 'label': 'Changelog Popup — Content Line', 'default_role': 'NORMAL', 'default_bold': False},
     'main_jjdlpdashboard_draw_changelog_popup_invhead': {'file': 'main.py', 'label': 'Changelog Popup — Scroll Indicator / Legend', 'default_role': 'INVHEAD', 'default_bold': False},
+    'main_jjdlpdashboard_draw_scheme_popup_normal_1': {'file': 'main.py', 'label': 'Scheme List Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'main_jjdlpdashboard_draw_scheme_popup_hilight': {'file': 'main.py', 'label': 'Scheme List Popup — Title', 'default_role': 'HILIGHT', 'default_bold': True},
+    'main_jjdlpdashboard_draw_scheme_popup_live': {'file': 'main.py', 'label': 'Scheme List Popup — Current Scheme Row', 'default_role': 'LIVE', 'default_bold': True},
+    'main_jjdlpdashboard_draw_scheme_popup_normal_2': {'file': 'main.py', 'label': 'Scheme List Popup — Other Scheme Row', 'default_role': 'NORMAL', 'default_bold': False},
+    'main_jjdlpdashboard_draw_scheme_popup_invhead': {'file': 'main.py', 'label': 'Scheme List Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
     'main_jjdlpdashboard_curses_choose_config_pairnum0': {'file': 'main.py', 'label': 'Config Picker Splash — Full-Screen Background', 'default_role': 'NORMAL', 'default_bold': False},
     'main_jjdlpdashboard_curses_choose_config_pairnum6': {'file': 'main.py', 'label': 'Config Picker Splash — Logo', 'default_role': 'LOGO', 'default_bold': True},
     'main_jjdlpdashboard_curses_choose_config_pairnum1_1': {'file': 'main.py', 'label': 'Config Picker Splash — System Clock', 'default_role': 'CHROME', 'default_bold': False},
