@@ -563,6 +563,7 @@ SITE_REGISTRY = {
     'main_jjdlpdashboard_refresh_screen_warn': {'file': 'main.py', 'label': 'Update Available', 'default_role': 'WARN', 'default_bold': True},
     'main_jjdlpdashboard_refresh_screen_dim': {'file': 'main.py', 'label': 'v{__version__}', 'default_role': 'DIM', 'default_bold': False},
     'main_jjdlpdashboard_refresh_screen_chrome_2': {'file': 'main.py', 'label': 'Separator', 'default_role': 'CHROME', 'default_bold': False},
+    'main_jjdlpdashboard_refresh_screen_scheme_name': {'file': 'main.py', 'label': 'Scheme Name Flash (shows briefly after \'c\')', 'default_role': 'HILIGHT', 'default_bold': True},
     'main_jjdlpdashboard_draw_write_failure_a_delete': {'file': 'main.py', 'label': 'Recording Failure Alert — Box, Title, Message, Names', 'default_role': 'DELETE', 'default_bold': True},
     'main_jjdlpdashboard_draw_write_failure_a_invhead': {'file': 'main.py', 'label': 'Recording Failure Alert — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
     'main_jjdlpdashboard_draw_exit_confirm_po_normal_1': {'file': 'main.py', 'label': 'Exit Confirm Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
@@ -845,6 +846,13 @@ _PALETTE_FROM_QUERY = False   # True only when _ORIG_PALETTE was populated by OS
                                # original to restore — terminal schemes leave palette alone.
 _ORIG_PALETTE = {}   # index -> (r, g, b) saved once, before any pinning
 
+# True once an "(RGB)" scheme has been applied this session (its base color
+# indices were pinned via init_color). Used by the dashboard's 'c' flash to
+# decide whether a non-Windows scheme change needs a restart to fully apply —
+# once the palette has been re-pinned, the terminal's own colors won't come
+# back until the process restarts (or a fresh session starts).
+_RGB_SCHEME_APPLIED = False
+
 
 def _palette_1000_to_hex4(value):
     return '%04x' % round(value * 255 / 1000)
@@ -984,7 +992,7 @@ def normalize_palette():
 
     No-op on Windows/PDCurses, multiplexers, and 8-color terminals
     (can_change_color() is False there)."""
-    global _PALETTE_READY
+    global _PALETTE_READY, _RGB_SCHEME_APPLIED
     if not _PALETTE_RGB or not curses.has_colors() or not curses.can_change_color():
         return False
     idx = _state.get('base_scheme_idx', DEFAULT_SCHEME_IDX)
@@ -995,6 +1003,7 @@ def normalize_palette():
             # registered by query_original_palette() when _PALETTE_FROM_QUERY
             # became True.  _PALETTE_READY tracks whether curses has seen any
             # init_color call yet (used by _restore_palette guard).
+            _RGB_SCHEME_APPLIED = True
             if not _PALETTE_READY and _PALETTE_FROM_QUERY:
                 _PALETTE_READY = True
             for i in range(8):

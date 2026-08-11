@@ -4460,6 +4460,9 @@ class JJDlpDashboard:
         self._mgmt_scroll = 0   # scroll offset for disable/remove list
         # Color scheme index for randomization
         self._color_scheme_idx = theme.DEFAULT_SCHEME_IDX
+        # Timestamp until which the scheme-name flash (triggered by 'c') stays
+        # drawn above the logo; 0.0 = no flash active.
+        self._scheme_flash_until: float = 0.0
         # Scroll offsets for log/stdout/stderr tabs (lines from bottom; 0 = newest at bottom)
         self._log_scroll    = 0
         self._stdout_scroll = 0
@@ -4563,6 +4566,8 @@ class JJDlpDashboard:
         theme.get_state()['base_scheme_idx'] = self._color_scheme_idx
         self._apply_color_scheme()
         theme.save_theme(theme.get_state())
+        # Flash the new scheme's name above the logo for a few seconds.
+        self._scheme_flash_until = time.time() + 3.0
 
     def _apply_color_scheme(self):
         """Re-initialize all 13 curses pairs. Delegates to theme.py, which
@@ -5915,6 +5920,17 @@ class JJDlpDashboard:
         self.stdscr.bkgd(" ", theme.attr(self, "main_jjdlpdashboard_refresh_screen_normal"))
 
         # Logo (6 lines tall, starts at row 1)
+        # Scheme-name flash — shown above the logo for a few seconds after
+        # the user presses 'c'. On non-Windows, if an RGB scheme was applied
+        # at any point this session (palette pinned), switching schemes needs
+        # a restart to fully take effect, so say so.
+        if time.time() < self._scheme_flash_until:
+            _scheme_name = theme.SCHEME_NAMES[self._color_scheme_idx]
+            _scheme_flash = _scheme_name
+            if os.name != 'nt' and theme._RGB_SCHEME_APPLIED:
+                _scheme_flash += " (restart jj-dlp to apply theme)"
+            self.safe_addstr(self.stdscr, 0, 2, _scheme_flash,
+                        theme.attr(self, "main_jjdlpdashboard_refresh_screen_scheme_name"))
         self.draw_logo(1, 2)
 
         # System time top-right
