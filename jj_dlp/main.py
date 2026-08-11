@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.17"
+__version__ = "1.26.14"
 
 import subprocess
 import time
@@ -4460,9 +4460,6 @@ class JJDlpDashboard:
         self._mgmt_scroll = 0   # scroll offset for disable/remove list
         # Color scheme index for randomization
         self._color_scheme_idx = theme.DEFAULT_SCHEME_IDX
-        # Timestamp until which the scheme-name flash (triggered by 'c') stays
-        # drawn above the logo; 0.0 = no flash active.
-        self._scheme_flash_until: float = 0.0
         # Scroll offsets for log/stdout/stderr tabs (lines from bottom; 0 = newest at bottom)
         self._log_scroll    = 0
         self._stdout_scroll = 0
@@ -4562,12 +4559,10 @@ class JJDlpDashboard:
         """Cycle to the next color scheme. Bound to the 'c' key ('C' for
         Colors); the 'n' key opens the full theme editor popup instead,
         which offers the same scheme picker plus role/site customization."""
-        self._color_scheme_idx = (self._color_scheme_idx + 1) % len(theme.SCHEME_NAMES)
+        self._color_scheme_idx = (self._color_scheme_idx + 1) % len(theme.COLOR_SCHEMES)
         theme.get_state()['base_scheme_idx'] = self._color_scheme_idx
         self._apply_color_scheme()
         theme.save_theme(theme.get_state())
-        # Flash the new scheme's name above the logo for a few seconds.
-        self._scheme_flash_until = time.time() + 6.0
 
     def _apply_color_scheme(self):
         """Re-initialize all 13 curses pairs. Delegates to theme.py, which
@@ -4575,7 +4570,7 @@ class JJDlpDashboard:
         scheme. self._color_scheme_idx is kept in sync with theme's saved
         base_scheme_idx so existing readers (e.g. the DOS Red bold-tabs
         check in draw_tabs) keep working unchanged."""
-        self._color_scheme_idx = theme.get_state().get('base_scheme_idx', theme.DEFAULT_SCHEME_IDX) % len(theme.SCHEME_NAMES)
+        self._color_scheme_idx = theme.get_state().get('base_scheme_idx', theme.DEFAULT_SCHEME_IDX) % len(theme.COLOR_SCHEMES)
         theme.apply_palette(self)
 
     def setup_colors(self):
@@ -5920,19 +5915,6 @@ class JJDlpDashboard:
         self.stdscr.bkgd(" ", theme.attr(self, "main_jjdlpdashboard_refresh_screen_normal"))
 
         # Logo (6 lines tall, starts at row 1)
-        # Scheme-name flash — shown above the logo for a few seconds after
-        # the user presses 'c'. On non-Windows, the terminal palette stays
-        # stuck on the RGB-pinned colors once an RGB scheme was applied this
-        # session, so switching back to a non-RGB (terminal-color) scheme
-        # needs a restart to fully take effect — say so only then.
-        if time.time() < self._scheme_flash_until:
-            _scheme_name = theme.SCHEME_NAMES[self._color_scheme_idx]
-            _scheme_flash = _scheme_name
-            if (os.name != 'nt' and theme._RGB_SCHEME_APPLIED
-                    and self._color_scheme_idx < theme.NUM_TERMINAL_SCHEMES):
-                _scheme_flash += " (restart jj-dlp to apply theme)"
-            self.safe_addstr(self.stdscr, 0, 2, _scheme_flash,
-                        theme.attr(self, "main_jjdlpdashboard_refresh_screen_scheme_name"))
         self.draw_logo(1, 2)
 
         # System time top-right
@@ -7143,7 +7125,6 @@ def main() -> None:
     # Kept inside main() (not at module scope) so that importing from this
     # module never triggers interactive prompts or sys.exit().
     ensure_curses()
-    theme.query_original_palette()
     if not plain_ffmpeg_check():
         print(f"\njj-dlp v{__version__}  ·  Aborted during ffmpeg check.")
         sys.exit(1)
