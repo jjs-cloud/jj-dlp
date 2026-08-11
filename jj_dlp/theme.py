@@ -208,6 +208,11 @@ _SCHEME_BACKGROUND = {
     8: curses.COLOR_WHITE,
 }
 
+# Default base scheme index: DOS Blue (6) on Windows, the original
+# Default (0) scheme everywhere else. Used as the fallback whenever
+# theme.json doesn't specify a base_scheme_idx.
+DEFAULT_SCHEME_IDX = 6 if os.name == 'nt' else 0
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # SITE_REGISTRY — hand-maintained. tag -> {file, label, default_role,
@@ -608,13 +613,13 @@ def load_theme():
     missing, empty, or unparseable. role_overrides is stored per base scheme
     index: {str(scheme_idx): {role: {'fg': name, 'bg': name}}}."""
     path = _theme_json_path()
-    default = {'base_scheme_idx': 0, 'role_overrides': {}, 'site_overrides': {}}
+    default = {'base_scheme_idx': DEFAULT_SCHEME_IDX, 'role_overrides': {}, 'site_overrides': {}}
     try:
         with open(path, 'r', encoding='utf-8') as f:
             data = json.loads(f.read())
         if not isinstance(data, dict):
             return default
-        data.setdefault('base_scheme_idx', 0)
+        data.setdefault('base_scheme_idx', DEFAULT_SCHEME_IDX)
         data.setdefault('role_overrides', {})
         data.setdefault('site_overrides', {})
         return data
@@ -722,7 +727,7 @@ def role_overrides_for(scheme_idx=None):
     """Return the role-override dict ({role: {'fg': name, 'bg': name}}) for
     the given scheme index, defaulting to the active base scheme. The dict is
     created on demand, so callers can mutate it directly."""
-    idx = str(_state.get('base_scheme_idx', 0) if scheme_idx is None else scheme_idx)
+    idx = str(_state.get('base_scheme_idx', DEFAULT_SCHEME_IDX) if scheme_idx is None else scheme_idx)
     return _state.setdefault('role_overrides', {}).setdefault(idx, {})
 
 
@@ -738,7 +743,7 @@ def resolve_scheme_values(dashboard=None, scheme_idx=None):
     dashboard is accepted for backward compatibility but no longer used —
     COLOR_SCHEMES now lives in theme.py."""
     if scheme_idx is None:
-        scheme_idx = _state.get('base_scheme_idx', 0)
+        scheme_idx = _state.get('base_scheme_idx', DEFAULT_SCHEME_IDX)
     scheme = COLOR_SCHEMES[scheme_idx % len(COLOR_SCHEMES)]
     values = {}
     for role in ROLE_ORDER:
@@ -766,7 +771,7 @@ def apply_palette(dashboard):
     after loading/saving theme.json, or when the base scheme changes)."""
     values = resolve_scheme_values()
     ambient_bg = _SCHEME_BACKGROUND.get(
-        _state.get('base_scheme_idx', 0), curses.COLOR_BLACK)
+        _state.get('base_scheme_idx', DEFAULT_SCHEME_IDX), curses.COLOR_BLACK)
 
     for role in ROLE_ORDER:
         pair_num = ROLE_PAIR_NUM[role]
@@ -1030,7 +1035,7 @@ class ThemeManager:
         self._main_sel = 0
         self._solid_bg = True   # solid (opaque) popup background; 'f' toggles
 
-        self._scheme_sel = _state.get('base_scheme_idx', 0)
+        self._scheme_sel = _state.get('base_scheme_idx', DEFAULT_SCHEME_IDX)
 
         self._role_sel = 0
         self._role_edit_field = 'fg'   # 'fg' or 'bg'
@@ -1091,7 +1096,7 @@ class ThemeManager:
             self._main_sel = min(len(options) - 1, self._main_sel + 1)
         elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459, ord(' ')):
             if self._main_sel == 0:
-                self._scheme_sel = _state.get('base_scheme_idx', 0)
+                self._scheme_sel = _state.get('base_scheme_idx', DEFAULT_SCHEME_IDX)
                 self.mode = self.MODE_SCHEME_SELECT
             elif self._main_sel == 1:
                 self._role_sel = 0
@@ -1303,7 +1308,7 @@ class ThemeManager:
         db.safe_addstr(stdscr, by1, bx1 + 2, " BASE SCHEME ",
                         curses.color_pair(db.C_INVHEAD) | curses.A_BOLD)
         for i, name in enumerate(self.SCHEME_NAMES):
-            is_cur = (i == _state.get('base_scheme_idx', 0))
+            is_cur = (i == _state.get('base_scheme_idx', DEFAULT_SCHEME_IDX))
             if i == self._scheme_sel:
                 attr_ = curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
             elif is_cur:
@@ -1321,7 +1326,7 @@ class ThemeManager:
         h = n + 4
         w = 42
         by1, bx1, by2, bx2 = self._box(stdscr, h, w)
-        scheme_idx = _state.get('base_scheme_idx', 0) % len(self.SCHEME_NAMES)
+        scheme_idx = _state.get('base_scheme_idx', DEFAULT_SCHEME_IDX) % len(self.SCHEME_NAMES)
         title = f" ROLE COLORS - {self.SCHEME_NAMES[scheme_idx]} "
         db.safe_addstr(stdscr, by1, bx1 + 2, title[:w - 4],
                         curses.color_pair(db.C_INVHEAD) | curses.A_BOLD)

@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.13"
+__version__ = "1.26.14"
 
 import subprocess
 import time
@@ -4459,7 +4459,7 @@ class JJDlpDashboard:
         self._mgmt_sel    = 0   # selected index for disable/remove list
         self._mgmt_scroll = 0   # scroll offset for disable/remove list
         # Color scheme index for randomization
-        self._color_scheme_idx = 0
+        self._color_scheme_idx = theme.DEFAULT_SCHEME_IDX
         # Scroll offsets for log/stdout/stderr tabs (lines from bottom; 0 = newest at bottom)
         self._log_scroll    = 0
         self._stdout_scroll = 0
@@ -4570,7 +4570,7 @@ class JJDlpDashboard:
         scheme. self._color_scheme_idx is kept in sync with theme's saved
         base_scheme_idx so existing readers (e.g. the DOS Red bold-tabs
         check in draw_tabs) keep working unchanged."""
-        self._color_scheme_idx = theme.get_state().get('base_scheme_idx', 0) % len(theme.COLOR_SCHEMES)
+        self._color_scheme_idx = theme.get_state().get('base_scheme_idx', theme.DEFAULT_SCHEME_IDX) % len(theme.COLOR_SCHEMES)
         theme.apply_palette(self)
 
     def setup_colors(self):
