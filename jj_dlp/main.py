@@ -3561,7 +3561,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         # flag as stalled. Just wait for the first sign of growth.
                         filename_error_warned = False
                         dbg(f"[STALL] no growth yet, but stall checker not armed "
-                            f"(no growth seen for this file yet) — skipping stall "
+                            f"(no growth seen for {active_file!r} yet) — skipping stall "
                             f"detection", site_name=streamer)
                         # NOTIFY_NO_CONFIRM_FILE is now checked every second via
                         # _check_no_confirm_deadline() above, not here — see
