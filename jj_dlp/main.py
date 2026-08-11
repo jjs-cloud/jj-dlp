@@ -5921,13 +5921,15 @@ class JJDlpDashboard:
 
         # Logo (6 lines tall, starts at row 1)
         # Scheme-name flash — shown above the logo for a few seconds after
-        # the user presses 'c'. On non-Windows, if an RGB scheme was applied
-        # at any point this session (palette pinned), switching schemes needs
-        # a restart to fully take effect, so say so.
+        # the user presses 'c'. On non-Windows, the terminal palette stays
+        # stuck on the RGB-pinned colors once an RGB scheme was applied this
+        # session, so switching back to a non-RGB (terminal-color) scheme
+        # needs a restart to fully take effect — say so only then.
         if time.time() < self._scheme_flash_until:
             _scheme_name = theme.SCHEME_NAMES[self._color_scheme_idx]
             _scheme_flash = _scheme_name
-            if os.name != 'nt' and theme._RGB_SCHEME_APPLIED:
+            if (os.name != 'nt' and theme._RGB_SCHEME_APPLIED
+                    and self._color_scheme_idx < theme.NUM_TERMINAL_SCHEMES):
                 _scheme_flash += " (restart jj-dlp to apply theme)"
             self.safe_addstr(self.stdscr, 0, 2, _scheme_flash,
                         theme.attr(self, "main_jjdlpdashboard_refresh_screen_scheme_name"))
