@@ -152,6 +152,13 @@ def configure(dashboard_log_fn=None, dashboard_dbg_fn=None) -> None:
 #   SYSTEM   — dashboard system-panel background section exception guards
 #   CHANGELOG — changelog-shown-on-update bookkeeping
 #   WEBUI - HTTP Server diagnostics
+#   GRAPH    — disk-rate graph reload/debug operations
+#   THEME    — color-scheme theme-push operations
+#   RESTART_ANCHOR — restart-anchor refresh logging
+#   SIMULATE_LQ — simulation: injected low-quality errors
+#   SIMULATE_QUALITY_UPGRADE — simulation: injected quality-upgrade event
+#   SIMULATE_STALL — simulation: injected stall/freeze
+#   SIMULATE_WRITE_FAILURE — simulation: injected write-failure blocker
 #
 DBG_TAGS: list[str] = [
     "DRAIN",
@@ -179,6 +186,13 @@ DBG_TAGS: list[str] = [
     "SYSTEM",
     "CHANGELOG",
     "WEBUI",
+    "GRAPH",
+    "THEME",
+    "RESTART_ANCHOR",
+    "SIMULATE_LQ",
+    "SIMULATE_QUALITY_UPGRADE",
+    "SIMULATE_STALL",
+    "SIMULATE_WRITE_FAILURE",
 ]
 
 import json

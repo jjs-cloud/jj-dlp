@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.15"
+__version__ = "1.26.16"
 
 import subprocess
 import time
@@ -4580,6 +4580,8 @@ class JJDlpDashboard:
     def setup_colors(self):
         curses.start_color()
         curses.use_default_colors()
+        if theme.apply_pending_theme_push():
+            dbg(f"[THEME] applied one-time theme push (scheme idx {theme.THEME_PUSH})")
         self._apply_color_scheme()
 
     def draw_scheme_popup(self) -> None:

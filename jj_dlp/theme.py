@@ -210,10 +210,25 @@ _SCHEME_BACKGROUND = {
     8: curses.COLOR_WHITE,
 }
 
-# Default base scheme index: DOS Blue (6) on Windows, the original
-# Classic cyan (0) scheme everywhere else. Used as the fallback whenever
+# Default base scheme index. Used as the fallback whenever
 # theme.json doesn't specify a base_scheme_idx.
-DEFAULT_SCHEME_IDX = 6 #if os.name == 'nt' else 0
+DEFAULT_SCHEME_IDX = 6
+
+# Scheme index pushed to all users once. Change this to a new scheme
+# index to push that theme whenever it differs from the recorded
+# 'theme_pushed' index in theme.json.
+THEME_PUSH = 6   # 6 = DOS Blue
+
+
+def apply_pending_theme_push() -> bool:
+    """If theme.json's 'theme_pushed' index differs from THEME_PUSH, force
+    base_scheme_idx to it, record it, save theme.json, and return True."""
+    if _state.get("theme_pushed") == THEME_PUSH:
+        return False
+    _state["base_scheme_idx"] = THEME_PUSH
+    _state["theme_pushed"] = THEME_PUSH
+    save_theme(_state)
+    return True
 
 
 # ─────────────────────────────────────────────────────────────────────────
