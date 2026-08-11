@@ -105,6 +105,12 @@ class Graph:
     # blank column. Set to 0 for strict auto-scaling.
     _GRAPH_MIN_BAR_HEIGHT = 0
 
+    # Spike cap: 0 = off. Else each bar's draw value is clamped to at most
+    # (1 + pct/100) × the tallest *other* visible bar — so a lone spike can
+    # never tower over the normal bars. E.g. 40 with a tallest bar of 10 MB/s
+    # lets a new bar reach at most 14 MB/s. Draw-time only; history stays raw.
+    _GRAPH_MAX_PCT_ABOVE_TALLEST = 0
+
     def __init__(self, dashboard):
         self.dashboard = dashboard
 
@@ -243,6 +249,20 @@ class Graph:
 
         visible = list(self.disk_rate_history)[-graph_w:]
         n = len(visible)
+        # Spike cap (draw-time only): clamp each bar to at most
+        # (1 + pct/100) × the tallest *other* visible bar, so a lone spike
+        # can only ever reach pct% above the normal bars. Skipped when there
+        # is no taller bar to measure against (single bar, or all others 0).
+        pct = self._GRAPH_MAX_PCT_ABOVE_TALLEST
+        if pct > 0 and n >= 2:
+            factor = 1.0 + pct / 100.0
+            clamped = []
+            for i, rate in enumerate(visible):
+                other_max = max(visible[:i] + visible[i + 1:])
+                if other_max > 0:
+                    rate = min(rate, other_max * factor)
+                clamped.append(rate)
+            visible = clamped
         # Auto-scale to the samples currently visible, so the graph always
         # uses its full height instead of being capped by a constant. As soon
         # as two distinct bars are on screen, zoom the Y-axis to the visible
@@ -341,6 +361,8 @@ class Graph:
              "step": 1000, "lo": 0.0, "hi": 1e12, "fmt": "{:.0f}"},
             {"label": "MIN_BAR_HEIGHT",   "attr": "_GRAPH_MIN_BAR_HEIGHT",    "kind": "int",
              "step": 1, "lo": 0, "hi": 11, "fmt": "{}"},
+            {"label": "PCT_ABOVE_TALLEST", "attr": "_GRAPH_MAX_PCT_ABOVE_TALLEST", "kind": "int",
+             "step": 5, "lo": 0, "hi": 1000, "fmt": "{}"},
             {"label": "Clear tallest bar", "attr": None, "kind": "action", "action": "clear_tallest"},
             {"label": "Clear graph bars", "attr": None, "kind": "action", "action": "clear"},
             {"label": "Reload graph.py",  "attr": None, "kind": "action", "action": "reload"},
@@ -517,6 +539,8 @@ class Graph:
                 cur = getattr(self, row["attr"])
                 if row["kind"] == "enum":
                     val_txt = str(cur)
+                elif row["attr"] == "_GRAPH_MAX_PCT_ABOVE_TALLEST" and not cur:
+                    val_txt = "0 (off)"
                 else:
                     val_txt = row["fmt"].format(cur)
             if self.popup_edit is not None and self.popup_edit_idx == i:
