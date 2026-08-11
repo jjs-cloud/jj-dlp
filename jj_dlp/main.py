@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.14"
+__version__ = "1.26.15"
 
 import subprocess
 import time
@@ -426,6 +426,7 @@ def load_global_config() -> dict:
         "web_ui_user":        general.get("WEB_UI_USER", "").strip().strip('"\''),
         "web_ui_pass":        general.get("WEB_UI_PASS", "").strip().strip('"\''),
         "graph_scale":        max(1, _int("GRAPH_SCALE", 1)),
+        "rgb_mode":           _bool("RGB_MODE", False),
     }
 
 def _write_global_conf_key(key: str, value: str) -> None:

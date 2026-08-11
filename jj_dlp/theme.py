@@ -57,10 +57,12 @@ moved in the source files, update the corresponding entries here to match.
 """
 
 
+import atexit
 import curses
 import json
 import os
 import re
+import sys
 import time
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -769,11 +771,118 @@ def resolve_scheme_values(dashboard=None, scheme_idx=None):
     return values
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Palette normalization — why this exists and what it does
+#
+# curses only sends color *indices* (0-7) to the terminal, and every
+# distro ships a different default palette, so the same app looks
+# different on every Linux terminal. Fix: when the terminal advertises
+# can_change_color() (xterm, GNOME, XFCE, Konsole, kitty, ...), re-pin
+# the 8 base indices to Windows Terminal's "Campbell" palette so every
+# such terminal renders identical, Windows-matching colors. Terminals
+# that can't change colors are left untouched. The originals are saved
+# here and restored on clean exit (atexit) via raw OSC 4 sequences.
+# Disabled unless RGB_MODE = true in global.conf; to tune the pinned
+# colors, edit _PALETTE_RGB.
+# ─────────────────────────────────────────────────────────────────────────
+# Windows Terminal "Campbell" palette (the default on Windows), hex ->
+# curses 0-1000 scale (value * 1000 / 255).
+_PALETTE_RGB = {
+    curses.COLOR_BLACK:    (47, 47, 47),       # 0C0C0C
+    curses.COLOR_RED:      (773, 59, 122),     # C50F1F
+    curses.COLOR_GREEN:    (75, 631, 55),      # 13A10E
+    curses.COLOR_YELLOW:   (757, 612, 0),      # C19C00
+    curses.COLOR_BLUE:     (0, 216, 855),      # 0037DA
+    curses.COLOR_MAGENTA:  (533, 90, 596),     # 881798
+    curses.COLOR_CYAN:     (227, 588, 867),    # 3A96DD
+    curses.COLOR_WHITE:    (800, 800, 800),    # CCCCCC
+}
+
+_PALETTE_NORMALIZED = False
+_ORIG_PALETTE = {}   # index -> (r, g, b) saved before normalization
+
+
+def _rgb_mode_enabled() -> bool:
+    """Return True when RGB_MODE is set to true in global.conf (default: off)."""
+    try:
+        import configparser
+        parser = configparser.ConfigParser(allow_no_value=True, interpolation=None, delimiters=('=',))
+        path = os.path.abspath("configs/global.conf")
+        if not os.path.exists(path):
+            path = os.path.abspath("global.conf")
+        parser.read(path, encoding="utf-8")
+        if parser.has_section("General"):
+            raw = parser["General"].get("RGB_MODE", "").strip().lower()
+            if raw:
+                return raw not in ("false", "0", "no")
+    except Exception:
+        pass
+    return False
+
+
+def _palette_1000_to_hex4(value):
+    return '%04x' % round(value * 255 / 1000)
+
+
+def _osc4_set(index, r, g, b):
+    """Emit an OSC 4 (Set Palette Color) sequence straight to stdout —
+    usable even after endwin(), so it can restore the palette on exit."""
+    if not sys.stdout.isatty():
+        return
+    sys.stdout.write(
+        '\x1b]4;%d;rgb:%s/%s/%s\x1b\\'
+        % (index, _palette_1000_to_hex4(r),
+           _palette_1000_to_hex4(g), _palette_1000_to_hex4(b)))
+    sys.stdout.flush()
+
+
+def _restore_palette():
+    global _PALETTE_NORMALIZED
+    if not _PALETTE_NORMALIZED:
+        return
+    for idx, (r, g, b) in _ORIG_PALETTE.items():
+        try:
+            _osc4_set(idx, r, g, b)
+        except Exception:
+            pass
+    _PALETTE_NORMALIZED = False
+
+
+def normalize_palette():
+    """Pin the 8 base color indices to the app's exact RGBs (matching the
+    Windows look) on any terminal that supports changing colors, when
+    RGB_MODE is enabled in global.conf. Runs once per process; no-op on
+    Windows/PDCurses, multiplexers, and 8-color terminals
+    (can_change_color() is False there)."""
+    global _PALETTE_NORMALIZED
+    if _PALETTE_NORMALIZED:
+        return True
+    if not _rgb_mode_enabled():
+        return False
+    try:
+        if not _PALETTE_RGB or not curses.has_colors() or not curses.can_change_color():
+            return False
+        for idx, rgb in _PALETTE_RGB.items():
+            try:
+                _ORIG_PALETTE[idx] = curses.color_content(idx)
+                curses.init_color(idx, *rgb)
+            except curses.error:
+                _ORIG_PALETTE.pop(idx, None)
+        if _ORIG_PALETTE:
+            _PALETTE_NORMALIZED = True
+            atexit.register(_restore_palette)
+            return True
+        return False
+    except curses.error:
+        return False
+
+
 def apply_palette(dashboard):
     """Re-initialize all 13 curses pairs from the active base scheme + role
     overrides. Call this instead of dashboard._apply_color_scheme() once
     theme.py owns palette application; safe to call at any time (e.g. right
     after loading/saving theme.json, or when the base scheme changes)."""
+    normalize_palette()
     values = resolve_scheme_values()
     ambient_bg = _SCHEME_BACKGROUND.get(
         _state.get('base_scheme_idx', DEFAULT_SCHEME_IDX), curses.COLOR_BLACK)
