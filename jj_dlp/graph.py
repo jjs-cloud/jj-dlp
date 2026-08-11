@@ -93,7 +93,7 @@ class Graph:
     # (N × _GRAPH_SUBSAMPLE_S seconds) instead of the whole GRAPH_SCALE
     # window. E.g. 2 → a ~1s rolling average — snappy, very File-Manager
     # like; 0 → smooth average over the entire GRAPH_SCALE window.
-    _GRAPH_AVG_SUBSAMPLES = 0
+    _GRAPH_AVG_SUBSAMPLES = 10
 
     # Bars below this rate (B/s) are recorded as 0 (drawn blank). Raise it
     # to de-emphasize a slow trickle; keep at 0 to show every non-zero
