@@ -35,19 +35,28 @@ class Graph:
     live-tuned knobs do not.
     """
 
-    # Density ramp for the disk-rate bars, ordered by actual visual ink
-    # coverage (not by codepoint): ' '=0%, ░=25%, ▄=50%, ▒=50%, ▓=75%, █=100%.
-    # ▄ (LOWER HALF BLOCK) and ▒ (a 25%-ish dither... actually a checkerboard
-    # ~50% dither) have the same *ink coverage*, but ▄ reads as visually
-    # lighter/lower — it's a flat half-fill sitting in the bottom half of the
-    # cell — while ▒'s even speckle reads as more "filled in". So of the two
-    # tied-weight glyphs, ▄ is placed first (the lighter-reading one) and ▒
-    # second, so a rate increase always moves toward a glyph that looks at
-    # least as full, never one that looks emptier. All glyphs are standard
-    # codepage-437 glyphs (confirmed against supported_characters.txt), so —
-    # unlike the eighth-block chars — these are safe on cmd.exe/PowerShell as
-    # well as real terminals. Index 0 is "empty".
-    _GRAPH_RAMP = [" ", "\u2591", "\u2584", "\u2592", "\u2593", "\u2588"]  # ' ░▄▒▓█'
+    # Per-row (body, tip) glyph pairs for local level 0..10, ordered so that a
+    # rate increase (local level up) always reads as a fuller bar — the exact
+    # downward ramp verified in demo.py (see correct_order.txt). The body
+    # fills every row below the bar's topmost row; the tip sits on that
+    # topmost row. All glyphs are standard codepage-437 glyphs (confirmed
+    # against supported_characters.txt), so — unlike the eighth-block chars —
+    # these are safe on cmd.exe/PowerShell as well as real terminals. The
+    # half-block (▄) never reads as a body — a body of ▄ would look like a
+    # half-height bar — so every ▄ here is a *tip* glyph.
+    _GRAPH_LEVELS = [  # local → (body, tip); index 0 is the emptiest bar
+        ("\u2592", "\u2584"),  # 0  ▒▄  (lightest: dither body + half-block tip)
+        ("\u2593", "\u2584"),  # 1  ▓▄
+        ("\u2588", "\u2584"),  # 2  █▄
+        ("\u2591", "\u2591"),  # 3  ░░
+        ("\u2592", "\u2591"),  # 4  ▒░
+        ("\u2593", "\u2591"),  # 5  ▓░
+        ("\u2593", "\u2592"),  # 6  ▓▒
+        ("\u2588", "\u2591"),  # 7  █░
+        ("\u2588", "\u2592"),  # 8  █▒
+        ("\u2588", "\u2593"),  # 9  █▓
+        ("\u2588", "\u2588"),  # 10 ██  (fullest)
+    ]
     # Cadence (seconds) of the instantaneous-rate sub-sampler feeding the
     # top-bar graph. Smaller = burstier/more random bars (each bar becomes a
     # point reading over a shorter window); larger = smoother. Only the
@@ -92,17 +101,9 @@ class Graph:
     _GRAPH_MIN_BAR_RATE = 0.0
 
     # draw: minimum visual height (in 1/11-row ramp units) for any non-zero
-    # bar, so a tiny-but-real rate draws as a faint ░ instead of a fully
+    # bar, so a tiny-but-real rate draws as a faint bar instead of a fully
     # blank column. Set to 0 for strict auto-scaling.
     _GRAPH_MIN_BAR_HEIGHT = 0
-    # Body density levels (ramp indices into the reordered _GRAPH_RAMP
-    # above: ' '=0 ░=1 ▄=2 ▒=3 ▓=4 █=5). The half-block (▄, index 2) is
-    # excluded from bodies — a body of ▄ would read as a half-height bar —
-    # so it only ever appears as a *tip* glyph, picked up automatically by
-    # the tip formula in draw() because it now sits at its correct weight
-    # (and correct visual ordering relative to ▒) inside the ramp.
-    _GRAPH_BODY_LEVELS = [1, 3, 4, 5]  # ░ ▒ ▓ █
-    _GRAPH_BODY_STARTS = [0, 1, 3, 6]  # state offset of each body level
 
     def __init__(self, dashboard):
         self.dashboard = dashboard
@@ -215,17 +216,15 @@ class Graph:
         as possible.
 
         Each bar encodes rate along three independent axes: height (whole
-        rows), the body's density (a texture from the ramp picked per bar, so
-        two bars landing on the same height still read as distinct), and the
-        tip's density (the topmost row, which is capped at the body's density).
-        That gives 11 distinguishable sub-states per row instead of 1. The
-        half-block (▄) never appears as a body (a body of ▄ would read as a
-        half-height bar) — only as a tip glyph. It's tied with ▒ in raw ink
-        coverage but visually reads as emptier, so it's placed just below ▒
-        in _GRAPH_RAMP: tip density is monotonic with the underlying rate,
-        and a rate increase never moves to a lighter-looking glyph. This is
-        the finest resolution available without risking the eighth-block
-        glyphs that don't render on cmd.exe/PowerShell.
+        rows), the body's density (a texture picked per bar, so two bars
+        landing on the same height still read as distinct), and the tip's
+        density (the topmost row). That gives 11 distinguishable sub-states
+        per row instead of 1. The (body, tip) pair for each of those 11
+        levels comes straight from the _GRAPH_LEVELS ramp, which is ordered
+        so the bars read as monotonically fuller as the rate climbs — a rate
+        increase never moves to a lighter-looking bar. This is the finest
+        resolution available without risking the eighth-block glyphs that
+        don't render on cmd.exe/PowerShell.
 
         Monochrome — a single color/attr for the whole graph, no height-based
         color tiering. That single attr is theme-editable (see SITE_REGISTRY
@@ -246,7 +245,7 @@ class Graph:
         # "maxed out" from float noise.
         scale_max = max(visible) if any(v > 0.01 for v in visible) else 1.0
 
-        per_row = self._GRAPH_BODY_STARTS[-1] + len(self._GRAPH_RAMP) - 1  # 11 (body, tip) pairs per row
+        per_row = len(self._GRAPH_LEVELS)  # 11 (body, tip) pairs per row
         res_units = graph_h * per_row
         # Theme-editable — appears in the theme manager (n) as "Top-Bar
         # Disk-Rate Graph"; defaults to the SYSTEM role, bold.
@@ -271,12 +270,7 @@ class Graph:
             # exact value picked within that row's bucket.
             height = min(graph_h, (units - 1) // per_row + 1)
             local = (units - 1) % per_row
-            bidx = 0
-            while (bidx + 1 < len(self._GRAPH_BODY_STARTS)
-                   and self._GRAPH_BODY_STARTS[bidx + 1] <= local):
-                bidx += 1
-            body_char = self._GRAPH_RAMP[self._GRAPH_BODY_LEVELS[bidx]]
-            tip_char = self._GRAPH_RAMP[local - self._GRAPH_BODY_STARTS[bidx] + 1]
+            body_char, tip_char = self._GRAPH_LEVELS[local]
 
             for r in range(height):
                 row = y1 - r
