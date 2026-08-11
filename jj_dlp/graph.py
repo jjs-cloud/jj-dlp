@@ -37,7 +37,7 @@ class Graph:
 
     # Per-row (body, tip) glyph pairs for local level 0..10, ordered so that a
     # rate increase (local level up) always reads as a fuller bar — the exact
-    # downward ramp verified in demo.py (see correct_order.txt). The body
+    # downward ramp verified in demo.py (see docs/bar_order.txt). The body
     # fills every row below the bar's topmost row; the tip sits on that
     # topmost row. All glyphs are standard codepage-437 glyphs (confirmed
     # against supported_characters.txt), so — unlike the eighth-block chars —
@@ -211,9 +211,12 @@ class Graph:
         (y0, x0) is the top-left, (x1, y1) the bottom-right (inclusive) of
         the available area. The graph fills right-to-left as new samples
         arrive, then scrolls once it reaches the logo. Height is auto-scaled
-        to the tallest sample currently on screen (not a fixed constant) so
-        the bars use the full available height and stay as visually varied
-        as possible.
+        to the samples currently on screen (not a fixed constant) so the
+        bars use the full available height and stay as visually varied as
+        possible. As soon as two distinct bars are on screen the Y-axis zooms
+        to the visible [min, max] range: the shortest bar draws as the
+        shortest possible bar (a single ramp unit) and the tallest fills the
+        whole graph.
 
         Each bar encodes rate along three independent axes: height (whole
         rows), the body's density (a texture picked per bar, so two bars
@@ -239,11 +242,20 @@ class Graph:
             return None
 
         visible = list(self.disk_rate_history)[-graph_w:]
-        # Auto-scale to the loudest sample currently visible, so the graph
-        # always uses its full height instead of being capped by a constant.
-        # A small floor avoids a single near-zero screen looking artificially
-        # "maxed out" from float noise.
-        scale_max = max(visible) if any(v > 0.01 for v in visible) else 1.0
+        n = len(visible)
+        # Auto-scale to the samples currently visible, so the graph always
+        # uses its full height instead of being capped by a constant. As soon
+        # as two distinct bars are on screen, zoom the Y-axis to the visible
+        # [min, max] range so the shortest bar is the shortest possible bar
+        # and the tallest fills the whole graph. A small floor avoids a
+        # single near-zero screen looking artificially "maxed out" from
+        # float noise.
+        if n >= 2 and max(visible) > min(visible):
+            zoomed = True
+            scale_min, scale_max = min(visible), max(visible)
+        else:
+            zoomed = False
+            scale_min, scale_max = 0.0, max(visible) if any(v > 0.01 for v in visible) else 1.0
 
         per_row = len(self._GRAPH_LEVELS)  # 11 (body, tip) pairs per row
         res_units = graph_h * per_row
@@ -251,20 +263,29 @@ class Graph:
         # Disk-Rate Graph"; defaults to the SYSTEM role, bold.
         attr = theme.attr(d, "main_jjdlpdashboard_draw_disk_rate_graph")
 
-        n = len(visible)
         for i, rate in enumerate(visible):
             col = x1 - (n - 1 - i)
             if col < x0:
                 continue
-            units = int(round((rate / scale_max) * res_units)) if scale_max > 0 else 0
-            units = max(0, min(res_units, units))
-            if units <= 0:
-                # Keep tiny-but-real rates from blanking the column entirely
-                # (see _GRAPH_MIN_BAR_HEIGHT).
-                if rate > 0.01 and self._GRAPH_MIN_BAR_HEIGHT > 0:
-                    units = min(res_units, self._GRAPH_MIN_BAR_HEIGHT)
-                else:
-                    continue
+            if zoomed:
+                # Stretch the visible [min, max] range across the full
+                # height. The shortest bar maps to the shortest possible bar
+                # (a single ramp unit — never blank), the tallest to the
+                # full graph. _GRAPH_MIN_BAR_HEIGHT, if set, still floors
+                # the bars.
+                span = scale_max - scale_min
+                units = int(round(((rate - scale_min) / span) * res_units)) if span > 0 else res_units
+                units = max(1, self._GRAPH_MIN_BAR_HEIGHT, min(res_units, units))
+            else:
+                units = int(round((rate / scale_max) * res_units)) if scale_max > 0 else 0
+                units = max(0, min(res_units, units))
+                if units <= 0:
+                    # Keep tiny-but-real rates from blanking the column
+                    # entirely (see _GRAPH_MIN_BAR_HEIGHT).
+                    if rate > 0.01 and self._GRAPH_MIN_BAR_HEIGHT > 0:
+                        units = min(res_units, self._GRAPH_MIN_BAR_HEIGHT)
+                    else:
+                        continue
 
             # Height (whole rows) plus which (body, tip) density pair this
             # exact value picked within that row's bucket.
