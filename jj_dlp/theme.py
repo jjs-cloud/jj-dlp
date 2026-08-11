@@ -210,10 +210,9 @@ _SCHEME_BACKGROUND = {
     8: curses.COLOR_WHITE,
 }
 
-# Default base scheme index: DOS Blue (6) on Windows, the original
-# Default (0) scheme everywhere else. Used as the fallback whenever
-# theme.json doesn't specify a base_scheme_idx.
-DEFAULT_SCHEME_IDX = 6 if os.name == 'nt' else 0
+# Default base scheme index: DOS Blue (6) for all platforms.
+# Used as the fallback whenever theme.json doesn't specify a base_scheme_idx.
+DEFAULT_SCHEME_IDX = 6
 
 
 # ─────────────────────────────────────────────────────────────────────────
