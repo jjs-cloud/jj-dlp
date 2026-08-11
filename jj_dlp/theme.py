@@ -213,7 +213,7 @@ _SCHEME_BACKGROUND = {
 # Default base scheme index: DOS Blue (6) on Windows, the original
 # Classic cyan (0) scheme everywhere else. Used as the fallback whenever
 # theme.json doesn't specify a base_scheme_idx.
-DEFAULT_SCHEME_IDX = 6 if os.name == 'nt' else 0
+DEFAULT_SCHEME_IDX = 6 #if os.name == 'nt' else 0
 
 
 # ─────────────────────────────────────────────────────────────────────────
