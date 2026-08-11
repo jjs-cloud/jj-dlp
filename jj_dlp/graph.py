@@ -3,22 +3,37 @@ jj-dlp  —  top-bar disk-rate graph (hot-swappable module)
 ═══════════════════════════════════════════════════════════════════════════════
 
 This module owns ALL of the top-bar disk-rate sparkline logic: the running
-state, the fast sub-sampler / bar-value pipeline, the bar-drawing routine,
-and the dev 'p' key knob popup that tunes the ``_GRAPH_*`` defaults live.
+state, the fast sub-sampler / multi-resolution history, the bar-drawing
+routine, and the dev 'p' key knob popup that tunes the ``_GRAPH_*`` defaults
+live.
 
 Because the dashboard keeps a single module reference (``from . import graph
 as _graph``) and constructs ``Graph`` from it, you can edit this file while
 the app is running and pick the changes up from the 'p' popup — select
 "Reload graph.py" and press Enter. The reload re-executes this module, swaps
-in a fresh ``Graph`` (disk-rate history is carried over; live-tuned knobs
-reset to the newly-loaded defaults) and, as long as this module keeps
-exposing a ``Graph`` class that constructs from ``(dashboard)``, the app
-keeps running. A broken edit never takes the app down — the reload fails
-safely and the previous graph keeps running.
+in a fresh ``Graph`` (history is carried over; live-tuned knobs reset to the
+newly-loaded defaults) and, as long as this module keeps exposing a ``Graph``
+class that constructs from ``(dashboard)``, the app keeps running. A broken
+edit never takes the app down — the reload fails safely and the previous
+graph keeps running.
+
+── Recording vs. rendering ─────────────────────────────────────────────────
+Recording (tick()) and rendering (draw()/GRAPH_SCALE) are fully decoupled.
+tick() samples the actively-recording files' write rate every
+_GRAPH_SUBSAMPLE_S seconds and feeds it into a small waterfall of
+fixed-size, fixed-resolution "tiers" (see _GRAPH_TIERS below) — the same
+technique RRDtool/Cacti/Graphite use for keeping bounded-size history at
+multiple time resolutions. Each tier stores (timestamp, avg_rate,
+peak_rate) rows and independently covers "now back to however far its own
+rows reach"; older rows just roll off (fixed memory, no unbounded growth,
+no dependency on GRAPH_SCALE). Editing GRAPH_SCALE just changes which tier
+draw() reads from and how it buckets that tier's rows into on-screen bars —
+instant, since the data's already there.
 """
 
 import time
 from collections import deque
+from typing import Dict, List
 
 import curses  # noqa: E402
 
@@ -57,47 +72,91 @@ class Graph:
         ("\u2588", "\u2593"),  # 9  █▓
         ("\u2588", "\u2588"),  # 10 ██  (fullest)
     ]
+
     # Cadence (seconds) of the instantaneous-rate sub-sampler feeding the
-    # top-bar graph. Smaller = burstier/more random bars (each bar becomes a
-    # point reading over a shorter window); larger = smoother. Only the
-    # actively-recording files are statted, so sub-second values are cheap.
+    # top-bar graph, and the finest possible tier resolution (see
+    # _GRAPH_TIERS below). Only the actively-recording files are statted,
+    # so sub-second values are cheap.
     _GRAPH_SUBSAMPLE_S = 0.5
 
+    # ── Multi-resolution history (RRDtool-style tier waterfall) ─────────────
+    # Every _GRAPH_SUBSAMPLE_S seconds, tick() feeds one raw sample into the
+    # FIRST tier below. Once that tier's own bucket (its "step") has
+    # accumulated enough real time, it's closed out — (avg, peak) of
+    # whatever fell inside it gets appended as one row — and that same
+    # closed value is fed into the NEXT (coarser) tier's bucket, and so on.
+    # This is a waterfall: tier N only ever receives already-consolidated
+    # values from tier N-1, never raw sub-samples directly (except tier 0).
+    #
+    # Each tier is a fixed-size ring (deque(maxlen=rows)) of
+    # (timestamp, avg_rate, peak_rate) rows, so total memory/disk footprint
+    # never grows no matter how long the app runs. "step" is that tier's
+    # time resolution (seconds/row); "rows" is how many rows it keeps.
+    # rows × step = that tier's own maximum retained time span:
+    #
+    #   label   step      rows   span (once fully populated)
+    #   1s      1 s        500   ~8.3 min
+    #   15s     15 s       500   ~2.1 hr
+    #   5m      300 s      500   ~1.7 days
+    #   2h      7200 s     500   ~41.7 days
+    #
+    # Total: 2000 rows (same footprint as the old flat 2000-entry history —
+    # just reorganized into 4 resolutions instead of one). GRAPH_SCALE can be
+    # set to anything ≥1 second; draw() (see _select_tier()/_bucket_bars())
+    # automatically picks whichever tier gives the best resolution while
+    # still having enough retained history to fill the screen — so "last
+    # week"/"last month" views are served by the 2h tier once the app has
+    # been running that long (chunky ~2h-wide real data points, not
+    # fabricated ones), while a 30s or 5-minute view gets full sub-minute
+    # resolution from a finer tier. Want smoother week/month views instead
+    # of the 2h-blocky look? Raise the "2h" tier's rows (or its own real
+    # span shrinks proportionally) or insert an in-between tier (e.g.
+    # step=1800, rows=500 for a 30-min tier reaching ~10.4 days) — each
+    # added/enlarged tier just costs its own row count in total footprint.
+    _GRAPH_TIERS = [
+        {"label": "1s",  "step": 1,    "rows": 500},
+        {"label": "15s", "step": 15,   "rows": 500},
+        {"label": "5m",  "step": 300,  "rows": 500},
+        {"label": "2h",  "step": 7200, "rows": 500},
+    ]
+
     # ── Top-bar disk-rate bar value pipeline ──────────
-    # How each bar's value is derived from the sub-samples. One of:
-    #   "instantaneous"  – the raw spot rate at the moment the bar falls.
-    #                      Bursty/blank — it zeroes out between yt-dlp's
-    #                      disk flushes, so at long GRAPH_SCALE values most
-    #                      bars come up empty (that's the "blank bars"
-    #                      symptom). Unchanged legacy behavior.
-    #   "window_average" – mean write rate across the whole GRAPH_SCALE
-    #                      window (bytes grown ÷ elapsed). Never zero while
-    #                      anything is recording; the closest semantic match
-    #                      to the File Manager tab's Rate column.
-    #   "window_peak"    – the peak spot rate seen during the window. Keeps
-    #                      a spiky look and never blanks, but every bar is a
-    #                      max-flush spike, so heights run fairly uniform.
-    #   "decay_hold"     – per sub-sample: held = max(spot, held * decay).
-    #                      A flush jumps the bar up instantly, then it decays
-    #                      back toward zero between flushes. Only useful at
-    #                      short GRAPH_SCALE values — at 600s/bar it decays
-    #                      to ~zero long before the next bar falls.
+    # How each bar's value is derived from the selected tier's rows (see
+    # _bucket_bars()). Applied at draw() time, NOT at recording time —
+    # recording (tick()) always runs the same regardless of this knob; this
+    # only controls how already-recorded rows get combined into bars. One of:
+    #   "instantaneous"  – each bar uses the average of whatever tier rows
+    #                      land in it. At the "1s" tier this is close to a
+    #                      true spot reading (~1-2 sub-samples per row); at
+    #                      coarser tiers it's really an average (the whole
+    #                      point of a tier is that it's already consolidated,
+    #                      so a true "instant spot value" isn't retained past
+    #                      the 1s tier — this mode just doesn't apply its own
+    #                      extra smoothing on top of what the tier stores).
+    #   "window_average" – mean of the avg_rate field across the tier rows
+    #                      landing in each bar. Never zero while anything is
+    #                      recording; the closest semantic match to the File
+    #                      Manager tab's Rate column.
+    #   "window_peak"    – max of the peak_rate field across the tier rows
+    #                      landing in each bar. Keeps a spiky look and never
+    #                      blanks.
+    #   "decay_hold"     – held = max(avg_rate, held × decay), replayed in
+    #                      chronological order across the selected tier's
+    #                      rows (decay-per-row is _GRAPH_DECAY_PER_SUBSAMPLE
+    #                      scaled up to that tier's row spacing, so the same
+    #                      real-world decay rate applies regardless of which
+    #                      tier ends up selected). A flush jumps the bar up,
+    #                      then it decays back toward zero between flushes.
     _GRAPH_MODE = "window_average"
 
-    # decay_hold: multiplier applied to the held rate every sub-sample.
-    # Lower = the bar falls back toward zero faster after a flush.
-    # 0.9 per 0.5s sub-sample leaves ~35% of the peak after ~5s.
+    # decay_hold: multiplier applied to the held rate every _GRAPH_SUBSAMPLE_S
+    # sub-sample (scaled up per-tier-row in _bucket_bars() — see above).
+    # Lower = the bar falls back toward zero faster after a flush. 0.9 per
+    # 0.5s sub-sample leaves ~35% of the peak after ~5s.
     _GRAPH_DECAY_PER_SUBSAMPLE = 0.9
 
-    # window_average: if >0, average only the most recent N sub-samples
-    # (N × _GRAPH_SUBSAMPLE_S seconds) instead of the whole GRAPH_SCALE
-    # window. E.g. 2 → a ~1s rolling average — snappy, very File-Manager
-    # like; 0 → smooth average over the entire GRAPH_SCALE window.
-    _GRAPH_AVG_SUBSAMPLES = 0
-
     # Bars below this rate (B/s) are recorded as 0 (drawn blank). Raise it
-    # to de-emphasize a slow trickle; keep at 0 to show every non-zero
-    # window.
+    # to de-emphasize a slow trickle; keep at 0 to show every non-zero bar.
     _GRAPH_MIN_BAR_RATE = 0.0
 
     # draw: minimum visual height (in 1/11-row ramp units) for any non-zero
@@ -108,32 +167,31 @@ class Graph:
     def __init__(self, dashboard):
         self.dashboard = dashboard
 
-        # ── Top-bar disk-rate sparkline ──────────────────────────────────────
-        # One bar per GRAPH_SCALE seconds (GRAPH_SCALE is dashboard-owned:
-        # self.dashboard.graph_scale). Each bar's value is derived from the
-        # fast sub-sampler (dashboard.file_manager.sample_active_write_rates)
-        # according to the _GRAPH_MODE knob — window_average by default, so
-        # bars stop blanking out between yt-dlp's disk flushes. It counts
-        # only files that are actively being recorded by yt-dlp (per each
-        # site's recording_output_paths registry), never File Manager
-        # artifact files (Move/Fixup/Trim/Split output). History is kept far
-        # longer than any realistic terminal width so widening the window
-        # doesn't lose data.
-        self.disk_rate_history: deque = deque(maxlen=2000)
-        _graph_start = time.time()
-        self._disk_graph_last_tick: float = _graph_start
+        # ── Multi-resolution disk-rate history ───────────────────────────
+        # One fixed-size deque of (timestamp, avg_rate, peak_rate) rows per
+        # tier in _GRAPH_TIERS — see the class-level comment above for the
+        # full design. It counts only files that are actively being
+        # recorded by yt-dlp (per each site's recording_output_paths
+        # registry), never File Manager artifact files (Move/Fixup/Trim/
+        # Split output).
+        self._tier_data: Dict[str, deque] = {
+            t["label"]: deque(maxlen=t["rows"]) for t in self._GRAPH_TIERS
+        }
+        # In-progress (not-yet-closed) accumulator per tier: the bucket
+        # currently being filled, closed out by _ingest() once its own
+        # "step" worth of real time has elapsed.
+        self._tier_accum: Dict[str, dict] = {
+            t["label"]: {"start": None, "sum": 0.0, "count": 0, "peak": 0.0}
+            for t in self._GRAPH_TIERS
+        }
         self._disk_graph_last_subsample: float = 0.0
         self._disk_graph_instant_rate: float = 0.0
-        # Value-pipeline state for the selectable bar modes in tick() (see
-        # the _GRAPH_* knobs just above the draw method). _disk_graph_window_*
-        # accumulate across the current GRAPH_SCALE window;
-        # _disk_graph_bytes_ring holds the last N sub-sample byte-deltas for
-        # the rolling-average variant.
-        self._disk_graph_window_bytes: float = 0.0
-        self._disk_graph_window_start: float = _graph_start
-        self._disk_graph_window_peak: float = 0.0
+        # Live "current tip" value for decay_hold — kept up to date every
+        # sub-sample for potential display use; the actual bucketed decay
+        # curve used for drawing is recomputed fresh from tier rows in
+        # _bucket_bars() so it stays correct even after the DECAY_PER_SUB
+        # knob is tuned live.
         self._disk_graph_held_rate: float = 0.0
-        self._disk_graph_bytes_ring: deque = deque(maxlen=self._GRAPH_AVG_SUBSAMPLES or 1)
 
         # ── Graph-knob popup state (dev feature, hidden 'p' hotkey) ─────────
         # Lets you tune the top-bar disk-rate graph's _GRAPH_* knobs live
@@ -147,61 +205,150 @@ class Graph:
         self.popup_edit_idx   = 0
         self.popup_status     = ""    # last reload result, shown in the legend
 
-    # ── Top-bar disk-rate sparkline ─────────────────────────────────────────
+    # ── Multi-resolution history: recording ─────────────────────────────────
+    def _ingest(self, avg_value: float, peak_value: float, now: float, tier_idx: int = 0) -> None:
+        """Feed one already-consolidated (avg, peak) sample into tier
+        ``_GRAPH_TIERS[tier_idx]``'s in-progress bucket. If that bucket has
+        accumulated a full "step" worth of real time, close it out (append
+        the row to that tier's deque) and cascade the closed value into the
+        next coarser tier. Recurses at most len(_GRAPH_TIERS) deep.
+        """
+        if tier_idx >= len(self._GRAPH_TIERS):
+            return
+        tier = self._GRAPH_TIERS[tier_idx]
+        acc = self._tier_accum[tier["label"]]
+        if acc["start"] is None:
+            acc["start"] = now
+        acc["sum"] += avg_value
+        acc["count"] += 1
+        if peak_value > acc["peak"]:
+            acc["peak"] = peak_value
+        if now - acc["start"] >= tier["step"]:
+            closed_avg = acc["sum"] / acc["count"]
+            closed_peak = acc["peak"]
+            closed_ts = acc["start"]
+            self._tier_data[tier["label"]].append((closed_ts, closed_avg, closed_peak))
+            acc["start"] = None
+            acc["sum"] = 0.0
+            acc["count"] = 0
+            acc["peak"] = 0.0
+            self._ingest(closed_avg, closed_peak, now, tier_idx + 1)
+
     def tick(self):
-        """Feed the top-bar disk-rate sparkline.
+        """Feed the top-bar disk-rate graph's multi-resolution history.
 
         A fast sub-sampler stats only the actively-recording files every
-        ``_GRAPH_SUBSAMPLE_S`` seconds (cheap — no os.walk) and keeps a
-        running total of bytes grown plus the peak and instantaneous spot
-        rate for the current window. Once every GRAPH_SCALE seconds a bar
-        falls, derived from those accumulated sub-samples per
-        ``_GRAPH_MODE`` — so each bar can be an average, a spot reading, a
-        peak, or a decay-hold, whichever you set the knobs to.
+        ``_GRAPH_SUBSAMPLE_S`` seconds (cheap — no os.walk) and feeds the
+        instantaneous spot rate into the tier waterfall via ``_ingest()``.
+        Recording never depends on GRAPH_SCALE or _GRAPH_MODE — those only
+        affect how draw() reads back and buckets the already-recorded tier
+        rows (see ``_select_tier()`` / ``_bucket_bars()``).
         """
         now = time.time()
-        # Fast sub-sampler: only stats the actively-recording files, so it
-        # can run at a sub-second cadence without re-walking the OUTPUT_DIRs.
-        if now - self._disk_graph_last_subsample >= self._GRAPH_SUBSAMPLE_S:
-            self._disk_graph_last_subsample = now
-            try:
-                inst_rate, grown = self.dashboard.file_manager.sample_active_write_rates()
-            except Exception:
-                inst_rate, grown = 0.0, 0.0
-            self._disk_graph_instant_rate = inst_rate
-            self._disk_graph_window_bytes += grown
-            if self._GRAPH_AVG_SUBSAMPLES > 0:
-                self._disk_graph_bytes_ring.append(grown)
-            if inst_rate > self._disk_graph_window_peak:
-                self._disk_graph_window_peak = inst_rate
-            self._disk_graph_held_rate = max(
-                inst_rate,
-                self._disk_graph_held_rate * self._GRAPH_DECAY_PER_SUBSAMPLE,
-            )
-        if now - self._disk_graph_last_tick < self.dashboard.graph_scale:
+        if now - self._disk_graph_last_subsample < self._GRAPH_SUBSAMPLE_S:
             return
-        elapsed = max(now - self._disk_graph_window_start, 0.001)
-        if self._GRAPH_MODE == "window_average":
-            if self._GRAPH_AVG_SUBSAMPLES > 0 and self._disk_graph_bytes_ring:
-                n = len(self._disk_graph_bytes_ring)
-                value = sum(self._disk_graph_bytes_ring) / (n * self._GRAPH_SUBSAMPLE_S)
-            else:
-                value = self._disk_graph_window_bytes / elapsed
-        elif self._GRAPH_MODE == "window_peak":
-            value = self._disk_graph_window_peak
-        elif self._GRAPH_MODE == "decay_hold":
-            value = self._disk_graph_held_rate
-        else:  # "instantaneous"
-            value = self._disk_graph_instant_rate
-        value = max(0.0, value)
-        self.disk_rate_history.append(value if value >= self._GRAPH_MIN_BAR_RATE else 0.0)
-        # Reset per-window accumulators for the next bar. The decay-hold
-        # carry-over is intentionally NOT reset — it keeps decaying across
-        # windows until the next flush raises it again.
-        self._disk_graph_window_bytes = 0.0
-        self._disk_graph_window_start = now
-        self._disk_graph_window_peak = 0.0
-        self._disk_graph_last_tick = now
+        self._disk_graph_last_subsample = now
+        try:
+            inst_rate, _grown = self.dashboard.file_manager.sample_active_write_rates()
+        except Exception:
+            inst_rate = 0.0
+        inst_rate = max(0.0, inst_rate)
+        self._disk_graph_instant_rate = inst_rate
+        self._disk_graph_held_rate = max(
+            inst_rate,
+            self._disk_graph_held_rate * self._GRAPH_DECAY_PER_SUBSAMPLE,
+        )
+        self._ingest(inst_rate, inst_rate, now)
+
+    # ── Multi-resolution history: rendering ─────────────────────────────────
+    def _select_tier(self, graph_w: int) -> dict:
+        """Pick the best tier to render *graph_w* bars at the current
+        GRAPH_SCALE: the FINEST tier that already has enough retained
+        history to fill the whole width, so bars use the best resolution
+        available without leaving the left side of the graph blank.
+
+        If no tier has enough history yet (e.g. right after startup, or
+        GRAPH_SCALE was just raised past what any tier has accumulated),
+        falls back to whichever tier currently holds the most history —
+        the same "still filling up" behavior the graph has always had,
+        just automatically picking the best available tier instead of
+        going blank. That tier will typically be the coarsest one, since
+        all tiers grow in lock-step with uptime until each hits its own
+        cap (see the class-level tier table), and the coarsest caps last.
+        """
+        scale = max(1, self.dashboard.graph_scale)
+        needed_span = graph_w * scale
+        now = time.time()
+
+        def span(t):
+            dq = self._tier_data[t["label"]]
+            return (now - dq[0][0]) if dq else 0.0
+
+        for t in self._GRAPH_TIERS:  # ascending by step → finest first
+            if span(t) >= needed_span:
+                return t
+        return max(self._GRAPH_TIERS, key=span)
+
+    def _bucket_bars(self, graph_w: int) -> List[float]:
+        """Group the selected tier's rows into up to *graph_w* on-screen
+        bars, each spanning GRAPH_SCALE seconds of wall-clock time (bar
+        boundaries are anchored to "now" and walked backward), combined per
+        _GRAPH_MODE. If a tier's own row spacing is coarser than
+        GRAPH_SCALE (happens when _select_tier() has to fall back to a
+        tier that's coarser than ideal — see there), the same row's value
+        will naturally repeat across several consecutive bars, since one
+        row covers more real time than one bar does. That's expected: it's
+        real recorded data rendered a bit blockier, not fabricated filler.
+        """
+        tier = self._select_tier(graph_w)
+        rows = list(self._tier_data[tier["label"]])  # oldest → newest
+        if not rows:
+            return []
+        scale = max(1, self.dashboard.graph_scale)
+        now = time.time()
+
+        buckets: Dict[int, list] = {}
+        for ts, avg, peak in rows:
+            idx = max(0, int((now - ts) // scale))  # 0 = most recent bucket
+            if idx >= graph_w:
+                continue
+            buckets.setdefault(idx, []).append((ts, avg, peak))
+        if not buckets:
+            return []
+
+        held_by_ts = {}
+        if self._GRAPH_MODE == "decay_hold":
+            # Replay the decay curve across ALL rows in chronological order
+            # (not just the visible window) so it carries continuously
+            # across bucket boundaries, matching the "never resets" intent
+            # of the original per-sub-sample design. The per-row decay
+            # factor is the sub-sample decay raised to (tier step ÷
+            # sub-sample seconds) so the same real-world decay rate holds
+            # regardless of which tier ends up selected.
+            decay_factor = self._GRAPH_DECAY_PER_SUBSAMPLE ** (
+                tier["step"] / max(self._GRAPH_SUBSAMPLE_S, 1e-6)
+            )
+            held = 0.0
+            for ts, avg, _peak in rows:
+                held = max(avg, held * decay_factor)
+                held_by_ts[ts] = held
+
+        max_idx = max(buckets)
+        bars_recent_first = []
+        for idx in range(0, max_idx + 1):
+            chunk = buckets.get(idx)
+            if not chunk:
+                bars_recent_first.append(0.0)
+                continue
+            if self._GRAPH_MODE == "window_peak":
+                value = max(p for _, _, p in chunk)
+            elif self._GRAPH_MODE == "decay_hold":
+                value = max(held_by_ts[ts] for ts, _, _ in chunk)
+            else:  # "window_average" / "instantaneous"
+                value = sum(a for _, a, _ in chunk) / len(chunk)
+            value = max(0.0, value)
+            bars_recent_first.append(value if value >= self._GRAPH_MIN_BAR_RATE else 0.0)
+        return list(reversed(bars_recent_first))  # oldest → newest, matches draw()
 
     def draw(self, y0: int, x0: int, x1: int, y1: int):
         """Draw the growing/scrolling disk-rate sparkline between the logo
@@ -217,6 +364,13 @@ class Graph:
         to the visible [min, max] range: the shortest bar draws as the
         shortest possible bar (a single ramp unit) and the tallest fills the
         whole graph.
+
+        Each on-screen bar is a live GRAPH_SCALE-second bucket of rows
+        pulled fresh from whichever history tier best fits every call (see
+        ``_select_tier()`` / ``_bucket_bars()``) — recording and rendering
+        are decoupled, so tweaking GRAPH_SCALE or _GRAPH_MODE re-groups the
+        existing history immediately instead of waiting for new bars to
+        accrue.
 
         Each bar encodes rate along three independent axes: height (whole
         rows), the body's density (a texture picked per bar, so two bars
@@ -238,10 +392,12 @@ class Graph:
         d = self.dashboard
         graph_w = max(0, x1 - x0 + 1)
         graph_h = max(1, y1 - y0 + 1)
-        if graph_w <= 0 or not self.disk_rate_history:
+        if graph_w <= 0:
             return None
 
-        visible = list(self.disk_rate_history)[-graph_w:]
+        visible = self._bucket_bars(graph_w)
+        if not visible:
+            return None
         n = len(visible)
         # Auto-scale to the samples currently visible, so the graph always
         # uses its full height instead of being capped by a constant. As soon
@@ -311,6 +467,48 @@ class Graph:
                             theme.attr(d, "main_jjdlpdashboard_draw_disk_rate_graph"))
         return scale_max
 
+    # ── Persistence (graph.json, via main.py's _load_graph_state/_save_graph_state) ─
+    def to_persist_dict(self) -> dict:
+        """Serialize every tier's rows into a plain JSON-able dict.
+
+        main.py treats this as opaque — it just reads/writes it to
+        graph.json verbatim (_load_graph_state()/_save_graph_state()) — so
+        the on-disk format can evolve here without touching main.py.
+        """
+        return {
+            "version": 1,
+            "saved_at": time.time(),
+            "tiers": {
+                t["label"]: [[ts, avg, peak] for ts, avg, peak in self._tier_data[t["label"]]]
+                for t in self._GRAPH_TIERS
+            },
+        }
+
+    def load_persist_dict(self, data) -> None:
+        """Restore tier rows from a dict previously produced by
+        to_persist_dict() (i.e. the contents of graph.json). Tolerant of
+        missing/malformed data — restores whatever tiers/rows validate and
+        silently skips the rest, so a partially-corrupt graph.json still
+        gets you back the tiers that did parse instead of starting empty.
+        """
+        if not isinstance(data, dict):
+            return
+        tiers = data.get("tiers")
+        if not isinstance(tiers, dict):
+            return
+        for t in self._GRAPH_TIERS:
+            raw_rows = tiers.get(t["label"])
+            if not isinstance(raw_rows, list):
+                continue
+            dq = self._tier_data[t["label"]]
+            dq.clear()
+            for row in raw_rows[-t["rows"]:]:
+                try:
+                    ts, avg, peak = float(row[0]), float(row[1]), float(row[2])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                dq.append((ts, avg, peak))
+
     # ── Graph-knob popup (dev feature, 'p' hotkey) ──────────────────────────
     # Bare-bones live editor for the top-bar disk-rate graph's _GRAPH_*
     # knobs. Setting them as instance attributes shadows the class defaults
@@ -335,8 +533,6 @@ class Graph:
              "step": 0.1, "lo": 0.05, "hi": 5.0, "fmt": "{:.2f}"},
             {"label": "DECAY_PER_SUB",    "attr": "_GRAPH_DECAY_PER_SUBSAMPLE", "kind": "float",
              "step": 0.05, "lo": 0.0, "hi": 1.0, "fmt": "{:.2f}"},
-            {"label": "AVG_SUBSAMPLES",   "attr": "_GRAPH_AVG_SUBSAMPLES",    "kind": "int",
-             "step": 1, "lo": 0, "hi": 500, "fmt": "{}"},
             {"label": "MIN_BAR_RATE",     "attr": "_GRAPH_MIN_BAR_RATE",      "kind": "float",
              "step": 1000, "lo": 0.0, "hi": 1e12, "fmt": "{:.0f}"},
             {"label": "MIN_BAR_HEIGHT",   "attr": "_GRAPH_MIN_BAR_HEIGHT",    "kind": "int",
@@ -347,8 +543,7 @@ class Graph:
         ]
 
     def _popup_set(self, row, value):
-        """Clamp and store *value* for *row*, applying side effects (e.g.
-        resizing the rolling-average ring when AVG_SUBSAMPLES changes)."""
+        """Clamp and store *value* for *row*."""
         if row["kind"] == "enum":
             setattr(self, row["attr"], value)
             return
@@ -362,8 +557,6 @@ class Graph:
         if hi is not None:
             value = min(hi, value)
         setattr(self, row["attr"], value)
-        if row["attr"] == "_GRAPH_AVG_SUBSAMPLES":
-            self._disk_graph_bytes_ring = deque(maxlen=int(value) or 1)
 
     def _popup_step(self, delta):
         row = self._knob_rows()[self.popup_sel]
@@ -378,45 +571,59 @@ class Graph:
             self._popup_set(row, getattr(self, row["attr"]) + delta * row["step"])
 
     def clear_all_bars(self) -> None:
-        """Clear every bar from the top-bar disk-rate graph — in memory and
-        out of global.json — so no stale history comes back on the next
-        launch.
+        """Clear every tier's history from the top-bar disk-rate graph — in
+        memory and out of graph.json — so no stale history comes back on
+        the next launch.
 
-        Persisting the empty history is delegated to main.py's existing
-        _save_disk_rate_history (lazily imported: only graph.py hot-reloads
-        via the 'p' popup, main.py does not). Writing [] is equivalent to
-        removing the key — _load_disk_rate_history reads it back as no bars.
+        Persisting the empty history is delegated to main.py's
+        _save_graph_state (lazily imported: only graph.py hot-reloads via
+        the 'p' popup, main.py does not).
         """
-        self.disk_rate_history.clear()
+        for dq in self._tier_data.values():
+            dq.clear()
+        for acc in self._tier_accum.values():
+            acc["start"] = None
+            acc["sum"] = 0.0
+            acc["count"] = 0
+            acc["peak"] = 0.0
         try:
             from . import main as _main
-            _main._save_disk_rate_history([])
-            self.popup_status = "graph bars cleared"
+            _main._save_graph_state(self.to_persist_dict())
+            self.popup_status = "graph history cleared"
         except Exception as _e:
             self.popup_status = f"clear failed: {_e}"
 
     def clear_tallest_bar(self) -> None:
-        """Remove just the single tallest bar from the top-bar disk-rate
-        graph — in memory and in global.json — leaving the rest of the
-        history intact.
+        """Remove just the single largest row from whichever tier is
+        currently being displayed (the one _select_tier() would pick for
+        the live GRAPH_SCALE) — in memory and in graph.json — leaving the
+        rest of that tier's history, and every other tier, intact.
 
         Useful for knocking out one freak spike (e.g. a brief burst that's
         now permanently pinning the auto-scale ceiling) without wiping the
-        whole graph. If multiple bars are tied for tallest, only the first
-        one encountered is removed. No-op (with a status message) if the
-        graph is currently empty.
+        whole graph. Compares by peak_rate when _GRAPH_MODE is
+        "window_peak" (since that's the field driving the ceiling in that
+        mode), avg_rate otherwise. If multiple rows are tied for largest,
+        only the first one encountered is removed. No-op (with a status
+        message) if that tier is currently empty.
         """
-        if not self.disk_rate_history:
-            self.popup_status = "graph is empty — nothing to clear"
+        # graph_w doesn't affect which tier has the most data, only whether
+        # it's "enough" to fill the screen — pass a generous width so this
+        # picks the same tier the graph is actually drawing with right now.
+        tier = self._select_tier(graph_w=1000)
+        dq = self._tier_data[tier["label"]]
+        if not dq:
+            self.popup_status = f"{tier['label']} tier is empty — nothing to clear"
             return
-        bars = list(self.disk_rate_history)
-        tallest_idx = max(range(len(bars)), key=lambda i: bars[i])
-        removed = bars.pop(tallest_idx)
-        self.disk_rate_history = deque(bars, maxlen=self.disk_rate_history.maxlen)
+        field_idx = 2 if self._GRAPH_MODE == "window_peak" else 1  # (ts, avg, peak)
+        rows = list(dq)
+        tallest_i = max(range(len(rows)), key=lambda i: rows[i][field_idx])
+        removed = rows.pop(tallest_i)
+        self._tier_data[tier["label"]] = deque(rows, maxlen=dq.maxlen)
         try:
             from . import main as _main
-            _main._save_disk_rate_history(bars)
-            self.popup_status = f"tallest bar cleared ({human_rate(removed)})"
+            _main._save_graph_state(self.to_persist_dict())
+            self.popup_status = f"tallest {tier['label']} sample cleared ({human_rate(removed[field_idx])})"
         except Exception as _e:
             self.popup_status = f"clear tallest failed: {_e}"
 
@@ -459,11 +666,13 @@ class Graph:
             row = rows[self.popup_sel]
             if row["kind"] == "action":
                 if row.get("action") == "clear_tallest":
-                    # Drop only the single tallest bar (in memory + on disk).
+                    # Drop only the single tallest row of the currently
+                    # displayed tier (in memory + on disk).
                     self.clear_tallest_bar()
                 elif row.get("action") == "clear":
-                    # Clear every bar from the on-screen graph and from
-                    # global.json so no history comes back on restart.
+                    # Clear every tier's history from the on-screen graph
+                    # and from graph.json so no history comes back on
+                    # restart.
                     self.clear_all_bars()
                 else:
                     # Hot-reload this module. On success the dashboard swaps

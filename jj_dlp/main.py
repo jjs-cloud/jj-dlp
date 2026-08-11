@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.13"
+__version__ = "1.26.14"
 
 import subprocess
 import time
@@ -619,38 +619,72 @@ def _save_last_live_cache(config_path: str, last_live: Dict[str, float]) -> None
         _save_global_json(global_data)
 
 
-# How many of the most recent disk-rate graph bars to persist across restarts.
-# Deliberately larger than any realistic terminal width so a wider window on
-# relaunch still shows a full graph.
-_GRAPH_PERSIST_BARS: int = 500
+# ── graph.json — top-bar disk-rate graph's multi-resolution history ────────
+# Kept in its own file (not global.json) because it now holds real,
+# meaningful data volume: 4 tiers × 500 (timestamp, avg_rate, peak_rate)
+# rows ≈ 6000 floats — trivial compared to yt-dlp's actual output, but big
+# enough that it doesn't belong bundled into global.json's small
+# priorities/last-live/config bookkeeping. main.py treats the contents as
+# opaque — graph.Graph.to_persist_dict()/load_persist_dict() own the actual
+# schema (see graph.py) — this just reads/writes the file.
+_graph_json_lock: threading.Lock = threading.Lock()
 
 
-def _load_disk_rate_history() -> List[float]:
-    """Return the persisted top-graph disk-rate bars from global.json."""
-    with _global_json_lock:
-        global_data = _load_global_json()
-    raw = global_data.get("disk_rate_history", [])
-    if not isinstance(raw, list):
-        return []
-    bars: List[float] = []
-    for v in raw[-_GRAPH_PERSIST_BARS:]:
+def _graph_json_path() -> str:
+    """Return the absolute path to graph.json (next to this file)."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "graph.json")
+
+
+def _load_graph_json() -> dict:
+    """Load graph.json. Returns an empty dict if the file does not exist or
+    cannot be parsed (a corrupt/missing graph.json just means the graph
+    starts with empty history — never a fatal error)."""
+    path = _graph_json_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+        dbg(f"[GRAPH_JSON][DIAG] load: parsed JSON was not a dict (type={type(data).__name__}) — returning {{}}")
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        dbg(f"[GRAPH_JSON][DIAG] load FAILED: path={path!r} error={e!r} — returning {{}}")
+    return {}
+
+
+def _save_graph_json(data: dict) -> None:
+    """Write *data* to graph.json. Silently ignores errors — losing this
+    file only costs some graph history, never yt-dlp's actual output."""
+    path = _graph_json_path()
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)  # atomic on POSIX and Windows
+    except Exception as e:
+        dbg(f"[GRAPH_JSON][DIAG] save FAILED: path={path!r} error={e!r}")
         try:
-            bars.append(float(v))
-        except (TypeError, ValueError):
-            continue
-    return bars
+            os.remove(tmp_path)
+        except Exception:
+            pass
 
 
-def _save_disk_rate_history(bars) -> None:
-    """Persist the most recent disk-rate graph bars into global.json.
+def _load_graph_state() -> dict:
+    """Return the persisted top-graph multi-resolution history dict from
+    graph.json, ready to hand to graph.Graph.load_persist_dict()."""
+    with _graph_json_lock:
+        return _load_graph_json()
 
-    Merges with any existing data so other keys are preserved. Keeps at most
-    _GRAPH_PERSIST_BARS entries.
-    """
-    with _global_json_lock:
-        global_data = _load_global_json()
-        global_data["disk_rate_history"] = [float(b) for b in bars][-_GRAPH_PERSIST_BARS:]
-        _save_global_json(global_data)
+
+def _save_graph_state(persist_dict: dict) -> None:
+    """Persist the top-graph multi-resolution history dict (as produced by
+    graph.Graph.to_persist_dict()) to graph.json, replacing its contents
+    entirely — the dict already contains everything (all tiers)."""
+    with _graph_json_lock:
+        _save_graph_json(persist_dict)
 
 
 def _load_live_since_cache(config_path: str) -> Dict[str, float]:
@@ -4492,14 +4526,23 @@ class JJDlpDashboard:
         # tick. It counts only files that are actively being recorded by
         # yt-dlp (per each site's recording_output_paths registry), never
         # File Manager artifact files (Move/Fixup/Trim/Split output).
-        # History is kept far longer than any realistic terminal width so
-        # widening the window doesn't lose data.
+        # History is kept as a fixed-size multi-resolution tier waterfall
+        # (see graph.py's class-level comment) so GRAPH_SCALE can range from
+        # 1 second up through weeks/months without either an unbounded
+        # graph.json or losing fine-grained resolution at small scales.
         self.graph_scale: int = max(1, int(self.global_cfg.get("graph_scale", 1)))
         self.graph = _graph.Graph(self)
-        # Bars persisted to global.json on the previous run are restored here
-        # so the graph comes back with its recent history instead of starting
+        # History persisted to graph.json on the previous run is restored
+        # here so the graph comes back with its history instead of starting
         # empty.
-        self.graph.disk_rate_history.extend(_load_disk_rate_history())
+        self.graph.load_persist_dict(_load_graph_state())
+        # Throttle for the periodic graph.json autosave in run() — coarse
+        # tier rows can represent hours of aggregated data, so unlike the
+        # old flat-bar design (where losing a few un-persisted seconds on a
+        # crash was cheap), losing an in-progress coarse-tier bucket on a
+        # crash is worth guarding against with more than just an on-quit
+        # save. See _maybe_autosave_graph_state().
+        self._graph_json_last_save: float = time.time()
 
         from .config_editor import ConfigEditor
         self.config_editor = ConfigEditor(self)
@@ -6723,30 +6766,49 @@ class JJDlpDashboard:
             self.graph.popup_status = f"reload failed: {_e}"
             return
         # Carry over history + transient pipeline state (knobs reset to the
-        # new defaults by the fresh instance).
-        _new.disk_rate_history.extend(_old.disk_rate_history)
+        # new defaults by the fresh instance). Tier rows are extended (not
+        # replaced) so each tier's own maxlen still applies if the reloaded
+        # code changed a tier's "rows" — extend() just drops the oldest
+        # overflow, same as any other deque.
+        for label, dq in _old._tier_data.items():
+            if label in _new._tier_data:
+                _new._tier_data[label].extend(dq)
+        for label, acc in _old._tier_accum.items():
+            if label in _new._tier_accum:
+                _new._tier_accum[label] = dict(acc)  # copy, not share
         _new._disk_graph_instant_rate = _old._disk_graph_instant_rate
-        _new._disk_graph_window_bytes = _old._disk_graph_window_bytes
-        _new._disk_graph_window_start = _old._disk_graph_window_start
-        _new._disk_graph_window_peak = _old._disk_graph_window_peak
         _new._disk_graph_held_rate = _old._disk_graph_held_rate
-        _new._disk_graph_last_tick = _old._disk_graph_last_tick
         _new._disk_graph_last_subsample = _old._disk_graph_last_subsample
-        _new._disk_graph_bytes_ring.extend(_old._disk_graph_bytes_ring)
         self.graph = _new
         _logger.dbg("[GRAPH] graph.py reloaded")
 
     # ── Run loop ──────────────────────────────────────────────────────────────
     def _persist_graph_history(self) -> None:
-        """Persist the current disk-rate graph bars to global.json.
+        """Persist the current disk-rate graph history to graph.json.
 
-        Called on shutdown so the graph comes back with its history on the
-        next launch.  Best-effort — failures are swallowed.
+        Called on shutdown (and periodically — see
+        _maybe_autosave_graph_state()) so the graph comes back with its
+        history on the next launch. Best-effort — failures are swallowed.
         """
         try:
-            _save_disk_rate_history(list(self.graph.disk_rate_history))
+            _save_graph_state(self.graph.to_persist_dict())
         except Exception as _e:
             dbg(f"[GRAPH] _persist_graph_history failed: {_e!r}")
+
+    def _maybe_autosave_graph_state(self) -> None:
+        """Periodically persist graph.json during a normal run, not just on
+        shutdown. Coarse tier rows (e.g. the "2h" tier) can represent hours
+        of already-aggregated data; losing an in-progress bucket to a crash
+        is worth more protection than the on-quit-only save the old
+        flat-bar design relied on. Throttled to once every 5 minutes so it
+        doesn't add meaningful I/O to the main loop.
+        """
+        now = time.time()
+        if now - self._graph_json_last_save < 300:
+            return
+        self._graph_json_last_save = now
+        self._persist_graph_history()
+
 
     def run(self):
         curses.curs_set(0)
@@ -6760,6 +6822,7 @@ class JJDlpDashboard:
         while True:
             _t_frame_start = time.time()
             self._update_write_failure_alert()
+            self._maybe_autosave_graph_state()
             self.refresh_screen()
             _t_after_refresh = time.time()
 
