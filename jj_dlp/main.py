@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.20"
+__version__ = "1.26.21"
 
 import subprocess
 import time
@@ -5451,9 +5451,9 @@ class JJDlpDashboard:
             tab_x += len(label) + 1
 
         show_debug = sel_site.show_debug_log if sel_site is not None else False
-        title = (" ACTIVITY LOG — Show Debug: ON  (Press A to toggle; F to configure filters) "
+        title = (" ACTIVITY LOG — Show Debug: ON  (Press A to toggle) (Press F to configure filters) "
                  if show_debug
-                 else " ACTIVITY LOG — Show Debug: OFF (Press A to toggle; F to configure filters) ")
+                 else " ACTIVITY LOG — Show Debug: OFF (Press A to toggle) ")
 
         self.draw_box(self.stdscr, y1 + 1, x1, y2, x2, self.C_DIM)
         self.safe_addstr(self.stdscr, y1 + 1, x1 + 2, title,
@@ -6036,6 +6036,26 @@ class JJDlpDashboard:
     def _handle_debug_filter_key(self, key) -> bool:
         count = len(self._debug_filter_patterns)
         checkbox_row = count + 1
+        # The focused regex field consumes every printable character,
+        # including Q/q.  It also absorbs ESC because Windows Terminal's
+        # right-click paste can lead with an ESC mouse/paste sequence.
+        if self._debug_filter_sel == 0:
+            if key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459) and self._debug_filter_buf.strip():
+                try:
+                    _re.compile(self._debug_filter_buf)
+                except _re.error as exc:
+                    self._debug_filter_error = f"Invalid regex: {exc}"
+                else:
+                    self._debug_filter_patterns.append(self._debug_filter_buf)
+                    self._debug_filter_buf = self._debug_filter_error = ""
+                    self._log_scroll = 0
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                self._debug_filter_buf = self._debug_filter_buf[:-1]
+            elif 32 <= key <= 126:
+                self._debug_filter_buf += chr(key)
+                self._debug_filter_error = ""
+            return True
+
         if key in (27, ord('q'), ord('Q')):
             self._debug_filter_popup_open = False
         elif key in (curses.KEY_UP, ord('k')):
@@ -6060,11 +6080,6 @@ class JJDlpDashboard:
                     self._log_scroll = 0
             elif self._debug_filter_sel == checkbox_row:
                 self._debug_filter_highlight = not self._debug_filter_highlight
-        elif self._debug_filter_sel == 0:
-            if key in (curses.KEY_BACKSPACE, 127, 8):
-                self._debug_filter_buf = self._debug_filter_buf[:-1]
-            elif 32 <= key <= 126:
-                self._debug_filter_buf += chr(key)
         return True
 
     def draw_debug_filter_popup(self) -> None:
@@ -6090,7 +6105,7 @@ class JJDlpDashboard:
         self.safe_addstr(self.stdscr, checkbox_y, bx1 + 2, f"[{checked}] Highlight match", check_attr)
         if self._debug_filter_error:
             self.safe_addstr(self.stdscr, by2 - 1, bx1 + 2, self._debug_filter_error[:box_w - 4], theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_error"))
-        self.safe_addstr(self.stdscr, by2, bx1 + 2, "Enter: add/toggle  Up/Down: select  D/Del: remove  Esc: close"[:box_w - 4], theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_legend"))
+        self.safe_addstr(self.stdscr, by2, bx1 + 2, "Enter: add/toggle  Up/Down: select  D/Del: remove  Esc: close (outside input)"[:box_w - 4], theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_legend"))
 
     def refresh_screen(self):
         self.stdscr.erase()
