@@ -5,16 +5,30 @@ WHAT THIS DOES
 ───────────────
 Every `curses.color_pair(...)` [`| curses.A_BOLD`] expression in main.py,
 config_editor.py, and file_manager.py has been rewritten to go through
-`theme.attr(owner, tag, default_pair_arg, default_bold)`. That function looks
-up `tag` in the user's saved overrides (theme.json) and, if found, uses the
-overridden pair/bold instead of the code's built-in default. If nothing is
-overridden for that tag, behavior is 100% identical to the original inline
-`curses.color_pair(...)` expression — this module is pure opt-in indirection.
+`theme.attr(owner, tag)` — or `theme.attr(owner, tag, runtime_pair)` for the
+small number of sites whose pair legitimately varies at runtime (a stat value
+colored by its current state, a border highlighted when focused, etc.). Every
+SITE_REGISTRY entry has a fixed `default_role`, so every site behaves the same
+way: an override role always wins, otherwise a passed runtime_pair wins (for
+the dynamic sites), otherwise the default_role applies. The splash/picker
+screens pass owner=None (they run before any dashboard exists); their roles
+resolve through the module-level ROLE_PAIR_NUM table instead of a dashboard's
+C_* constants, so they are editable exactly like every other site. SITE_REGISTRY
+in this file is the single source of truth for each site's default role and
+bold — call sites no longer carry their own default pair/bold literals, so
+there's only ever one place to edit a site's default. `attr()` looks up `tag`
+in the user's saved overrides (theme.json) and, if found, uses the overridden
+pair/bold instead of the registry default. If nothing is overridden for that
+tag, behavior is 100% identical to the original inline `curses.color_pair(...)`
+expression — this module is pure opt-in indirection.
 
-Two independent customization layers, both persisted to theme.json:
+Two independent customization layers, both persisted to theme.json AND
+bakeable (via the 'W' hotkey) into this file — theme.py owns both the base
+scheme palettes (COLOR_SCHEMES) and the per-site registry (SITE_REGISTRY),
+so baking either layer only ever touches this one file:
 
-  1. BASE SCHEME + ROLE COLORS — pick one of JJDlpDashboard.COLOR_SCHEMES as
-     a starting point, then optionally recolor any of the 13 named roles
+  1. BASE SCHEME + ROLE COLORS — pick one of COLOR_SCHEMES (below) as a
+     starting point, then optionally recolor any of the 13 named roles
      (C_CHROME, C_HILIGHT, ... C_DELETE) by fg/bg. This changes what each
      role *means* color-wise, same as editing the COLOR_SCHEMES tuple
      directly — every call site that uses that role updates together. Role
@@ -31,15 +45,24 @@ Site overrides are resolved AFTER role colors, so a site pointed at C_REC
 picks up whatever C_REC currently resolves to (base scheme or custom role
 color), not a frozen snapshot.
 
-SITE_REGISTRY is auto-generated (see the scan/tag/rewrite pipeline used to
-build this file) and should be treated as generated data — if call sites are
-added, removed, or moved in the source files, re-run that pipeline rather
-than hand-editing entries here.
+One deliberate non-theme exception: the STREAMERS panel's selected row gets a
+focus cue (`curses.A_REVERSE`, only while that sub-panel has keyboard focus) at
+its call site in main.py. That's a focus/cursor indicator like the '>' row
+markers, not a color or bold decision, and a static per-site flag can't express
+"reverse only while focused", so it stays at the call site; the site's
+role/bold are still fully theme-editable.
+
+SITE_REGISTRY is maintained by hand. If call sites are added, removed, or
+moved in the source files, update the corresponding entries here to match.
 """
 
+
+import atexit
 import curses
 import json
 import os
+import re
+import sys
 import time
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -95,350 +118,496 @@ PAIR_NUM_ROLE = {v: k for k, v in ROLE_PAIR_NUM.items()}
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# SITE_REGISTRY — auto-generated. tag -> {file, line, label, default_role,
-# default_bold}. default_role is None for sites whose default pair argument
-# is a runtime variable or a raw numeric literal outside the 13-role system
-# (mostly the splash/browser-picker screens) — those sites can still have
-# their bold flag overridden, but not be repointed to a role by number.
+# COLOR_SCHEMES — the base palettes. This is the single source of truth for
+# scheme colors; theme.py owns it so base-scheme role-color overrides can be
+# baked here directly (see bake_to_source) without touching main.py.
+#
+# Each tuple is (chrome_fg, hilight_fg, hilight_bg, 
+#                warn_fg, live_fg, invhead_fg, 
+#                invhead_bg, logo_fg, rec_fg,
+#                dim_fg, livebadge_fg, livebadge_bg,
+#                normal_fg, disabled_fg, system_fg,
+#                delete_fg, delete_bg) —
+# see SCHEME_TUPLE_FIELDS above for the field order.
+# ─────────────────────────────────────────────────────────────────────────
+SCHEME_NAMES = [
+    "Classic cyan", "Amber terminal", "Green phosphor",
+    "Red alert", "Magenta/purple", "Ice blue", "DOS Blue", "DOS Red", "DOS White",
+]
+
+COLOR_SCHEMES = [
+    # 0: Classic cyan
+    (curses.COLOR_CYAN,    curses.COLOR_WHITE,   curses.COLOR_BLUE,
+     curses.COLOR_YELLOW,  curses.COLOR_GREEN,   curses.COLOR_BLACK,
+     curses.COLOR_CYAN,    curses.COLOR_MAGENTA, curses.COLOR_RED,
+     curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
+     curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_YELLOW,
+     curses.COLOR_WHITE,   curses.COLOR_RED),
+    # 1: Amber terminal
+    (curses.COLOR_YELLOW,  curses.COLOR_WHITE,   curses.COLOR_YELLOW,
+     curses.COLOR_WHITE,   curses.COLOR_GREEN,   curses.COLOR_BLACK,
+     curses.COLOR_YELLOW,  curses.COLOR_YELLOW,  curses.COLOR_RED,
+     curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
+     curses.COLOR_WHITE,   curses.COLOR_WHITE,   curses.COLOR_CYAN,
+     curses.COLOR_WHITE,   curses.COLOR_RED),
+    # 2: Green phosphor
+    (curses.COLOR_GREEN,   curses.COLOR_WHITE,   curses.COLOR_GREEN,
+     curses.COLOR_CYAN,    curses.COLOR_WHITE,   curses.COLOR_BLACK,
+     curses.COLOR_GREEN,   curses.COLOR_GREEN,   curses.COLOR_RED,
+     curses.COLOR_GREEN,   curses.COLOR_BLACK,   curses.COLOR_WHITE,
+     curses.COLOR_WHITE,   curses.COLOR_CYAN,    curses.COLOR_YELLOW,
+     curses.COLOR_WHITE,   curses.COLOR_RED),
+    # 3: Red alert
+    (curses.COLOR_RED,     curses.COLOR_WHITE,   curses.COLOR_RED,
+     curses.COLOR_YELLOW,  curses.COLOR_GREEN,   curses.COLOR_BLACK,
+     curses.COLOR_RED,     curses.COLOR_RED,     curses.COLOR_MAGENTA,
+     curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
+     curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_CYAN,
+     curses.COLOR_WHITE,   curses.COLOR_MAGENTA),
+    # 4: Magenta/purple
+    (curses.COLOR_MAGENTA, curses.COLOR_WHITE,   curses.COLOR_MAGENTA,
+     curses.COLOR_CYAN,    curses.COLOR_GREEN,   curses.COLOR_BLACK,
+     curses.COLOR_MAGENTA, curses.COLOR_CYAN,    curses.COLOR_RED,
+     curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
+     curses.COLOR_WHITE,   curses.COLOR_CYAN,    curses.COLOR_YELLOW,
+     curses.COLOR_WHITE,   curses.COLOR_RED),
+    # 5: Ice blue
+    (curses.COLOR_CYAN,    curses.COLOR_WHITE,   curses.COLOR_CYAN,
+     curses.COLOR_WHITE,   curses.COLOR_GREEN,   curses.COLOR_BLACK,
+     curses.COLOR_WHITE,   curses.COLOR_BLUE,    curses.COLOR_RED,
+     curses.COLOR_CYAN,    curses.COLOR_BLACK,   curses.COLOR_GREEN,
+     curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_MAGENTA,
+     curses.COLOR_WHITE,   curses.COLOR_RED),
+    # 6: DOS Blue (classic QBasic/EDIT-style white-on-blue screen)
+    (curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_WHITE,
+     curses.COLOR_YELLOW,  curses.COLOR_GREEN,   curses.COLOR_BLUE,
+     curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_RED,
+     curses.COLOR_CYAN,    curses.COLOR_BLACK,   curses.COLOR_GREEN,
+     curses.COLOR_WHITE,   curses.COLOR_CYAN,    curses.COLOR_YELLOW,
+     curses.COLOR_WHITE,   curses.COLOR_RED),
+    # 7: DOS Red (red alert / danger screen)
+    (curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_WHITE,
+     curses.COLOR_YELLOW,  curses.COLOR_GREEN,   curses.COLOR_RED,
+     curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_WHITE,
+     curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
+     curses.COLOR_YELLOW,  curses.COLOR_YELLOW,  curses.COLOR_WHITE,
+     curses.COLOR_WHITE,   curses.COLOR_BLUE),
+    # 8: DOS White (classic light-background word-processor screen)
+    (curses.COLOR_BLUE,    curses.COLOR_WHITE,   curses.COLOR_BLUE,
+     curses.COLOR_RED,     curses.COLOR_GREEN,   curses.COLOR_WHITE,
+     curses.COLOR_BLUE,    curses.COLOR_MAGENTA, curses.COLOR_RED,
+     curses.COLOR_BLACK,   curses.COLOR_WHITE,   curses.COLOR_GREEN,
+     curses.COLOR_BLACK,   curses.COLOR_CYAN,    curses.COLOR_BLUE,
+     curses.COLOR_WHITE,   curses.COLOR_RED),
+]
+
+# Main dashboard background for each scheme (index-aligned with
+# COLOR_SCHEMES). Defaults to COLOR_BLACK when not listed here — the
+# DOS Blue/Red/White schemes override this to recolor the whole screen.
+_SCHEME_BACKGROUND = {
+    6: curses.COLOR_BLUE,
+    7: curses.COLOR_RED,
+    8: curses.COLOR_WHITE,
+}
+
+# Default base scheme index. Used as the fallback whenever
+# theme.json doesn't specify a base_scheme_idx.
+DEFAULT_SCHEME_IDX = 6
+
+# Scheme index pushed to all users once. Change this to a new scheme
+# index to push that theme whenever it differs from the recorded
+# 'theme_pushed' index in theme.json.
+THEME_PUSH = 6   # 6 = DOS Blue
+
+
+def apply_pending_theme_push() -> bool:
+    """If theme.json's 'theme_pushed' index differs from THEME_PUSH, force
+    base_scheme_idx to it, record it, save theme.json, and return True."""
+    if _state.get("theme_pushed") == THEME_PUSH:
+        return False
+    _state["base_scheme_idx"] = THEME_PUSH
+    _state["theme_pushed"] = THEME_PUSH
+    save_theme(_state)
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# SITE_REGISTRY — hand-maintained. tag -> {file, label, default_role,
+# default_bold}. This registry is the single source of truth for each call
+# site's default role/bold — call sites in the source files just pass their
+# tag (and, for runtime-variable sites, their runtime pair) to theme.attr();
+# they no longer carry their own default pair/bold literals.
+# Every entry has a default_role, so every site is editable (role + bold) the
+# same way. Sites whose pair genuinely varies at runtime (stat values colored
+# by state, borders highlighted when focused) keep passing a runtime pair,
+# which attr() lets win over the default_role; the splash/picker screens pass
+# owner=None and no pair, so their default_role resolves through ROLE_PAIR_NUM.
 # ─────────────────────────────────────────────────────────────────────────
 SITE_REGISTRY = {
-    'config_editor_priorityeditor_draw_live_1': {'file': 'config_editor.py', 'line': 531, 'label': 'Priority Editor — Title (STREAMER SETTINGS)', 'default_role': 'LIVE', 'default_bold': True},
-    'config_editor_priorityeditor_draw_live_2': {'file': 'config_editor.py', 'line': 535, 'label': 'Priority Editor — Mode Indicator Badge', 'default_role': 'LIVE', 'default_bold': True},
-    'config_editor_priorityeditor_draw_dim_1': {'file': 'config_editor.py', 'line': 546, 'label': 'Priority Editor — Hints List', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_priorityeditor_draw_dim_2': {'file': 'config_editor.py', 'line': 553, 'label': 'Priority Editor — \'No streamers.\' Message', 'default_role': 'DIM', 'default_bold': False},
-    'config_editor_priorityeditor_draw_hilight_1': {'file': 'config_editor.py', 'line': 577, 'label': 'Priority Editor — Bypass Streamer Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_priorityeditor_draw_live_3': {'file': 'config_editor.py', 'line': 579, 'label': 'Priority Editor — Bypass Streamer Row (Unselected)', 'default_role': 'LIVE', 'default_bold': True},
-    'config_editor_priorityeditor_draw_hilight_2': {'file': 'config_editor.py', 'line': 581, 'label': 'Priority Editor — Normal Streamer Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_priorityeditor_draw_normal': {'file': 'config_editor.py', 'line': 583, 'label': 'Priority Editor — Normal Streamer Row (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_priorityeditor_draw_live_4': {'file': 'config_editor.py', 'line': 589, 'label': 'Priority Editor — Scroll-Up Arrow', 'default_role': 'LIVE', 'default_bold': True},
-    'config_editor_priorityeditor_draw_live_5': {'file': 'config_editor.py', 'line': 591, 'label': 'Priority Editor — Scroll-Down Arrow', 'default_role': 'LIVE', 'default_bold': True},
-    'config_editor_streamersettingspopu_draw_normal': {'file': 'config_editor.py', 'line': 726, 'label': 'Streamer Settings Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_streamersettingspopu_draw_system': {'file': 'config_editor.py', 'line': 730, 'label': 'Streamer Settings Popup — Title', 'default_role': 'SYSTEM', 'default_bold': True},
-    'config_editor_streamersettingspopu_draw_hilight': {'file': 'config_editor.py', 'line': 736, 'label': 'Streamer Settings Popup — Menu Option (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_streamersettingspopu_draw_warn': {'file': 'config_editor.py', 'line': 736, 'label': 'Streamer Settings Popup — Menu Option (Unselected)', 'default_role': 'WARN', 'default_bold': True},
-    'config_editor_streamersettingspopu_draw_invhead': {'file': 'config_editor.py', 'line': 740, 'label': 'Streamer Settings Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
-    'config_editor_qualitysettingspopup_draw_normal': {'file': 'config_editor.py', 'line': 821, 'label': 'Quality Settings Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_qualitysettingspopup_draw_system': {'file': 'config_editor.py', 'line': 825, 'label': 'Quality Settings Popup — Title', 'default_role': 'SYSTEM', 'default_bold': True},
-    'config_editor_qualitysettingspopup_draw_hilight_1': {'file': 'config_editor.py', 'line': 828, 'label': 'Quality Settings Popup — \'Low Quality Enabled\' Label', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_qualitysettingspopup_draw_hilight_2': {'file': 'config_editor.py', 'line': 829, 'label': 'Quality Settings Popup — Checkbox Value', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_qualitysettingspopup_draw_invhead': {'file': 'config_editor.py', 'line': 831, 'label': 'Quality Settings Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
-    'config_editor_notificationsettings_draw_normal_1': {'file': 'config_editor.py', 'line': 950, 'label': 'Notification Settings Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_notificationsettings_draw_system': {'file': 'config_editor.py', 'line': 954, 'label': 'Notification Settings Popup — Title', 'default_role': 'SYSTEM', 'default_bold': True},
-    'config_editor_notificationsettings_draw_hilight_1': {'file': 'config_editor.py', 'line': 957, 'label': 'Notification Settings Popup — \'ntfy Notifications\' Label', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_notificationsettings_draw_hilight_2': {'file': 'config_editor.py', 'line': 958, 'label': 'Notification Settings Popup — State Badge (Inherit/On/Off)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_notificationsettings_draw_normal_2': {'file': 'config_editor.py', 'line': 966, 'label': 'Notification Settings Popup — \'Effective\' Label', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_notificationsettings_draw_warn': {'file': 'config_editor.py', 'line': 967, 'label': 'Notification Settings Popup — Effective Value (ON/OFF)', 'default_role': 'WARN', 'default_bold': True},
-    'config_editor_notificationsettings_draw_invhead': {'file': 'config_editor.py', 'line': 969, 'label': 'Notification Settings Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
-    'config_editor_splitsettingspopup_draw_normal_1': {'file': 'config_editor.py', 'line': 1198, 'label': 'Split Settings Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_splitsettingspopup_draw_system': {'file': 'config_editor.py', 'line': 1202, 'label': 'Split Settings Popup — Title', 'default_role': 'SYSTEM', 'default_bold': True},
-    'config_editor_splitsettingspopup_draw_hilight_1': {'file': 'config_editor.py', 'line': 1208, 'label': 'Split Settings Popup — Field Label (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_splitsettingspopup_draw_warn_1': {'file': 'config_editor.py', 'line': 1209, 'label': 'Split Settings Popup — Field Label (Unselected)', 'default_role': 'WARN', 'default_bold': True},
-    'config_editor_splitsettingspopup_draw_hilight_2': {'file': 'config_editor.py', 'line': 1210, 'label': 'Split Settings Popup — Field Value (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_splitsettingspopup_draw_normal_2': {'file': 'config_editor.py', 'line': 1211, 'label': 'Split Settings Popup — Field Value (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_splitsettingspopup_draw_normal_3': {'file': 'config_editor.py', 'line': 1234, 'label': 'Split Settings Popup — \'Effective\' Label', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_splitsettingspopup_draw_warn_2': {'file': 'config_editor.py', 'line': 1235, 'label': 'Split Settings Popup — Effective Value', 'default_role': 'WARN', 'default_bold': True},
-    'config_editor_splitsettingspopup_draw_warn_3': {'file': 'config_editor.py', 'line': 1240, 'label': 'Split Settings Popup — Error Message', 'default_role': 'WARN', 'default_bold': True},
-    'config_editor_splitsettingspopup_draw_invhead': {'file': 'config_editor.py', 'line': 1243, 'label': 'Split Settings Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
-    'config_editor_introdelaysettingspo_draw_normal_1': {'file': 'config_editor.py', 'line': 1449, 'label': 'Intro Delay Settings Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_introdelaysettingspo_draw_system': {'file': 'config_editor.py', 'line': 1453, 'label': 'Intro Delay Settings Popup — Title', 'default_role': 'SYSTEM', 'default_bold': True},
-    'config_editor_introdelaysettingspo_draw_hilight_1': {'file': 'config_editor.py', 'line': 1459, 'label': 'Intro Delay Settings Popup — Field Label (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_introdelaysettingspo_draw_warn_1': {'file': 'config_editor.py', 'line': 1460, 'label': 'Intro Delay Settings Popup — Field Label (Unselected)', 'default_role': 'WARN', 'default_bold': True},
-    'config_editor_introdelaysettingspo_draw_hilight_2': {'file': 'config_editor.py', 'line': 1461, 'label': 'Intro Delay Settings Popup — Field Value (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_introdelaysettingspo_draw_normal_2': {'file': 'config_editor.py', 'line': 1462, 'label': 'Intro Delay Settings Popup — Field Value (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_introdelaysettingspo_draw_normal_3': {'file': 'config_editor.py', 'line': 1484, 'label': 'Intro Delay Settings Popup — \'Effective\' Label', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_introdelaysettingspo_draw_warn_2': {'file': 'config_editor.py', 'line': 1485, 'label': 'Intro Delay Settings Popup — Effective Value', 'default_role': 'WARN', 'default_bold': True},
-    'config_editor_introdelaysettingspo_draw_warn_3': {'file': 'config_editor.py', 'line': 1490, 'label': 'Intro Delay Settings Popup — Error Message', 'default_role': 'WARN', 'default_bold': True},
-    'config_editor_introdelaysettingspo_draw_invhead': {'file': 'config_editor.py', 'line': 1493, 'label': 'Intro Delay Settings Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
-    'config_editor_schedulesettingspopu_draw_normal_1': {'file': 'config_editor.py', 'line': 1797, 'label': 'Schedule Settings Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_schedulesettingspopu_draw_system': {'file': 'config_editor.py', 'line': 1802, 'label': 'Schedule Settings Popup — Title', 'default_role': 'SYSTEM', 'default_bold': True},
-    'config_editor_schedulesettingspopu_draw_hilight_1': {'file': 'config_editor.py', 'line': 1811, 'label': 'Schedule Settings Popup — Field Label (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_schedulesettingspopu_draw_warn_1': {'file': 'config_editor.py', 'line': 1812, 'label': 'Schedule Settings Popup — Field Label (Unselected)', 'default_role': 'WARN', 'default_bold': True},
-    'config_editor_schedulesettingspopu_draw_hilight_2': {'file': 'config_editor.py', 'line': 1813, 'label': 'Schedule Settings Popup — Field Value (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_schedulesettingspopu_draw_normal_2': {'file': 'config_editor.py', 'line': 1814, 'label': 'Schedule Settings Popup — Field Value (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_schedulesettingspopu_draw_hilight_3': {'file': 'config_editor.py', 'line': 1829, 'label': 'Schedule Settings Popup — Day-of-Week Token (Cursor)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_schedulesettingspopu_draw_live': {'file': 'config_editor.py', 'line': 1831, 'label': 'Schedule Settings Popup — Day-of-Week Token (Active)', 'default_role': 'LIVE', 'default_bold': True},
-    'config_editor_schedulesettingspopu_draw_dim': {'file': 'config_editor.py', 'line': 1833, 'label': 'Schedule Settings Popup — Day-of-Week Token (Inactive)', 'default_role': 'DIM', 'default_bold': False},
-    'config_editor_schedulesettingspopu_draw_normal_3': {'file': 'config_editor.py', 'line': 1842, 'label': 'Schedule Settings Popup — Time Edit Buffer', 'default_role': 'NORMAL', 'default_bold': True},
-    'config_editor_schedulesettingspopu_draw_warn_2': {'file': 'config_editor.py', 'line': 1852, 'label': 'Schedule Settings Popup — Error Message', 'default_role': 'WARN', 'default_bold': True},
-    'config_editor_schedulesettingspopu_draw_invhead': {'file': 'config_editor.py', 'line': 1859, 'label': 'Schedule Settings Popup — Legend/Hint Line', 'default_role': 'INVHEAD', 'default_bold': False},
-    'config_editor_sitesortmanager_draw_popup_normal_1': {'file': 'config_editor.py', 'line': 2021, 'label': 'Dashboard Sort Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_sitesortmanager_draw_popup_chrome': {'file': 'config_editor.py', 'line': 2025, 'label': 'Dashboard Sort Popup — Title', 'default_role': 'CHROME', 'default_bold': True},
-    'config_editor_sitesortmanager_draw_popup_invhead': {'file': 'config_editor.py', 'line': 2028, 'label': 'Dashboard Sort Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
-    'config_editor_sitesortmanager_draw_popup_hilight': {'file': 'config_editor.py', 'line': 2045, 'label': 'Dashboard Sort Popup — Selected Option', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_sitesortmanager_draw_popup_live': {'file': 'config_editor.py', 'line': 2047, 'label': 'Dashboard Sort Popup — Currently Active Option', 'default_role': 'LIVE', 'default_bold': True},
-    'config_editor_sitesortmanager_draw_popup_normal_2': {'file': 'config_editor.py', 'line': 2049, 'label': 'Dashboard Sort Popup — Unselected Option', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_destinations_po_normal_1': {'file': 'config_editor.py', 'line': 2532, 'label': 'Destinations Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_destinations_po_system': {'file': 'config_editor.py', 'line': 2535, 'label': 'Destinations Popup — Title', 'default_role': 'SYSTEM', 'default_bold': True},
-    'config_editor_globalconfigeditor_draw_destinations_po_dim_1': {'file': 'config_editor.py', 'line': 2540, 'label': 'Destinations Popup — Streamer Comment Text', 'default_role': 'DIM', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_destinations_po_dim_2': {'file': 'config_editor.py', 'line': 2544, 'label': 'Destinations Popup — \'Paths:\' Header', 'default_role': 'DIM', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_destinations_po_dim_3': {'file': 'config_editor.py', 'line': 2549, 'label': '(none yet)', 'default_role': 'DIM', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_destinations_po_normal_2': {'file': 'config_editor.py', 'line': 2558, 'label': 'Destinations Popup — Path Row', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_destinations_po_warn': {'file': 'config_editor.py', 'line': 2563, 'label': 'Destinations Popup — \'New path:\' Label', 'default_role': 'WARN', 'default_bold': True},
-    'config_editor_globalconfigeditor_draw_destinations_po_normal_3': {'file': 'config_editor.py', 'line': 2566, 'label': 'Destinations Popup — New-Path Entry Buffer', 'default_role': 'NORMAL', 'default_bold': True},
-    'config_editor_globalconfigeditor_draw_destinations_po_invhead': {'file': 'config_editor.py', 'line': 2570, 'label': 'Destinations Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_msg_filters_pop_normal_1': {'file': 'config_editor.py', 'line': 2590, 'label': 'Message Filters Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_msg_filters_pop_system': {'file': 'config_editor.py', 'line': 2593, 'label': 'Message Filters Popup — Title', 'default_role': 'SYSTEM', 'default_bold': True},
-    'config_editor_globalconfigeditor_draw_msg_filters_pop_hilight_1': {'file': 'config_editor.py', 'line': 2602, 'label': 'Message Filters Popup — \'Tag Enabled\' Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_globalconfigeditor_draw_msg_filters_pop_normal_2': {'file': 'config_editor.py', 'line': 2603, 'label': 'Message Filters Popup — \'Tag Enabled\' Row (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_msg_filters_pop_hilight_2': {'file': 'config_editor.py', 'line': 2604, 'label': 'Message Filters Popup — Tag Badge (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_globalconfigeditor_draw_msg_filters_pop_live_1': {'file': 'config_editor.py', 'line': 2606, 'label': 'Message Filters Popup — Tag Badge (Enabled)', 'default_role': 'LIVE', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_msg_filters_pop_warn': {'file': 'config_editor.py', 'line': 2606, 'label': 'Message Filters Popup — Tag Badge (Disabled)', 'default_role': 'WARN', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_msg_filters_pop_dim_1': {'file': 'config_editor.py', 'line': 2611, 'label': 'Message Filters Popup — \'Messages:\' Header', 'default_role': 'DIM', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_msg_filters_pop_dim_2': {'file': 'config_editor.py', 'line': 2616, 'label': '(no dbg() calls found for this tag)', 'default_role': 'DIM', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_msg_filters_pop_hilight_3': {'file': 'config_editor.py', 'line': 2635, 'label': 'Message Filters Popup — Message Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_globalconfigeditor_draw_msg_filters_pop_normal_3': {'file': 'config_editor.py', 'line': 2636, 'label': 'Message Filters Popup — Message Row (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_msg_filters_pop_hilight_4': {'file': 'config_editor.py', 'line': 2637, 'label': 'Message Filters Popup — Message Badge (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_globalconfigeditor_draw_msg_filters_pop_live_2': {'file': 'config_editor.py', 'line': 2639, 'label': 'Message Filters Popup — Message Badge (On)', 'default_role': 'LIVE', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_msg_filters_pop_dim_3': {'file': 'config_editor.py', 'line': 2639, 'label': 'Message Filters Popup — Message Badge (Off)', 'default_role': 'DIM', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_msg_filters_pop_invhead': {'file': 'config_editor.py', 'line': 2647, 'label': 'Space:Toggle  Enter:Save  Esc:Back', 'default_role': 'INVHEAD', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_debug_tags_popu_normal_1': {'file': 'config_editor.py', 'line': 2669, 'label': 'Debug Tags Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_debug_tags_popu_system': {'file': 'config_editor.py', 'line': 2672, 'label': 'Debug Tags Popup — Title', 'default_role': 'SYSTEM', 'default_bold': True},
-    'config_editor_globalconfigeditor_draw_debug_tags_popu_hilight_1': {'file': 'config_editor.py', 'line': 2681, 'label': 'Debug Tags Popup — \'Enable Logging\' Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_globalconfigeditor_draw_debug_tags_popu_normal_2': {'file': 'config_editor.py', 'line': 2682, 'label': 'Debug Tags Popup — \'Enable Logging\' Row (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_debug_tags_popu_hilight_2': {'file': 'config_editor.py', 'line': 2683, 'label': 'Debug Tags Popup — Enable Logging Badge (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_globalconfigeditor_draw_debug_tags_popu_live_1': {'file': 'config_editor.py', 'line': 2685, 'label': 'Debug Tags Popup — Enable Logging Badge (On)', 'default_role': 'LIVE', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_debug_tags_popu_warn': {'file': 'config_editor.py', 'line': 2687, 'label': 'Debug Tags Popup — Enable Logging Badge (Off)', 'default_role': 'WARN', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_debug_tags_popu_dim_1': {'file': 'config_editor.py', 'line': 2696, 'label': 'Tag Filters:', 'default_role': 'DIM', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_debug_tags_popu_hilight_3': {'file': 'config_editor.py', 'line': 2717, 'label': 'Debug Tags Popup — Tag Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_globalconfigeditor_draw_debug_tags_popu_normal_3': {'file': 'config_editor.py', 'line': 2718, 'label': 'Debug Tags Popup — Tag Row (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_debug_tags_popu_hilight_4': {'file': 'config_editor.py', 'line': 2719, 'label': 'Debug Tags Popup — Tag Badge (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_globalconfigeditor_draw_debug_tags_popu_live_2': {'file': 'config_editor.py', 'line': 2721, 'label': 'Debug Tags Popup — Tag Badge (On)', 'default_role': 'LIVE', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_debug_tags_popu_dim_2': {'file': 'config_editor.py', 'line': 2723, 'label': 'Debug Tags Popup — Tag Badge (Off)', 'default_role': 'DIM', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_debug_tags_popu_invhead': {'file': 'config_editor.py', 'line': 2734, 'label': 'Space:Messages  Enter:Save  Esc:Cancel', 'default_role': 'INVHEAD', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_live_1': {'file': 'config_editor.py', 'line': 2866, 'label': 'Global Settings Panel — Title', 'default_role': 'LIVE', 'default_bold': True},
-    'config_editor_globalconfigeditor_draw_live_2': {'file': 'config_editor.py', 'line': 2870, 'label': 'Global Settings Panel — Mode Indicator Badge', 'default_role': 'LIVE', 'default_bold': True},
-    'config_editor_globalconfigeditor_draw_hilight_1': {'file': 'config_editor.py', 'line': 2878, 'label': 'Global Settings Panel — Item Key (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_globalconfigeditor_draw_warn': {'file': 'config_editor.py', 'line': 2879, 'label': 'Global Settings Panel — Item Key (Unselected)', 'default_role': 'WARN', 'default_bold': True},
-    'config_editor_globalconfigeditor_draw_hilight_2': {'file': 'config_editor.py', 'line': 2880, 'label': 'Global Settings Panel — Item Value (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_globalconfigeditor_draw_live_3': {'file': 'config_editor.py', 'line': 2881, 'label': 'Global Settings Panel — Item Value (Unselected)', 'default_role': 'LIVE', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_live_4': {'file': 'config_editor.py', 'line': 2896, 'label': 'Global Settings Panel — Scroll-Up Arrow', 'default_role': 'LIVE', 'default_bold': True},
-    'config_editor_globalconfigeditor_draw_live_5': {'file': 'config_editor.py', 'line': 2898, 'label': 'Global Settings Panel — Scroll-Down Arrow', 'default_role': 'LIVE', 'default_bold': True},
-    'config_editor_globalconfigeditor_draw_popup_normal_1': {'file': 'config_editor.py', 'line': 2931, 'label': 'Edit Global Value Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_popup_system_1': {'file': 'config_editor.py', 'line': 2934, 'label': 'Edit Global Value Popup — Title', 'default_role': 'SYSTEM', 'default_bold': True},
-    'config_editor_globalconfigeditor_draw_popup_chrome': {'file': 'config_editor.py', 'line': 2938, 'label': 'Edit Global Value Popup — \'Key:\' Line', 'default_role': 'CHROME', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_popup_dim': {'file': 'config_editor.py', 'line': 2942, 'label': 'Edit Global Value Popup — Comment Text', 'default_role': 'DIM', 'default_bold': False},
-    'config_editor_globalconfigeditor_draw_popup_system_2': {'file': 'config_editor.py', 'line': 2948, 'label': 'Edit Global Value Popup — \'New Value:\' Label', 'default_role': 'SYSTEM', 'default_bold': True},
-    'config_editor_globalconfigeditor_draw_popup_normal_2': {'file': 'config_editor.py', 'line': 2950, 'label': 'Edit Global Value Popup — New-Value Entry Buffer', 'default_role': 'NORMAL', 'default_bold': True},
-    'config_editor_globalconfigeditor_draw_popup_warn': {'file': 'config_editor.py', 'line': 2953, 'label': 'Edit Global Value Popup — Error Message', 'default_role': 'WARN', 'default_bold': True},
-    'config_editor_globalconfigeditor_draw_popup_invhead': {'file': 'config_editor.py', 'line': 2956, 'label': 'Enter: Save | Esc: Cancel #1', 'default_role': 'INVHEAD', 'default_bold': False},
-    'config_editor_configeditor_draw_tab_dim_1': {'file': 'config_editor.py', 'line': 3134, 'label': 'Site:', 'default_role': 'DIM', 'default_bold': False},
-    'config_editor_configeditor_draw_tab_hilight_1': {'file': 'config_editor.py', 'line': 3139, 'label': 'Site Tab Bar — Selected Site Tab', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_configeditor_draw_tab_chrome': {'file': 'config_editor.py', 'line': 3141, 'label': 'Site Tab Bar — Unselected Site Tab', 'default_role': 'CHROME', 'default_bold': False},
-    'config_editor_configeditor_draw_tab_dim_2': {'file': 'config_editor.py', 'line': 3145, 'label': '[: prev site  ]: next site  Tab: Next Panel', 'default_role': 'DIM', 'default_bold': False},
-    'config_editor_configeditor_draw_tab_live_1': {'file': 'config_editor.py', 'line': 3153, 'label': 'Site Settings Panel — Mode Indicator Badge', 'default_role': 'LIVE', 'default_bold': True},
-    'config_editor_configeditor_draw_tab_live_2': {'file': 'config_editor.py', 'line': 3164, 'label': 'No configurable items found. #1', 'default_role': 'LIVE', 'default_bold': True},
-    'config_editor_configeditor_draw_tab_dim_3': {'file': 'config_editor.py', 'line': 3169, 'label': 'No configurable items found. #2', 'default_role': 'DIM', 'default_bold': False},
-    'config_editor_configeditor_draw_tab_hilight_2': {'file': 'config_editor.py', 'line': 3178, 'label': 'Site Settings Panel — Item Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_configeditor_draw_tab_warn_1': {'file': 'config_editor.py', 'line': 3182, 'label': 'Site Settings Panel — Section Header Row (Unselected)', 'default_role': 'WARN', 'default_bold': True},
-    'config_editor_configeditor_draw_tab_normal': {'file': 'config_editor.py', 'line': 3183, 'label': 'Site Settings Panel — Regular Item Row (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_configeditor_draw_tab_hilight_3': {'file': 'config_editor.py', 'line': 3187, 'label': 'Site Settings Panel — Section Header (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'config_editor_configeditor_draw_tab_warn_2': {'file': 'config_editor.py', 'line': 3188, 'label': 'Site Settings Panel — Section Header (Unselected)', 'default_role': 'WARN', 'default_bold': True},
-    'config_editor_configeditor_draw_tab_warn_3': {'file': 'config_editor.py', 'line': 3192, 'label': 'Site Settings Panel — Item Key (Unselected)', 'default_role': 'WARN', 'default_bold': True},
-    'config_editor_configeditor_draw_tab_live_3': {'file': 'config_editor.py', 'line': 3194, 'label': 'Site Settings Panel — Item Value (Unselected)', 'default_role': 'LIVE', 'default_bold': False},
-    'config_editor_configeditor_draw_tab_live_4': {'file': 'config_editor.py', 'line': 3210, 'label': 'Site Settings Panel — Scroll-Up Arrow', 'default_role': 'LIVE', 'default_bold': True},
-    'config_editor_configeditor_draw_tab_live_5': {'file': 'config_editor.py', 'line': 3212, 'label': 'Site Settings Panel — Scroll-Down Arrow', 'default_role': 'LIVE', 'default_bold': True},
-    'config_editor_configeditor_draw_popup_normal_1': {'file': 'config_editor.py', 'line': 3249, 'label': 'Edit Config Value Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
-    'config_editor_configeditor_draw_popup_warn_1': {'file': 'config_editor.py', 'line': 3253, 'label': 'Edit Config Value Popup — Title', 'default_role': 'WARN', 'default_bold': True},
-    'config_editor_configeditor_draw_popup_chrome': {'file': 'config_editor.py', 'line': 3258, 'label': 'Edit Config Value Popup — \'Key:\' Line', 'default_role': 'CHROME', 'default_bold': False},
-    'config_editor_configeditor_draw_popup_dim': {'file': 'config_editor.py', 'line': 3263, 'label': 'Edit Config Value Popup — Comment Text', 'default_role': 'DIM', 'default_bold': False},
-    'config_editor_configeditor_draw_popup_warn_2': {'file': 'config_editor.py', 'line': 3269, 'label': 'Edit Config Value Popup — \'New Value:\' Label', 'default_role': 'WARN', 'default_bold': True},
-    'config_editor_configeditor_draw_popup_normal_2': {'file': 'config_editor.py', 'line': 3270, 'label': 'Edit Config Value Popup — New-Value Entry Buffer', 'default_role': 'NORMAL', 'default_bold': True},
-    'config_editor_configeditor_draw_popup_warn_3': {'file': 'config_editor.py', 'line': 3273, 'label': 'Edit Config Value Popup — Error Message', 'default_role': 'WARN', 'default_bold': True},
-    'config_editor_configeditor_draw_popup_invhead': {'file': 'config_editor.py', 'line': 3275, 'label': 'Enter: Save | Esc: Cancel #2', 'default_role': 'INVHEAD', 'default_bold': False},
-    'file_manager_filemanagertab_draw_popup_normal_1': {'file': 'file_manager.py', 'line': 763, 'label': 'File Manager Sort Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
-    'file_manager_filemanagertab_draw_popup_chrome': {'file': 'file_manager.py', 'line': 767, 'label': 'File Manager Sort Popup — Title', 'default_role': 'CHROME', 'default_bold': True},
-    'file_manager_filemanagertab_draw_popup_invhead': {'file': 'file_manager.py', 'line': 770, 'label': 'File Manager Sort Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
-    'file_manager_filemanagertab_draw_popup_hilight': {'file': 'file_manager.py', 'line': 786, 'label': 'File Manager Sort Popup — Selected Option', 'default_role': 'HILIGHT', 'default_bold': True},
-    'file_manager_filemanagertab_draw_popup_live': {'file': 'file_manager.py', 'line': 788, 'label': 'File Manager Sort Popup — Currently Active Option', 'default_role': 'LIVE', 'default_bold': True},
-    'file_manager_filemanagertab_draw_popup_normal_2': {'file': 'file_manager.py', 'line': 790, 'label': 'File Manager Sort Popup — Unselected Option', 'default_role': 'NORMAL', 'default_bold': False},
-    'file_manager_filemanagertab_draw_menu_popup_normal_1': {'file': 'file_manager.py', 'line': 858, 'label': 'File Options Menu Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
-    'file_manager_filemanagertab_draw_menu_popup_chrome': {'file': 'file_manager.py', 'line': 862, 'label': 'File Options Menu Popup — Title', 'default_role': 'CHROME', 'default_bold': True},
-    'file_manager_filemanagertab_draw_menu_popup_invhead': {'file': 'file_manager.py', 'line': 865, 'label': 'File Options Menu Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
-    'file_manager_filemanagertab_draw_menu_popup_hilight': {'file': 'file_manager.py', 'line': 871, 'label': 'File Options Menu Popup — Menu Option (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'file_manager_filemanagertab_draw_menu_popup_normal_2': {'file': 'file_manager.py', 'line': 872, 'label': 'File Options Menu Popup — Menu Option (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
-    'file_manager_filemanagertab_draw_fixup_popup_normal_1': {'file': 'file_manager.py', 'line': 924, 'label': 'Fixup Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
-    'file_manager_filemanagertab_draw_fixup_popup_chrome': {'file': 'file_manager.py', 'line': 928, 'label': 'Fixup Popup — Title', 'default_role': 'CHROME', 'default_bold': True},
-    'file_manager_filemanagertab_draw_fixup_popup_invhead': {'file': 'file_manager.py', 'line': 931, 'label': 'Fixup Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
-    'file_manager_filemanagertab_draw_fixup_popup_dim': {'file': 'file_manager.py', 'line': 936, 'label': 'Fixup Popup — Target Filename', 'default_role': 'DIM', 'default_bold': False},
-    'file_manager_filemanagertab_draw_fixup_popup_hilight': {'file': 'file_manager.py', 'line': 944, 'label': 'Fixup Popup — Checkbox Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'file_manager_filemanagertab_draw_fixup_popup_normal_2': {'file': 'file_manager.py', 'line': 945, 'label': 'Fixup Popup — Checkbox Row (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
-    'file_manager_filemanagertab_draw_move_popup_normal_1': {'file': 'file_manager.py', 'line': 1040, 'label': 'Move Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
-    'file_manager_filemanagertab_draw_move_popup_chrome': {'file': 'file_manager.py', 'line': 1043, 'label': 'Move Popup — Title', 'default_role': 'CHROME', 'default_bold': True},
-    'file_manager_filemanagertab_draw_move_popup_invhead': {'file': 'file_manager.py', 'line': 1046, 'label': 'Move Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
-    'file_manager_filemanagertab_draw_move_popup_dim': {'file': 'file_manager.py', 'line': 1050, 'label': 'Move Popup — \'Select a destination:\' Header', 'default_role': 'DIM', 'default_bold': False},
-    'file_manager_filemanagertab_draw_move_popup_hilight_1': {'file': 'file_manager.py', 'line': 1057, 'label': 'Move File Popup — Selected Destination', 'default_role': 'HILIGHT', 'default_bold': True},
-    'file_manager_filemanagertab_draw_move_popup_normal_2': {'file': 'file_manager.py', 'line': 1058, 'label': 'Move File Popup — Unselected Destination', 'default_role': 'NORMAL', 'default_bold': False},
-    'file_manager_filemanagertab_draw_move_popup_hilight_2': {'file': 'file_manager.py', 'line': 1065, 'label': 'Move Popup — \'Configure New Destination\' (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'file_manager_filemanagertab_draw_move_popup_system': {'file': 'file_manager.py', 'line': 1066, 'label': 'Move Popup — \'Configure New Destination\' (Unselected)', 'default_role': 'SYSTEM', 'default_bold': False},
-    'file_manager_filemanagertab_draw_move_popup_hilight_3': {'file': 'file_manager.py', 'line': 1077, 'label': 'Move Popup — Checkbox Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'file_manager_filemanagertab_draw_move_popup_normal_3': {'file': 'file_manager.py', 'line': 1078, 'label': 'Move Popup — Checkbox Row (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
-    'file_manager_filemanagertab_draw_move_filename_p_normal_1': {'file': 'file_manager.py', 'line': 1150, 'label': 'Rename/Move Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
-    'file_manager_filemanagertab_draw_move_filename_p_chrome': {'file': 'file_manager.py', 'line': 1153, 'label': 'Rename/Move Popup — Title', 'default_role': 'CHROME', 'default_bold': True},
-    'file_manager_filemanagertab_draw_move_filename_p_invhead': {'file': 'file_manager.py', 'line': 1156, 'label': 'Rename/Move Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
-    'file_manager_filemanagertab_draw_move_filename_p_dim': {'file': 'file_manager.py', 'line': 1161, 'label': 'Streamer: {self._move_filename_streamer}', 'default_role': 'DIM', 'default_bold': False},
-    'file_manager_filemanagertab_draw_move_filename_p_warn': {'file': 'file_manager.py', 'line': 1164, 'label': 'Filename:', 'default_role': 'WARN', 'default_bold': True},
-    'file_manager_filemanagertab_draw_move_filename_p_normal_2': {'file': 'file_manager.py', 'line': 1171, 'label': 'Rename/Move Popup — Filename Entry Buffer', 'default_role': 'NORMAL', 'default_bold': True},
-    'file_manager_filemanagertab_draw_trim_popup_normal_1': {'file': 'file_manager.py', 'line': 1575, 'label': 'Trim Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
-    'file_manager_filemanagertab_draw_trim_popup_chrome': {'file': 'file_manager.py', 'line': 1579, 'label': 'Trim Popup — Title', 'default_role': 'CHROME', 'default_bold': True},
-    'file_manager_filemanagertab_draw_trim_popup_invhead': {'file': 'file_manager.py', 'line': 1582, 'label': 'Trim Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
-    'file_manager_filemanagertab_draw_trim_popup_dim': {'file': 'file_manager.py', 'line': 1587, 'label': 'Trim Popup — Target Filename', 'default_role': 'DIM', 'default_bold': False},
-    'file_manager_filemanagertab_draw_trim_popup_hilight_1': {'file': 'file_manager.py', 'line': 1597, 'label': 'Trim Popup — Start/End Field (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'file_manager_filemanagertab_draw_trim_popup_normal_2': {'file': 'file_manager.py', 'line': 1598, 'label': 'Trim Popup — Unselected Field', 'default_role': 'NORMAL', 'default_bold': False},
-    'file_manager_filemanagertab_draw_trim_popup_hilight_2': {'file': 'file_manager.py', 'line': 1619, 'label': 'Trim Popup — Checkbox Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'file_manager_filemanagertab_draw_trim_popup_normal_3': {'file': 'file_manager.py', 'line': 1620, 'label': 'Trim Popup — Checkbox Row (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
-    'file_manager_filemanagertab_draw_chrome': {'file': 'file_manager.py', 'line': 1713, 'label': 'FILE MANAGER', 'default_role': 'CHROME', 'default_bold': True},
-    'file_manager_filemanagertab_draw_dim_1': {'file': 'file_manager.py', 'line': 1719, 'label': 'No OUTPUT_DIR configured on any site.', 'default_role': 'DIM', 'default_bold': False},
-    'file_manager_filemanagertab_draw_normal': {'file': 'file_manager.py', 'line': 1736, 'label': 'File Manager — Column Header Row', 'default_role': 'NORMAL', 'default_bold': True},
-    'file_manager_filemanagertab_draw_system_1': {'file': 'file_manager.py', 'line': 1773, 'label': 'File Manager — Subfolder Group Header', 'default_role': 'SYSTEM', 'default_bold': True},
-    'file_manager_filemanagertab_draw_dim_2': {'file': 'file_manager.py', 'line': 1776, 'label': 'File Manager — \'Empty\' Placeholder Row', 'default_role': 'DIM', 'default_bold': False},
-    'file_manager_filemanagertab_draw_hilight': {'file': 'file_manager.py', 'line': 1796, 'label': 'File Manager — File Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'file_manager_filemanagertab_draw_live': {'file': 'file_manager.py', 'line': 1798, 'label': 'File Manager — File Row (Writing)', 'default_role': 'LIVE', 'default_bold': True},
-    'file_manager_filemanagertab_draw_dim_3': {'file': 'file_manager.py', 'line': 1800, 'label': 'File Manager — File Row (Idle)', 'default_role': 'DIM', 'default_bold': False},
-    'file_manager_filemanagertab_draw_system_2': {'file': 'file_manager.py', 'line': 1817, 'label': 'File Manager — Subfolder Path Prefix', 'default_role': 'SYSTEM', 'default_bold': False},
-    'file_manager_filemanagertab_draw_delete': {'file': 'file_manager.py', 'line': 1830, 'label': 'File Manager — Delete-Mode Info (Permanent)', 'default_role': 'DELETE', 'default_bold': True},
-    'file_manager_filemanagertab_draw_dim_4': {'file': 'file_manager.py', 'line': 1830, 'label': 'File Manager — Delete-Mode Info (Trash)', 'default_role': 'DIM', 'default_bold': False},
-    'file_manager_filemanagertab_draw_warn': {'file': 'file_manager.py', 'line': 1835, 'label': 'File Manager — Status Message Line', 'default_role': 'WARN', 'default_bold': True},
-    'main_jjdlpdashboard_safe_ch_pair': {'file': 'main.py', 'line': 4318, 'label': 'Box Border (generic, all panels)', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_draw_logo_logo': {'file': 'main.py', 'line': 4559, 'label': 'Main Logo Banner', 'default_role': 'LOGO', 'default_bold': True},
-    'main_jjdlpdashboard_draw_christmas_easte_pair': {'file': 'main.py', 'line': 4589, 'label': 'Christmas Easter Egg — Tree', 'default_role': None, 'default_bold': True},
-    'main_jjdlpdashboard_draw_christmas_easte_live': {'file': 'main.py', 'line': 4592, 'label': 'Christmas Easter Egg — \'Merry Christmas!\' Text', 'default_role': 'LIVE', 'default_bold': True},
-    'main_jjdlpdashboard_draw_tabs_hilight': {'file': 'main.py', 'line': 4601, 'label': 'Tab Bar — Selected Tab', 'default_role': 'HILIGHT', 'default_bold': True},
-    'main_jjdlpdashboard_draw_tabs_invhead': {'file': 'main.py', 'line': 4603, 'label': 'Tab Bar — Unselected Tab', 'default_role': 'INVHEAD', 'default_bold': False},
-    'main_jjdlpdashboard_draw_system_panel_system': {'file': 'main.py', 'line': 4614, 'label': 'SYSTEM', 'default_role': 'SYSTEM', 'default_bold': True},
-    'main_jjdlpdashboard_split_after_rows_dim': {'file': 'main.py', 'line': 4710, 'label': 'System Panel — Stat Row Label', 'default_role': 'DIM', 'default_bold': False},
-    'main_jjdlpdashboard_split_after_rows_cpair': {'file': 'main.py', 'line': 4713, 'label': 'System Panel — Stat Row Value (color varies by stat)', 'default_role': None, 'default_bold': True},
-    'main_jjdlpdashboard_split_after_rows_rec_1': {'file': 'main.py', 'line': 4734, 'label': 'System Panel — \'ffmpeg errors\' Section Header', 'default_role': 'REC', 'default_bold': False},
-    'main_jjdlpdashboard_split_after_rows_rec_2': {'file': 'main.py', 'line': 4743, 'label': 'System Panel — ffmpeg Error Streamer Name', 'default_role': 'REC', 'default_bold': False},
-    'main_jjdlpdashboard_split_after_rows_rec_3': {'file': 'main.py', 'line': 4746, 'label': 'System Panel — ffmpeg Error Count', 'default_role': 'REC', 'default_bold': False},
-    'main_jjdlpdashboard_split_after_rows_rec_4': {'file': 'main.py', 'line': 4768, 'label': 'System Panel — \'stalled\' Section Header', 'default_role': 'REC', 'default_bold': False},
-    'main_jjdlpdashboard_split_after_rows_rec_5': {'file': 'main.py', 'line': 4777, 'label': 'System Panel — Stalled Streamer Name', 'default_role': 'REC', 'default_bold': False},
-    'main_jjdlpdashboard_split_after_rows_rec_6': {'file': 'main.py', 'line': 4780, 'label': 'System Panel — Stalled Duration', 'default_role': 'REC', 'default_bold': False},
-    'main_jjdlpdashboard_split_after_rows_warn_1': {'file': 'main.py', 'line': 4799, 'label': 'System Panel — \'ads\' Section Header', 'default_role': 'WARN', 'default_bold': True},
-    'main_jjdlpdashboard_split_after_rows_warn_2': {'file': 'main.py', 'line': 4805, 'label': 'Ad detected', 'default_role': 'WARN', 'default_bold': True},
-    'main_jjdlpdashboard_update_disk_usage_system': {'file': 'main.py', 'line': 4893, 'label': 'System Panel — \'Disk\' Section Header', 'default_role': 'SYSTEM', 'default_bold': False},
-    'main_jjdlpdashboard_update_disk_usage_color': {'file': 'main.py', 'line': 4909, 'label': 'System Panel — Per-Drive Usage Line', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_update_disk_usage_chrome': {'file': 'main.py', 'line': 4917, 'label': 'System Panel — Uptime Line', 'default_role': 'CHROME', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_chrome_1': {'file': 'main.py', 'line': 4975, 'label': '{cfg_label}', 'default_role': 'CHROME', 'default_bold': True},
-    'main_jjdlpdashboard_draw_site_panel_live_1': {'file': 'main.py', 'line': 4981, 'label': 'LIVE:{live_cnt}', 'default_role': 'LIVE', 'default_bold': True},
-    'main_jjdlpdashboard_draw_site_panel_rec_1': {'file': 'main.py', 'line': 4984, 'label': 'REC:{rec_cnt}', 'default_role': 'REC', 'default_bold': True},
-    'main_jjdlpdashboard_draw_site_panel_dim_1': {'file': 'main.py', 'line': 4987, 'label': 'OFF:{off_cnt}', 'default_role': 'DIM', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_disabled_1': {'file': 'main.py', 'line': 4991, 'label': 'DIS:{dis_cnt}', 'default_role': 'DISABLED', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_chrome_2': {'file': 'main.py', 'line': 5020, 'label': 'Site Panel (Compact) — Column Separator', 'default_role': 'CHROME', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_disabled_2': {'file': 'main.py', 'line': 5050, 'label': 'Site Panel (Compact) — Name (Disabled)', 'default_role': 'DISABLED', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_disabled_3': {'file': 'main.py', 'line': 5054, 'label': 'Site Panel (Compact) — Status Badge (Disabled, Flash On)', 'default_role': 'DISABLED', 'default_bold': True},
-    'main_jjdlpdashboard_draw_site_panel_disabled_4': {'file': 'main.py', 'line': 5057, 'label': 'Site Panel (Compact) — Status Badge (Disabled, Flash Off)', 'default_role': 'DISABLED', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_disabled_5': {'file': 'main.py', 'line': 5060, 'label': 'Site Panel (Compact) — Status Badge (Disabled, Never Live)', 'default_role': 'DISABLED', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_live_2': {'file': 'main.py', 'line': 5062, 'label': 'Site Panel (Compact) — Name (Live)', 'default_role': 'LIVE', 'default_bold': True},
-    'main_jjdlpdashboard_draw_site_panel_live_3': {'file': 'main.py', 'line': 5066, 'label': 'Site Panel (Compact) — Status Badge (Recording, Flash On)', 'default_role': 'LIVE', 'default_bold': True},
-    'main_jjdlpdashboard_draw_site_panel_rec_2': {'file': 'main.py', 'line': 5069, 'label': 'Site Panel (Compact) — Status Badge (Recording, Flash Off)', 'default_role': 'REC', 'default_bold': True},
-    'main_jjdlpdashboard_draw_site_panel_live_4': {'file': 'main.py', 'line': 5072, 'label': 'Site Panel (Compact) — Status Badge (Live, Not Recording)', 'default_role': 'LIVE', 'default_bold': True},
-    'main_jjdlpdashboard_draw_site_panel_dim_2': {'file': 'main.py', 'line': 5076, 'label': 'Site Panel (Compact) — Name (Offline)', 'default_role': 'DIM', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_dim_3': {'file': 'main.py', 'line': 5078, 'label': 'Site Panel (Compact) — Status Badge (Offline)', 'default_role': 'DIM', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_live_5': {'file': 'main.py', 'line': 5091, 'label': 'Site Panel (Compact) — Last Live, Recently Live', 'default_role': 'LIVE', 'default_bold': True},
-    'main_jjdlpdashboard_draw_site_panel_dim_4': {'file': 'main.py', 'line': 5093, 'label': 'Site Panel (Compact) — Last Live, Older', 'default_role': 'DIM', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_disabled_6': {'file': 'main.py', 'line': 5134, 'label': 'Site Panel (Normal) — Name (Disabled)', 'default_role': 'DISABLED', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_disabled_7': {'file': 'main.py', 'line': 5136, 'label': 'Site Panel (Normal) — Progress Bar (Disabled)', 'default_role': 'DISABLED', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_disabled_8': {'file': 'main.py', 'line': 5141, 'label': 'Site Panel (Normal) — Status Badge (Disabled, Flash On)', 'default_role': 'DISABLED', 'default_bold': True},
-    'main_jjdlpdashboard_draw_site_panel_disabled_9': {'file': 'main.py', 'line': 5144, 'label': 'Site Panel (Normal) — Status Badge (Disabled, Flash Off)', 'default_role': 'DISABLED', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_disabled_10': {'file': 'main.py', 'line': 5147, 'label': 'Site Panel (Normal) — Status Badge (Disabled, Never Live)', 'default_role': 'DISABLED', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_live_6': {'file': 'main.py', 'line': 5150, 'label': 'Site Panel (Normal) — Name (Live)', 'default_role': 'LIVE', 'default_bold': True},
-    'main_jjdlpdashboard_draw_site_panel_live_7': {'file': 'main.py', 'line': 5154, 'label': 'Site Panel (Normal) — Status Badge (Recording, Flash On)', 'default_role': 'LIVE', 'default_bold': True},
-    'main_jjdlpdashboard_draw_site_panel_rec_3': {'file': 'main.py', 'line': 5157, 'label': 'Site Panel (Normal) — Status Badge (Recording, Flash Off)', 'default_role': 'REC', 'default_bold': True},
-    'main_jjdlpdashboard_draw_site_panel_live_8': {'file': 'main.py', 'line': 5160, 'label': 'Site Panel (Normal) — Status Badge (Live, Not Recording)', 'default_role': 'LIVE', 'default_bold': True},
-    'main_jjdlpdashboard_draw_site_panel_live_9': {'file': 'main.py', 'line': 5162, 'label': 'Site Panel (Normal) — Progress Bar (Live)', 'default_role': 'LIVE', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_dim_5': {'file': 'main.py', 'line': 5167, 'label': 'Site Panel (Normal) — Name (Offline)', 'default_role': 'DIM', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_dim_6': {'file': 'main.py', 'line': 5169, 'label': 'Site Panel (Normal) — Status Badge (Offline)', 'default_role': 'DIM', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_dim_7': {'file': 'main.py', 'line': 5171, 'label': 'Site Panel (Normal) — Progress Bar (Offline)', 'default_role': 'DIM', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_chrome_3': {'file': 'main.py', 'line': 5185, 'label': 'Site Panel (Normal) — Duration Column', 'default_role': 'CHROME', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_live_10': {'file': 'main.py', 'line': 5193, 'label': 'Site Panel (Normal) — Last Live, Recently Live', 'default_role': 'LIVE', 'default_bold': True},
-    'main_jjdlpdashboard_draw_site_panel_dim_8': {'file': 'main.py', 'line': 5195, 'label': 'Site Panel (Normal) — Last Live, Older', 'default_role': 'DIM', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_warn': {'file': 'main.py', 'line': 5215, 'label': 'Next check: {_nxt_str}', 'default_role': 'WARN', 'default_bold': True},
-    'main_jjdlpdashboard_draw_log_tab_dim_1': {'file': 'main.py', 'line': 5322, 'label': 'Activity Log — \'Site:\' Label', 'default_role': 'DIM', 'default_bold': False},
-    'main_jjdlpdashboard_draw_log_tab_hilight': {'file': 'main.py', 'line': 5328, 'label': 'Activity Log — Site Tab (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'main_jjdlpdashboard_draw_log_tab_chrome': {'file': 'main.py', 'line': 5330, 'label': 'Activity Log — Site Tab (Unselected)', 'default_role': 'CHROME', 'default_bold': False},
-    'main_jjdlpdashboard_draw_log_tab_dim_2': {'file': 'main.py', 'line': 5341, 'label': 'Activity Log — Title', 'default_role': 'DIM', 'default_bold': True},
-    'main_jjdlpdashboard_draw_log_tab_dim_3': {'file': 'main.py', 'line': 5372, 'label': 'Activity Log — Line (Normal)', 'default_role': 'DIM', 'default_bold': False},
-    'main_jjdlpdashboard_draw_log_tab_live': {'file': 'main.py', 'line': 5374, 'label': 'Activity Log — Line (Live/Recording Started)', 'default_role': 'LIVE', 'default_bold': False},
-    'main_jjdlpdashboard_draw_log_tab_rec': {'file': 'main.py', 'line': 5376, 'label': 'Activity Log — Line (Error/Stall/Stopped)', 'default_role': 'REC', 'default_bold': False},
-    'main_jjdlpdashboard_draw_log_tab_warn_1': {'file': 'main.py', 'line': 5378, 'label': 'Activity Log — Line (Warning)', 'default_role': 'WARN', 'default_bold': False},
-    'main_jjdlpdashboard_draw_log_tab_warn_2': {'file': 'main.py', 'line': 5385, 'label': '↑{self._log_scroll}/{max_scroll}', 'default_role': 'WARN', 'default_bold': False},
-    'main_jjdlpdashboard_draw_pipe_tab_bar_dim': {'file': 'main.py', 'line': 5392, 'label': 'Stdout/Stderr Tabs — \'Site:\' Label', 'default_role': 'DIM', 'default_bold': False},
-    'main_jjdlpdashboard_draw_pipe_tab_bar_hilight': {'file': 'main.py', 'line': 5398, 'label': 'Stdout/Stderr Tabs — Site Tab (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'main_jjdlpdashboard_draw_pipe_tab_bar_chrome': {'file': 'main.py', 'line': 5400, 'label': 'Stdout/Stderr Tabs — Site Tab (Unselected)', 'default_role': 'CHROME', 'default_bold': False},
-    'main_jjdlpdashboard_draw_streamer_panel_border_pair': {'file': 'main.py', 'line': 5414, 'label': 'STREAMERS', 'default_role': None, 'default_bold': True},
-    'main_jjdlpdashboard_draw_streamer_panel_hilight': {'file': 'main.py', 'line': 5439, 'label': 'Streamer Sub-Tab List — Selected Row', 'default_role': 'HILIGHT', 'default_bold': True},
-    'main_jjdlpdashboard_draw_streamer_panel_dim': {'file': 'main.py', 'line': 5442, 'label': 'Streamer Sub-Tab List — Unselected Row', 'default_role': 'DIM', 'default_bold': False},
-    'main_jjdlpdashboard_draw_pipe_tab_border_pair': {'file': 'main.py', 'line': 5455, 'label': '{title}{title_suffix}', 'default_role': None, 'default_bold': True},
-    'main_jjdlpdashboard_draw_pipe_tab_dim': {'file': 'main.py', 'line': 5472, 'label': 'Stdout/Stderr Panel — Content Line', 'default_role': 'DIM', 'default_bold': False},
-    'main_jjdlpdashboard_draw_pipe_tab_warn': {'file': 'main.py', 'line': 5478, 'label': 'Stdout/Stderr Panel — Scroll Indicator', 'default_role': 'WARN', 'default_bold': False},
-    'main_jjdlpdashboard_draw_eventsub_tab_invhead_1': {'file': 'main.py', 'line': 5573, 'label': 'TWITCH EVENTSUB', 'default_role': 'INVHEAD', 'default_bold': True},
-    'main_jjdlpdashboard_draw_eventsub_tab_warn': {'file': 'main.py', 'line': 5582, 'label': 'EventSub Tab — Site Header (\'-- {label} --\')', 'default_role': 'WARN', 'default_bold': True},
-    'main_jjdlpdashboard_draw_eventsub_tab_dim': {'file': 'main.py', 'line': 5588, 'label': 'EventSub not available', 'default_role': 'DIM', 'default_bold': False},
-    'main_jjdlpdashboard_draw_eventsub_tab_invhead_2': {'file': 'main.py', 'line': 5616, 'label': 'EventSub Tab — Stat Row Label', 'default_role': 'INVHEAD', 'default_bold': False},
-    'main_jjdlpdashboard_draw_eventsub_tab_cpair': {'file': 'main.py', 'line': 5617, 'label': 'EventSub Tab — Stat Row Value (color varies by stat)', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_draw_footer_invhead': {'file': 'main.py', 'line': 5702, 'label': 'Bottom Footer / Key Legend Bar', 'default_role': 'INVHEAD', 'default_bold': False},
-    'main_jjdlpdashboard_draw_mgmt_overlay_normal_1': {'file': 'main.py', 'line': 5737, 'label': 'Add/Remove/Disable Overlay — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
-    'main_jjdlpdashboard_draw_mgmt_overlay_warn_1': {'file': 'main.py', 'line': 5742, 'label': 'Add/Remove/Disable Overlay — Title', 'default_role': 'WARN', 'default_bold': True},
-    'main_jjdlpdashboard_draw_mgmt_overlay_dim_1': {'file': 'main.py', 'line': 5744, 'label': 'Site: {site_lbl}', 'default_role': 'DIM', 'default_bold': False},
-    'main_jjdlpdashboard_draw_mgmt_overlay_live_1': {'file': 'main.py', 'line': 5754, 'label': 'Add/Remove/Disable Overlay — Result Message (Disable/Remove)', 'default_role': 'LIVE', 'default_bold': True},
-    'main_jjdlpdashboard_draw_mgmt_overlay_dim_2': {'file': 'main.py', 'line': 5759, 'label': 'No enabled streamers. #2', 'default_role': 'DIM', 'default_bold': False},
-    'main_jjdlpdashboard_draw_mgmt_overlay_invhead_1': {'file': 'main.py', 'line': 5762, 'label': 'Add/Remove/Disable Overlay — Legend (Empty List)', 'default_role': 'INVHEAD', 'default_bold': False},
-    'main_jjdlpdashboard_draw_mgmt_overlay_hilight_1': {'file': 'main.py', 'line': 5784, 'label': 'Add/Remove/Disable Overlay — Selected Streamer', 'default_role': 'HILIGHT', 'default_bold': True},
-    'main_jjdlpdashboard_draw_mgmt_overlay_normal_2': {'file': 'main.py', 'line': 5785, 'label': 'Add/Remove/Disable Overlay — Unselected Streamer', 'default_role': 'NORMAL', 'default_bold': False},
-    'main_jjdlpdashboard_draw_mgmt_overlay_invhead_2': {'file': 'main.py', 'line': 5791, 'label': 'Add/Remove/Disable Overlay — Legend (List Picker)', 'default_role': 'INVHEAD', 'default_bold': False},
-    'main_jjdlpdashboard_draw_mgmt_overlay_live_2': {'file': 'main.py', 'line': 5801, 'label': 'Add/Remove/Disable Overlay — Result Message (Add)', 'default_role': 'LIVE', 'default_bold': True},
-    'main_jjdlpdashboard_draw_mgmt_overlay_chrome': {'file': 'main.py', 'line': 5820, 'label': 'Add/Remove/Disable Overlay — \'Re-enable disabled:\' Header', 'default_role': 'CHROME', 'default_bold': False},
-    'main_jjdlpdashboard_draw_mgmt_overlay_hilight_2': {'file': 'main.py', 'line': 5838, 'label': 'Add/Remove/Disable Overlay — Disabled Streamer Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'main_jjdlpdashboard_draw_mgmt_overlay_dim_3': {'file': 'main.py', 'line': 5839, 'label': 'Add/Remove/Disable Overlay — Disabled Streamer Row (Unselected)', 'default_role': 'DIM', 'default_bold': False},
-    'main_jjdlpdashboard_draw_mgmt_overlay_dim_4': {'file': 'main.py', 'line': 5845, 'label': 'Add/Remove/Disable Overlay — \'No disabled streamers.\' Message', 'default_role': 'DIM', 'default_bold': False},
-    'main_jjdlpdashboard_draw_mgmt_overlay_warn_2': {'file': 'main.py', 'line': 5849, 'label': 'Add/Remove/Disable Overlay — \'New username:\' Label', 'default_role': 'WARN', 'default_bold': True},
-    'main_jjdlpdashboard_draw_mgmt_overlay_hilight_3': {'file': 'main.py', 'line': 5850, 'label': 'Add/Remove/Disable Overlay — Username Input (Focused)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'main_jjdlpdashboard_draw_mgmt_overlay_normal_3': {'file': 'main.py', 'line': 5852, 'label': 'Add/Remove/Disable Overlay — Username Input (Unfocused)', 'default_role': 'NORMAL', 'default_bold': True},
-    'main_jjdlpdashboard_draw_mgmt_overlay_invhead_3': {'file': 'main.py', 'line': 5862, 'label': 'Add/Remove/Disable Overlay — Legend (Add Mode)', 'default_role': 'INVHEAD', 'default_bold': False},
-    'main_jjdlpdashboard_refresh_screen_normal': {'file': 'main.py', 'line': 5868, 'label': 'Full-Screen Background Color', 'default_role': 'NORMAL', 'default_bold': False},
-    'main_jjdlpdashboard_refresh_screen_chrome_1': {'file': 'main.py', 'line': 5885, 'label': 'Top-Right System Clock', 'default_role': 'CHROME', 'default_bold': False},
-    'main_jjdlpdashboard_refresh_screen_warn': {'file': 'main.py', 'line': 5895, 'label': 'Update Available', 'default_role': 'WARN', 'default_bold': True},
-    'main_jjdlpdashboard_refresh_screen_dim': {'file': 'main.py', 'line': 5901, 'label': 'v{__version__}', 'default_role': 'DIM', 'default_bold': False},
-    'main_jjdlpdashboard_refresh_screen_chrome_2': {'file': 'main.py', 'line': 5908, 'label': 'Separator', 'default_role': 'CHROME', 'default_bold': False},
-    'main_jjdlpdashboard_draw_write_failure_a_delete': {'file': 'main.py', 'line': 6375, 'label': 'Recording Failure Alert — Box, Title, Message, Names', 'default_role': 'DELETE', 'default_bold': True},
-    'main_jjdlpdashboard_draw_write_failure_a_invhead': {'file': 'main.py', 'line': 6401, 'label': 'Recording Failure Alert — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
-    'main_jjdlpdashboard_draw_exit_confirm_po_normal_1': {'file': 'main.py', 'line': 6446, 'label': 'Exit Confirm Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
-    'main_jjdlpdashboard_draw_exit_confirm_po_warn': {'file': 'main.py', 'line': 6451, 'label': 'Exit Confirm Popup — Title', 'default_role': 'WARN', 'default_bold': True},
-    'main_jjdlpdashboard_draw_exit_confirm_po_normal_2': {'file': 'main.py', 'line': 6454, 'label': 'Exit Confirm Popup — Message Text', 'default_role': 'NORMAL', 'default_bold': True},
-    'main_jjdlpdashboard_draw_exit_confirm_po_hilight_1': {'file': 'main.py', 'line': 6461, 'label': 'Exit Confirm Popup — \'Yes\' Button (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'main_jjdlpdashboard_draw_exit_confirm_po_normal_3': {'file': 'main.py', 'line': 6462, 'label': 'Exit Confirm Popup — \'Yes\' Button (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
-    'main_jjdlpdashboard_draw_exit_confirm_po_hilight_2': {'file': 'main.py', 'line': 6463, 'label': 'Exit Confirm Popup — \'No\' Button (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
-    'main_jjdlpdashboard_draw_exit_confirm_po_normal_4': {'file': 'main.py', 'line': 6464, 'label': 'Exit Confirm Popup — \'No\' Button (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
-    'main_jjdlpdashboard_draw_exit_confirm_po_invhead': {'file': 'main.py', 'line': 6470, 'label': 'Exit Confirm Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
-    'main_jjdlpdashboard_draw_changelog_popup_normal_1': {'file': 'main.py', 'line': 6488, 'label': 'Changelog Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
-    'main_jjdlpdashboard_draw_changelog_popup_hilight': {'file': 'main.py', 'line': 6493, 'label': 'Changelog Popup — Title', 'default_role': 'HILIGHT', 'default_bold': True},
-    'main_jjdlpdashboard_draw_changelog_popup_normal_2': {'file': 'main.py', 'line': 6507, 'label': 'Changelog Popup — Content Line', 'default_role': 'NORMAL', 'default_bold': False},
-    'main_jjdlpdashboard_draw_changelog_popup_invhead': {'file': 'main.py', 'line': 6518, 'label': 'Changelog Popup — Scroll Indicator / Legend', 'default_role': 'INVHEAD', 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_config_pairnum0': {'file': 'main.py', 'line': 6614, 'label': 'Config Picker Splash — Full-Screen Background', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_config_pairnum6': {'file': 'main.py', 'line': 6618, 'label': 'Config Picker Splash — Logo', 'default_role': None, 'default_bold': True},
-    'main_jjdlpdashboard_curses_choose_config_pairnum1_1': {'file': 'main.py', 'line': 6621, 'label': 'Config Picker Splash — System Clock', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_config_pairnum1_2': {'file': 'main.py', 'line': 6622, 'label': 'Config Picker Splash — Separator Line', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_config_pairnum5_1': {'file': 'main.py', 'line': 6626, 'label': 'Config Picker Splash — Title', 'default_role': None, 'default_bold': True},
-    'main_jjdlpdashboard_curses_choose_config_pairnum3_1': {'file': 'main.py', 'line': 6631, 'label': 'Config Picker Splash — Instructions Line', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_config_pairnum2': {'file': 'main.py', 'line': 6639, 'label': 'Config Picker Splash — File Row (Cursor)', 'default_role': None, 'default_bold': True},
-    'main_jjdlpdashboard_curses_choose_config_pairnum4': {'file': 'main.py', 'line': 6641, 'label': 'Config Picker Splash — File Row (Checked)', 'default_role': None, 'default_bold': True},
-    'main_jjdlpdashboard_curses_choose_config_pairnum1_3': {'file': 'main.py', 'line': 6643, 'label': 'Config Picker Splash — File Row (Unchecked)', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_config_pairnum3_2': {'file': 'main.py', 'line': 6649, 'label': 'Config Picker Splash — \'Do Not Show Again\' (Checked)', 'default_role': None, 'default_bold': True},
-    'main_jjdlpdashboard_curses_choose_config_pairnum3_3': {'file': 'main.py', 'line': 6649, 'label': 'Config Picker Splash — \'Do Not Show Again\' (Unchecked)', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_config_pairnum5_2': {'file': 'main.py', 'line': 6660, 'label': 'Config Picker Splash — Footer', 'default_role': None, 'default_bold': True},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum0': {'file': 'main.py', 'line': 6736, 'label': 'Browser Picker Splash — Full-Screen Background', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum6': {'file': 'main.py', 'line': 6740, 'label': 'Browser Picker Splash — Logo', 'default_role': None, 'default_bold': True},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum1_1': {'file': 'main.py', 'line': 6743, 'label': 'Browser Picker Splash — System Clock', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum1_2': {'file': 'main.py', 'line': 6744, 'label': 'Browser Picker Splash — Separator Line', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum5_1': {'file': 'main.py', 'line': 6750, 'label': 'Browser Picker Splash — Title', 'default_role': None, 'default_bold': True},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum3_1': {'file': 'main.py', 'line': 6753, 'label': 'Browser Picker Splash — Instructions Line', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum3_2': {'file': 'main.py', 'line': 6756, 'label': 'Browser Picker Splash — Chrome-Unsupported Warning', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum4': {'file': 'main.py', 'line': 6764, 'label': 'Browser Picker Splash — \'Applies to:\' Line', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum2': {'file': 'main.py', 'line': 6773, 'label': 'Browser Picker Splash — Browser Row (Cursor)', 'default_role': None, 'default_bold': True},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum1_3': {'file': 'main.py', 'line': 6775, 'label': 'Browser Picker Splash — Browser Row (Not Cursor)', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum3_3': {'file': 'main.py', 'line': 6782, 'label': 'Browser Picker Splash — \'Do Not Show Again\' (Checked)', 'default_role': None, 'default_bold': True},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum3_4': {'file': 'main.py', 'line': 6782, 'label': 'Browser Picker Splash — \'Do Not Show Again\' (Unchecked)', 'default_role': None, 'default_bold': False},
-    'main_jjdlpdashboard_curses_choose_browse_pairnum5_2': {'file': 'main.py', 'line': 6791, 'label': 'Browser Picker Splash — Footer', 'default_role': None, 'default_bold': True},
+    'config_editor_priorityeditor_draw_live_1': {'file': 'config_editor.py', 'label': 'Priority Editor — Title (STREAMER SETTINGS)', 'default_role': 'LIVE', 'default_bold': True},
+    'config_editor_priorityeditor_draw_live_2': {'file': 'config_editor.py', 'label': 'Priority Editor — Mode Indicator Badge', 'default_role': 'LIVE', 'default_bold': True},
+    'config_editor_priorityeditor_draw_dim_1': {'file': 'config_editor.py', 'label': 'Priority Editor — Hints List', 'default_role': 'NORMAL', 'default_bold': True},
+    'config_editor_priorityeditor_draw_dim_2': {'file': 'config_editor.py', 'label': 'Priority Editor — \'No streamers.\' Message', 'default_role': 'DIM', 'default_bold': True},
+    'config_editor_priorityeditor_draw_hilight_1': {'file': 'config_editor.py', 'label': 'Priority Editor — Bypass Streamer Row (Selected)', 'default_role': 'INVHEAD', 'default_bold': False},
+    'config_editor_priorityeditor_draw_live_3': {'file': 'config_editor.py', 'label': 'Priority Editor — Bypass Streamer Row (Unselected)', 'default_role': 'LIVE', 'default_bold': True},
+    'config_editor_priorityeditor_draw_hilight_2': {'file': 'config_editor.py', 'label': 'Priority Editor — Normal Streamer Row (Selected)', 'default_role': 'INVHEAD', 'default_bold': False},
+    'config_editor_priorityeditor_draw_normal': {'file': 'config_editor.py', 'label': 'Priority Editor — Normal Streamer Row (Unselected)', 'default_role': 'NORMAL', 'default_bold': True},
+    'config_editor_priorityeditor_draw_live_4': {'file': 'config_editor.py', 'label': 'Priority Editor — Scroll-Up Arrow', 'default_role': 'LIVE', 'default_bold': True},
+    'config_editor_priorityeditor_draw_live_5': {'file': 'config_editor.py', 'label': 'Priority Editor — Scroll-Down Arrow', 'default_role': 'LIVE', 'default_bold': True},
+    'config_editor_streamersettingspopu_draw_normal': {'file': 'config_editor.py', 'label': 'Streamer Settings Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_streamersettingspopu_draw_system': {'file': 'config_editor.py', 'label': 'Streamer Settings Popup — Title', 'default_role': 'SYSTEM', 'default_bold': True},
+    'config_editor_streamersettingspopu_draw_hilight': {'file': 'config_editor.py', 'label': 'Streamer Settings Popup — Menu Option (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_streamersettingspopu_draw_warn': {'file': 'config_editor.py', 'label': 'Streamer Settings Popup — Menu Option (Unselected)', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_streamersettingspopu_draw_invhead': {'file': 'config_editor.py', 'label': 'Streamer Settings Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
+    'config_editor_qualitysettingspopup_draw_normal': {'file': 'config_editor.py', 'label': 'Quality Settings Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_qualitysettingspopup_draw_system': {'file': 'config_editor.py', 'label': 'Quality Settings Popup — Title', 'default_role': 'SYSTEM', 'default_bold': True},
+    'config_editor_qualitysettingspopup_draw_hilight_1': {'file': 'config_editor.py', 'label': 'Quality Settings Popup — \'Low Quality Enabled\' Label', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_qualitysettingspopup_draw_hilight_2': {'file': 'config_editor.py', 'label': 'Quality Settings Popup — Checkbox Value', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_qualitysettingspopup_draw_invhead': {'file': 'config_editor.py', 'label': 'Quality Settings Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
+    'config_editor_notificationsettings_draw_normal_1': {'file': 'config_editor.py', 'label': 'Notification Settings Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_notificationsettings_draw_system': {'file': 'config_editor.py', 'label': 'Notification Settings Popup — Title', 'default_role': 'SYSTEM', 'default_bold': True},
+    'config_editor_notificationsettings_draw_hilight_1': {'file': 'config_editor.py', 'label': 'Notification Settings Popup — \'ntfy Notifications\' Label', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_notificationsettings_draw_hilight_2': {'file': 'config_editor.py', 'label': 'Notification Settings Popup — State Badge (Inherit/On/Off)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_notificationsettings_draw_normal_2': {'file': 'config_editor.py', 'label': 'Notification Settings Popup — \'Effective\' Label', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_notificationsettings_draw_warn': {'file': 'config_editor.py', 'label': 'Notification Settings Popup — Effective Value (ON/OFF)', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_notificationsettings_draw_invhead': {'file': 'config_editor.py', 'label': 'Notification Settings Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
+    'config_editor_splitsettingspopup_draw_normal_1': {'file': 'config_editor.py', 'label': 'Split Settings Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_splitsettingspopup_draw_system': {'file': 'config_editor.py', 'label': 'Split Settings Popup — Title', 'default_role': 'SYSTEM', 'default_bold': True},
+    'config_editor_splitsettingspopup_draw_hilight_1': {'file': 'config_editor.py', 'label': 'Split Settings Popup — Field Label (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_splitsettingspopup_draw_warn_1': {'file': 'config_editor.py', 'label': 'Split Settings Popup — Field Label (Unselected)', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_splitsettingspopup_draw_hilight_2': {'file': 'config_editor.py', 'label': 'Split Settings Popup — Field Value (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_splitsettingspopup_draw_normal_2': {'file': 'config_editor.py', 'label': 'Split Settings Popup — Field Value (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_splitsettingspopup_draw_normal_3': {'file': 'config_editor.py', 'label': 'Split Settings Popup — \'Effective\' Label', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_splitsettingspopup_draw_warn_2': {'file': 'config_editor.py', 'label': 'Split Settings Popup — Effective Value', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_splitsettingspopup_draw_warn_3': {'file': 'config_editor.py', 'label': 'Split Settings Popup — Error Message', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_splitsettingspopup_draw_invhead': {'file': 'config_editor.py', 'label': 'Split Settings Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
+    'config_editor_introdelaysettingspo_draw_normal_1': {'file': 'config_editor.py', 'label': 'Intro Delay Settings Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_introdelaysettingspo_draw_system': {'file': 'config_editor.py', 'label': 'Intro Delay Settings Popup — Title', 'default_role': 'SYSTEM', 'default_bold': True},
+    'config_editor_introdelaysettingspo_draw_hilight_1': {'file': 'config_editor.py', 'label': 'Intro Delay Settings Popup — Field Label (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_introdelaysettingspo_draw_warn_1': {'file': 'config_editor.py', 'label': 'Intro Delay Settings Popup — Field Label (Unselected)', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_introdelaysettingspo_draw_hilight_2': {'file': 'config_editor.py', 'label': 'Intro Delay Settings Popup — Field Value (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_introdelaysettingspo_draw_normal_2': {'file': 'config_editor.py', 'label': 'Intro Delay Settings Popup — Field Value (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_introdelaysettingspo_draw_normal_3': {'file': 'config_editor.py', 'label': 'Intro Delay Settings Popup — \'Effective\' Label', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_introdelaysettingspo_draw_warn_2': {'file': 'config_editor.py', 'label': 'Intro Delay Settings Popup — Effective Value', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_introdelaysettingspo_draw_warn_3': {'file': 'config_editor.py', 'label': 'Intro Delay Settings Popup — Error Message', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_introdelaysettingspo_draw_invhead': {'file': 'config_editor.py', 'label': 'Intro Delay Settings Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
+    'config_editor_schedulesettingspopu_draw_normal_1': {'file': 'config_editor.py', 'label': 'Schedule Settings Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_schedulesettingspopu_draw_system': {'file': 'config_editor.py', 'label': 'Schedule Settings Popup — Title', 'default_role': 'SYSTEM', 'default_bold': True},
+    'config_editor_schedulesettingspopu_draw_hilight_1': {'file': 'config_editor.py', 'label': 'Schedule Settings Popup — Field Label (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_schedulesettingspopu_draw_warn_1': {'file': 'config_editor.py', 'label': 'Schedule Settings Popup — Field Label (Unselected)', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_schedulesettingspopu_draw_hilight_2': {'file': 'config_editor.py', 'label': 'Schedule Settings Popup — Field Value (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_schedulesettingspopu_draw_normal_2': {'file': 'config_editor.py', 'label': 'Schedule Settings Popup — Field Value (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_schedulesettingspopu_draw_hilight_3': {'file': 'config_editor.py', 'label': 'Schedule Settings Popup — Day-of-Week Token (Cursor)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_schedulesettingspopu_draw_live': {'file': 'config_editor.py', 'label': 'Schedule Settings Popup — Day-of-Week Token (Active)', 'default_role': 'LIVE', 'default_bold': True},
+    'config_editor_schedulesettingspopu_draw_dim': {'file': 'config_editor.py', 'label': 'Schedule Settings Popup — Day-of-Week Token (Inactive)', 'default_role': 'DIM', 'default_bold': False},
+    'config_editor_schedulesettingspopu_draw_normal_3': {'file': 'config_editor.py', 'label': 'Schedule Settings Popup — Time Edit Buffer', 'default_role': 'NORMAL', 'default_bold': True},
+    'config_editor_schedulesettingspopu_draw_warn_2': {'file': 'config_editor.py', 'label': 'Schedule Settings Popup — Error Message', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_schedulesettingspopu_draw_invhead': {'file': 'config_editor.py', 'label': 'Schedule Settings Popup — Legend/Hint Line', 'default_role': 'INVHEAD', 'default_bold': False},
+    'config_editor_sitesortmanager_draw_popup_normal_1': {'file': 'config_editor.py', 'label': 'Dashboard Sort Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_sitesortmanager_draw_popup_chrome': {'file': 'config_editor.py', 'label': 'Dashboard Sort Popup — Title', 'default_role': 'CHROME', 'default_bold': True},
+    'config_editor_sitesortmanager_draw_popup_invhead': {'file': 'config_editor.py', 'label': 'Dashboard Sort Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
+    'config_editor_sitesortmanager_draw_popup_hilight': {'file': 'config_editor.py', 'label': 'Dashboard Sort Popup — Selected Option', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_sitesortmanager_draw_popup_live': {'file': 'config_editor.py', 'label': 'Dashboard Sort Popup — Currently Active Option', 'default_role': 'LIVE', 'default_bold': True},
+    'config_editor_sitesortmanager_draw_popup_normal_2': {'file': 'config_editor.py', 'label': 'Dashboard Sort Popup — Unselected Option', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_destinations_po_normal_1': {'file': 'config_editor.py', 'label': 'Destinations Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_destinations_po_system': {'file': 'config_editor.py', 'label': 'Destinations Popup — Title', 'default_role': 'SYSTEM', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_destinations_po_dim_1': {'file': 'config_editor.py', 'label': 'Destinations Popup — Streamer Comment Text', 'default_role': 'DIM', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_destinations_po_dim_2': {'file': 'config_editor.py', 'label': 'Destinations Popup — \'Paths:\' Header', 'default_role': 'DIM', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_destinations_po_dim_3': {'file': 'config_editor.py', 'label': '(none yet)', 'default_role': 'DIM', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_destinations_po_normal_2': {'file': 'config_editor.py', 'label': 'Destinations Popup — Path Row', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_destinations_po_warn': {'file': 'config_editor.py', 'label': 'Destinations Popup — \'New path:\' Label', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_destinations_po_normal_3': {'file': 'config_editor.py', 'label': 'Destinations Popup — New-Path Entry Buffer', 'default_role': 'NORMAL', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_destinations_po_invhead': {'file': 'config_editor.py', 'label': 'Destinations Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_msg_filters_pop_normal_1': {'file': 'config_editor.py', 'label': 'Message Filters Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_msg_filters_pop_system': {'file': 'config_editor.py', 'label': 'Message Filters Popup — Title', 'default_role': 'SYSTEM', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_msg_filters_pop_hilight_1': {'file': 'config_editor.py', 'label': 'Message Filters Popup — \'Tag Enabled\' Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_msg_filters_pop_normal_2': {'file': 'config_editor.py', 'label': 'Message Filters Popup — \'Tag Enabled\' Row (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_msg_filters_pop_hilight_2': {'file': 'config_editor.py', 'label': 'Message Filters Popup — Tag Badge (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_msg_filters_pop_live_1': {'file': 'config_editor.py', 'label': 'Message Filters Popup — Tag Badge (Enabled)', 'default_role': 'LIVE', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_msg_filters_pop_warn': {'file': 'config_editor.py', 'label': 'Message Filters Popup — Tag Badge (Disabled)', 'default_role': 'WARN', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_msg_filters_pop_dim_1': {'file': 'config_editor.py', 'label': 'Message Filters Popup — \'Messages:\' Header', 'default_role': 'DIM', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_msg_filters_pop_dim_2': {'file': 'config_editor.py', 'label': '(no dbg() calls found for this tag)', 'default_role': 'DIM', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_msg_filters_pop_hilight_3': {'file': 'config_editor.py', 'label': 'Message Filters Popup — Message Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_msg_filters_pop_normal_3': {'file': 'config_editor.py', 'label': 'Message Filters Popup — Message Row (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_msg_filters_pop_hilight_4': {'file': 'config_editor.py', 'label': 'Message Filters Popup — Message Badge (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_msg_filters_pop_live_2': {'file': 'config_editor.py', 'label': 'Message Filters Popup — Message Badge (On)', 'default_role': 'LIVE', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_msg_filters_pop_dim_3': {'file': 'config_editor.py', 'label': 'Message Filters Popup — Message Badge (Off)', 'default_role': 'DIM', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_msg_filters_pop_invhead': {'file': 'config_editor.py', 'label': 'Space:Toggle  Enter:Save  Esc:Back', 'default_role': 'INVHEAD', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_debug_tags_popu_normal_1': {'file': 'config_editor.py', 'label': 'Debug Tags Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_debug_tags_popu_system': {'file': 'config_editor.py', 'label': 'Debug Tags Popup — Title', 'default_role': 'SYSTEM', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_debug_tags_popu_hilight_1': {'file': 'config_editor.py', 'label': 'Debug Tags Popup — \'Enable Logging\' Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_debug_tags_popu_normal_2': {'file': 'config_editor.py', 'label': 'Debug Tags Popup — \'Enable Logging\' Row (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_debug_tags_popu_hilight_2': {'file': 'config_editor.py', 'label': 'Debug Tags Popup — Enable Logging Badge (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_debug_tags_popu_live_1': {'file': 'config_editor.py', 'label': 'Debug Tags Popup — Enable Logging Badge (On)', 'default_role': 'LIVE', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_debug_tags_popu_warn': {'file': 'config_editor.py', 'label': 'Debug Tags Popup — Enable Logging Badge (Off)', 'default_role': 'WARN', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_debug_tags_popu_dim_1': {'file': 'config_editor.py', 'label': 'Tag Filters:', 'default_role': 'DIM', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_debug_tags_popu_hilight_3': {'file': 'config_editor.py', 'label': 'Debug Tags Popup — Tag Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_debug_tags_popu_normal_3': {'file': 'config_editor.py', 'label': 'Debug Tags Popup — Tag Row (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_debug_tags_popu_hilight_4': {'file': 'config_editor.py', 'label': 'Debug Tags Popup — Tag Badge (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_debug_tags_popu_live_2': {'file': 'config_editor.py', 'label': 'Debug Tags Popup — Tag Badge (On)', 'default_role': 'LIVE', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_debug_tags_popu_dim_2': {'file': 'config_editor.py', 'label': 'Debug Tags Popup — Tag Badge (Off)', 'default_role': 'DIM', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_debug_tags_popu_invhead': {'file': 'config_editor.py', 'label': 'Space:Messages  Enter:Save  Esc:Cancel', 'default_role': 'INVHEAD', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_live_1': {'file': 'config_editor.py', 'label': 'Global Settings Panel — Title', 'default_role': 'LIVE', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_live_2': {'file': 'config_editor.py', 'label': 'Global Settings Panel — Mode Indicator Badge', 'default_role': 'LIVE', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_hilight_1': {'file': 'config_editor.py', 'label': 'Global Settings Panel — Item Key (Selected)', 'default_role': 'INVHEAD', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_warn': {'file': 'config_editor.py', 'label': 'Global Settings Panel — Item Key (Unselected)', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_hilight_2': {'file': 'config_editor.py', 'label': 'Global Settings Panel — Item Value (Selected)', 'default_role': 'INVHEAD', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_live_3': {'file': 'config_editor.py', 'label': 'Global Settings Panel — Item Value (Unselected)', 'default_role': 'NORMAL', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_live_4': {'file': 'config_editor.py', 'label': 'Global Settings Panel — Scroll-Up Arrow', 'default_role': 'LIVE', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_live_5': {'file': 'config_editor.py', 'label': 'Global Settings Panel — Scroll-Down Arrow', 'default_role': 'LIVE', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_popup_normal_1': {'file': 'config_editor.py', 'label': 'Edit Global Value Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_popup_system_1': {'file': 'config_editor.py', 'label': 'Edit Global Value Popup — Title', 'default_role': 'SYSTEM', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_popup_chrome': {'file': 'config_editor.py', 'label': 'Edit Global Value Popup — \'Key:\' Line', 'default_role': 'NORMAL', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_popup_dim': {'file': 'config_editor.py', 'label': 'Edit Global Value Popup — Comment Text', 'default_role': 'NORMAL', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_popup_system_2': {'file': 'config_editor.py', 'label': 'Edit Global Value Popup — \'New Value:\' Label', 'default_role': 'SYSTEM', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_popup_normal_2': {'file': 'config_editor.py', 'label': 'Edit Global Value Popup — New-Value Entry Buffer', 'default_role': 'NORMAL', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_popup_warn': {'file': 'config_editor.py', 'label': 'Edit Global Value Popup — Error Message', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_popup_invhead': {'file': 'config_editor.py', 'label': 'Enter: Save | Esc: Cancel #1', 'default_role': 'INVHEAD', 'default_bold': False},
+    'config_editor_configeditor_draw_tab_dim_1': {'file': 'config_editor.py', 'label': 'Site:', 'default_role': 'DIM', 'default_bold': False},
+    'config_editor_configeditor_draw_tab_hilight_1': {'file': 'config_editor.py', 'label': 'Site Tab Bar — Selected Site Tab', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_configeditor_draw_tab_chrome': {'file': 'config_editor.py', 'label': 'Site Tab Bar — Unselected Site Tab', 'default_role': 'CHROME', 'default_bold': False},
+    'config_editor_configeditor_draw_tab_dim_2': {'file': 'config_editor.py', 'label': '[: prev site  ]: next site  Tab: Next Panel', 'default_role': 'DIM', 'default_bold': False},
+    'config_editor_configeditor_draw_tab_live_1': {'file': 'config_editor.py', 'label': 'Site Settings Panel — Mode Indicator Badge', 'default_role': 'LIVE', 'default_bold': True},
+    'config_editor_configeditor_draw_tab_live_2': {'file': 'config_editor.py', 'label': 'No configurable items found. #1', 'default_role': 'LIVE', 'default_bold': True},
+    'config_editor_configeditor_draw_tab_dim_3': {'file': 'config_editor.py', 'label': 'No configurable items found. #2', 'default_role': 'DIM', 'default_bold': False},
+    'config_editor_configeditor_draw_tab_hilight_2': {'file': 'config_editor.py', 'label': 'Site Settings Panel — Item Row (Selected)', 'default_role': 'INVHEAD', 'default_bold': False},
+    'config_editor_configeditor_draw_tab_warn_1': {'file': 'config_editor.py', 'label': 'Site Settings Panel — Section Header Row (Unselected)', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_configeditor_draw_tab_normal': {'file': 'config_editor.py', 'label': 'Site Settings Panel — Regular Item Row (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_configeditor_draw_tab_hilight_3': {'file': 'config_editor.py', 'label': 'Site Settings Panel — Section Header (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_configeditor_draw_tab_warn_2': {'file': 'config_editor.py', 'label': 'Site Settings Panel — Section Header (Unselected)', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_configeditor_draw_tab_warn_3': {'file': 'config_editor.py', 'label': 'Site Settings Panel — Item Key (Unselected)', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_configeditor_draw_tab_live_3': {'file': 'config_editor.py', 'label': 'Site Settings Panel — Item Value (Unselected)', 'default_role': 'NORMAL', 'default_bold': True},
+    'config_editor_configeditor_draw_tab_live_4': {'file': 'config_editor.py', 'label': 'Site Settings Panel — Scroll-Up Arrow', 'default_role': 'LIVE', 'default_bold': True},
+    'config_editor_configeditor_draw_tab_live_5': {'file': 'config_editor.py', 'label': 'Site Settings Panel — Scroll-Down Arrow', 'default_role': 'LIVE', 'default_bold': True},
+    'config_editor_configeditor_draw_popup_normal_1': {'file': 'config_editor.py', 'label': 'Edit Config Value Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_configeditor_draw_popup_warn_1': {'file': 'config_editor.py', 'label': 'Edit Config Value Popup — Title', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_configeditor_draw_popup_chrome': {'file': 'config_editor.py', 'label': 'Edit Config Value Popup — \'Key:\' Line', 'default_role': 'NORMAL', 'default_bold': True},
+    'config_editor_configeditor_draw_popup_dim': {'file': 'config_editor.py', 'label': 'Edit Config Value Popup — Comment Text', 'default_role': 'NORMAL', 'default_bold': True},
+    'config_editor_configeditor_draw_popup_warn_2': {'file': 'config_editor.py', 'label': 'Edit Config Value Popup — \'New Value:\' Label', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_configeditor_draw_popup_normal_2': {'file': 'config_editor.py', 'label': 'Edit Config Value Popup — New-Value Entry Buffer', 'default_role': 'NORMAL', 'default_bold': True},
+    'config_editor_configeditor_draw_popup_warn_3': {'file': 'config_editor.py', 'label': 'Edit Config Value Popup — Error Message', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_configeditor_draw_popup_invhead': {'file': 'config_editor.py', 'label': 'Enter: Save | Esc: Cancel #2', 'default_role': 'INVHEAD', 'default_bold': False},
+    'file_manager_filemanagertab_draw_popup_normal_1': {'file': 'file_manager.py', 'label': 'File Manager Sort Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_popup_chrome': {'file': 'file_manager.py', 'label': 'File Manager Sort Popup — Title', 'default_role': 'CHROME', 'default_bold': True},
+    'file_manager_filemanagertab_draw_popup_invhead': {'file': 'file_manager.py', 'label': 'File Manager Sort Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
+    'file_manager_filemanagertab_draw_popup_hilight': {'file': 'file_manager.py', 'label': 'File Manager Sort Popup — Selected Option', 'default_role': 'HILIGHT', 'default_bold': True},
+    'file_manager_filemanagertab_draw_popup_live': {'file': 'file_manager.py', 'label': 'File Manager Sort Popup — Currently Active Option', 'default_role': 'LIVE', 'default_bold': True},
+    'file_manager_filemanagertab_draw_popup_normal_2': {'file': 'file_manager.py', 'label': 'File Manager Sort Popup — Unselected Option', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_menu_popup_normal_1': {'file': 'file_manager.py', 'label': 'File Options Menu Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_menu_popup_chrome': {'file': 'file_manager.py', 'label': 'File Options Menu Popup — Title', 'default_role': 'CHROME', 'default_bold': True},
+    'file_manager_filemanagertab_draw_menu_popup_invhead': {'file': 'file_manager.py', 'label': 'File Options Menu Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
+    'file_manager_filemanagertab_draw_menu_popup_hilight': {'file': 'file_manager.py', 'label': 'File Options Menu Popup — Menu Option (Selected)', 'default_role': 'INVHEAD', 'default_bold': False},
+    'file_manager_filemanagertab_draw_menu_popup_normal_2': {'file': 'file_manager.py', 'label': 'File Options Menu Popup — Menu Option (Unselected)', 'default_role': 'NORMAL', 'default_bold': True},
+    'file_manager_filemanagertab_draw_fixup_popup_normal_1': {'file': 'file_manager.py', 'label': 'Fixup Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_fixup_popup_chrome': {'file': 'file_manager.py', 'label': 'Fixup Popup — Title', 'default_role': 'CHROME', 'default_bold': True},
+    'file_manager_filemanagertab_draw_fixup_popup_invhead': {'file': 'file_manager.py', 'label': 'Fixup Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
+    'file_manager_filemanagertab_draw_fixup_popup_dim': {'file': 'file_manager.py', 'label': 'Fixup Popup — Target Filename', 'default_role': 'DIM', 'default_bold': False},
+    'file_manager_filemanagertab_draw_fixup_popup_hilight': {'file': 'file_manager.py', 'label': 'Fixup Popup — Checkbox Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'file_manager_filemanagertab_draw_fixup_popup_normal_2': {'file': 'file_manager.py', 'label': 'Fixup Popup — Checkbox Row (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_move_popup_normal_1': {'file': 'file_manager.py', 'label': 'Move Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_move_popup_chrome': {'file': 'file_manager.py', 'label': 'Move Popup — Title', 'default_role': 'CHROME', 'default_bold': True},
+    'file_manager_filemanagertab_draw_move_popup_invhead': {'file': 'file_manager.py', 'label': 'Move Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
+    'file_manager_filemanagertab_draw_move_popup_dim': {'file': 'file_manager.py', 'label': 'Move Popup — \'Select a destination:\' Header', 'default_role': 'DIM', 'default_bold': False},
+    'file_manager_filemanagertab_draw_move_popup_hilight_1': {'file': 'file_manager.py', 'label': 'Move File Popup — Selected Destination', 'default_role': 'HILIGHT', 'default_bold': True},
+    'file_manager_filemanagertab_draw_move_popup_normal_2': {'file': 'file_manager.py', 'label': 'Move File Popup — Unselected Destination', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_move_popup_hilight_2': {'file': 'file_manager.py', 'label': 'Move Popup — \'Configure New Destination\' (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'file_manager_filemanagertab_draw_move_popup_system': {'file': 'file_manager.py', 'label': 'Move Popup — \'Configure New Destination\' (Unselected)', 'default_role': 'SYSTEM', 'default_bold': False},
+    'file_manager_filemanagertab_draw_move_popup_hilight_3': {'file': 'file_manager.py', 'label': 'Move Popup — Checkbox Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'file_manager_filemanagertab_draw_move_popup_normal_3': {'file': 'file_manager.py', 'label': 'Move Popup — Checkbox Row (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_move_filename_p_normal_1': {'file': 'file_manager.py', 'label': 'Rename/Move Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_move_filename_p_chrome': {'file': 'file_manager.py', 'label': 'Rename/Move Popup — Title', 'default_role': 'CHROME', 'default_bold': True},
+    'file_manager_filemanagertab_draw_move_filename_p_invhead': {'file': 'file_manager.py', 'label': 'Rename/Move Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
+    'file_manager_filemanagertab_draw_move_filename_p_dim': {'file': 'file_manager.py', 'label': 'Streamer: {self._move_filename_streamer}', 'default_role': 'DIM', 'default_bold': False},
+    'file_manager_filemanagertab_draw_move_filename_p_warn': {'file': 'file_manager.py', 'label': 'Filename:', 'default_role': 'WARN', 'default_bold': True},
+    'file_manager_filemanagertab_draw_move_filename_p_normal_2': {'file': 'file_manager.py', 'label': 'Rename/Move Popup — Filename Entry Buffer', 'default_role': 'NORMAL', 'default_bold': True},
+    'file_manager_filemanagertab_draw_trim_popup_normal_1': {'file': 'file_manager.py', 'label': 'Trim Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_trim_popup_chrome': {'file': 'file_manager.py', 'label': 'Trim Popup — Title', 'default_role': 'CHROME', 'default_bold': True},
+    'file_manager_filemanagertab_draw_trim_popup_invhead': {'file': 'file_manager.py', 'label': 'Trim Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
+    'file_manager_filemanagertab_draw_trim_popup_dim': {'file': 'file_manager.py', 'label': 'Trim Popup — Target Filename', 'default_role': 'DIM', 'default_bold': False},
+    'file_manager_filemanagertab_draw_trim_popup_hilight_1': {'file': 'file_manager.py', 'label': 'Trim Popup — Start/End Field (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'file_manager_filemanagertab_draw_trim_popup_normal_2': {'file': 'file_manager.py', 'label': 'Trim Popup — Unselected Field', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_trim_popup_hilight_2': {'file': 'file_manager.py', 'label': 'Trim Popup — Checkbox Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'file_manager_filemanagertab_draw_trim_popup_normal_3': {'file': 'file_manager.py', 'label': 'Trim Popup — Checkbox Row (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_split_popup_normal_1': {'file': 'file_manager.py', 'label': 'Split Popup — Background Fill (Job Running)', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_split_popup_chrome_1': {'file': 'file_manager.py', 'label': 'Split Popup — Title (Job Running)', 'default_role': 'CHROME', 'default_bold': True},
+    'file_manager_filemanagertab_draw_split_popup_invhead_1': {'file': 'file_manager.py', 'label': 'Split Popup — Legend Line (Job Running)', 'default_role': 'INVHEAD', 'default_bold': False},
+    'file_manager_filemanagertab_draw_split_popup_dim_1': {'file': 'file_manager.py', 'label': 'Split Popup — Target Filename (Job Running)', 'default_role': 'DIM', 'default_bold': False},
+    'file_manager_filemanagertab_draw_split_popup_hilight_1': {'file': 'file_manager.py', 'label': 'Split Popup — Stop Job Row (Job Running)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'file_manager_filemanagertab_draw_split_popup_normal_2': {'file': 'file_manager.py', 'label': 'Split Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_split_popup_chrome_2': {'file': 'file_manager.py', 'label': 'Split Popup — Title', 'default_role': 'CHROME', 'default_bold': True},
+    'file_manager_filemanagertab_draw_split_popup_invhead_2': {'file': 'file_manager.py', 'label': 'Split Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
+    'file_manager_filemanagertab_draw_split_popup_dim_2': {'file': 'file_manager.py', 'label': 'Split Popup — Target Filename', 'default_role': 'DIM', 'default_bold': False},
+    'file_manager_filemanagertab_draw_split_popup_system': {'file': 'file_manager.py', 'label': 'Split Popup — Mode Line', 'default_role': 'SYSTEM', 'default_bold': False},
+    'file_manager_filemanagertab_draw_split_popup_hilight_2': {'file': 'file_manager.py', 'label': 'Split Popup — Field Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'file_manager_filemanagertab_draw_split_popup_normal_3': {'file': 'file_manager.py', 'label': 'Split Popup — Field Row (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_split_popup_hilight_3': {'file': 'file_manager.py', 'label': 'Split Popup — Stop Job Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'file_manager_filemanagertab_draw_split_popup_normal_4': {'file': 'file_manager.py', 'label': 'Split Popup — Stop Job Row (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_split_confirm_normal': {'file': 'file_manager.py', 'label': 'Split Stop Confirm — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_split_confirm_chrome': {'file': 'file_manager.py', 'label': 'Split Stop Confirm — Title', 'default_role': 'CHROME', 'default_bold': True},
+    'file_manager_filemanagertab_draw_split_confirm_invhead': {'file': 'file_manager.py', 'label': 'Split Stop Confirm — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
+    'file_manager_filemanagertab_draw_split_confirm_warn': {'file': 'file_manager.py', 'label': 'Split Stop Confirm — Confirmation Message', 'default_role': 'WARN', 'default_bold': True},
+    'file_manager_filemanagertab_draw_chrome': {'file': 'file_manager.py', 'label': 'FILE MANAGER', 'default_role': 'CHROME', 'default_bold': True},
+    'file_manager_filemanagertab_draw_dim_1': {'file': 'file_manager.py', 'label': 'No OUTPUT_DIR configured on any site.', 'default_role': 'DIM', 'default_bold': False},
+    'file_manager_filemanagertab_draw_normal': {'file': 'file_manager.py', 'label': 'File Manager — Column Header Row', 'default_role': 'NORMAL', 'default_bold': True},
+    'file_manager_filemanagertab_draw_system_1': {'file': 'file_manager.py', 'label': 'File Manager — Subfolder Group Header', 'default_role': 'SYSTEM', 'default_bold': True},
+    'file_manager_filemanagertab_draw_dim_2': {'file': 'file_manager.py', 'label': 'File Manager — \'Empty\' Placeholder Row', 'default_role': 'DIM', 'default_bold': False},
+    'file_manager_filemanagertab_draw_hilight': {'file': 'file_manager.py', 'label': 'File Manager — File Row (Selected)', 'default_role': 'INVHEAD', 'default_bold': False},
+    'file_manager_filemanagertab_draw_live': {'file': 'file_manager.py', 'label': 'File Manager — File Row (Writing)', 'default_role': 'LIVE', 'default_bold': True},
+    'file_manager_filemanagertab_draw_live_2': {'file': 'file_manager.py', 'label': 'File Manager — Scroll-Up Arrow', 'default_role': 'LIVE', 'default_bold': True},
+    'file_manager_filemanagertab_draw_live_3': {'file': 'file_manager.py', 'label': 'File Manager — Scroll-Down Arrow', 'default_role': 'LIVE', 'default_bold': True},
+    'file_manager_filemanagertab_draw_dim_3': {'file': 'file_manager.py', 'label': 'File Manager — File Row (Idle)', 'default_role': 'NORMAL', 'default_bold': True},
+    'file_manager_filemanagertab_draw_system_2': {'file': 'file_manager.py', 'label': 'File Manager — Subfolder Path Prefix', 'default_role': 'WARN', 'default_bold': False},
+    'file_manager_filemanagertab_draw_delete': {'file': 'file_manager.py', 'label': 'File Manager — Delete-Mode Info (Permanent)', 'default_role': 'DELETE', 'default_bold': True},
+    'file_manager_filemanagertab_draw_dim_4': {'file': 'file_manager.py', 'label': 'File Manager — Delete-Mode Info (Trash)', 'default_role': 'DIM', 'default_bold': False},
+    'file_manager_filemanagertab_draw_warn': {'file': 'file_manager.py', 'label': 'File Manager — Status Message Line', 'default_role': 'WARN', 'default_bold': True},
+    'main_jjdlpdashboard_safe_ch_pair': {'file': 'main.py', 'label': 'Box Border (generic, all panels)', 'default_role': 'CHROME', 'default_bold': False},
+    'main_jjdlpdashboard_draw_logo_logo': {'file': 'main.py', 'label': 'Main Logo Banner', 'default_role': 'LOGO', 'default_bold': True},
+    'main_jjdlpdashboard_draw_disk_rate_graph': {'file': 'main.py', 'label': 'Top Bar Disk Rate Graph', 'default_role': 'NORMAL', 'default_bold': True},
+    'main_jjdlpdashboard_draw_christmas_easte_pair': {'file': 'main.py', 'label': 'Christmas Easter Egg — Tree', 'default_role': 'LIVE', 'default_bold': True},
+    'main_jjdlpdashboard_draw_tabs_hilight': {'file': 'main.py', 'label': 'Tab Bar — Selected Tab', 'default_role': 'INVHEAD', 'default_bold': False},
+    'main_jjdlpdashboard_draw_tabs_invhead': {'file': 'main.py', 'label': 'Tab Bar — Unselected Tab', 'default_role': 'CHROME', 'default_bold': True},
+    'main_jjdlpdashboard_draw_system_panel_system': {'file': 'main.py', 'label': 'SYSTEM', 'default_role': 'SYSTEM', 'default_bold': True},
+    'main_jjdlpdashboard_split_after_rows_dim': {'file': 'main.py', 'label': 'System Panel — Stat Row Label', 'default_role': 'NORMAL', 'default_bold': True},
+    'main_jjdlpdashboard_split_after_rows_cpair': {'file': 'main.py', 'label': 'System Panel — Stat Row Value (color varies by stat)', 'default_role': 'NORMAL', 'default_bold': True},
+    'main_jjdlpdashboard_split_after_rows_rec_1': {'file': 'main.py', 'label': 'System Panel — \'ffmpeg errors\' Section Header', 'default_role': 'REC', 'default_bold': False},
+    'main_jjdlpdashboard_split_after_rows_rec_2': {'file': 'main.py', 'label': 'System Panel — ffmpeg Error Streamer Name', 'default_role': 'REC', 'default_bold': False},
+    'main_jjdlpdashboard_split_after_rows_rec_3': {'file': 'main.py', 'label': 'System Panel — ffmpeg Error Count', 'default_role': 'REC', 'default_bold': False},
+    'main_jjdlpdashboard_split_after_rows_rec_4': {'file': 'main.py', 'label': 'System Panel — \'stalled\' Section Header', 'default_role': 'REC', 'default_bold': False},
+    'main_jjdlpdashboard_split_after_rows_rec_5': {'file': 'main.py', 'label': 'System Panel — Stalled Streamer Name', 'default_role': 'REC', 'default_bold': False},
+    'main_jjdlpdashboard_split_after_rows_rec_6': {'file': 'main.py', 'label': 'System Panel — Stalled Duration', 'default_role': 'REC', 'default_bold': False},
+    'main_jjdlpdashboard_split_after_rows_warn_1': {'file': 'main.py', 'label': 'System Panel — \'ads\' Section Header', 'default_role': 'WARN', 'default_bold': True},
+    'main_jjdlpdashboard_split_after_rows_warn_2': {'file': 'main.py', 'label': 'Ad detected', 'default_role': 'WARN', 'default_bold': True},
+    'main_jjdlpdashboard_update_disk_usage_system': {'file': 'main.py', 'label': 'System Panel — \'Disk\' Section Header', 'default_role': 'SYSTEM', 'default_bold': True},
+    'main_jjdlpdashboard_update_disk_usage_color': {'file': 'main.py', 'label': 'System Panel — Per-Drive Usage Line', 'default_role': 'LIVE', 'default_bold': True},
+    'main_jjdlpdashboard_update_disk_usage_chrome': {'file': 'main.py', 'label': 'System Panel — Uptime Line', 'default_role': 'CHROME', 'default_bold': True},
+    'main_jjdlpdashboard_draw_site_panel_border_hilight': {'file': 'main.py', 'label': 'Site Panel — Border (Selected)', 'default_role': 'HILIGHT', 'default_bold': False},
+    'main_jjdlpdashboard_draw_site_panel_border_chrome': {'file': 'main.py', 'label': 'Site Panel — Border (Unselected)', 'default_role': 'CHROME', 'default_bold': False},
+    'main_jjdlpdashboard_draw_site_panel_chrome_1': {'file': 'main.py', 'label': '{cfg_label}', 'default_role': 'CHROME', 'default_bold': True},
+    'main_jjdlpdashboard_draw_site_panel_live_1': {'file': 'main.py', 'label': 'LIVE:{live_cnt}', 'default_role': 'LIVE', 'default_bold': True},
+    'main_jjdlpdashboard_draw_site_panel_rec_1': {'file': 'main.py', 'label': 'REC:{rec_cnt}', 'default_role': 'REC', 'default_bold': True},
+    'main_jjdlpdashboard_draw_site_panel_dim_1': {'file': 'main.py', 'label': 'OFF:{off_cnt}', 'default_role': 'DIM', 'default_bold': False},
+    'main_jjdlpdashboard_draw_site_panel_disabled_1': {'file': 'main.py', 'label': 'DIS:{dis_cnt}', 'default_role': 'DISABLED', 'default_bold': False},
+    'main_jjdlpdashboard_draw_site_panel_chrome_2': {'file': 'main.py', 'label': 'Site Panel (Compact) — Column Separator', 'default_role': 'CHROME', 'default_bold': False},
+    'main_jjdlpdashboard_draw_site_panel_disabled_2': {'file': 'main.py', 'label': 'Site Panel (Compact) — Name (Disabled)', 'default_role': 'DISABLED', 'default_bold': False},
+    'main_jjdlpdashboard_draw_site_panel_disabled_3': {'file': 'main.py', 'label': 'Site Panel (Compact) — Status Badge (Disabled, Flash On)', 'default_role': 'DISABLED', 'default_bold': True},
+    'main_jjdlpdashboard_draw_site_panel_disabled_4': {'file': 'main.py', 'label': 'Site Panel (Compact) — Status Badge (Disabled, Flash Off)', 'default_role': 'DISABLED', 'default_bold': False},
+    'main_jjdlpdashboard_draw_site_panel_disabled_5': {'file': 'main.py', 'label': 'Site Panel (Compact) — Status Badge (Disabled, Never Live)', 'default_role': 'DISABLED', 'default_bold': False},
+    'main_jjdlpdashboard_draw_site_panel_live_2': {'file': 'main.py', 'label': 'Site Panel (Compact) — Name (Live)', 'default_role': 'LIVE', 'default_bold': True},
+    'main_jjdlpdashboard_draw_site_panel_live_3': {'file': 'main.py', 'label': 'Site Panel (Compact) — Status Badge (Recording, Flash On)', 'default_role': 'LIVE', 'default_bold': True},
+    'main_jjdlpdashboard_draw_site_panel_rec_2': {'file': 'main.py', 'label': 'Site Panel (Compact) — Status Badge (Recording, Flash Off)', 'default_role': 'REC', 'default_bold': True},
+    'main_jjdlpdashboard_draw_site_panel_live_4': {'file': 'main.py', 'label': 'Site Panel (Compact) — Status Badge (Live, Not Recording)', 'default_role': 'LIVE', 'default_bold': True},
+    'main_jjdlpdashboard_draw_site_panel_dim_2': {'file': 'main.py', 'label': 'Site Panel (Compact) — Name (Offline)', 'default_role': 'DIM', 'default_bold': False},
+    'main_jjdlpdashboard_draw_site_panel_dim_3': {'file': 'main.py', 'label': 'Site Panel (Compact) — Status Badge (Offline)', 'default_role': 'DIM', 'default_bold': False},
+    'main_jjdlpdashboard_draw_site_panel_live_5': {'file': 'main.py', 'label': 'Site Panel (Compact) — Last Live, Recently Live', 'default_role': 'LIVE', 'default_bold': True},
+    'main_jjdlpdashboard_draw_site_panel_dim_4': {'file': 'main.py', 'label': 'Site Panel (Compact) — Last Live, Older', 'default_role': 'DIM', 'default_bold': False},
+    'main_jjdlpdashboard_draw_site_panel_disabled_6': {'file': 'main.py', 'label': 'Site Panel (Normal) — Name (Disabled)', 'default_role': 'DISABLED', 'default_bold': False},
+    'main_jjdlpdashboard_draw_site_panel_disabled_7': {'file': 'main.py', 'label': 'Site Panel (Normal) — Progress Bar (Disabled)', 'default_role': 'DISABLED', 'default_bold': False},
+    'main_jjdlpdashboard_draw_site_panel_disabled_8': {'file': 'main.py', 'label': 'Site Panel (Normal) — Status Badge (Disabled, Flash On)', 'default_role': 'DISABLED', 'default_bold': True},
+    'main_jjdlpdashboard_draw_site_panel_disabled_9': {'file': 'main.py', 'label': 'Site Panel (Normal) — Status Badge (Disabled, Flash Off)', 'default_role': 'DISABLED', 'default_bold': False},
+    'main_jjdlpdashboard_draw_site_panel_disabled_10': {'file': 'main.py', 'label': 'Site Panel (Normal) — Status Badge (Disabled, Never Live)', 'default_role': 'DISABLED', 'default_bold': False},
+    'main_jjdlpdashboard_draw_site_panel_live_6': {'file': 'main.py', 'label': 'Site Panel (Normal) — Name (Live)', 'default_role': 'LIVE', 'default_bold': True},
+    'main_jjdlpdashboard_draw_site_panel_live_7': {'file': 'main.py', 'label': 'Site Panel (Normal) — Status Badge (Recording, Flash On)', 'default_role': 'LIVE', 'default_bold': True},
+    'main_jjdlpdashboard_draw_site_panel_rec_3': {'file': 'main.py', 'label': 'Site Panel (Normal) — Status Badge (Recording, Flash Off)', 'default_role': 'REC', 'default_bold': True},
+    'main_jjdlpdashboard_draw_site_panel_live_8': {'file': 'main.py', 'label': 'Site Panel (Normal) — Status Badge (Live, Not Recording)', 'default_role': 'LIVE', 'default_bold': True},
+    'main_jjdlpdashboard_draw_site_panel_live_9': {'file': 'main.py', 'label': 'Site Panel (Normal) — Progress Bar (Live)', 'default_role': 'LIVE', 'default_bold': False},
+    'main_jjdlpdashboard_draw_site_panel_dim_5': {'file': 'main.py', 'label': 'Site Panel (Normal) — Name (Offline)', 'default_role': 'NORMAL', 'default_bold': True},
+    'main_jjdlpdashboard_draw_site_panel_dim_6': {'file': 'main.py', 'label': 'Site Panel (Normal) — Status Badge (Offline)', 'default_role': 'NORMAL', 'default_bold': True},
+    'main_jjdlpdashboard_draw_site_panel_dim_7': {'file': 'main.py', 'label': 'Site Panel (Normal) — Progress Bar (Offline)', 'default_role': 'NORMAL', 'default_bold': True},
+    'main_jjdlpdashboard_draw_site_panel_chrome_3': {'file': 'main.py', 'label': 'Site Panel (Normal) — Duration Column', 'default_role': 'CHROME', 'default_bold': False},
+    'main_jjdlpdashboard_draw_site_panel_live_10': {'file': 'main.py', 'label': 'Site Panel (Normal) — Last Live, Recently Live', 'default_role': 'LIVE', 'default_bold': True},
+    'main_jjdlpdashboard_draw_site_panel_dim_8': {'file': 'main.py', 'label': 'Site Panel (Normal) — Last Live, Older', 'default_role': 'NORMAL', 'default_bold': True},
+    'main_jjdlpdashboard_draw_site_panel_warn': {'file': 'main.py', 'label': 'Next check: {_nxt_str}', 'default_role': 'WARN', 'default_bold': True},
+    'main_jjdlpdashboard_draw_log_tab_dim_1': {'file': 'main.py', 'label': 'Activity Log — \'Site:\' Label', 'default_role': 'NORMAL', 'default_bold': True},
+    'main_jjdlpdashboard_draw_log_tab_hilight': {'file': 'main.py', 'label': 'Activity Log — Site Tab (Selected)', 'default_role': 'HILIGHT', 'default_bold': False},
+    'main_jjdlpdashboard_draw_log_tab_chrome': {'file': 'main.py', 'label': 'Activity Log — Site Tab (Unselected)', 'default_role': 'CHROME', 'default_bold': True},
+    'main_jjdlpdashboard_draw_log_tab_dim_2': {'file': 'main.py', 'label': 'Activity Log — Title', 'default_role': 'NORMAL', 'default_bold': True},
+    'main_jjdlpdashboard_draw_log_tab_dim_3': {'file': 'main.py', 'label': 'Activity Log — Line (Normal)', 'default_role': 'NORMAL', 'default_bold': True},
+    'main_jjdlpdashboard_draw_log_tab_live': {'file': 'main.py', 'label': 'Activity Log — Line (Live/Recording Started)', 'default_role': 'LOGO', 'default_bold': True},
+    'main_jjdlpdashboard_draw_log_tab_rec': {'file': 'main.py', 'label': 'Activity Log — Line (Error/Stall/Stopped)', 'default_role': 'REC', 'default_bold': True},
+    'main_jjdlpdashboard_draw_log_tab_warn_1': {'file': 'main.py', 'label': 'Activity Log — Line (Warning)', 'default_role': 'WARN', 'default_bold': True},
+    'main_jjdlpdashboard_draw_log_tab_warn_2': {'file': 'main.py', 'label': '↑{self._log_scroll}/{max_scroll}', 'default_role': 'WARN', 'default_bold': False},
+    'main_jjdlpdashboard_draw_pipe_tab_bar_dim': {'file': 'main.py', 'label': 'Stdout/Stderr Tabs — \'Site:\' Label', 'default_role': 'NORMAL', 'default_bold': True},
+    'main_jjdlpdashboard_draw_pipe_tab_bar_hilight': {'file': 'main.py', 'label': 'Stdout/Stderr Tabs — Site Tab (Selected)', 'default_role': 'HILIGHT', 'default_bold': False},
+    'main_jjdlpdashboard_draw_pipe_tab_bar_chrome': {'file': 'main.py', 'label': 'Stdout/Stderr Tabs — Site Tab (Unselected)', 'default_role': 'CHROME', 'default_bold': True},
+    'main_jjdlpdashboard_draw_streamer_panel_border_pair': {'file': 'main.py', 'label': 'STREAMERS', 'default_role': 'HILIGHT', 'default_bold': False},
+    'main_jjdlpdashboard_draw_streamer_panel_hilight': {'file': 'main.py', 'label': 'Streamer Sub-Tab List — Selected Row', 'default_role': 'CHROME', 'default_bold': False},
+    'main_jjdlpdashboard_draw_streamer_panel_dim': {'file': 'main.py', 'label': 'Streamer Sub-Tab List — Unselected Row', 'default_role': 'NORMAL', 'default_bold': True},
+    'main_jjdlpdashboard_draw_pipe_tab_border_pair': {'file': 'main.py', 'label': '{title}{title_suffix}', 'default_role': 'HILIGHT', 'default_bold': True},
+    'main_jjdlpdashboard_draw_pipe_tab_dim': {'file': 'main.py', 'label': 'Stdout/Stderr Panel — Content Line', 'default_role': 'NORMAL', 'default_bold': True},
+    'main_jjdlpdashboard_draw_pipe_tab_warn': {'file': 'main.py', 'label': 'Stdout/Stderr Panel — Scroll Indicator', 'default_role': 'WARN', 'default_bold': True},
+    'main_jjdlpdashboard_draw_eventsub_tab_invhead_1': {'file': 'main.py', 'label': 'TWITCH EVENTSUB', 'default_role': 'INVHEAD', 'default_bold': True},
+    'main_jjdlpdashboard_draw_eventsub_tab_warn': {'file': 'main.py', 'label': 'EventSub Tab — Site Header (\'-- {label} --\')', 'default_role': 'WARN', 'default_bold': True},
+    'main_jjdlpdashboard_draw_eventsub_tab_dim': {'file': 'main.py', 'label': 'EventSub not available', 'default_role': 'DIM', 'default_bold': False},
+    'main_jjdlpdashboard_draw_eventsub_tab_invhead_2': {'file': 'main.py', 'label': 'EventSub Tab — Stat Row Label', 'default_role': 'INVHEAD', 'default_bold': False},
+    'main_jjdlpdashboard_draw_eventsub_tab_cpair': {'file': 'main.py', 'label': 'EventSub Tab — Stat Row Value (color varies by stat)', 'default_role': 'NORMAL', 'default_bold': False},
+    'main_jjdlpdashboard_draw_footer_invhead': {'file': 'main.py', 'label': 'Bottom Footer / Key Legend Bar', 'default_role': 'INVHEAD', 'default_bold': False},
+    'main_jjdlpdashboard_draw_mgmt_overlay_normal_1': {'file': 'main.py', 'label': 'Add/Remove/Disable Overlay — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'main_jjdlpdashboard_draw_mgmt_overlay_warn_1': {'file': 'main.py', 'label': 'Add/Remove/Disable Overlay — Title', 'default_role': 'WARN', 'default_bold': True},
+    'main_jjdlpdashboard_draw_mgmt_overlay_dim_1': {'file': 'main.py', 'label': 'Site: {site_lbl}', 'default_role': 'DIM', 'default_bold': False},
+    'main_jjdlpdashboard_draw_mgmt_overlay_live_1': {'file': 'main.py', 'label': 'Add/Remove/Disable Overlay — Result Message (Disable/Remove)', 'default_role': 'LIVE', 'default_bold': True},
+    'main_jjdlpdashboard_draw_mgmt_overlay_dim_2': {'file': 'main.py', 'label': 'No enabled streamers. #2', 'default_role': 'DIM', 'default_bold': False},
+    'main_jjdlpdashboard_draw_mgmt_overlay_invhead_1': {'file': 'main.py', 'label': 'Add/Remove/Disable Overlay — Legend (Empty List)', 'default_role': 'INVHEAD', 'default_bold': False},
+    'main_jjdlpdashboard_draw_mgmt_overlay_hilight_1': {'file': 'main.py', 'label': 'Add/Remove/Disable Overlay — Selected Streamer', 'default_role': 'HILIGHT', 'default_bold': True},
+    'main_jjdlpdashboard_draw_mgmt_overlay_normal_2': {'file': 'main.py', 'label': 'Add/Remove/Disable Overlay — Unselected Streamer', 'default_role': 'NORMAL', 'default_bold': False},
+    'main_jjdlpdashboard_draw_mgmt_overlay_invhead_2': {'file': 'main.py', 'label': 'Add/Remove/Disable Overlay — Legend (List Picker)', 'default_role': 'INVHEAD', 'default_bold': False},
+    'main_jjdlpdashboard_draw_mgmt_overlay_live_2': {'file': 'main.py', 'label': 'Add/Remove/Disable Overlay — Result Message (Add)', 'default_role': 'LIVE', 'default_bold': True},
+    'main_jjdlpdashboard_draw_mgmt_overlay_chrome': {'file': 'main.py', 'label': 'Add/Remove/Disable Overlay — \'Re-enable disabled:\' Header', 'default_role': 'CHROME', 'default_bold': False},
+    'main_jjdlpdashboard_draw_mgmt_overlay_hilight_2': {'file': 'main.py', 'label': 'Add/Remove/Disable Overlay — Disabled Streamer Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'main_jjdlpdashboard_draw_mgmt_overlay_dim_3': {'file': 'main.py', 'label': 'Add/Remove/Disable Overlay — Disabled Streamer Row (Unselected)', 'default_role': 'DIM', 'default_bold': False},
+    'main_jjdlpdashboard_draw_mgmt_overlay_dim_4': {'file': 'main.py', 'label': 'Add/Remove/Disable Overlay — \'No disabled streamers.\' Message', 'default_role': 'DIM', 'default_bold': False},
+    'main_jjdlpdashboard_draw_mgmt_overlay_warn_2': {'file': 'main.py', 'label': 'Add/Remove/Disable Overlay — \'New username:\' Label', 'default_role': 'WARN', 'default_bold': True},
+    'main_jjdlpdashboard_draw_mgmt_overlay_hilight_3': {'file': 'main.py', 'label': 'Add/Remove/Disable Overlay — Username Input (Focused)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'main_jjdlpdashboard_draw_mgmt_overlay_normal_3': {'file': 'main.py', 'label': 'Add/Remove/Disable Overlay — Username Input (Unfocused)', 'default_role': 'NORMAL', 'default_bold': True},
+    'main_jjdlpdashboard_draw_mgmt_overlay_invhead_3': {'file': 'main.py', 'label': 'Add/Remove/Disable Overlay — Legend (Add Mode)', 'default_role': 'INVHEAD', 'default_bold': False},
+    'main_jjdlpdashboard_refresh_screen_normal': {'file': 'main.py', 'label': 'Full-Screen Background Color', 'default_role': 'NORMAL', 'default_bold': False},
+    'main_jjdlpdashboard_refresh_screen_chrome_1': {'file': 'main.py', 'label': 'Top-Right System Clock', 'default_role': 'CHROME', 'default_bold': False},
+    'main_jjdlpdashboard_refresh_screen_warn': {'file': 'main.py', 'label': 'Update Available', 'default_role': 'WARN', 'default_bold': True},
+    'main_jjdlpdashboard_refresh_screen_dim': {'file': 'main.py', 'label': 'v{__version__}', 'default_role': 'DIM', 'default_bold': False},
+    'main_jjdlpdashboard_refresh_screen_chrome_2': {'file': 'main.py', 'label': 'Separator', 'default_role': 'CHROME', 'default_bold': False},
+    'main_jjdlpdashboard_draw_write_failure_a_delete': {'file': 'main.py', 'label': 'Recording Failure Alert — Box, Title, Message, Names', 'default_role': 'DELETE', 'default_bold': True},
+    'main_jjdlpdashboard_draw_write_failure_a_invhead': {'file': 'main.py', 'label': 'Recording Failure Alert — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
+    'main_jjdlpdashboard_draw_exit_confirm_po_normal_1': {'file': 'main.py', 'label': 'Exit Confirm Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'main_jjdlpdashboard_draw_exit_confirm_po_warn': {'file': 'main.py', 'label': 'Exit Confirm Popup — Title', 'default_role': 'WARN', 'default_bold': True},
+    'main_jjdlpdashboard_draw_exit_confirm_po_normal_2': {'file': 'main.py', 'label': 'Exit Confirm Popup — Message Text', 'default_role': 'NORMAL', 'default_bold': True},
+    'main_jjdlpdashboard_draw_exit_confirm_po_hilight_1': {'file': 'main.py', 'label': 'Exit Confirm Popup — \'Yes\' Button (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'main_jjdlpdashboard_draw_exit_confirm_po_normal_3': {'file': 'main.py', 'label': 'Exit Confirm Popup — \'Yes\' Button (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
+    'main_jjdlpdashboard_draw_exit_confirm_po_hilight_2': {'file': 'main.py', 'label': 'Exit Confirm Popup — \'No\' Button (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'main_jjdlpdashboard_draw_exit_confirm_po_normal_4': {'file': 'main.py', 'label': 'Exit Confirm Popup — \'No\' Button (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
+    'main_jjdlpdashboard_draw_exit_confirm_po_invhead': {'file': 'main.py', 'label': 'Exit Confirm Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
+    'main_jjdlpdashboard_draw_changelog_popup_normal_1': {'file': 'main.py', 'label': 'Changelog Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'main_jjdlpdashboard_draw_changelog_popup_hilight': {'file': 'main.py', 'label': 'Changelog Popup — Title', 'default_role': 'HILIGHT', 'default_bold': True},
+    'main_jjdlpdashboard_draw_changelog_popup_normal_2': {'file': 'main.py', 'label': 'Changelog Popup — Content Line', 'default_role': 'NORMAL', 'default_bold': False},
+    'main_jjdlpdashboard_draw_changelog_popup_invhead': {'file': 'main.py', 'label': 'Changelog Popup — Scroll Indicator / Legend', 'default_role': 'INVHEAD', 'default_bold': False},
+    'main_jjdlpdashboard_draw_scheme_popup_normal_1': {'file': 'main.py', 'label': 'Scheme List Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'main_jjdlpdashboard_draw_scheme_popup_hilight': {'file': 'main.py', 'label': 'Scheme List Popup — Title', 'default_role': 'HILIGHT', 'default_bold': True},
+    'main_jjdlpdashboard_draw_scheme_popup_live': {'file': 'main.py', 'label': 'Scheme List Popup — Current Scheme Row', 'default_role': 'LIVE', 'default_bold': True},
+    'main_jjdlpdashboard_draw_scheme_popup_normal_2': {'file': 'main.py', 'label': 'Scheme List Popup — Other Scheme Row', 'default_role': 'NORMAL', 'default_bold': False},
+    'main_jjdlpdashboard_draw_scheme_popup_invhead': {'file': 'main.py', 'label': 'Scheme List Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_config_pairnum0': {'file': 'main.py', 'label': 'Config Picker Splash — Full-Screen Background', 'default_role': 'NORMAL', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_config_pairnum6': {'file': 'main.py', 'label': 'Config Picker Splash — Logo', 'default_role': 'LOGO', 'default_bold': True},
+    'main_jjdlpdashboard_curses_choose_config_pairnum1_1': {'file': 'main.py', 'label': 'Config Picker Splash — System Clock', 'default_role': 'CHROME', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_config_pairnum1_2': {'file': 'main.py', 'label': 'Config Picker Splash — Separator Line', 'default_role': 'CHROME', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_config_pairnum5_1': {'file': 'main.py', 'label': 'Config Picker Splash — Title', 'default_role': 'INVHEAD', 'default_bold': True},
+    'main_jjdlpdashboard_curses_choose_config_pairnum3_1': {'file': 'main.py', 'label': 'Config Picker Splash — Instructions Line', 'default_role': 'WARN', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_config_pairnum2': {'file': 'main.py', 'label': 'Config Picker Splash — File Row (Cursor)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'main_jjdlpdashboard_curses_choose_config_pairnum4': {'file': 'main.py', 'label': 'Config Picker Splash — File Row (Checked)', 'default_role': 'LIVE', 'default_bold': True},
+    'main_jjdlpdashboard_curses_choose_config_pairnum1_3': {'file': 'main.py', 'label': 'Config Picker Splash — File Row (Unchecked)', 'default_role': 'CHROME', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_config_pairnum3_2': {'file': 'main.py', 'label': 'Config Picker Splash — \'Do Not Show Again\' (Checked)', 'default_role': 'WARN', 'default_bold': True},
+    'main_jjdlpdashboard_curses_choose_config_pairnum3_3': {'file': 'main.py', 'label': 'Config Picker Splash — \'Do Not Show Again\' (Unchecked)', 'default_role': 'WARN', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_config_pairnum5_2': {'file': 'main.py', 'label': 'Config Picker Splash — Footer', 'default_role': 'INVHEAD', 'default_bold': True},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum0': {'file': 'main.py', 'label': 'Browser Picker Splash — Full-Screen Background', 'default_role': 'NORMAL', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum6': {'file': 'main.py', 'label': 'Browser Picker Splash — Logo', 'default_role': 'LOGO', 'default_bold': True},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum1_1': {'file': 'main.py', 'label': 'Browser Picker Splash — System Clock', 'default_role': 'CHROME', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum1_2': {'file': 'main.py', 'label': 'Browser Picker Splash — Separator Line', 'default_role': 'CHROME', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum5_1': {'file': 'main.py', 'label': 'Browser Picker Splash — Title', 'default_role': 'INVHEAD', 'default_bold': True},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum3_1': {'file': 'main.py', 'label': 'Browser Picker Splash — Instructions Line', 'default_role': 'WARN', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum3_2': {'file': 'main.py', 'label': 'Browser Picker Splash — Chrome-Unsupported Warning', 'default_role': 'WARN', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum4': {'file': 'main.py', 'label': 'Browser Picker Splash — \'Applies to:\' Line', 'default_role': 'LIVE', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum2': {'file': 'main.py', 'label': 'Browser Picker Splash — Browser Row (Cursor)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum1_3': {'file': 'main.py', 'label': 'Browser Picker Splash — Browser Row (Not Cursor)', 'default_role': 'CHROME', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum3_3': {'file': 'main.py', 'label': 'Browser Picker Splash — \'Do Not Show Again\' (Checked)', 'default_role': 'WARN', 'default_bold': True},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum3_4': {'file': 'main.py', 'label': 'Browser Picker Splash — \'Do Not Show Again\' (Unchecked)', 'default_role': 'WARN', 'default_bold': False},
+    'main_jjdlpdashboard_curses_choose_browse_pairnum5_2': {'file': 'main.py', 'label': 'Browser Picker Splash — Footer', 'default_role': 'INVHEAD', 'default_bold': True},
 }
 
 
@@ -466,13 +635,13 @@ def load_theme():
     missing, empty, or unparseable. role_overrides is stored per base scheme
     index: {str(scheme_idx): {role: {'fg': name, 'bg': name}}}."""
     path = _theme_json_path()
-    default = {'base_scheme_idx': 0, 'role_overrides': {}, 'site_overrides': {}}
+    default = {'base_scheme_idx': DEFAULT_SCHEME_IDX, 'role_overrides': {}, 'site_overrides': {}}
     try:
         with open(path, 'r', encoding='utf-8') as f:
             data = json.loads(f.read())
         if not isinstance(data, dict):
             return default
-        data.setdefault('base_scheme_idx', 0)
+        data.setdefault('base_scheme_idx', DEFAULT_SCHEME_IDX)
         data.setdefault('role_overrides', {})
         data.setdefault('site_overrides', {})
         return data
@@ -520,34 +689,55 @@ def set_state(data):
 # ─────────────────────────────────────────────────────────────────────────
 # The core indirection function every call site now goes through.
 # ─────────────────────────────────────────────────────────────────────────
-def attr(owner, tag, default_pair_arg, default_bold):
+def _role_to_pair(owner, role, fallback=0):
+    """Resolve a role name to a curses pair number. With a real owner
+    (dashboard) use its C_<ROLE> constant — that's what actually defines the
+    pair. With owner=None (the standalone splash/picker screens that run
+    before any dashboard exists) fall back to the module-level ROLE_PAIR_NUM
+    table, so role overrides work there exactly like everywhere else."""
+    if owner is not None:
+        return getattr(owner, f'C_{role}', fallback)
+    return ROLE_PAIR_NUM.get(role, fallback)
+
+
+def attr(owner, tag, runtime_pair=None):
     """Return the curses attribute (color pair | optional bold) to use for a
     given call site.
 
-    owner:             the object whose C_* constants `default_pair_arg` may
-                        reference (self / db / self.dashboard / the
-                        JJDlpDashboard class / None). Only used to resolve a
-                        *role name* override back into a pair number when the
-                        owner exposes C_* attributes; unused otherwise.
-    tag:                the stable site identifier (see SITE_REGISTRY).
-    default_pair_arg:   the value the original code passed to
-                         curses.color_pair(...) at this site — either a role
-                         pair number (self.C_X) or a runtime variable/literal.
-    default_bold:       True if the original code included "| curses.A_BOLD".
-    """
-    overrides = _state.get('site_overrides', {})
-    ov = overrides.get(tag)
+    owner:          the object whose C_* constants resolve a role name to a
+                    pair number (self / db / self.dashboard / the
+                    JJDlpDashboard class), or None for the standalone
+                    splash/picker screens that run before any dashboard
+                    exists (role pairs then come from ROLE_PAIR_NUM).
+    tag:            the stable site identifier (see SITE_REGISTRY), which is
+                    the single source of truth for this site's default role
+                    and bold — call sites no longer pass their own defaults.
+    runtime_pair:   optional pair number the call site computes at runtime
+                    (e.g. a stat value colored by its current state). It wins
+                    over the site's default_role — the role only kicks in as
+                    a fallback. A saved per-site override role always wins
+                    over both.
 
-    if ov is None:
-        pair_num = default_pair_arg
-        bold = default_bold
+    Resolution order: override role → runtime_pair → default_role → pair 0.
+    Every SITE_REGISTRY entry has a default_role, so every site is editable
+    (role + bold) in the theme editor the same way.
+    """
+    entry = SITE_REGISTRY.get(tag, {})
+    default_role = entry.get('default_role')
+    default_bold = entry.get('default_bold', False)
+
+    ov = _state.get('site_overrides', {}).get(tag)
+
+    if ov is not None and ov.get('role'):
+        pair_num = _role_to_pair(owner, ov['role'],
+                                 runtime_pair if runtime_pair is not None else 0)
+    elif runtime_pair is not None:
+        pair_num = runtime_pair
+    elif default_role is not None:
+        pair_num = _role_to_pair(owner, default_role, 0)
     else:
-        role = ov.get('role')
-        if role and owner is not None:
-            pair_num = getattr(owner, f'C_{role}', default_pair_arg)
-        else:
-            pair_num = default_pair_arg
-        bold = ov.get('bold', default_bold)
+        pair_num = 0
+    bold = ov.get('bold', default_bold) if ov is not None else default_bold
 
     result = curses.color_pair(pair_num)
     if bold:
@@ -559,26 +749,31 @@ def role_overrides_for(scheme_idx=None):
     """Return the role-override dict ({role: {'fg': name, 'bg': name}}) for
     the given scheme index, defaulting to the active base scheme. The dict is
     created on demand, so callers can mutate it directly."""
-    idx = str(_state.get('base_scheme_idx', 0) if scheme_idx is None else scheme_idx)
+    idx = str(_state.get('base_scheme_idx', DEFAULT_SCHEME_IDX) if scheme_idx is None else scheme_idx)
     return _state.setdefault('role_overrides', {}).setdefault(idx, {})
 
 
 # ─────────────────────────────────────────────────────────────────────────
 # Applying role fg/bg overrides on top of a base COLOR_SCHEMES tuple.
 # ─────────────────────────────────────────────────────────────────────────
-def resolve_scheme_values(dashboard):
+def resolve_scheme_values(dashboard=None, scheme_idx=None):
     """Return a dict {role: {'fg': curses.COLOR_*, 'bg': curses.COLOR_* or
-    None}} for all 13 roles, combining the active base scheme with any saved
-    role_overrides for that scheme. bg is None for roles that share the
-    ambient background."""
-    scheme = dashboard.COLOR_SCHEMES[_state.get('base_scheme_idx', 0) % len(dashboard.COLOR_SCHEMES)]
+    None}} for all 13 roles, combining a base scheme with any saved
+    role_overrides for it (defaulting to the active base scheme). bg is None
+    for roles that share the ambient background.
+
+    dashboard is accepted for backward compatibility but no longer used —
+    COLOR_SCHEMES now lives in theme.py."""
+    if scheme_idx is None:
+        scheme_idx = _state.get('base_scheme_idx', DEFAULT_SCHEME_IDX)
+    scheme = COLOR_SCHEMES[scheme_idx % len(COLOR_SCHEMES)]
     values = {}
     for role in ROLE_ORDER:
         values[role] = {'fg': None, 'bg': None}
     for (role, field), value in zip(SCHEME_TUPLE_FIELDS, scheme):
         values[role][field] = value
 
-    for role, ov in role_overrides_for().items():
+    for role, ov in role_overrides_for(scheme_idx).items():
         if role not in values:
             continue
         if ov.get('fg'):
@@ -591,14 +786,121 @@ def resolve_scheme_values(dashboard):
     return values
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Palette normalization — why this exists and what it does
+#
+# curses only sends color *indices* (0-7) to the terminal, and every
+# distro ships a different default palette, so the same app looks
+# different on every Linux terminal. Fix: when the terminal advertises
+# can_change_color() (xterm, GNOME, XFCE, Konsole, kitty, ...), re-pin
+# the 8 base indices to Windows Terminal's "Campbell" palette so every
+# such terminal renders identical, Windows-matching colors. Terminals
+# that can't change colors are left untouched. The originals are saved
+# here and restored on clean exit (atexit) via raw OSC 4 sequences.
+# Disabled unless RGB_MODE = true in global.conf; to tune the pinned
+# colors, edit _PALETTE_RGB.
+# ─────────────────────────────────────────────────────────────────────────
+# Windows Terminal "Campbell" palette (the default on Windows), hex ->
+# curses 0-1000 scale (value * 1000 / 255).
+_PALETTE_RGB = {
+    curses.COLOR_BLACK:    (47, 47, 47),       # 0C0C0C
+    curses.COLOR_RED:      (773, 59, 122),     # C50F1F
+    curses.COLOR_GREEN:    (75, 631, 55),      # 13A10E
+    curses.COLOR_YELLOW:   (757, 612, 0),      # C19C00
+    curses.COLOR_BLUE:     (0, 216, 855),      # 0037DA
+    curses.COLOR_MAGENTA:  (533, 90, 596),     # 881798
+    curses.COLOR_CYAN:     (227, 588, 867),    # 3A96DD
+    curses.COLOR_WHITE:    (800, 800, 800),    # CCCCCC
+}
+
+_PALETTE_NORMALIZED = False
+_ORIG_PALETTE = {}   # index -> (r, g, b) saved before normalization
+
+
+def _rgb_mode_enabled() -> bool:
+    """Return True when RGB_MODE is set to true in global.conf (default: off)."""
+    try:
+        import configparser
+        parser = configparser.ConfigParser(allow_no_value=True, interpolation=None, delimiters=('=',))
+        path = os.path.abspath("configs/global.conf")
+        if not os.path.exists(path):
+            path = os.path.abspath("global.conf")
+        parser.read(path, encoding="utf-8")
+        if parser.has_section("General"):
+            raw = parser["General"].get("RGB_MODE", "").strip().lower()
+            if raw:
+                return raw not in ("false", "0", "no")
+    except Exception:
+        pass
+    return False
+
+
+def _palette_1000_to_hex4(value):
+    return '%04x' % round(value * 255 / 1000)
+
+
+def _osc4_set(index, r, g, b):
+    """Emit an OSC 4 (Set Palette Color) sequence straight to stdout —
+    usable even after endwin(), so it can restore the palette on exit."""
+    if not sys.stdout.isatty():
+        return
+    sys.stdout.write(
+        '\x1b]4;%d;rgb:%s/%s/%s\x1b\\'
+        % (index, _palette_1000_to_hex4(r),
+           _palette_1000_to_hex4(g), _palette_1000_to_hex4(b)))
+    sys.stdout.flush()
+
+
+def _restore_palette():
+    global _PALETTE_NORMALIZED
+    if not _PALETTE_NORMALIZED:
+        return
+    for idx, (r, g, b) in _ORIG_PALETTE.items():
+        try:
+            _osc4_set(idx, r, g, b)
+        except Exception:
+            pass
+    _PALETTE_NORMALIZED = False
+
+
+def normalize_palette():
+    """Pin the 8 base color indices to the app's exact RGBs (matching the
+    Windows look) on any terminal that supports changing colors, when
+    RGB_MODE is enabled in global.conf. Runs once per process; no-op on
+    Windows/PDCurses, multiplexers, and 8-color terminals
+    (can_change_color() is False there)."""
+    global _PALETTE_NORMALIZED
+    if _PALETTE_NORMALIZED:
+        return True
+    if not _rgb_mode_enabled():
+        return False
+    try:
+        if not _PALETTE_RGB or not curses.has_colors() or not curses.can_change_color():
+            return False
+        for idx, rgb in _PALETTE_RGB.items():
+            try:
+                _ORIG_PALETTE[idx] = curses.color_content(idx)
+                curses.init_color(idx, *rgb)
+            except curses.error:
+                _ORIG_PALETTE.pop(idx, None)
+        if _ORIG_PALETTE:
+            _PALETTE_NORMALIZED = True
+            atexit.register(_restore_palette)
+            return True
+        return False
+    except curses.error:
+        return False
+
+
 def apply_palette(dashboard):
     """Re-initialize all 13 curses pairs from the active base scheme + role
     overrides. Call this instead of dashboard._apply_color_scheme() once
     theme.py owns palette application; safe to call at any time (e.g. right
     after loading/saving theme.json, or when the base scheme changes)."""
-    values = resolve_scheme_values(dashboard)
-    ambient_bg = dashboard._SCHEME_BACKGROUND.get(
-        _state.get('base_scheme_idx', 0), curses.COLOR_BLACK)
+    normalize_palette()
+    values = resolve_scheme_values()
+    ambient_bg = _SCHEME_BACKGROUND.get(
+        _state.get('base_scheme_idx', DEFAULT_SCHEME_IDX), curses.COLOR_BLACK)
 
     for role in ROLE_ORDER:
         pair_num = ROLE_PAIR_NUM[role]
@@ -610,6 +912,229 @@ def apply_palette(dashboard):
             curses.init_pair(pair_num, fg, bg)
         except curses.error:
             pass
+
+    # clearok(True) forces the next refresh() on this window
+    # to do a full, uncached repaint, so the freshly defined pair colors
+    # actually reach the terminal instead of staying stuck until unrelated
+    # content happens to change.
+    stdscr = getattr(dashboard, 'stdscr', None)
+    if stdscr is not None:
+        try:
+            stdscr.clearok(True)
+        except curses.error:
+            pass
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Bake-to-source — DEV FEATURE (hidden 'W' hotkey).
+#
+# theme.py is the single source of truth for both customization layers, so
+# baking just rewrites theme.py itself:
+#   • role fg/bg overrides  → the COLOR_SCHEMES tuple for that scheme
+#   • per-site role/bold    → the SITE_REGISTRY entry's default_role/default_bold
+# No other source file needs to change.
+#
+# This is a snapshot convenience: runtime behavior is unchanged (theme.json
+# keeps winning), and the next app update overwrites these edits.
+# ─────────────────────────────────────────────────────────────────────────
+_REG_DEFAULT_ROLE_RE = re.compile(r"'default_role':\s*(None|'[A-Z]+')")
+_REG_DEFAULT_BOLD_RE = re.compile(r"'default_bold':\s*(True|False)")
+_SCHEME_TUPLE_TOKEN_RE = re.compile(r'curses\.COLOR_[A-Z]+')
+
+
+def _source_file_path(name):
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+
+
+def _read_source_file(name):
+    try:
+        with open(_source_file_path(name), 'r', encoding='utf-8', newline='') as f:
+            return f.read()
+    except Exception:
+        return None
+
+
+def _atomic_write_text(path, text):
+    """Atomically write a text file (tmp + os.replace), matching save_theme."""
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8", newline='') as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        return True
+    except Exception:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+        return False
+
+
+def _effective_scheme_colors(scheme_idx):
+    """List of effective fg/bg curses color constants (in SCHEME_TUPLE_FIELDS
+    order) for the given scheme index, base tuple + role overrides applied."""
+    values = resolve_scheme_values(scheme_idx=scheme_idx)
+    return [values[role][field] for role, field in SCHEME_TUPLE_FIELDS]
+
+
+def _rewrite_scheme_tuple(theme_text, scheme_idx, color_values):
+    """Rewrite the scheme_idx-th tuple inside theme.py's own
+    COLOR_SCHEMES = [...] so each curses.COLOR_X token (in
+    SCHEME_TUPLE_FIELDS order) matches color_values.
+    Returns (new_text, changed)."""
+    lines = theme_text.splitlines(keepends=True)
+
+    start = None
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith('COLOR_SCHEMES = ['):
+            start = i
+            break
+    if start is None:
+        return theme_text, False
+
+    end = None
+    for i in range(start, len(lines)):
+        if lines[i].strip() == ']':
+            end = i
+            break
+    if end is None:
+        return theme_text, False
+
+    group_starts = [i for i in range(start, end)
+                    if lines[i].lstrip().startswith('(curses.COLOR_')]
+    if scheme_idx >= len(group_starts):
+        return theme_text, False
+
+    gs = group_starts[scheme_idx]
+    ge = gs
+    while ge <= end and ')' not in lines[ge]:
+        ge += 1
+    if ge > end:
+        return theme_text, False
+
+    by_line = {}
+    for li in range(gs, ge + 1):
+        segs = [(m.start(), m.end()) for m in _SCHEME_TUPLE_TOKEN_RE.finditer(lines[li])]
+        if segs:
+            by_line[li] = segs
+    token_count = sum(len(segs) for segs in by_line.values())
+    if token_count != len(SCHEME_TUPLE_FIELDS):
+        return theme_text, False
+
+    new_names = [_color_const_to_name(v) for v in color_values]
+    name_idx = 0
+    changed = False
+    for li in sorted(by_line):
+        parts = []
+        cursor = 0
+        for s, e in by_line[li]:
+            name = new_names[name_idx]
+            name_idx += 1
+            parts.append(lines[li][cursor:s])
+            parts.append(f'curses.COLOR_{name}')
+            cursor = e
+        parts.append(lines[li][cursor:])
+        rebuilt = ''.join(parts)
+        if rebuilt != lines[li]:
+            lines[li] = rebuilt
+            changed = True
+    return (''.join(lines), True) if changed else (theme_text, False)
+
+
+def _rewrite_registry_entry(theme_text, tag, ov):
+    """Rewrite a SITE_REGISTRY entry's default_role/default_bold to match the
+    override. Returns (new_text, changed)."""
+    lines = theme_text.splitlines(keepends=True)
+    target = None
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("'" + tag + "':"):
+            target = i
+            break
+    if target is None:
+        return theme_text, False
+
+    new_line = lines[target]
+    if ov.get('role'):
+        role_match = _REG_DEFAULT_ROLE_RE.search(new_line)
+        if role_match and role_match.group(1) != 'None':
+            new_line = _REG_DEFAULT_ROLE_RE.sub(
+                f"'default_role': '{ov['role']}'", new_line, count=1)
+    if 'bold' in ov:
+        new_line = _REG_DEFAULT_BOLD_RE.sub(
+            f"'default_bold': {ov['bold']}", new_line, count=1)
+
+    if new_line == lines[target]:
+        return theme_text, False
+    lines[target] = new_line
+    return ''.join(lines), True
+
+
+def bake_to_source(dashboard=None):
+    """Write the currently-active customizations into theme.py, so they
+    become the new defaults. theme.py is the only file touched:
+      • base-scheme role-color overrides → the COLOR_SCHEMES tuple here
+      • per-site role/bold overrides     → the SITE_REGISTRY entry here
+    Call sites elsewhere carry no defaults of their own, so there's nothing
+    else to rewrite.
+
+    dashboard is accepted for backward compatibility but no longer needed.
+
+    Dev feature bound to the hidden 'W' hotkey. Returns a summary dict:
+      {'ok': bool, 'error': str|None, 'schemes': [idx, ...],
+       'role_sites': int, 'bold_sites': int, 'files': [name, ...]}
+    """
+    summary = {'ok': True, 'error': None, 'schemes': [],
+               'role_sites': 0, 'bold_sites': 0, 'files': []}
+
+    theme_text = _read_source_file('theme.py')
+    if theme_text is None:
+        summary['ok'] = False
+        summary['error'] = "Could not read theme.py"
+        return summary
+
+    dirty = False
+
+    # 1. Base-scheme role-color overrides → COLOR_SCHEMES tuples (this file)
+    role_overrides = _state.get('role_overrides', {})
+    for idx in sorted(int(k) for k in role_overrides if str(k).isdigit()):
+        colors = _effective_scheme_colors(idx)
+        new_text, changed = _rewrite_scheme_tuple(theme_text, idx, colors)
+        if changed:
+            theme_text = new_text
+            dirty = True
+            summary['schemes'].append(idx)
+
+    # 2. Per-site overrides → SITE_REGISTRY entries (this file)
+    site_overrides = _state.get('site_overrides', {})
+    for tag, ov in sorted(site_overrides.items()):
+        entry = SITE_REGISTRY.get(tag)
+        if entry is None:
+            continue
+        if not ov.get('role') and 'bold' not in ov:
+            continue
+        new_text, changed = _rewrite_registry_entry(theme_text, tag, ov)
+        if changed:
+            theme_text = new_text
+            dirty = True
+            if ov.get('role'):
+                summary['role_sites'] += 1
+            if 'bold' in ov:
+                summary['bold_sites'] += 1
+
+    if not dirty:
+        summary['ok'] = False
+        summary['error'] = "Nothing to bake — no role or site overrides are active."
+        return summary
+
+    if _atomic_write_text(_source_file_path('theme.py'), theme_text):
+        summary['files'].append('theme.py')
+    else:
+        summary['ok'] = False
+        summary['error'] = "Failed to write theme.py"
+
+    return summary
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -625,13 +1150,12 @@ class ThemeManager:
     MODE_SCHEME_SELECT = 'scheme'     # pick a base COLOR_SCHEMES entry
     MODE_ROLE_LIST = 'role_list'      # list of 13 roles
     MODE_ROLE_EDIT = 'role_edit'      # editing one role's fg/bg
-    MODE_SITE_LIST = 'site_list'      # browsable/searchable list of 337 sites
+    MODE_SITE_LIST = 'site_list'      # browsable/searchable list of 359 sites
     MODE_SITE_EDIT = 'site_edit'      # editing one site's role + bold
 
-    SCHEME_NAMES = [
-        "Default (cyan/blue/green/magenta)", "Amber terminal", "Green phosphor",
-        "Red alert", "Magenta/purple", "Ice blue", "DOS Blue", "DOS Red", "DOS White",
-    ]
+    # SCHEME_NAMES lives at module level now (alongside COLOR_SCHEMES);
+    # kept accessible as self.SCHEME_NAMES below for existing call sites.
+    SCHEME_NAMES = SCHEME_NAMES
 
     def __init__(self, dashboard):
         self.dashboard = dashboard
@@ -640,7 +1164,7 @@ class ThemeManager:
         self._main_sel = 0
         self._solid_bg = True   # solid (opaque) popup background; 'f' toggles
 
-        self._scheme_sel = _state.get('base_scheme_idx', 0)
+        self._scheme_sel = _state.get('base_scheme_idx', DEFAULT_SCHEME_IDX)
 
         self._role_sel = 0
         self._role_edit_field = 'fg'   # 'fg' or 'bg'
@@ -701,7 +1225,7 @@ class ThemeManager:
             self._main_sel = min(len(options) - 1, self._main_sel + 1)
         elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459, ord(' ')):
             if self._main_sel == 0:
-                self._scheme_sel = _state.get('base_scheme_idx', 0)
+                self._scheme_sel = _state.get('base_scheme_idx', DEFAULT_SCHEME_IDX)
                 self.mode = self.MODE_SCHEME_SELECT
             elif self._main_sel == 1:
                 self._role_sel = 0
@@ -716,7 +1240,7 @@ class ThemeManager:
                 self.close_popup()
 
     def _handle_scheme_key(self, key):
-        n = len(self.dashboard.COLOR_SCHEMES)
+        n = len(COLOR_SCHEMES)
         if key == 27:
             self.mode = self.MODE_MAIN
         elif key == curses.KEY_UP:
@@ -780,7 +1304,7 @@ class ThemeManager:
     def _recompute_site_filter(self):
         needle = self._site_filter.lower()
         tags = sorted(SITE_REGISTRY.keys(),
-                      key=lambda t: (SITE_REGISTRY[t]['file'], SITE_REGISTRY[t]['line']))
+                      key=lambda t: (SITE_REGISTRY[t]['file'], SITE_REGISTRY[t]['label']))
         if not needle:
             self._site_filtered = tags
         else:
@@ -822,12 +1346,6 @@ class ThemeManager:
                     ROLE_ORDER.index(current_role) if current_role in ROLE_ORDER else 0
                 )
                 self.mode = self.MODE_SITE_EDIT
-        elif key in (ord('x'), ord('X')):
-            # Clear override for the currently-selected site.
-            if n:
-                tag = self._site_filtered[self._site_sel]
-                _state.get('site_overrides', {}).pop(tag, None)
-                save_theme(_state)
         elif 32 <= key < 127:
             self._site_filter += chr(key)
             self._recompute_site_filter()
@@ -919,7 +1437,7 @@ class ThemeManager:
         db.safe_addstr(stdscr, by1, bx1 + 2, " BASE SCHEME ",
                         curses.color_pair(db.C_INVHEAD) | curses.A_BOLD)
         for i, name in enumerate(self.SCHEME_NAMES):
-            is_cur = (i == _state.get('base_scheme_idx', 0))
+            is_cur = (i == _state.get('base_scheme_idx', DEFAULT_SCHEME_IDX))
             if i == self._scheme_sel:
                 attr_ = curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
             elif is_cur:
@@ -937,7 +1455,7 @@ class ThemeManager:
         h = n + 4
         w = 42
         by1, bx1, by2, bx2 = self._box(stdscr, h, w)
-        scheme_idx = _state.get('base_scheme_idx', 0) % len(self.SCHEME_NAMES)
+        scheme_idx = _state.get('base_scheme_idx', DEFAULT_SCHEME_IDX) % len(self.SCHEME_NAMES)
         title = f" ROLE COLORS - {self.SCHEME_NAMES[scheme_idx]} "
         db.safe_addstr(stdscr, by1, bx1 + 2, title[:w - 4],
                         curses.color_pair(db.C_INVHEAD) | curses.A_BOLD)
@@ -1027,7 +1545,7 @@ class ThemeManager:
             db.safe_addstr(stdscr, by1 + 3 + row, bx1 + 2, (prefix + label)[:w - 4], attr_)
 
         db.safe_addstr(stdscr, by2, bx1 + 2,
-                        " Enter:Edit  x:Clear  Type:Filter  Esc:Back ",
+                        " Enter:Edit  Type:Filter  Esc:Back ",
                         curses.color_pair(db.C_INVHEAD))
 
     def _draw_site_edit(self, stdscr):
@@ -1040,7 +1558,7 @@ class ThemeManager:
         entry = SITE_REGISTRY[tag]
         ov = _state.get('site_overrides', {}).get(tag, {})
 
-        h = 10
+        h = 11
         w = min(70, max(50, len(entry['label']) + 8))
         by1, bx1, by2, bx2 = self._box(stdscr, h, w)
         db.safe_addstr(stdscr, by1, bx1 + 2, " EDIT CALL SITE ",
@@ -1049,24 +1567,26 @@ class ThemeManager:
         db.safe_addstr(stdscr, by1 + 2, bx1 + 2, entry['label'][:w - 4],
                         curses.color_pair(db.C_WARN) | curses.A_BOLD)
         db.safe_addstr(stdscr, by1 + 3, bx1 + 2,
-                        f"{entry['file']}:{entry['line']}", curses.color_pair(db.C_DIM))
+                        f"Tag: {tag}"[:w - 4], curses.color_pair(db.C_DIM))
+        db.safe_addstr(stdscr, by1 + 4, bx1 + 2,
+                        f"File: {entry['file']}"[:w - 4], curses.color_pair(db.C_DIM))
 
         if entry['default_role'] is not None:
             current_role = ov.get('role', entry['default_role'])
             role_attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
                          if self._site_edit_field == 'role' else curses.color_pair(db.C_NORMAL))
-            db.safe_addstr(stdscr, by1 + 5, bx1 + 2,
+            db.safe_addstr(stdscr, by1 + 6, bx1 + 2,
                             f"Color role: {ROLE_LABELS.get(current_role, current_role)}",
                             role_attr)
         else:
-            db.safe_addstr(stdscr, by1 + 5, bx1 + 2,
+            db.safe_addstr(stdscr, by1 + 6, bx1 + 2,
                             "Color role: (set at runtime, not overridable)",
                             curses.color_pair(db.C_DIM))
 
         bold_val = ov.get('bold', entry['default_bold'])
         bold_attr = (curses.color_pair(db.C_HILIGHT) | curses.A_BOLD
                      if self._site_edit_field == 'bold' else curses.color_pair(db.C_NORMAL))
-        db.safe_addstr(stdscr, by1 + 6, bx1 + 2,
+        db.safe_addstr(stdscr, by1 + 7, bx1 + 2,
                         f"Bold: {'ON' if bold_val else 'off'}", bold_attr)
 
         sample_role = ov.get('role', entry['default_role']) if entry['default_role'] else None
@@ -1075,8 +1595,8 @@ class ThemeManager:
             sample_attr = curses.color_pair(sample_pair)
             if bold_val:
                 sample_attr |= curses.A_BOLD
-            db.safe_addstr(stdscr, by1 + 8, bx1 + 2, "Sample: ", curses.color_pair(db.C_NORMAL))
-            db.safe_addstr(stdscr, by1 + 8, bx1 + 10, " Aa 123 ", sample_attr)
+            db.safe_addstr(stdscr, by1 + 9, bx1 + 2, "Sample: ", curses.color_pair(db.C_NORMAL))
+            db.safe_addstr(stdscr, by1 + 9, bx1 + 10, " Aa 123 ", sample_attr)
 
         db.safe_addstr(stdscr, by2, bx1 + 2,
                         " Tab:Field  \u2190\u2192/Space:Change  r:Reset  Esc:Back ",

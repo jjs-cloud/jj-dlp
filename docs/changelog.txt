@@ -1,3 +1,19 @@
+v1.26.17
+
+- when scrolled up on the log, stdout, and stderr tabs, output now freezes so you can read it
+- fixed some visual bugs, refined the default color schemes
+- minor ui/ux improvements
+    - arrows indicating more files at the top and bottom of the file manager list
+    - page up/down jumps to the top/bottom of the file manager list
+    - when sorting by date modified in the file manager, files will no longer jump around when they are actively recording
+- added a new File Option called "Split" in the File Manager tab.  This allows you to split files into parts. (In case you forgot to enable SPLIT_AFTER in SITE SETTINGS or STREAMER SETTINGS) It works on files that are currently IDLE, as well as files that are currently WRITING. It will create the next part automatically as the livestream progresses. This option is also useful if you want to split the file into parts, but also want to keep the full original file intact.
+- added a bar graph at the top that shows disk write speed over time
+- added a new global setting called "RGB_MODE"  When this is enabled, the app will force exact RBG colors intead of your terminal's color palette.
+- fixed silent error with yt-dlp cookies not found
+
+====================
+====================
+
 v1.26.0
 
 - fixed the "‼ RECORDING FAILURE ‼" notification

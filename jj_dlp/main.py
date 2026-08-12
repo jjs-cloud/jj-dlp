@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.0"
+__version__ = "1.26.17"
 
 import subprocess
 import time
@@ -44,6 +44,7 @@ from .browser_config import (
 )
 from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS, _compute_config_id, SiteSortManager, SORT_OPTIONS, _SORT_LABELS
 from .file_manager import FileManagerTab
+from . import graph as _graph
 from . import simulation as _simulation
 
 import curses  # noqa: E402
@@ -362,6 +363,7 @@ def load_global_config() -> dict:
         update_interval   – int
         update_branch     – str   ("main", "testing", or "experimental")
         ask_for_browser   – bool
+        graph_scale       – int   (seconds per bar on the top disk-rate graph)
     """
     path = get_global_conf_path()
     parser = configparser.ConfigParser(allow_no_value=True, interpolation=None, delimiters=('=',))
@@ -423,6 +425,8 @@ def load_global_config() -> dict:
         "web_ui_port":        _int("WEB_UI_PORT", 8765),
         "web_ui_user":        general.get("WEB_UI_USER", "").strip().strip('"\''),
         "web_ui_pass":        general.get("WEB_UI_PASS", "").strip().strip('"\''),
+        "graph_scale":        max(1, _int("GRAPH_SCALE", 1)),
+        "rgb_mode":           _bool("RGB_MODE", False),
     }
 
 def _write_global_conf_key(key: str, value: str) -> None:
@@ -616,6 +620,40 @@ def _save_last_live_cache(config_path: str, last_live: Dict[str, float]) -> None
         _save_global_json(global_data)
 
 
+# How many of the most recent disk-rate graph bars to persist across restarts.
+# Deliberately larger than any realistic terminal width so a wider window on
+# relaunch still shows a full graph.
+_GRAPH_PERSIST_BARS: int = 500
+
+
+def _load_disk_rate_history() -> List[float]:
+    """Return the persisted top-graph disk-rate bars from global.json."""
+    with _global_json_lock:
+        global_data = _load_global_json()
+    raw = global_data.get("disk_rate_history", [])
+    if not isinstance(raw, list):
+        return []
+    bars: List[float] = []
+    for v in raw[-_GRAPH_PERSIST_BARS:]:
+        try:
+            bars.append(float(v))
+        except (TypeError, ValueError):
+            continue
+    return bars
+
+
+def _save_disk_rate_history(bars) -> None:
+    """Persist the most recent disk-rate graph bars into global.json.
+
+    Merges with any existing data so other keys are preserved. Keeps at most
+    _GRAPH_PERSIST_BARS entries.
+    """
+    with _global_json_lock:
+        global_data = _load_global_json()
+        global_data["disk_rate_history"] = [float(b) for b in bars][-_GRAPH_PERSIST_BARS:]
+        _save_global_json(global_data)
+
+
 def _load_live_since_cache(config_path: str) -> Dict[str, float]:
     """Return the persisted live-since timestamps for the given site from
     global.json.
@@ -703,7 +741,7 @@ class SiteState:
         # but are still holding for their Intro Delay period — no yt-dlp
         # process has been launched yet. Guarded by self.lock, same as
         # currently_recording. Used purely so the dashboard can keep showing
-        # [●Live] instead of flashing [► REC] until recording actually starts.
+        # [● Live] instead of flashing [►  REC] until recording actually starts.
         self.intro_delay_pending: Set[str] = set()
         # Resolution (height, in px) each currently-recording streamer started
         # at, per the checker's --dump-json output. Used by UPGRADE_QUALITY to
@@ -719,6 +757,14 @@ class SiteState:
         # Used purely to gate the recording_resolution fallback in the
         # dashboard renderer.
         self.recording_attempt_started: Dict[str, float] = {}
+        # streamer -> absolute path of the file yt-dlp is currently writing
+        # for that recording. Guarded by self.lock. Published by
+        # record_stream() once the active output file resolves (and whenever a
+        # SPLIT_AFTER segment switch happens); cleared when the recording
+        # ends. Used by the File Manager's top-bar disk-rate graph so it only
+        # counts files actually being recorded by yt-dlp, never File Manager
+        # artifacts (Move/Fixup/Trim/Split output files).
+        self.recording_output_paths: Dict[str, str] = {}
         self.recording_threads:   List[threading.Thread] = []
         self.known_streamers:     Set[str] = set()
         self.trigger_event        = threading.Event()
@@ -750,6 +796,13 @@ class SiteState:
         self.dash_debug_lines:    deque = deque(maxlen=DEBUG_LOG_BUFFER_SIZE)      # recent debug-tag log
         self.dash_stdout_lines:   deque = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)   # recent stdout lines
         self.dash_stderr_lines:   deque = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)   # recent stderr lines
+        # Signature of the last "hard" checker-command failure we surfaced on
+        # the Log tab (see _CHECKER_HARD_ERROR_PATTERNS), or None if the
+        # checker is currently healthy. Only the monitor_site thread for this
+        # site touches this, so no lock is needed. Used to log a failure once
+        # (not every check_interval) and to log a single "recovered" line
+        # when the checker starts working again.
+        self._last_checker_error: Optional[str] = None
         # Same lines, additionally bucketed per-streamer so the STREAMERS
         # panel on the Stdout/Stderr tabs can show one streamer's output in
         # isolation. No liveness-checker output is shown. Buckets are
@@ -824,6 +877,23 @@ class SiteState:
         """Remove a subprocess from the registry (after it exits)."""
         with self._procs_lock:
             self._active_procs.pop(streamer, None)
+
+    def set_recording_output(self, streamer: str, path: str) -> None:
+        """Publish the absolute path of the file *streamer*'s yt-dlp process
+        is currently writing (see recording_output_paths)."""
+        with self.lock:
+            self.recording_output_paths[streamer] = path
+
+    def clear_recording_output(self, streamer: str) -> None:
+        """Forget *streamer*'s active recording output path (recording ended)."""
+        with self.lock:
+            self.recording_output_paths.pop(streamer, None)
+
+    def recording_output_paths_snapshot(self) -> Set[str]:
+        """Absolute paths of every file currently being written by yt-dlp,
+        across all streamers on this site. Thread-safe copy."""
+        with self.lock:
+            return set(self.recording_output_paths.values())
 
     def kill_proc_for_streamer(self, streamer: str) -> None:
         with self._procs_lock:
@@ -1164,6 +1234,28 @@ update_available_lock = threading.Lock()
 FFMPEG_ERROR_PATTERNS: List[str] = [
     "timestamp discontinuity",
     "Packet corrupt",
+]
+
+# Substrings that indicate the *checker* command itself is broken/misconfigured
+# (missing cookies DB, bad binary path, DNS/network failure, permissions, ...)
+# as opposed to a normal "this streamer is offline" result. Matching one of
+# these means every streamer in the check just silently failed to be
+# evaluated, so it's surfaced on the dashboard's Log tab — previously it only
+# went to the debug log (off by default) or the raw, easy-to-miss stderr
+# pipe view, so a broken checker looked identical to "nobody is live".
+_CHECKER_HARD_ERROR_PATTERNS: List[str] = [
+    "could not find",
+    "cookies database",
+    "unsupported browser",
+    "permission denied",
+    "no such file or directory",
+    "not recognized as an internal or external command",
+    "command not found",
+    "connection refused",
+    "network is unreachable",
+    "temporary failure in name resolution",
+    "name or service not known",
+    "certificate verify failed",
 ]
 
 # Lines from the checker command are stored with these prefixes so draw_stdout_tab
@@ -2049,7 +2141,7 @@ def get_live_streamers(streamers: List[str], cfg: dict,
         return {}
     # NOTE: Do NOT filter out blocked streamers here. We still need to know
     # if a blocked/disabled streamer is live so the dashboard can flash
-    # [●Live] ↔ [DIS]. Recording is suppressed downstream in
+    # [● Live] ↔ [DIS]. Recording is suppressed downstream in
     # start_recording_if_needed(), not here.
     urls = [cfg["site_tmpl"].format(username=s) for s in streamers]
     cmd = build_yt_dlp_command(cfg["yt_dlp_path"], cfg["checker_cmd"], urls)
@@ -2064,6 +2156,40 @@ def get_live_streamers(streamers: List[str], cfg: dict,
     dbg(f"[CHECKER] returncode={result.returncode} stdout_len={len(result.stdout)} stderr_len={len(result.stderr)}")
     if result.stderr:
         dbg(f"[CHECKER] stderr (first 500 chars): {result.stderr[:500]!r}")
+
+    # Surface a broken checker command on the dashboard's Log tab. Without
+    # this, something like a missing browser-cookies database makes the
+    # checker fail on every single streamer, every cycle, forever — but
+    # get_live_streamers() just returns an empty {} either way, so the
+    # dashboard looks identical to "nobody is live" and the failure never
+    # shows up anywhere the user is likely to look.
+    if site is not None and result.stderr:
+        _err_lower = result.stderr.lower()
+        if any(pat in _err_lower for pat in _CHECKER_HARD_ERROR_PATTERNS):
+            _err_first_line = next(
+                (ln.strip() for ln in result.stderr.splitlines() if ln.strip()), ""
+            )[:300]
+            if _err_first_line != site._last_checker_error:
+                site._last_checker_error = _err_first_line
+                site.log_line(
+                    f"[!] CHECKER FAILED — liveness checks are not working: {_err_first_line}"
+                )
+                if "cookies database" in _err_lower or "could not find" in _err_lower:
+                    browser = _read_browser_from_config(site.config_path)
+                    if browser and browser != "disabled":
+                        site.log_line(
+                            f"[!] Fix: open {browser} & ensure you are logged in to the site(s), or "
+                            "restart jj-dlp and select a different browser (or "
+                            '"disabled <- remove cookies option") from the browser menu.'
+                        )
+                    else:
+                        site.log_line(
+                            "[!] Fix: restart jj-dlp and select a different browser from the browser menu."
+                        )
+        elif site._last_checker_error is not None:
+            site._last_checker_error = None
+            site.log_line("Checker command is working again.")
+
     if cfg["logging"]:
         checker_path = get_checker_log_path(cfg)
         try:
@@ -2924,6 +3050,14 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 except Exception as e:
                     dbg(f"[STALL] json fallback failed: {e}", site_name=streamer)
 
+            # Publish the resolved output file so the top-bar disk-rate graph
+            # can count exactly which file(s) yt-dlp is actively recording
+            # (and only those — never File Manager Move/Fixup/Trim/Split
+            # output). If resolution failed, nothing is published and the
+            # graph reads zero until the file resolves.
+            if active_file:
+                site.set_recording_output(streamer, active_file)
+
             last_size, _, _, _ = get_streamer_file_size(
                 output_dir,
                 streamer,
@@ -3277,6 +3411,12 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                                 close_logs = next_close_logs
                                 proc_start_time = next_proc_start_time
                                 active_file = next_file
+                                # Republish the switched-to segment as the
+                                # active recording output so the disk-rate
+                                # graph follows the new file (the previous
+                                # segment has stopped growing).
+                                if active_file:
+                                    site.set_recording_output(streamer, active_file)
                                 # Use next_proc_start_time (not time.time()) so the
                                 # split timer accounts for time already spent verifying
                                 # the new file. time.time() here would let each segment
@@ -3484,7 +3624,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         # flag as stalled. Just wait for the first sign of growth.
                         filename_error_warned = False
                         dbg(f"[STALL] no growth yet, but stall checker not armed "
-                            f"(no growth seen for this file yet) — skipping stall "
+                            f"(no growth seen for {active_file!r} yet) — skipping stall "
                             f"detection", site_name=streamer)
                         # NOTIFY_NO_CONFIRM_FILE is now checked every second via
                         # _check_no_confirm_deadline() above, not here — see
@@ -3579,6 +3719,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
     finally:
         with site.lock:
             site.currently_recording.discard(streamer)
+            # Stop treating this streamer's file as an active recording so
+            # the top-bar disk-rate graph drops it the moment recording ends.
+            site.recording_output_paths.pop(streamer, None)
             # Clear the UPGRADE_QUALITY baseline along with currently_recording
             # so the next time this streamer starts recording (fresh or
             # restarted-for-quality) gets a clean baseline rather than
@@ -4311,12 +4454,12 @@ class JJDlpDashboard:
     """
 
     @staticmethod
-    def draw_box(stdscr, y1, x1, y2, x2, pair):
+    def draw_box(stdscr, y1, x1, y2, x2, pair, tag="main_jjdlpdashboard_safe_ch_pair"):
         h, w = stdscr.getmaxyx()
         def safe_ch(y, x, ch):
             if 0 <= y < h and 0 <= x < w - 1:
                 try:
-                    stdscr.addch(y, x, ch, theme.attr(JJDlpDashboard, "main_jjdlpdashboard_safe_ch_pair", pair, False))
+                    stdscr.addch(y, x, ch, theme.attr(JJDlpDashboard, tag, pair))
                 except curses.error:
                     pass
         for x in range(x1 + 1, x2):
@@ -4380,11 +4523,19 @@ class JJDlpDashboard:
         self._mgmt_sel    = 0   # selected index for disable/remove list
         self._mgmt_scroll = 0   # scroll offset for disable/remove list
         # Color scheme index for randomization
-        self._color_scheme_idx = 0
+        self._color_scheme_idx = theme.DEFAULT_SCHEME_IDX
+        # When the 'c'-key scheme-list popup should stop being drawn (epoch secs).
+        self._scheme_popup_until = 0.0
         # Scroll offsets for log/stdout/stderr tabs (lines from bottom; 0 = newest at bottom)
         self._log_scroll    = 0
         self._stdout_scroll = 0
         self._stderr_scroll = 0
+        # When scrolled up (scroll > 0), the displayed lines are frozen to a
+        # snapshot so live output can't keep shoving the viewport around. Set
+        # while scroll > 0, cleared when the user scrolls back to 0 (live).
+        self._log_frozen_lines    = None
+        self._stdout_frozen_lines = None
+        self._stderr_frozen_lines = None
         # STREAMERS panel (Stdout/Stderr tabs): 0 = "All Streamers",
         # 1..N = index+1 into site.dash_all_streamers. Shared by both tabs
         # and reset whenever the selected site changes.
@@ -4399,6 +4550,22 @@ class JJDlpDashboard:
         self._disk_cache_time: float = 0.0
         self._disk_cache_drives: list = []
         self._disk_cache_results: list = []  # list of (drive, usage) or (drive, None) on error
+
+        # ── Top-bar disk-rate sparkline ──────────────────────────────────────
+        # All graph state + logic now lives in graph.Graph (hot-swappable
+        # via the 'p' knob popup → "Reload graph.py"). GRAPH_SCALE (seconds
+        # per bar) stays here as dashboard-owned config the graph reads each
+        # tick. It counts only files that are actively being recorded by
+        # yt-dlp (per each site's recording_output_paths registry), never
+        # File Manager artifact files (Move/Fixup/Trim/Split output).
+        # History is kept far longer than any realistic terminal width so
+        # widening the window doesn't lose data.
+        self.graph_scale: int = max(1, int(self.global_cfg.get("graph_scale", 1)))
+        self.graph = _graph.Graph(self)
+        # Bars persisted to global.json on the previous run are restored here
+        # so the graph comes back with its recent history instead of starting
+        # empty.
+        self.graph.disk_rate_history.extend(_load_disk_rate_history())
 
         from .config_editor import ConfigEditor
         self.config_editor = ConfigEditor(self)
@@ -4419,6 +4586,10 @@ class JJDlpDashboard:
         self._changelog_scroll       = 0   # lines scrolled up from the bottom (0 = top)
         self._changelog_lines: List[str] = []
         self._changelog_popup_queued = False   # will be set to True after first frame
+
+        # ── Bake-to-source popup state (dev feature, hidden 'W' hotkey) ──────
+        self._bake_popup_open   = False
+        self._bake_popup_lines: List[str] = []
 
         # ── Exit-confirmation popup state ─────────────────────────────────────
         self._exit_confirm_open      = False
@@ -4446,93 +4617,19 @@ class JJDlpDashboard:
     C_SYSTEM    = 12  # system panel header/border
     C_DELETE    = 13  # permanent delete warning (white on red)
 
-    # Color schemes: list of (chrome_fg, hilight_fg, hilight_bg, warn_fg, live_fg,
-    #                          invhead_fg, invhead_bg, logo_fg, rec_fg, dim_fg,
-    #                          livebadge_fg, livebadge_bg, normal_fg, disabled_fg, system_fg,
-    #                          delete_fg, delete_bg)
-    COLOR_SCHEMES = [
-        # 0: Default (cyan/blue/green/magenta)
-        (curses.COLOR_CYAN,    curses.COLOR_WHITE,   curses.COLOR_BLUE,
-         curses.COLOR_YELLOW,  curses.COLOR_GREEN,   curses.COLOR_BLACK,
-         curses.COLOR_CYAN,    curses.COLOR_MAGENTA, curses.COLOR_RED,
-         curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
-         curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_YELLOW,
-         curses.COLOR_WHITE,   curses.COLOR_RED),
-        # 1: Amber terminal
-        (curses.COLOR_YELLOW,  curses.COLOR_WHITE,   curses.COLOR_YELLOW,
-         curses.COLOR_WHITE,   curses.COLOR_GREEN,   curses.COLOR_BLACK,
-         curses.COLOR_YELLOW,  curses.COLOR_YELLOW,  curses.COLOR_RED,
-         curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
-         curses.COLOR_WHITE,   curses.COLOR_WHITE,   curses.COLOR_CYAN,
-         curses.COLOR_WHITE,   curses.COLOR_RED),
-        # 2: Green phosphor
-        (curses.COLOR_GREEN,   curses.COLOR_WHITE,   curses.COLOR_GREEN,
-         curses.COLOR_CYAN,    curses.COLOR_WHITE,   curses.COLOR_BLACK,
-         curses.COLOR_GREEN,   curses.COLOR_GREEN,   curses.COLOR_RED,
-         curses.COLOR_GREEN,   curses.COLOR_BLACK,   curses.COLOR_WHITE,
-         curses.COLOR_WHITE,   curses.COLOR_CYAN,    curses.COLOR_YELLOW,
-         curses.COLOR_WHITE,   curses.COLOR_RED),
-        # 3: Red alert
-        (curses.COLOR_RED,     curses.COLOR_WHITE,   curses.COLOR_RED,
-         curses.COLOR_YELLOW,  curses.COLOR_GREEN,   curses.COLOR_BLACK,
-         curses.COLOR_RED,     curses.COLOR_RED,     curses.COLOR_MAGENTA,
-         curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
-         curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_CYAN,
-         curses.COLOR_WHITE,   curses.COLOR_MAGENTA),
-        # 4: Magenta/purple
-        (curses.COLOR_MAGENTA, curses.COLOR_WHITE,   curses.COLOR_MAGENTA,
-         curses.COLOR_CYAN,    curses.COLOR_GREEN,   curses.COLOR_BLACK,
-         curses.COLOR_MAGENTA, curses.COLOR_CYAN,    curses.COLOR_RED,
-         curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
-         curses.COLOR_WHITE,   curses.COLOR_CYAN,    curses.COLOR_YELLOW,
-         curses.COLOR_WHITE,   curses.COLOR_RED),
-        # 5: Ice blue
-        (curses.COLOR_CYAN,    curses.COLOR_WHITE,   curses.COLOR_CYAN,
-         curses.COLOR_WHITE,   curses.COLOR_GREEN,   curses.COLOR_BLACK,
-         curses.COLOR_WHITE,   curses.COLOR_BLUE,    curses.COLOR_RED,
-         curses.COLOR_CYAN,    curses.COLOR_BLACK,   curses.COLOR_GREEN,
-         curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_MAGENTA,
-         curses.COLOR_WHITE,   curses.COLOR_RED),
-        # 6: DOS Blue (classic QBasic/EDIT-style white-on-blue screen)
-        (curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_CYAN,
-         curses.COLOR_YELLOW,  curses.COLOR_GREEN,   curses.COLOR_BLUE,
-         curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_RED,
-         curses.COLOR_CYAN,    curses.COLOR_BLACK,   curses.COLOR_GREEN,
-         curses.COLOR_WHITE,   curses.COLOR_CYAN,    curses.COLOR_YELLOW,
-         curses.COLOR_WHITE,   curses.COLOR_RED),
-        # 7: DOS Red (red alert / danger screen)
-        (curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_WHITE,
-         curses.COLOR_YELLOW,  curses.COLOR_GREEN,   curses.COLOR_RED,
-         curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_WHITE,
-         curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
-         curses.COLOR_YELLOW,  curses.COLOR_YELLOW,  curses.COLOR_WHITE,
-         curses.COLOR_WHITE,   curses.COLOR_BLUE),
-        # 8: DOS White (classic light-background word-processor screen)
-        (curses.COLOR_BLUE,    curses.COLOR_WHITE,   curses.COLOR_BLUE,
-         curses.COLOR_RED,     curses.COLOR_GREEN,   curses.COLOR_WHITE,
-         curses.COLOR_BLUE,    curses.COLOR_MAGENTA, curses.COLOR_RED,
-         curses.COLOR_BLACK,   curses.COLOR_WHITE,   curses.COLOR_GREEN,
-         curses.COLOR_BLACK,   curses.COLOR_CYAN,    curses.COLOR_BLUE,
-         curses.COLOR_WHITE,   curses.COLOR_RED),
-    ]
-
-    # Main dashboard background for each scheme (index-aligned with
-    # COLOR_SCHEMES). Defaults to COLOR_BLACK when not listed here — the
-    # DOS Blue/Red/White schemes override this to recolor the whole screen.
-    _SCHEME_BACKGROUND = {
-        6: curses.COLOR_BLUE,
-        7: curses.COLOR_RED,
-        8: curses.COLOR_WHITE,
-    }
+    # Color schemes now live in theme.py (theme.COLOR_SCHEMES /
+    # theme._SCHEME_BACKGROUND) so base-scheme role-color overrides can be
+    # baked there directly, without touching this file.
 
     def randomize_colors(self):
         """Cycle to the next color scheme. Bound to the 'c' key ('C' for
         Colors); the 'n' key opens the full theme editor popup instead,
         which offers the same scheme picker plus role/site customization."""
-        self._color_scheme_idx = (self._color_scheme_idx + 1) % len(self.COLOR_SCHEMES)
+        self._color_scheme_idx = (self._color_scheme_idx + 1) % len(theme.COLOR_SCHEMES)
         theme.get_state()['base_scheme_idx'] = self._color_scheme_idx
         self._apply_color_scheme()
         theme.save_theme(theme.get_state())
+        self._scheme_popup_until = time.time() + 2.0
 
     def _apply_color_scheme(self):
         """Re-initialize all 13 curses pairs. Delegates to theme.py, which
@@ -4540,30 +4637,68 @@ class JJDlpDashboard:
         scheme. self._color_scheme_idx is kept in sync with theme's saved
         base_scheme_idx so existing readers (e.g. the DOS Red bold-tabs
         check in draw_tabs) keep working unchanged."""
-        self._color_scheme_idx = theme.get_state().get('base_scheme_idx', 0) % len(self.COLOR_SCHEMES)
+        self._color_scheme_idx = theme.get_state().get('base_scheme_idx', theme.DEFAULT_SCHEME_IDX) % len(theme.COLOR_SCHEMES)
         theme.apply_palette(self)
 
     def setup_colors(self):
         curses.start_color()
         curses.use_default_colors()
+        if theme.apply_pending_theme_push():
+            dbg(f"[THEME] applied one-time theme push (scheme idx {theme.THEME_PUSH})")
         self._apply_color_scheme()
+
+    def draw_scheme_popup(self) -> None:
+        """Display-only popup listing every color scheme (current one
+        highlighted). Shown for ~2s after the 'c' key cycles schemes."""
+        if time.time() >= self._scheme_popup_until:
+            return
+        h, w = self.stdscr.getmaxyx()
+        names = theme.SCHEME_NAMES
+        box_h = len(names) + 4
+        box_w = min(w - 4, 44)
+        by1 = max(0, (h - box_h) // 2)
+        bx1 = max(0, (w - box_w) // 2)
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            self.safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1),
+                        theme.attr(self, "main_jjdlpdashboard_draw_scheme_popup_normal_1"))
+
+        self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_CHROME)
+        self.safe_addstr(self.stdscr, by1, bx1 + 2, " COLOR SCHEMES ",
+                    theme.attr(self, "main_jjdlpdashboard_draw_scheme_popup_hilight"))
+
+        for i, name in enumerate(names):
+            if i == self._color_scheme_idx:
+                attr_ = theme.attr(self, "main_jjdlpdashboard_draw_scheme_popup_live")
+                prefix = "* "
+            else:
+                attr_ = theme.attr(self, "main_jjdlpdashboard_draw_scheme_popup_normal_2")
+                prefix = "  "
+            self.safe_addstr(self.stdscr, by1 + 2 + i, bx1 + 2,
+                        (prefix + name)[:box_w - 4], attr_)
+
+        self.safe_addstr(self.stdscr, by2, bx1 + 2, " c: next scheme ",
+                    theme.attr(self, "main_jjdlpdashboard_draw_scheme_popup_invhead"))
 
 
     # ── Logo ─────────────────────────────────────────────────────────────────
     def draw_logo(self, y, x):
         for i, line in enumerate(ASCII_LOGO):
             self.safe_addstr(self.stdscr, y + i, x, line,
-                        theme.attr(self, "main_jjdlpdashboard_draw_logo_logo", self.C_LOGO, True))
+                        theme.attr(self, "main_jjdlpdashboard_draw_logo_logo"))
+
 
     # ── Christmas Day easter egg ────────────────────────────────────────────
     @staticmethod
     def _is_christmas_day() -> bool:
-        """Return True only on December 25th (local system date)."""
+        """Return True on December 24th and 25th (local system date)."""
         _today = datetime.now()
-        return _today.month == 12 and _today.day == 25
+        return _today.month == 12 and _today.day in (24, 25)
 
     def draw_christmas_easter_egg(self, y, x):
-        """A small festive banner shown only on Christmas Day, next to the logo."""
+        """A small festive tree shown only on Christmas Eve/Day, below the version number."""
         tree = [
             "   *   ",
             "  /_\\  ",
@@ -4571,7 +4706,6 @@ class JJDlpDashboard:
             "/_____\\",
             "  | |  ",
         ]
-        greeting = "Merry Christmas!"
 
         for i, line in enumerate(tree):
             # Alternate red/green per row for a bit of festive sparkle;
@@ -4582,25 +4716,19 @@ class JJDlpDashboard:
                 pair = self.C_LIVE
             else:
                 pair = self.C_REC
-            self.safe_addstr(self.stdscr, y + i, x + 15, line,
-                        theme.attr(self, "main_jjdlpdashboard_draw_christmas_easte_pair", pair, True))
-
-        self.safe_addstr(self.stdscr, y + len(tree) + 1, x + 11, greeting,
-                    theme.attr(self, "main_jjdlpdashboard_draw_christmas_easte_live", self.C_LIVE, True))
+            self.safe_addstr(self.stdscr, y + i, x, line,
+                        theme.attr(self, "main_jjdlpdashboard_draw_christmas_easte_pair", pair))
 
     # ── Tab bar ──────────────────────────────────────────────────────────────
     def draw_tabs(self, y, x):
-        dos_red = (self._color_scheme_idx == 7)  # DOS Red: bold tab headers
         for i, tab in enumerate(self.TABS):
             label = f"  {tab}  "
             if i == self.selected_tab:
                 self.safe_addstr(self.stdscr, y, x, label,
-                            theme.attr(self, "main_jjdlpdashboard_draw_tabs_hilight", self.C_HILIGHT, False))
+                            theme.attr(self, "main_jjdlpdashboard_draw_tabs_hilight"))
             else:
-                attr = theme.attr(self, "main_jjdlpdashboard_draw_tabs_invhead", self.C_CHROME, True)
-                if dos_red:
-                    attr |= curses.A_BOLD
-                self.safe_addstr(self.stdscr, y, x, label, attr)
+                self.safe_addstr(self.stdscr, y, x, label,
+                            theme.attr(self, "main_jjdlpdashboard_draw_tabs_invhead"))
             x += len(label) + 1
 
     # ── System status sidebar ────────────────────────────────────────────────
@@ -4608,7 +4736,7 @@ class JJDlpDashboard:
         """Draws the SYSTEM info panel (from demo). Placed in the sidebar."""
         self.draw_box(self.stdscr, y1, x1, y2, x2, self.C_SYSTEM)
         self.safe_addstr(self.stdscr, y1, x1 + 2, " SYSTEM ",
-                    theme.attr(self, "main_jjdlpdashboard_draw_system_panel_system", self.C_SYSTEM, True))
+                    theme.attr(self, "main_jjdlpdashboard_draw_system_panel_system"))
 
         # Aggregate counts across all sites
         total_streamers = 0
@@ -4704,10 +4832,10 @@ class JJDlpDashboard:
             if label:
                 self.safe_addstr(self.stdscr, row_y, x1 + 2,
                             label[:label_w].ljust(label_w),
-                            theme.attr(self, "main_jjdlpdashboard_split_after_rows_dim", self.C_NORMAL, True))
+                            theme.attr(self, "main_jjdlpdashboard_split_after_rows_dim"))
                 self.safe_addstr(self.stdscr, row_y, x1 + 2 + label_w + 1,
                             str(val)[:inner_w - label_w - 1],
-                            theme.attr(self, "main_jjdlpdashboard_split_after_rows_cpair", cpair, True))
+                            theme.attr(self, "main_jjdlpdashboard_split_after_rows_cpair", cpair))
 
         # Disk space rows — drives from global.conf take precedence; fall back to per-site
         disk_row_y = y1 + 2 + len(rows) + 1
@@ -4728,7 +4856,7 @@ class JJDlpDashboard:
                 if ffmpeg_row_y < y2 - 1:
                     self.safe_addstr(self.stdscr, ffmpeg_row_y, x1 + 2,
                                 "── ffmpeg errors ──"[:inner_w],
-                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_rec_1", self.C_REC, False))
+                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_rec_1"))
                     ffmpeg_row_y += 1
                 for _streamer, _count in all_ffmpeg_errors:
                     if ffmpeg_row_y >= y2 - 1:
@@ -4737,10 +4865,10 @@ class JJDlpDashboard:
                     _val   = str(_count)
                     self.safe_addstr(self.stdscr, ffmpeg_row_y, x1 + 2,
                                 _label,
-                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_rec_2", self.C_REC, False))
+                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_rec_2"))
                     self.safe_addstr(self.stdscr, ffmpeg_row_y, x1 + 2 + label_w + 1,
                                 _val[:inner_w - label_w - 1],
-                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_rec_3", self.C_REC, False))
+                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_rec_3"))
                     ffmpeg_row_y += 1
                 disk_row_y = ffmpeg_row_y + 1
         except Exception as _ffmpeg_err_exc:
@@ -4762,7 +4890,7 @@ class JJDlpDashboard:
                 if disk_row_y < y2 - 1:
                     self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
                                 "── stalled ──"[:inner_w],
-                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_rec_4", self.C_REC, False))
+                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_rec_4"))
                     disk_row_y += 1
                 for _streamer, _secs in all_stalls:
                     if disk_row_y >= y2 - 1:
@@ -4771,10 +4899,10 @@ class JJDlpDashboard:
                     _val   = _fmt_duration(int(_secs))
                     self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
                                 _label,
-                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_rec_5", self.C_REC, False))
+                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_rec_5"))
                     self.safe_addstr(self.stdscr, disk_row_y, x1 + 2 + label_w + 1,
                                 _val[:inner_w - label_w - 1],
-                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_rec_6", self.C_REC, False))
+                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_rec_6"))
                     disk_row_y += 1
                 disk_row_y += 1
         except Exception as _stall_exc:
@@ -4793,13 +4921,13 @@ class JJDlpDashboard:
                 if disk_row_y < y2 - 1:
                     self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
                                 "── ads ──"[:inner_w],
-                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_warn_1", self.C_WARN, True))
+                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_warn_1"))
                     disk_row_y += 1
                 for _streamer in all_ad_alerts:
                     if disk_row_y >= y2 - 1:
                         break
                     _label = _streamer[:label_w].ljust(label_w)
-                    _attr  = theme.attr(self, "main_jjdlpdashboard_split_after_rows_warn_2", self.C_WARN, True)
+                    _attr  = theme.attr(self, "main_jjdlpdashboard_split_after_rows_warn_2")
                     self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
                                 _label, _attr)
                     self.safe_addstr(self.stdscr, disk_row_y, x1 + 2 + label_w + 1,
@@ -4886,8 +5014,10 @@ class JJDlpDashboard:
                 threading.Thread(target=_update_disk_usage, args=(drives,), daemon=True).start()
 
             if disk_row_y < y2 - 1:
-                self.safe_addstr(self.stdscr, disk_row_y, x1 + 2, "── Disk ──",
-                            theme.attr(self, "main_jjdlpdashboard_update_disk_usage_system", self.C_SYSTEM, True))
+                _disk_header = "── Disk ──"
+                self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
+                            _disk_header[:inner_w],
+                            theme.attr(self, "main_jjdlpdashboard_update_disk_usage_system"))
                 disk_row_y += 1
             for drive, usage in self._disk_cache_results:
                 if disk_row_y >= y2 - 1:
@@ -4903,7 +5033,7 @@ class JJDlpDashboard:
                 color = self.C_LIVE if pct < 80 else (self.C_WARN if pct < 95 else self.C_REC)
                 self.safe_addstr(self.stdscr, disk_row_y, x1 + 2,
                             disk_str[:inner_w],
-                            theme.attr(self, "main_jjdlpdashboard_update_disk_usage_color", color, True))
+                            theme.attr(self, "main_jjdlpdashboard_update_disk_usage_color", color))
                 disk_row_y += 1
         except Exception as _disk_outer_exc:
             dbg(f"[DISK] outer exception in disk section: {type(_disk_outer_exc).__name__}: {_disk_outer_exc}")
@@ -4911,7 +5041,7 @@ class JJDlpDashboard:
         # Uptime at bottom
         self.safe_addstr(self.stdscr, y2 - 1, x1 + 2,
                     f"Up: {uptime_str}"[:inner_w],
-                    theme.attr(self, "main_jjdlpdashboard_update_disk_usage_chrome", self.C_CHROME, True))
+                    theme.attr(self, "main_jjdlpdashboard_update_disk_usage_chrome"))
 
     # ── Site panel (one per config) ──────────────────────────────────────────
     def draw_site_panel(self, site: "SiteState", y1, x1, y2, x2, is_selected: bool = False):
@@ -4922,7 +5052,9 @@ class JJDlpDashboard:
         now = time.time()
         #Pick border color based on selection
         border_pair = self.C_HILIGHT if is_selected else self.C_CHROME
-        self.draw_box(self.stdscr, y1, x1, y2, x2, border_pair)
+        border_tag = ("main_jjdlpdashboard_draw_site_panel_border_hilight"
+                      if is_selected else "main_jjdlpdashboard_draw_site_panel_border_chrome")
+        self.draw_box(self.stdscr, y1, x1, y2, x2, border_pair, border_tag)
 
         # ── Panel header ──
         _panel_cfg = site.get_cached_config()
@@ -4969,23 +5101,23 @@ class JJDlpDashboard:
         # Site label on top border
         label_text = f"  {cfg_label}  "
         self.safe_addstr(self.stdscr, header_y, x1 + 2, label_text,
-                    theme.attr(self, "main_jjdlpdashboard_draw_site_panel_chrome_1", self.C_CHROME, True))
+                    theme.attr(self, "main_jjdlpdashboard_draw_site_panel_chrome_1"))
 
         # Status badge row
         badge_y = y1 + 1
         bx = x1 + 2
         self.safe_addstr(self.stdscr, badge_y, bx,
-                    f"LIVE:{live_cnt}",  theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_1", self.C_LIVE, True))
+                    f"LIVE:{live_cnt}",  theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_1"))
         bx += 7
         self.safe_addstr(self.stdscr, badge_y, bx,
-                    f"REC:{rec_cnt}",    theme.attr(self, "main_jjdlpdashboard_draw_site_panel_rec_1", self.C_REC, True))
+                    f"REC:{rec_cnt}",    theme.attr(self, "main_jjdlpdashboard_draw_site_panel_rec_1"))
         bx += 6
         self.safe_addstr(self.stdscr, badge_y, bx,
-                    f"OFF:{off_cnt}",    theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_1", self.C_DIM, False))
+                    f"OFF:{off_cnt}",    theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_1"))
         bx += 6
         if dis_cnt:
             self.safe_addstr(self.stdscr, badge_y, bx,
-                        f"DIS:{dis_cnt}", theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_1", self.C_DISABLED, False))
+                        f"DIS:{dis_cnt}", theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_1"))
 
         # ── Streamer rows ──
         panel_width  = x2 - x1 - 2   # usable inner width
@@ -5014,7 +5146,7 @@ class JJDlpDashboard:
             _rows_used = min(max_rows, (len(all_s) + 1) // 2)
             for _sy in range(row_start, row_start + _rows_used):
                 self.safe_addstr(self.stdscr, _sy, _sep_col, "│",
-                            theme.attr(self, "main_jjdlpdashboard_draw_site_panel_chrome_2", self.C_CHROME, False))
+                            theme.attr(self, "main_jjdlpdashboard_draw_site_panel_chrome_2"))
             for i, s in enumerate(all_s):
                 row_idx = i // 2
                 col_idx = i % 2
@@ -5044,61 +5176,61 @@ class JJDlpDashboard:
                     last_live_str = ""
 
                 if is_dis:
-                    name_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_2", self.C_DISABLED, False)
+                    name_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_2")
                     if since is not None:
                         if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
-                            status_str = "[●Live]"
-                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_3", self.C_DISABLED, True)
+                            status_str = "[● Live]"
+                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_3")
                         else:
-                            status_str = "[x DIS]"
-                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_4", self.C_DISABLED, False)
+                            status_str = "[x  DIS]"
+                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_4")
                     else:
-                        status_str = "[x DIS]"
-                        status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_5", self.C_DISABLED, False)
+                        status_str = "[x  DIS]"
+                        status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_5")
                 elif since is not None:
-                    name_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_2", self.C_LIVE, True)
+                    name_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_2")
                     if is_rec:
                         if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
-                            status_str = "[●Live]"
-                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_3", self.C_LIVE, True)
+                            status_str = "[● Live]"
+                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_3")
                         else:
-                            status_str = "[► REC] "
-                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_rec_2", self.C_REC, True)
+                            status_str = "[►  REC] "
+                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_rec_2")
                     else:
-                        status_str = "[●Live]"
-                        status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_4", self.C_LIVE, True)
+                        status_str = "[● Live]"
+                        status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_4")
                     if not (is_rec and recording_res.get(s) is not None):
                         last_live_str = ""  # currently live, no "last live"
                 else:
-                    name_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_2", self.C_DIM, False)
-                    status_str = "[○ off]"
-                    status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_3", self.C_DIM, False)
+                    name_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_2")
+                    status_str = "[○  off]"
+                    status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_3")
 
                 col = x1 + 2 + col_idx * (half_w + _col_gap)
                 self.safe_addstr(self.stdscr, row_y, col,
                             s[:name_w_compact].ljust(name_w_compact), name_attr)
                 col += name_w_compact + 1
                 self.safe_addstr(self.stdscr, row_y, col,
-                            status_str[:7].ljust(7), status_attr)
-                col += 8
+                            status_str[:8].ljust(8), status_attr)
+                col += 9
                 if last_live_str:
                     if (ll_ts is not None
                             and _last_live_highlight_days > 0
                             and (now - ll_ts) <= _last_live_highlight_days * 86400):
-                        ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_5", self.C_LIVE, True)
+                        ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_5")
                     else:
-                        ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_4", self.C_DIM, False)
+                        ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_4")
                     self.safe_addstr(self.stdscr, row_y, col,
                                 last_live_str[:last_live_w_compact],
                                 ll_attr)
         else:
             # Normal: 1 column with progress bar, duration, last_live
             # Column widths — bar_w honours PROGRESS_BAR_WIDTH but won't overflow the row.
-            # Row layout: [name_w] 1 [status=7] 1 [bar_w] 1 [dur=9] 1 [last_live_w]
+            # Row layout: [name_w] 1 [status=8] 1 [bar_w] 1 [dur=9] 1 [last_live_w]
             # So the actual space available for the bar is what's left after the fixed columns.
             name_w      = max(10, min(18, panel_width // 4))
             last_live_w = 12   # "Last Live" column
-            _fixed_cols = name_w + 1 + 7 + 1 + 1 + 9 + 1 + last_live_w  # everything except bar
+            _fixed_cols = name_w + 1 + 8 + 1 + 1 + 9 + 1 + last_live_w  # everything except bar
             bar_w       = max(4, min(_bar_cfg_w, panel_width - _fixed_cols))
 
             for i, s in enumerate(all_s):
@@ -5128,44 +5260,44 @@ class JJDlpDashboard:
                     last_live_str = ""
 
                 if is_dis:
-                    name_attr   = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_6", self.C_DISABLED, False)
+                    name_attr   = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_6")
                     bar_str     = "─" * bar_w
-                    bar_attr    = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_7", self.C_DISABLED, False)
+                    bar_attr    = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_7")
                     dur_str     = ""
                     if since is not None:
                         if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
-                            status_str  = "[●Live]"
-                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_8", self.C_DISABLED, True)
+                            status_str  = "[● Live]"
+                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_8")
                         else:
-                            status_str  = "[x DIS]"
-                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_9", self.C_DISABLED, False)
+                            status_str  = "[x  DIS]"
+                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_9")
                     else:
-                        status_str  = "[x DIS]"
-                        status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_10", self.C_DISABLED, False)
+                        status_str  = "[x  DIS]"
+                        status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_10")
                 elif since is not None:
                     elapsed     = now - since
-                    name_attr   = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_6", self.C_LIVE, True)
+                    name_attr   = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_6")
                     if is_rec:
                         if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
-                            status_str  = "[●Live]"
-                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_7", self.C_LIVE, True)
+                            status_str  = "[● Live]"
+                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_7")
                         else:
-                            status_str  = "[► REC] "
-                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_rec_3", self.C_REC, True)
+                            status_str  = "[►  REC] "
+                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_rec_3")
                     else:
-                        status_str  = "[●Live]"
-                        status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_8", self.C_LIVE, True)
+                        status_str  = "[● Live]"
+                        status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_8")
                     bar_str     = _live_bar(elapsed, bar_w, _bar_max_secs)
-                    bar_attr    = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_9", self.C_LIVE, False)
+                    bar_attr    = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_9")
                     dur_str     = _fmt_duration(elapsed)
                     if not (is_rec and recording_res.get(s) is not None):
                         last_live_str = ""  # currently live, no "last live"
                 else:
-                    name_attr   = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_5", self.C_NORMAL, True)
-                    status_str  = "[○ off]"
-                    status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_6", self.C_NORMAL, True)
+                    name_attr   = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_5")
+                    status_str  = "[○  off]"
+                    status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_6")
                     bar_str     = "─" * bar_w
-                    bar_attr    = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_7", self.C_NORMAL, True)
+                    bar_attr    = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_7")
                     dur_str     = ""
 
                 col = x1 + 2
@@ -5173,13 +5305,13 @@ class JJDlpDashboard:
                             s[:name_w].ljust(name_w), name_attr)
                 col += name_w + 1
                 self.safe_addstr(self.stdscr, row_y, col,
-                            status_str[:7].ljust(7), status_attr)
-                col += 8
+                            status_str[:8].ljust(8), status_attr)
+                col += 9
                 self.safe_addstr(self.stdscr, row_y, col, bar_str, bar_attr)
                 col += bar_w + 1
                 if dur_str:
                     self.safe_addstr(self.stdscr, row_y, col,
-                                dur_str[:9].ljust(9), theme.attr(self, "main_jjdlpdashboard_draw_site_panel_chrome_3", self.C_CHROME, False))
+                                dur_str[:9].ljust(9), theme.attr(self, "main_jjdlpdashboard_draw_site_panel_chrome_3"))
                 else:
                     self.safe_addstr(self.stdscr, row_y, col, " " * 9, 0)
                 col += 10
@@ -5187,9 +5319,9 @@ class JJDlpDashboard:
                     if (ll_ts is not None
                             and _last_live_highlight_days > 0
                             and (now - ll_ts) <= _last_live_highlight_days * 86400):
-                        ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_10", self.C_LIVE, True)
+                        ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_10")
                     else:
-                        ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_8", self.C_NORMAL, True)
+                        ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_8")
                     self.safe_addstr(self.stdscr, row_y, col,
                                 last_live_str[:last_live_w],
                                 ll_attr)
@@ -5209,7 +5341,7 @@ class JJDlpDashboard:
             _nxt_str = f"{nxt:>4.0f}s"
         self.safe_addstr(self.stdscr, y2 - 1, x1 + 2,
                     f"Next check: {_nxt_str}",
-                    theme.attr(self, "main_jjdlpdashboard_draw_site_panel_warn", self.C_WARN, True))
+                    theme.attr(self, "main_jjdlpdashboard_draw_site_panel_warn"))
 
     # ── Dashboard tab ────────────────────────────────────────────────────────
     def draw_dashboard_tab(self, y1, x1, y2, x2):
@@ -5286,6 +5418,21 @@ class JJDlpDashboard:
     # ── Line-wrap helper ─────────────────────────────────────────────────────
     _CONTROL_CHAR_RE = _re.compile(r'[\x00-\x08\x0b-\x1f\x7f]')
 
+    @staticmethod
+    def _apply_freeze(scroll: int, live_lines: List[str],
+                      frozen: Optional[List[str]]) -> "Tuple[Optional[List[str]], List[str]]":
+        """Return (updated_frozen, lines_to_draw) for the scroll-up freeze.
+
+        scroll == 0 means live-following: drop any stale snapshot.
+        scroll >  0 freezes the display on a snapshot so active writers
+        (ffmpeg) can't keep shifting the viewport while the user reads.
+        """
+        if scroll == 0:
+            return None, live_lines
+        if frozen is None:
+            return list(live_lines), list(live_lines)
+        return frozen, frozen
+
     @classmethod
     def _sanitize_line(cls, line: str) -> str:
         """Strip control characters (stray '\\r' in particular) that would
@@ -5316,15 +5463,15 @@ class JJDlpDashboard:
         sel_site = self.sites[self.selected_site_idx] if self.sites else None
         tab_x    = x1 + 1
         self.safe_addstr(self.stdscr, y1, x1, "  Site: ",
-                    theme.attr(self, "main_jjdlpdashboard_draw_log_tab_dim_1", self.C_NORMAL, True))
+                    theme.attr(self, "main_jjdlpdashboard_draw_log_tab_dim_1"))
         tab_x += 8
         for i, site in enumerate(self.sites):
             lbl = site.get_cached_config().get("site_label",
                               os.path.basename(site.config_path))
             label = f" {lbl} "
-            attr  = (theme.attr(self, "main_jjdlpdashboard_draw_log_tab_hilight", self.C_HILIGHT, False)
+            attr  = (theme.attr(self, "main_jjdlpdashboard_draw_log_tab_hilight")
                      if i == self.selected_site_idx
-                     else theme.attr(self, "main_jjdlpdashboard_draw_log_tab_chrome", self.C_CHROME, True))
+                     else theme.attr(self, "main_jjdlpdashboard_draw_log_tab_chrome"))
             self.safe_addstr(self.stdscr, y1, tab_x, label, attr)
             tab_x += len(label) + 1
 
@@ -5335,7 +5482,7 @@ class JJDlpDashboard:
 
         self.draw_box(self.stdscr, y1 + 1, x1, y2, x2, self.C_DIM)
         self.safe_addstr(self.stdscr, y1 + 1, x1 + 2, title,
-                    theme.attr(self, "main_jjdlpdashboard_draw_log_tab_dim_2", self.C_NORMAL, True))
+                    theme.attr(self, "main_jjdlpdashboard_draw_log_tab_dim_2"))
 
         if sel_site is None:
             return
@@ -5355,6 +5502,9 @@ class JJDlpDashboard:
             _merge_lines_by_timestamp(raw_lines, raw_debug) if raw_debug else raw_lines
         )
 
+        self._log_frozen_lines, display_lines = self._apply_freeze(
+            self._log_scroll, display_lines, self._log_frozen_lines)
+
         wrapped = self._wrap_lines(display_lines, line_width)
 
         # Clamp scroll so it never exceeds available history
@@ -5366,35 +5516,35 @@ class JJDlpDashboard:
         view  = wrapped[start : start + visible_rows]
 
         for i, line in enumerate(view):
-            attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_dim_3", self.C_NORMAL, True)
+            attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_dim_3")
             if "Live now" in line or "Recording started" in line:
-                attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_live", self.C_LOGO, True)
+                attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_live")
             elif "ERROR" in line or "Stall" in line or "STOPPED" in line:
-                attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_rec", self.C_REC, True)
+                attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_rec")
             elif "Warning" in line:
-                attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_warn_1", self.C_WARN, True)
+                attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_warn_1")
             self.safe_addstr(self.stdscr, y1 + 2 + i, x1 + 2, line, attr)
 
         # Scroll indicator
         if max_scroll > 0:
             scroll_info = f" ↑{self._log_scroll}/{max_scroll} " if self._log_scroll else " (end) "
             self.safe_addstr(self.stdscr, y1 + 1, x2 - len(scroll_info) - 1,
-                        scroll_info, theme.attr(self, "main_jjdlpdashboard_draw_log_tab_warn_2", self.C_WARN, False))
+                        scroll_info, theme.attr(self, "main_jjdlpdashboard_draw_log_tab_warn_2"))
 
     def _draw_pipe_tab_bar(self, y1, x1, x2) -> None:
         """Draw the '  Site: <site> <site> ...' switcher row shared by the
         Stdout/Stderr tabs."""
         tab_x = x1 + 1
         self.safe_addstr(self.stdscr, y1, x1, "  Site: ",
-                    theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_bar_dim", self.C_NORMAL, True))
+                    theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_bar_dim"))
         tab_x += 8
         for i, site in enumerate(self.sites):
             lbl = site.get_cached_config().get("site_label",
                               os.path.basename(site.config_path))
             label = f" {lbl} "
-            attr  = (theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_bar_hilight", self.C_HILIGHT, False)
+            attr  = (theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_bar_hilight")
                      if i == self.selected_site_idx
-                     else theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_bar_chrome", self.C_CHROME, True))
+                     else theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_bar_chrome"))
             self.safe_addstr(self.stdscr, y1, tab_x, label, attr)
             tab_x += len(label) + 1
 
@@ -5408,7 +5558,7 @@ class JJDlpDashboard:
         self.draw_box(self.stdscr, y1, x1, y2, x2, border_pair)
         title = " STREAMERS " if not is_active else " STREAMERS [  ] "
         self.safe_addstr(self.stdscr, y1, x1 + 2, title,
-                    theme.attr(self, "main_jjdlpdashboard_draw_streamer_panel_border_pair", border_pair, False))
+                    theme.attr(self, "main_jjdlpdashboard_draw_streamer_panel_border_pair", border_pair))
 
         streamers = list(site.dash_all_streamers) if site is not None else []
         # Clamp selection in case the streamer list shrank (e.g. one removed).
@@ -5433,10 +5583,10 @@ class JJDlpDashboard:
             idx = start + i
             label = name[:row_width].ljust(row_width)
             if idx == sel:
-                attr = (theme.attr(self, "main_jjdlpdashboard_draw_streamer_panel_hilight", self.C_CHROME, False)
+                attr = (theme.attr(self, "main_jjdlpdashboard_draw_streamer_panel_hilight")
                          | (curses.A_REVERSE if is_active else 0))
             else:
-                attr = theme.attr(self, "main_jjdlpdashboard_draw_streamer_panel_dim", self.C_NORMAL, True)
+                attr = theme.attr(self, "main_jjdlpdashboard_draw_streamer_panel_dim")
             self.safe_addstr(self.stdscr, y1 + 1 + i, x1 + 1, label, attr)
 
     def _draw_pipe_tab(self, y1, x1, y2, x2, title: str, lines: List[str],
@@ -5449,7 +5599,7 @@ class JJDlpDashboard:
         self.draw_box(self.stdscr, y1, x1, y2, x2, border_pair)
         title_suffix = " [  ]" if is_active else ""
         self.safe_addstr(self.stdscr, y1, x1 + 2, f" {title}{title_suffix} ",
-                    theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_border_pair", border_pair, True))
+                    theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_border_pair", border_pair))
 
         if sel_site is None:
             return 0
@@ -5466,13 +5616,13 @@ class JJDlpDashboard:
 
         for i, line in enumerate(view):
             self.safe_addstr(self.stdscr, y1 + 1 + i, x1 + 2, line,
-                        theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_dim", self.C_NORMAL, True))
+                        theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_dim"))
 
         # Scroll indicator
         if max_scroll > 0:
             scroll_info = f" ↑{scroll}/{max_scroll} " if scroll else " (end) "
             self.safe_addstr(self.stdscr, y1, x2 - len(scroll_info) - 1,
-                        scroll_info, theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_warn", self.C_WARN, True))
+                        scroll_info, theme.attr(self, "main_jjdlpdashboard_draw_pipe_tab_warn"))
 
         return scroll
 
@@ -5520,6 +5670,8 @@ class JJDlpDashboard:
             title = " STDOUT — Show All: ON  (Press A to toggle) " if show_all else " STDOUT — Show All: OFF (Press A to toggle) "
         else:
             title = f" STDOUT — {streamers[sel_idx - 1] if sel_idx - 1 < len(streamers) else ''} "
+        self._stdout_frozen_lines, lines = self._apply_freeze(
+            self._stdout_scroll, lines, self._stdout_frozen_lines)
         self._stdout_scroll = self._draw_pipe_tab(
             y1 + 1, panel_x2 + 1, y2, x2, title, lines, self._stdout_scroll,
             is_active=(self._pipe_focus == "content"))
@@ -5559,6 +5711,8 @@ class JJDlpDashboard:
             title = " STDERR — Show All: ON  (Press A to toggle) " if show_all else " STDERR — Show All: OFF (Press A to toggle) "
         else:
             title = f" STDERR — {streamers[sel_idx - 1] if sel_idx - 1 < len(streamers) else ''} "
+        self._stderr_frozen_lines, lines = self._apply_freeze(
+            self._stderr_scroll, lines, self._stderr_frozen_lines)
         self._stderr_scroll = self._draw_pipe_tab(
             y1 + 1, panel_x2 + 1, y2, x2, title, lines, self._stderr_scroll,
             is_active=(self._pipe_focus == "content"))
@@ -5567,7 +5721,7 @@ class JJDlpDashboard:
     def draw_eventsub_tab(self, y1, x1, y2, x2):
         self.draw_box(self.stdscr, y1, x1, y2, x2, self.C_CHROME)
         self.safe_addstr(self.stdscr, y1, x1 + 2, " TWITCH EVENTSUB ",
-                    theme.attr(self, "main_jjdlpdashboard_draw_eventsub_tab_invhead_1", self.C_INVHEAD, True))
+                    theme.attr(self, "main_jjdlpdashboard_draw_eventsub_tab_invhead_1"))
 
         row_y = y1 + 2
         for site in self.sites:
@@ -5576,13 +5730,13 @@ class JJDlpDashboard:
             lbl = site.get_cached_config().get("site_label",
                               os.path.basename(site.config_path))
             self.safe_addstr(self.stdscr, row_y, x1 + 2, f"-- {lbl} --",
-                        theme.attr(self, "main_jjdlpdashboard_draw_eventsub_tab_warn", self.C_WARN, True))
+                        theme.attr(self, "main_jjdlpdashboard_draw_eventsub_tab_warn"))
             row_y += 1
 
             es = site.eventsub_state
             if es is None:
                 self.safe_addstr(self.stdscr, row_y, x1 + 4, "EventSub not available",
-                            theme.attr(self, "main_jjdlpdashboard_draw_eventsub_tab_dim", self.C_DIM, False))
+                            theme.attr(self, "main_jjdlpdashboard_draw_eventsub_tab_dim"))
                 row_y += 2
                 continue
 
@@ -5610,8 +5764,8 @@ class JJDlpDashboard:
                 if row_y >= y2 - 1:
                     break
                 self.safe_addstr(self.stdscr, row_y, x1 + 4,
-                            f"{label:<16}", theme.attr(self, "main_jjdlpdashboard_draw_eventsub_tab_invhead_2", self.C_INVHEAD, False))
-                self.safe_addstr(self.stdscr, row_y, x1 + 21, val, theme.attr(self, "main_jjdlpdashboard_draw_eventsub_tab_cpair", cpair, False))
+                            f"{label:<16}", theme.attr(self, "main_jjdlpdashboard_draw_eventsub_tab_invhead_2"))
+                self.safe_addstr(self.stdscr, row_y, x1 + 21, val, theme.attr(self, "main_jjdlpdashboard_draw_eventsub_tab_cpair", cpair))
                 row_y += 1
             row_y += 1
 
@@ -5687,7 +5841,7 @@ class JJDlpDashboard:
                          f"  C: Colors  N: Theme Manager  Q: quit  ")
             elif current_tab == "File Manager":
                 hints = (f"  \u2191\u2193: select  Enter: open  Space: show folder"
-                         f"  DEL: delete  S: sort  T: toggle trash  M: more options"
+                         f"  DEL: delete  S: sort  T: toggle trash  M: File Options"
                          f"  C: Colors  Q: quit  ")
             else:
                 hints = (f"  LEFT/RIGHT: switch tabs"
@@ -5696,7 +5850,7 @@ class JJDlpDashboard:
                          f"  C: Colors  Q: quit  ")
         self.safe_addstr(self.stdscr, h - 1, 0,
                     hints.ljust(w - 1)[:w - 1],
-                    theme.attr(self, "main_jjdlpdashboard_draw_footer_invhead", self.C_INVHEAD, False))
+                    theme.attr(self, "main_jjdlpdashboard_draw_footer_invhead"))
 
     # ── Streamer management overlay ───────────────────────────────────────────
     def _mgmt_enabled_streamers(self, site) -> list:
@@ -5731,14 +5885,14 @@ class JJDlpDashboard:
         # Fill background
         for y in range(by1, by2 + 1):
             self.safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1),
-                        theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_normal_1", self.C_NORMAL, False))
+                        theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_normal_1"))
 
         self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_WARN)
         title = f" {action.upper()} STREAMER "
         self.safe_addstr(self.stdscr, by1, bx1 + 2, title,
-                    theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_warn_1", self.C_WARN, True))
+                    theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_warn_1"))
         self.safe_addstr(self.stdscr, by1 + 1, bx1 + 2,
-                    f"Site: {site_lbl}", theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_dim_1", self.C_DIM, False))
+                    f"Site: {site_lbl}", theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_dim_1"))
 
         if action in ("disable", "remove"):
             # ── List-picker mode: arrow up/down to select a streamer ──────────
@@ -5748,15 +5902,15 @@ class JJDlpDashboard:
             if self._mgmt_result:
                 self.safe_addstr(self.stdscr, by1 + 2, bx1 + 2,
                             self._mgmt_result[:box_w - 4],
-                            theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_live_1", self.C_LIVE, True))
+                            theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_live_1"))
 
             if not enabled:
                 self.safe_addstr(self.stdscr, by1 + 3, bx1 + 2,
                             "No enabled streamers.",
-                            theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_dim_2", self.C_DIM, False))
+                            theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_dim_2"))
                 self.safe_addstr(self.stdscr, by2, bx1 + 2,
                             " Esc: Go back ",
-                            theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_invhead_1", self.C_INVHEAD, False))
+                            theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_invhead_1"))
                 return
 
             # Clamp selection
@@ -5778,14 +5932,14 @@ class JJDlpDashboard:
                 row_y  = list_top + (i - self._mgmt_scroll)
                 is_sel = (i == self._mgmt_sel)
                 prefix = "> " if is_sel else "  "
-                attr   = (theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_hilight_1", self.C_HILIGHT, True)
-                          if is_sel else theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_normal_2", self.C_NORMAL, False))
+                attr   = (theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_hilight_1")
+                          if is_sel else theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_normal_2"))
                 self.safe_addstr(self.stdscr, row_y, bx1 + 2,
                             (prefix + s)[:box_w - 4], attr)
 
             self.safe_addstr(self.stdscr, by2, bx1 + 2,
                         " \u2191\u2193: select  Enter: confirm  Esc: Go back ",
-                        theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_invhead_2", self.C_INVHEAD, False))
+                        theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_invhead_2"))
 
         else:
             # ── ADD mode: disabled-streamer list + text input for new names ───
@@ -5795,7 +5949,7 @@ class JJDlpDashboard:
             if self._mgmt_result:
                 self.safe_addstr(self.stdscr, by1 + 2, bx1 + 2,
                             self._mgmt_result[:box_w - 4],
-                            theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_live_2", self.C_LIVE, True))
+                            theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_live_2"))
 
             # Fixed rows at the bottom for text input + legend
             input_row  = by2 - 2
@@ -5814,7 +5968,7 @@ class JJDlpDashboard:
             if disabled:
                 self.safe_addstr(self.stdscr, list_header, bx1 + 2,
                             "Re-enable disabled:",
-                            theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_chrome", self.C_CHROME, False))
+                            theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_chrome"))
 
                 # Clamp selection (-1 = text input focused, >=0 = list item)
                 if self._mgmt_sel >= 0:
@@ -5832,21 +5986,21 @@ class JJDlpDashboard:
                     row_y  = list_top + (i - self._mgmt_scroll)
                     is_sel = (self._mgmt_sel == i)
                     prefix = "> " if is_sel else "  "
-                    attr   = (theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_hilight_2", self.C_HILIGHT, True)
-                              if is_sel else theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_dim_3", self.C_DIM, False))
+                    attr   = (theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_hilight_2")
+                              if is_sel else theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_dim_3"))
                     self.safe_addstr(self.stdscr, row_y, bx1 + 2,
                                 (prefix + s)[:box_w - 4], attr)
             else:
                 self.safe_addstr(self.stdscr, list_top, bx1 + 2,
                             "No disabled streamers.",
-                            theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_dim_4", self.C_DIM, False))
+                            theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_dim_4"))
 
             # Text input (always shown at bottom)
             self.safe_addstr(self.stdscr, input_row, bx1 + 2, "New username:",
-                        theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_warn_2", self.C_WARN, True))
-            input_attr = (theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_hilight_3", self.C_HILIGHT, True)
+                        theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_warn_2"))
+            input_attr = (theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_hilight_3")
                           if self._mgmt_sel == -1
-                          else theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_normal_3", self.C_NORMAL, True))
+                          else theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_normal_3"))
             self.safe_addstr(self.stdscr, input_row, bx1 + 16,
                         (self._mgmt_buf + "_")[:box_w - 18], input_attr)
 
@@ -5856,30 +6010,33 @@ class JJDlpDashboard:
                 legend = " Enter: add  Esc: Go back "
             self.safe_addstr(self.stdscr, legend_row, bx1 + 2,
                         legend[:box_w - 4],
-                        theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_invhead_3", self.C_INVHEAD, False))
+                        theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_invhead_3"))
 
     # ── Full screen refresh ───────────────────────────────────────────────────
     def refresh_screen(self):
         self.stdscr.erase()
         h, w = self.stdscr.getmaxyx()
-        self.stdscr.bkgd(" ", theme.attr(self, "main_jjdlpdashboard_refresh_screen_normal", self.C_NORMAL, False))
+        self.stdscr.bkgd(" ", theme.attr(self, "main_jjdlpdashboard_refresh_screen_normal"))
 
         # Logo (6 lines tall, starts at row 1)
         self.draw_logo(1, 2)
 
-        # Christmas Day easter egg — only appears on Dec 25th, sitting to the
-        # right of the logo. Skipped entirely if the terminal isn't wide
-        # enough to fit it without colliding with the top-right indicators.
-        if self._is_christmas_day():
-            _logo_w = max(len(_l) for _l in ASCII_LOGO)
-            _egg_x = 2 + _logo_w + 4
-            if w - _egg_x > 30:
-                self.draw_christmas_easter_egg(1, _egg_x)
-
         # System time top-right
         sys_time_str = datetime.now().strftime("%Y-%m-%d  %H:%M:%S")
-        self.safe_addstr(self.stdscr, 1, w - len(sys_time_str) - 3, sys_time_str,
-                    theme.attr(self, "main_jjdlpdashboard_refresh_screen_chrome_1", self.C_CHROME, False))
+        time_x = w - len(sys_time_str) - 3
+        self.safe_addstr(self.stdscr, 1, time_x, sys_time_str,
+                    theme.attr(self, "main_jjdlpdashboard_refresh_screen_chrome_1"))
+
+        # Disk-rate sparkline — fills the gap between the logo and the clock,
+        # same height as the logo (rows 1-6). Graph.draw also renders the
+        # "max …" scale label above the graph's right edge.
+        self.graph.tick()
+        _logo_w = max(len(_l) for _l in ASCII_LOGO)
+        _graph_x0 = 2 + _logo_w + 3
+        _graph_x1 = time_x - 2
+        _graph_y1 = 1 + len(ASCII_LOGO) - 1
+        if _graph_x1 > _graph_x0:
+            self.graph.draw(1, _graph_x0, _graph_x1, _graph_y1)
 
         # Track the next available row on the right side
         next_right_row = 2
@@ -5889,20 +6046,26 @@ class JJDlpDashboard:
             if UPDATE_AVAILABLE:
                 update_str = "Update Available"
                 self.safe_addstr(self.stdscr, next_right_row, w - len(update_str) - 3, update_str,
-                            theme.attr(self, "main_jjdlpdashboard_refresh_screen_warn", self.C_WARN, True))
+                            theme.attr(self, "main_jjdlpdashboard_refresh_screen_warn"))
                 next_right_row += 1
         
         # App version indicator (Below Update Available, or directly below time)
         version_str = f"v{__version__}"
         self.safe_addstr(self.stdscr, next_right_row, w - len(version_str) - 3, version_str,
-                    theme.attr(self, "main_jjdlpdashboard_refresh_screen_dim", self.C_DIM, False))
+                    theme.attr(self, "main_jjdlpdashboard_refresh_screen_dim"))
+
+        # Christmas Day easter egg — tree below the version indicator, shown
+        # only on Dec 24th and 25th. Right-aligned to the same margin as the
+        # version number above it.
+        if self._is_christmas_day():
+            self.draw_christmas_easter_egg(next_right_row + 1, w - 3 - 7)
 
         # Blank line after logo (row 7), then tab bar at row 8
         # (Logo occupies rows 1-6, row 7 is blank, tabs at row 8)
         self.draw_tabs(8, 2)
 
         # Separator
-        self.safe_addstr(self.stdscr, 9, 1, "-" * (w - 2), theme.attr(self, "main_jjdlpdashboard_refresh_screen_chrome_2", self.C_CHROME, False))
+        self.safe_addstr(self.stdscr, 9, 1, "-" * (w - 2), theme.attr(self, "main_jjdlpdashboard_refresh_screen_chrome_2"))
 
         # Content area starts at row 10
         content_y1 = 10
@@ -5936,6 +6099,9 @@ class JJDlpDashboard:
         elif current_tab_name == "Config":
             self.draw_config_tab(content_y1, 1, content_y2, content_x2)
         elif current_tab_name == "File Manager":
+            # Poll at the tab's normal (snappier) cadence while it's focused;
+            # draw_system_panel() also polls at a slower cadence so the
+            # sidebar rate stays fresh even when this tab isn't active.
             self.file_manager.maybe_poll()
             self.file_manager.draw(self.stdscr, content_y1, 1, content_y2, content_x2)
         _t_main_tab = time.time() - _t0
@@ -5960,6 +6126,18 @@ class JJDlpDashboard:
         # Changelog popup — drawn on top of sort popup if both somehow open.
         if self._changelog_popup_open:
             self.draw_changelog_popup()
+
+        # Bake-to-source popup (dev feature) — drawn above the changelog.
+        if self._bake_popup_open:
+            self.draw_bake_popup()
+
+        # Graph-knob popup (dev feature) — drawn above the bake popup.
+        if self.graph.popup_open:
+            self.graph.draw_popup()
+
+        # Transient scheme-list popup ('c' key) — drawn above the other popups
+        # but below the exit-confirm / failure alerts.
+        self.draw_scheme_popup()
 
         # Exit-confirmation popup — drawn on top of everything else.
         if self._exit_confirm_open:
@@ -6012,6 +6190,17 @@ class JJDlpDashboard:
                 self._changelog_scroll += page   # clamped in draw method
             return True
 
+        # Bake-to-source popup intercepts all keys while open.
+        if self._bake_popup_open:
+            if key in (ord('q'), ord('Q'), 27,
+                       ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
+                self._bake_popup_open = False
+            return True
+
+        # Graph-knob popup intercepts all keys while open.
+        if self.graph.popup_open:
+            return self.graph.handle_key(key)
+
         if self._mgmt_mode:
             return self._handle_mgmt_key(key)
 
@@ -6035,7 +6224,7 @@ class JJDlpDashboard:
 
         if current_tab_name == "File Manager":
             # Pass keys to FileManagerTab first. Still allow global tab/site switching.
-            excluded = [ord(']'), curses.KEY_NPAGE, ord('['), curses.KEY_PPAGE]
+            excluded = [ord(']'), ord('[')]
             if not self.file_manager._move_filename_open:
                 excluded += [curses.KEY_LEFT, ord('h'), curses.KEY_RIGHT, ord('l')]
             if key not in excluded:
@@ -6071,6 +6260,8 @@ class JJDlpDashboard:
             elif tab in ("Stdout", "Stderr"):
                 if self._pipe_focus == "streamers":
                     self._streamer_panel_sel = max(0, self._streamer_panel_sel - 1)
+                    # A different streamer buffer starts back at live-following.
+                    self._stdout_scroll = self._stderr_scroll = 0
                 elif tab == "Stdout":
                     self._stdout_scroll += 1
                 else:
@@ -6084,6 +6275,8 @@ class JJDlpDashboard:
                     sel_site = self.sites[self.selected_site_idx] if self.sites else None
                     max_idx  = len(sel_site.dash_all_streamers) if sel_site is not None else 0
                     self._streamer_panel_sel = min(max_idx, self._streamer_panel_sel + 1)
+                    # A different streamer buffer starts back at live-following.
+                    self._stdout_scroll = self._stderr_scroll = 0
                 elif tab == "Stdout":
                     self._stdout_scroll = max(0, self._stdout_scroll - 1)
                 else:
@@ -6121,9 +6314,17 @@ class JJDlpDashboard:
             self.randomize_colors()
         elif key in (ord('n'), ord('N')):
             self.theme_manager.open_popup()
+        elif key in (ord('w'), ord('W')):
+            # Dev feature: bake the current base-scheme + per-site
+            # customizations into theme.py (the only file this writes to).
+            self.open_bake_popup()
         elif key in (ord('s'), ord('S')):
             if current_tab_name == "Dashboard":
                 self.sort_manager.open_popup()
+        elif key in (ord('p'), ord('P')):
+            # Dev feature: tune the top-bar disk-rate graph knobs live, or
+            # hot-reload graph.py from disk ("Reload graph.py" row).
+            self.graph.toggle_popup()
         elif key in (ord('g'), ord('G')):
             self.open_changelog_popup()
         return True
@@ -6288,6 +6489,23 @@ class JJDlpDashboard:
                 f"{_new_thresh_raw!r} — keeping current threshold"
             )
 
+        # ── GRAPH_SCALE ───────────────────────────────────────────────────────
+        # Apply the new seconds-per-bar value immediately so the top graph's
+        # cadence (and the disk-directory scan it drives) picks it up without
+        # a restart.
+        try:
+            _new_scale = max(1, int(new_cfg.get("GRAPH_SCALE", "1").strip()))
+            if _new_scale != self.graph_scale:
+                self.graph_scale = _new_scale
+                _logger.dbg(
+                    f"[CONFIG] apply_global_cfg: GRAPH_SCALE updated to {_new_scale}"
+                )
+        except (ValueError, TypeError):
+            _logger.dbg(
+                f"[CONFIG] apply_global_cfg: invalid GRAPH_SCALE value "
+                f"{new_cfg.get('GRAPH_SCALE', '1')!r} — keeping current scale"
+            )
+
     # ── Changelog popup helpers ───────────────────────────────────────────────
     def _should_show_changelog(self) -> bool:
         """Return True when the changelog should be shown at startup.
@@ -6379,7 +6597,7 @@ class JJDlpDashboard:
             self._write_failure_alert_open = False
             return
 
-        alert_attr = theme.attr(self, "main_jjdlpdashboard_draw_write_failure_a_delete", self.C_DELETE, True)
+        alert_attr = theme.attr(self, "main_jjdlpdashboard_draw_write_failure_a_delete")
 
         title = " ‼ RECORDING FAILURE ‼ "
         message = "The following streamer(s) are NOT being recorded:"
@@ -6405,7 +6623,7 @@ class JJDlpDashboard:
         for i, line in enumerate(names_lines):
             self.safe_addstr(self.stdscr, by1 + 4 + i, bx1 + 2, line[:box_w - 4], alert_attr)
         self.safe_addstr(self.stdscr, by2 - 1, bx1 + max(0, (box_w - len(legend)) // 2),
-                    legend[:box_w - 2], theme.attr(self, "main_jjdlpdashboard_draw_write_failure_a_invhead", self.C_INVHEAD, False))
+                    legend[:box_w - 2], theme.attr(self, "main_jjdlpdashboard_draw_write_failure_a_invhead"))
 
     def _open_exit_confirm(self) -> None:
         """Open the 'Are you sure you want to exit?' popup, 'Yes' selected by default."""
@@ -6450,31 +6668,31 @@ class JJDlpDashboard:
         # Fill background
         for y in range(by1, by2 + 1):
             self.safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1),
-                        theme.attr(self, "main_jjdlpdashboard_draw_exit_confirm_po_normal_1", self.C_NORMAL, False))
+                        theme.attr(self, "main_jjdlpdashboard_draw_exit_confirm_po_normal_1"))
 
         self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_WARN)
         title = " CONFIRM EXIT "
         self.safe_addstr(self.stdscr, by1, bx1 + 2, title,
-                    theme.attr(self, "main_jjdlpdashboard_draw_exit_confirm_po_warn", self.C_WARN, True))
+                    theme.attr(self, "main_jjdlpdashboard_draw_exit_confirm_po_warn"))
 
         self.safe_addstr(self.stdscr, by1 + 2, bx1 + max(0, (box_w - len(message)) // 2),
-                    message, theme.attr(self, "main_jjdlpdashboard_draw_exit_confirm_po_normal_2", self.C_NORMAL, True))
+                    message, theme.attr(self, "main_jjdlpdashboard_draw_exit_confirm_po_normal_2"))
 
         yes_label = " Yes "
         no_label  = " No "
         gap = 4
         buttons_w = len(yes_label) + len(no_label) + gap
         start_x = bx1 + max(0, (box_w - buttons_w) // 2)
-        yes_attr = (theme.attr(self, "main_jjdlpdashboard_draw_exit_confirm_po_hilight_1", self.C_HILIGHT, True)) if self._exit_confirm_sel == 0 \
-                   else theme.attr(self, "main_jjdlpdashboard_draw_exit_confirm_po_normal_3", self.C_NORMAL, False)
-        no_attr  = (theme.attr(self, "main_jjdlpdashboard_draw_exit_confirm_po_hilight_2", self.C_HILIGHT, True)) if self._exit_confirm_sel == 1 \
-                   else theme.attr(self, "main_jjdlpdashboard_draw_exit_confirm_po_normal_4", self.C_NORMAL, False)
+        yes_attr = (theme.attr(self, "main_jjdlpdashboard_draw_exit_confirm_po_hilight_1")) if self._exit_confirm_sel == 0 \
+                   else theme.attr(self, "main_jjdlpdashboard_draw_exit_confirm_po_normal_3")
+        no_attr  = (theme.attr(self, "main_jjdlpdashboard_draw_exit_confirm_po_hilight_2")) if self._exit_confirm_sel == 1 \
+                   else theme.attr(self, "main_jjdlpdashboard_draw_exit_confirm_po_normal_4")
         self.safe_addstr(self.stdscr, by1 + 3, start_x, yes_label, yes_attr)
         self.safe_addstr(self.stdscr, by1 + 3, start_x + len(yes_label) + gap, no_label, no_attr)
 
         self.safe_addstr(self.stdscr, by2, bx1 + max(0, (box_w - len(legend)) // 2),
                     legend[:max(0, box_w - 2)],
-                    theme.attr(self, "main_jjdlpdashboard_draw_exit_confirm_po_invhead", self.C_INVHEAD, False))
+                    theme.attr(self, "main_jjdlpdashboard_draw_exit_confirm_po_invhead"))
 
     def draw_changelog_popup(self) -> None:
         """Draw the scrollable changelog popup centred on screen."""
@@ -6492,12 +6710,12 @@ class JJDlpDashboard:
         # Fill background
         for y in range(by1, by2 + 1):
             self.safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1),
-                        theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_normal_1", self.C_NORMAL, False))
+                        theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_normal_1"))
 
         self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_CHROME)
         title = " WHAT'S NEW "
         self.safe_addstr(self.stdscr, by1, bx1 + 2, title,
-                    theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_hilight", self.C_HILIGHT, True))
+                    theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_hilight"))
 
         content_width = max(1, box_w - 4)
         wrapped = self._wrap_lines(self._changelog_lines, content_width)
@@ -6511,7 +6729,7 @@ class JJDlpDashboard:
 
         for i, line in enumerate(view):
             self.safe_addstr(self.stdscr, by1 + 1 + i, bx1 + 2, line,
-                        theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_normal_2", self.C_NORMAL, False))
+                        theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_normal_2"))
 
         # Scroll indicator
         if max_scroll > 0:
@@ -6522,9 +6740,122 @@ class JJDlpDashboard:
         legend = f" Q/Esc: close {scroll_info}"
         self.safe_addstr(self.stdscr, by2, bx1 + 2,
                     legend[:box_w - 4],
-                    theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_invhead", self.C_INVHEAD, False))
+                    theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_invhead"))
+
+    # ── Bake-to-source popup (dev feature, hidden 'W' hotkey) ────────────────
+    def open_bake_popup(self) -> None:
+        """Write the current theme customizations into theme.py (the only
+        file this touches) and show a summary popup. NOTE: the next app
+        update overwrites these edits."""
+        result = theme.bake_to_source()
+        lines = []
+        if not result['ok']:
+            lines.append("BAKE TO SOURCE — FAILED")
+            lines.append(result.get('error') or "Unknown error.")
+        else:
+            lines.append("BAKE TO SOURCE — OK")
+            if result['schemes']:
+                schemes = ", ".join(str(i) for i in result['schemes'])
+                lines.append(f"  COLOR_SCHEMES {schemes} updated")
+            if result['role_sites'] or result['bold_sites']:
+                parts = []
+                if result['role_sites']:
+                    parts.append(f"{result['role_sites']} role repoint(s)")
+                if result['bold_sites']:
+                    parts.append(f"{result['bold_sites']} bold toggle(s)")
+                lines.append("  SITE_REGISTRY updated: " + ", ".join(parts))
+            if result['files']:
+                lines.append("  Files written: " + ", ".join(result['files']))
+            lines.append("NOTE: app updates overwrite these edits.")
+        self._bake_popup_lines = lines
+        self._bake_popup_open = True
+
+    def draw_bake_popup(self) -> None:
+        """Draw the bake-to-source result popup centred on screen."""
+        if not self._bake_popup_open:
+            return
+        h, w = self.stdscr.getmaxyx()
+        content = self._bake_popup_lines
+        box_h = min(h - 4, len(content) + 4)
+        box_w = min(w - 4, 64)
+        by1 = max(0, (h - box_h) // 2)
+        bx1 = max(0, (w - box_w) // 2)
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            self.safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1),
+                        theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_normal_1"))
+
+        self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_CHROME)
+        title = " THEME \u2192 SOURCE "
+        self.safe_addstr(self.stdscr, by1, bx1 + 2, title,
+                    theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_hilight"))
+
+        for i, line in enumerate(content[:max(0, box_h - 3)]):
+            self.safe_addstr(self.stdscr, by1 + 2 + i, bx1 + 2, line[:box_w - 4],
+                        theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_normal_2"))
+
+        legend = " Q/Esc: close "
+        self.safe_addstr(self.stdscr, by2, bx1 + 2, legend[:box_w - 4],
+                    theme.attr(self, "main_jjdlpdashboard_draw_changelog_popup_invhead"))
+
+    # ── Graph module hot-reload (dev feature) ─────────────────────────────────
+    def reload_graph_module(self) -> None:
+        """Hot-reload jj_dlp/graph.py from disk (triggered by the "Reload
+        graph.py" row of the 'p' knob popup).
+
+        On success: re-executes the module, constructs a fresh ``Graph`` from
+        it (carrying over the disk-rate history and the transient sub-sampler
+        state; live-tuned _GRAPH_* knobs reset to the newly-loaded file
+        defaults) and swaps it in for ``self.graph``. The popup closes because
+        the fresh instance starts closed.
+
+        On failure: the current ``Graph`` keeps running untouched and the
+        error is recorded on it so the popup's legend can show it. A syntax
+        error in graph.py therefore never takes the app down.
+        """
+        try:
+            import importlib
+            import traceback
+            importlib.reload(_graph)
+        except Exception as _e:
+            _logger.dbg(f"[GRAPH] reload failed:\n{traceback.format_exc()}")
+            self.graph.popup_status = f"reload failed: {_e}"
+            return
+        try:
+            _old = self.graph
+            _new = _graph.Graph(self)
+        except Exception as _e:
+            _logger.dbg(f"[GRAPH] reload failed (Graph construction):\n{traceback.format_exc()}")
+            self.graph.popup_status = f"reload failed: {_e}"
+            return
+        # Carry over history + transient pipeline state (knobs reset to the
+        # new defaults by the fresh instance).
+        _new.disk_rate_history.extend(_old.disk_rate_history)
+        _new._disk_graph_instant_rate = _old._disk_graph_instant_rate
+        _new._disk_graph_window_bytes = _old._disk_graph_window_bytes
+        _new._disk_graph_window_start = _old._disk_graph_window_start
+        _new._disk_graph_window_peak = _old._disk_graph_window_peak
+        _new._disk_graph_held_rate = _old._disk_graph_held_rate
+        _new._disk_graph_last_tick = _old._disk_graph_last_tick
+        _new._disk_graph_last_subsample = _old._disk_graph_last_subsample
+        _new._disk_graph_bytes_ring.extend(_old._disk_graph_bytes_ring)
+        self.graph = _new
+        _logger.dbg("[GRAPH] graph.py reloaded")
 
     # ── Run loop ──────────────────────────────────────────────────────────────
+    def _persist_graph_history(self) -> None:
+        """Persist the current disk-rate graph bars to global.json.
+
+        Called on shutdown so the graph comes back with its history on the
+        next launch.  Best-effort — failures are swallowed.
+        """
+        try:
+            _save_disk_rate_history(list(self.graph.disk_rate_history))
+        except Exception as _e:
+            dbg(f"[GRAPH] _persist_graph_history failed: {_e!r}")
+
     def run(self):
         curses.curs_set(0)
         self.stdscr.nodelay(True)
@@ -6561,6 +6892,7 @@ class JJDlpDashboard:
                     should_quit = True
                     break
             if should_quit:
+                self._persist_graph_history()
                 break
             self.tick += 1
             curses.napms(50)
@@ -6599,12 +6931,7 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
     """
     curses.start_color()
     curses.use_default_colors()
-    curses.init_pair(1, curses.COLOR_CYAN,    curses.COLOR_BLACK)
-    curses.init_pair(2, curses.COLOR_WHITE,   curses.COLOR_BLUE)
-    curses.init_pair(3, curses.COLOR_YELLOW,  curses.COLOR_BLACK)
-    curses.init_pair(4, curses.COLOR_GREEN,   curses.COLOR_BLACK)
-    curses.init_pair(5, curses.COLOR_WHITE,   curses.COLOR_CYAN)
-    curses.init_pair(6, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
+    theme.apply_palette(None)   # pairs 1-13 follow the active theme, like the dashboard
 
     curses.curs_set(0)
     stdscr.keypad(True)
@@ -6615,27 +6942,36 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
     n         = len(found)
     do_not_show_config = False
 
+    # Display the SITE_LABEL of each config instead of its path.
+    site_labels = {}
+    for _name in found:
+        try:
+            site_labels[_name] = load_config(os.path.join(os.getcwd(), _name)).get(
+                "site_label", os.path.basename(_name))
+        except (SystemExit, Exception):
+            site_labels[_name] = os.path.basename(_name)
+
     while True:
         stdscr.erase()
         h, w = stdscr.getmaxyx()
-        stdscr.bkgd(" ", theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum0", 0, False))
+        stdscr.bkgd(" ", theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum0"))
 
         # Logo
         for i, line in enumerate(ASCII_LOGO):
-            JJDlpDashboard.safe_addstr(stdscr, 1 + i, 2, line, theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum6", 6, True))
+            JJDlpDashboard.safe_addstr(stdscr, 1 + i, 2, line, theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum6"))
 
         ts = time.strftime("%Y-%m-%d  %H:%M:%S")
-        JJDlpDashboard.safe_addstr(stdscr, 1, w - len(ts) - 3, ts, theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum1_1", 1, False))
-        JJDlpDashboard.safe_addstr(stdscr, 7, 2, "-" * (w - 4), theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum1_2", 1, False))
+        JJDlpDashboard.safe_addstr(stdscr, 1, w - len(ts) - 3, ts, theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum1_1"))
+        JJDlpDashboard.safe_addstr(stdscr, 7, 2, "-" * (w - 4), theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum1_2"))
 
         # Title
-        title = "SELECT CONFIG FILE(S)"
-        JJDlpDashboard.safe_addstr(stdscr, 9, 2, title, theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum5_1", 5, True))
+        title = "SELECT SITES"
+        JJDlpDashboard.safe_addstr(stdscr, 9, 2, title, theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum5_1"))
 
         # Instructions
         JJDlpDashboard.safe_addstr(stdscr, 10, 2,
                     "Space = toggle [x]   Enter = confirm   Q = quit",
-                    theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum3_1", 3, False))
+                    theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum3_1"))
 
         # File list
         for i, name in enumerate(found):
@@ -6643,28 +6979,28 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
             checked = "[x]" if i in selected else "[ ]"
             is_cur  = i == cursor
             if is_cur:
-                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum2", 2, True)
+                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum2")
             elif i in selected:
-                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum4", 4, True)
+                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum4")
             else:
-                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum1_3", 1, False)
-            JJDlpDashboard.safe_addstr(stdscr, row, 4, f"  {checked}  {name}", attr)
+                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum1_3")
+            JJDlpDashboard.safe_addstr(stdscr, row, 4, f"  {checked}  {site_labels.get(name, name)}", attr)
 
         # "Do not show again" checkbox
         dna_row = 12 + n + 1
         dna_box = "[x]" if do_not_show_config else "[ ]"
-        dna_attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum3_2", 3, True) if do_not_show_config else theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum3_3", 3, False)
+        dna_attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum3_2") if do_not_show_config else theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum3_3")
         JJDlpDashboard.safe_addstr(stdscr, dna_row, 4,
                     f"  {dna_box}  Do not show again (press D to toggle)",
                     dna_attr)
 
         # Footer
         sel_count = len(selected)
-        footer = (f"  {sel_count} file(s) selected  "
+        footer = (f"  {sel_count} site(s) selected  "
                   f"↑/↓ navigate  Space toggle  Enter confirm  D do not show  ")
         JJDlpDashboard.safe_addstr(stdscr, h - 1, 0,
                     footer.ljust(w - 1)[:w - 1],
-                    theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum5_2", 5, True))
+                    theme.attr(None, "main_jjdlpdashboard_curses_choose_config_pairnum5_2"))
 
         stdscr.refresh()
         key = stdscr.getch()
@@ -6706,12 +7042,7 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
     """
     curses.start_color()
     curses.use_default_colors()
-    curses.init_pair(1, curses.COLOR_CYAN,    curses.COLOR_BLACK)
-    curses.init_pair(2, curses.COLOR_WHITE,   curses.COLOR_BLUE)
-    curses.init_pair(3, curses.COLOR_YELLOW,  curses.COLOR_BLACK)
-    curses.init_pair(4, curses.COLOR_GREEN,   curses.COLOR_BLACK)
-    curses.init_pair(5, curses.COLOR_WHITE,   curses.COLOR_CYAN)
-    curses.init_pair(6, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
+    theme.apply_palette(None)   # pairs 1-13 follow the active theme, like the dashboard
 
     curses.curs_set(0)
     stdscr.keypad(True)
@@ -6740,27 +7071,27 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
     while True:
         stdscr.erase()
         h, w = stdscr.getmaxyx()
-        stdscr.bkgd(" ", theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum0", 0, False))
+        stdscr.bkgd(" ", theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum0"))
 
         # Logo
         for i, line in enumerate(ASCII_LOGO):
-            JJDlpDashboard.safe_addstr(stdscr, 1 + i, 2, line, theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum6", 6, True))
+            JJDlpDashboard.safe_addstr(stdscr, 1 + i, 2, line, theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum6"))
 
         ts = time.strftime("%Y-%m-%d  %H:%M:%S")
-        JJDlpDashboard.safe_addstr(stdscr, 1, w - len(ts) - 3, ts, theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum1_1", 1, False))
-        JJDlpDashboard.safe_addstr(stdscr, 7, 2, "-" * (w - 4), theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum1_2", 1, False))
+        JJDlpDashboard.safe_addstr(stdscr, 1, w - len(ts) - 3, ts, theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum1_1"))
+        JJDlpDashboard.safe_addstr(stdscr, 7, 2, "-" * (w - 4), theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum1_2"))
 
         # Browser sub-title
         br_title_row = 9
         JJDlpDashboard.safe_addstr(stdscr, br_title_row, 2,
                     "SELECT BROWSER",
-                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum5_1", 5, True))
+                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum5_1"))
         JJDlpDashboard.safe_addstr(stdscr, br_title_row + 1, 2,
                     "Select your browser for the yt-dlp --cookies-from-browser option.",
-                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_1", 3, False))
+                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_1"))
         JJDlpDashboard.safe_addstr(stdscr, br_title_row + 2, 2,
                     "Note: Chrome based browsers are not supported. Firefox is recommended.",
-                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_2", 3, False))
+                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_2"))
         applies_to_labels = [
             file_cfgs[fname].get("site_label")
             for fname in chosen_files
@@ -6768,7 +7099,7 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
         ]
         JJDlpDashboard.safe_addstr(stdscr, br_title_row + 4, 2,
                     f"Applies to: {', '.join(applies_to_labels)}",
-                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum4", 4, False))
+                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum4"))
 
         # Browser list (single-select radio buttons)
         list_start_row = br_title_row + 6
@@ -6777,16 +7108,16 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
             dot    = "(*)" if i == br_cursor else "( )"
             is_cur = i == br_cursor
             if is_cur:
-                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum2", 2, True)
+                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum2")
             else:
-                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum1_3", 1, False)
+                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum1_3")
             label = f"  {dot}  {br}" + ("  ← remove cookies option" if br == "disabled" else "")
             JJDlpDashboard.safe_addstr(stdscr, row, 4, label, attr)
 
         # "Do not show again" checkbox (below the browser list)
         dna_row  = list_start_row + nb + 1
         dna_box  = "[x]" if do_not_show else "[ ]"
-        dna_attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_3", 3, True) if do_not_show else theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_4", 3, False)
+        dna_attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_3") if do_not_show else theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_4")
         JJDlpDashboard.safe_addstr(stdscr, dna_row, 4,
                     f"  {dna_box}  Do not show again (press D to toggle)",
                     dna_attr)
@@ -6795,7 +7126,7 @@ def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
         footer = "  ↑/↓ navigate  Enter = confirm  D = do not show again  Q = quit  "
         JJDlpDashboard.safe_addstr(stdscr, h - 1, 0,
                     footer.ljust(w - 1)[:w - 1],
-                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum5_2", 5, True))
+                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum5_2"))
 
         stdscr.refresh()
         key = stdscr.getch()
@@ -6945,52 +7276,50 @@ def main() -> None:
                 sys.exit(1)
             config_paths.append(ap)
     else:
-        default_path = os.path.abspath("jj-dlp.conf")
-        if os.path.isfile(default_path):
-            config_paths = [default_path]
+        cwd   = os.getcwd()
+        configs_dir = os.path.join(cwd, "configs")
+        if not os.path.isdir(configs_dir):
+            print(f"ERROR: No 'configs/' directory found in {cwd}. "
+                  "Pass --config <path> or create a configs/ folder.",
+                  file=sys.stderr)
+            sys.exit(1)
+
+        found = []
+        for f in os.listdir(configs_dir):
+            if f.endswith(".conf") and os.path.isfile(os.path.join(configs_dir, f)):
+                # global.conf is always loaded silently; never shown in the chooser
+                if f == _GLOBAL_CONF_NAME:
+                    continue
+                rel = os.path.relpath(os.path.join(configs_dir, f), cwd)
+                if rel not in found:
+                    found.append(rel)
+        found.sort()
+
+        if not found:
+            print(f"ERROR: No .conf files found in {configs_dir}. "
+                  "Pass --config <path> or place a config file in configs/.",
+                  file=sys.stderr)
+            sys.exit(1)
+
+        if len(found) == 1:
+            print(f"Using: {found[0]}")
+            chosen = [found[0]]
         else:
-            cwd   = os.getcwd()
-            search_dirs = []
-            if os.path.isdir(os.path.join(cwd, "configs")):
-                search_dirs.append(os.path.join(cwd, "configs"))
-            search_dirs.append(cwd)
+            # Load global.conf to check if we should show the UI
+            global_cfg = load_global_config()
+            ask_for_config = global_cfg.get("ask_for_config", True)
 
-            found = []
-            for d in search_dirs:
-                for f in os.listdir(d):
-                    if f.endswith(".conf") and os.path.isfile(os.path.join(d, f)):
-                        # global.conf is always loaded silently; never shown in the chooser
-                        if f == _GLOBAL_CONF_NAME:
-                            continue
-                        rel = os.path.relpath(os.path.join(d, f), cwd)
-                        if rel not in found:
-                            found.append(rel)
-            found.sort()
+            # Load global.json to see if we have saved configs
+            global_data = _load_global_json()
+            saved_configs = global_data.get("startup_configs", [])
 
-            if not found:
-                print(f"ERROR: No .conf files found in {cwd} or configs/. "
-                      "Pass --config <path> or place a jj-dlp.conf here.",
-                      file=sys.stderr)
-                sys.exit(1)
-            if len(found) == 1:
-                print(f"Using: {found[0]}")
-                chosen = [found[0]]
+            if not ask_for_config and saved_configs and all(c in found for c in saved_configs):
+                chosen = saved_configs
             else:
-                # Load global.conf to check if we should show the UI
-                global_cfg = load_global_config()
-                ask_for_config = global_cfg.get("ask_for_config", True)
-                
-                # Load global.json to see if we have saved configs
-                global_data = _load_global_json()
-                saved_configs = global_data.get("startup_configs", [])
-                
-                if not ask_for_config and saved_configs and all(c in found for c in saved_configs):
-                    chosen = saved_configs
-                else:
-                    # Multi-select chooser
-                    chosen = curses.wrapper(_curses_choose_config, found)
+                # Multi-select chooser
+                chosen = curses.wrapper(_curses_choose_config, found)
 
-            config_paths = [os.path.join(cwd, f) for f in chosen]
+        config_paths = [os.path.join(cwd, f) for f in chosen]
 
     # ASK_FOR_BROWSER logic
     _global_cfg = load_global_config()
@@ -7135,6 +7464,7 @@ def main() -> None:
         _dash_log(msg)
 
     # ── Launch curses dashboard ───────────────────────────────────────────────
+    dashboard = None
     try:
         def _run_dashboard(stdscr):
             h, w = stdscr.getmaxyx()
@@ -7146,14 +7476,24 @@ def main() -> None:
                     f"(currently {w}×{h}). Resize and re-run.")
                 stdscr.refresh()
                 stdscr.getch()
-                return
-            JJDlpDashboard(stdscr, sites, global_cfg=global_cfg).run()
+                return None
+            dash = JJDlpDashboard(stdscr, sites, global_cfg=global_cfg)
+            dash.run()
+            return dash
 
-        curses.wrapper(_run_dashboard)
+        dashboard = curses.wrapper(_run_dashboard)
 
     except KeyboardInterrupt:
         pass
     finally:
+        # Persist the disk-rate graph history on any shutdown path (normal
+        # quit persists inside run(); this covers Ctrl-C / KeyboardInterrupt).
+        if dashboard is not None:
+            try:
+                dashboard._persist_graph_history()
+            except Exception:
+                pass
+
         for site in sites:
             site.stop()
             if site.eventsub is not None:
