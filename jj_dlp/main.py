@@ -4497,6 +4497,14 @@ class JJDlpDashboard:
         self._log_scroll    = 0
         self._stdout_scroll = 0
         self._stderr_scroll = 0
+        # Filters apply only to debug lines in the Log tab.  Multiple
+        # expressions are combined with OR; no expression shows all debug.
+        self._debug_filter_popup_open = False
+        self._debug_filter_patterns: List[str] = []
+        self._debug_filter_buf = ""
+        self._debug_filter_sel = 0       # 0=input, 1..N=patterns, N+1=checkbox
+        self._debug_filter_highlight = False
+        self._debug_filter_error = ""
         # When scrolled up (scroll > 0), the displayed lines are frozen to a
         # snapshot so live output can't keep shoving the viewport around. Set
         # while scroll > 0, cleared when the user scrolls back to 0 (live).
@@ -5443,9 +5451,9 @@ class JJDlpDashboard:
             tab_x += len(label) + 1
 
         show_debug = sel_site.show_debug_log if sel_site is not None else False
-        title = (" ACTIVITY LOG — Show Debug: ON  (Press A to toggle) "
+        title = (" ACTIVITY LOG — Show Debug: ON  (Press A to toggle; F to configure filters) "
                  if show_debug
-                 else " ACTIVITY LOG — Show Debug: OFF (Press A to toggle) ")
+                 else " ACTIVITY LOG — Show Debug: OFF (Press A to toggle; F to configure filters) ")
 
         self.draw_box(self.stdscr, y1 + 1, x1, y2, x2, self.C_DIM)
         self.safe_addstr(self.stdscr, y1 + 1, x1 + 2, title,
@@ -5461,18 +5469,50 @@ class JJDlpDashboard:
             raw_lines = list(sel_site.dash_log_lines)
             raw_debug = list(sel_site.dash_debug_lines) if show_debug else []
 
+        compiled_filters = []
+        for expression in self._debug_filter_patterns:
+            try:
+                compiled_filters.append(_re.compile(expression))
+            except _re.error:
+                continue
+        if compiled_filters:
+            raw_debug = [line for line in raw_debug
+                         if any(pattern.search(line) for pattern in compiled_filters)]
+
         # Activity lines are always shown. Debug lines are only pulled in
         # (and merged back into chronological order) when the toggle is on —
         # they live in their own buffer so they never displaced activity
         # lines in the first place.
-        display_lines = (
-            _merge_lines_by_timestamp(raw_lines, raw_debug) if raw_debug else raw_lines
-        )
+        def _timestamp(line: str) -> str:
+            return line[:20] if line[:1] == "[" else ""
+
+        # Preserve the source type for optional match highlighting.  Activity
+        # lines remain visible regardless of the debug-filter configuration.
+        activity_entries = [(line, False) for line in raw_lines]
+        debug_entries = [(line, True) for line in raw_debug]
+        display_lines = []
+        i = j = 0
+        while i < len(activity_entries) and j < len(debug_entries):
+            if _timestamp(activity_entries[i][0]) <= _timestamp(debug_entries[j][0]):
+                display_lines.append(activity_entries[i]); i += 1
+            else:
+                display_lines.append(debug_entries[j]); j += 1
+        display_lines.extend(activity_entries[i:])
+        display_lines.extend(debug_entries[j:])
 
         self._log_frozen_lines, display_lines = self._apply_freeze(
             self._log_scroll, display_lines, self._log_frozen_lines)
 
-        wrapped = self._wrap_lines(display_lines, line_width)
+        wrapped = []
+        for line, is_debug in display_lines:
+            line = self._sanitize_line(line)
+            if not line:
+                wrapped.append(("", is_debug))
+                continue
+            while len(line) > line_width:
+                wrapped.append((line[:line_width], is_debug))
+                line = line[line_width:]
+            wrapped.append((line, is_debug))
 
         # Clamp scroll so it never exceeds available history
         max_scroll = max(0, len(wrapped) - visible_rows)
@@ -5482,7 +5522,7 @@ class JJDlpDashboard:
         start = max(0, len(wrapped) - visible_rows - self._log_scroll)
         view  = wrapped[start : start + visible_rows]
 
-        for i, line in enumerate(view):
+        for i, (line, is_debug) in enumerate(view):
             attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_dim_3")
             if "Live now" in line or "Recording started" in line:
                 attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_live")
@@ -5491,6 +5531,13 @@ class JJDlpDashboard:
             elif "Warning" in line:
                 attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_warn_1")
             self.safe_addstr(self.stdscr, y1 + 2 + i, x1 + 2, line, attr)
+            if is_debug and self._debug_filter_highlight:
+                for pattern in compiled_filters:
+                    for match in pattern.finditer(line):
+                        if match.start() != match.end():
+                            self.safe_addstr(self.stdscr, y1 + 2 + i,
+                                x1 + 2 + match.start(), match.group(),
+                                theme.attr(self, "main_jjdlpdashboard_draw_log_tab_match"))
 
         # Scroll indicator
         if max_scroll > 0:
@@ -5980,6 +6027,71 @@ class JJDlpDashboard:
                         theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_invhead_3"))
 
     # ── Full screen refresh ───────────────────────────────────────────────────
+    def _open_debug_filter_popup(self) -> None:
+        self._debug_filter_popup_open = True
+        self._debug_filter_buf = ""
+        self._debug_filter_sel = 0
+        self._debug_filter_error = ""
+
+    def _handle_debug_filter_key(self, key) -> bool:
+        count = len(self._debug_filter_patterns)
+        checkbox_row = count + 1
+        if key in (27, ord('q'), ord('Q')):
+            self._debug_filter_popup_open = False
+        elif key in (curses.KEY_UP, ord('k')):
+            self._debug_filter_sel = max(0, self._debug_filter_sel - 1)
+        elif key in (curses.KEY_DOWN, ord('j')):
+            self._debug_filter_sel = min(checkbox_row, self._debug_filter_sel + 1)
+        elif key == ord(' ') and self._debug_filter_sel == checkbox_row:
+            self._debug_filter_highlight = not self._debug_filter_highlight
+        elif key in (curses.KEY_DC, ord('d'), ord('D')) and 1 <= self._debug_filter_sel <= count:
+            del self._debug_filter_patterns[self._debug_filter_sel - 1]
+            self._debug_filter_sel = min(self._debug_filter_sel, len(self._debug_filter_patterns) + 1)
+            self._log_scroll = 0
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
+            if self._debug_filter_sel == 0 and self._debug_filter_buf.strip():
+                try:
+                    _re.compile(self._debug_filter_buf)
+                except _re.error as exc:
+                    self._debug_filter_error = f"Invalid regex: {exc}"
+                else:
+                    self._debug_filter_patterns.append(self._debug_filter_buf)
+                    self._debug_filter_buf = self._debug_filter_error = ""
+                    self._log_scroll = 0
+            elif self._debug_filter_sel == checkbox_row:
+                self._debug_filter_highlight = not self._debug_filter_highlight
+        elif self._debug_filter_sel == 0:
+            if key in (curses.KEY_BACKSPACE, 127, 8):
+                self._debug_filter_buf = self._debug_filter_buf[:-1]
+            elif 32 <= key <= 126:
+                self._debug_filter_buf += chr(key)
+        return True
+
+    def draw_debug_filter_popup(self) -> None:
+        h, w = self.stdscr.getmaxyx()
+        box_w = min(max(58, min(96, w - 4)), w - 4)
+        box_h = min(max(9, len(self._debug_filter_patterns) + 8), h - 4)
+        by1, bx1 = max(0, (h - box_h) // 2), max(0, (w - box_w) // 2)
+        by2, bx2 = by1 + box_h, bx1 + box_w
+        for y in range(by1, by2 + 1):
+            self.safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1), theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_normal"))
+        self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_CHROME)
+        self.safe_addstr(self.stdscr, by1, bx1 + 2, " DEBUG LOG FILTERS ", theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_title"))
+        self.safe_addstr(self.stdscr, by1 + 1, bx1 + 2, "Show matching debug lines only; regular log lines are unaffected.", theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text"))
+        input_attr = theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_selected") if self._debug_filter_sel == 0 else theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text")
+        self.safe_addstr(self.stdscr, by1 + 2, bx1 + 2, "Regex: " + (self._debug_filter_buf + "_")[:box_w - 11], input_attr)
+        max_rows = max(0, box_h - 7)
+        for index, expression in enumerate(self._debug_filter_patterns[:max_rows]):
+            attr = theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_selected") if self._debug_filter_sel == index + 1 else theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text")
+            self.safe_addstr(self.stdscr, by1 + 3 + index, bx1 + 2, f"  {index + 1}. {expression}"[:box_w - 4], attr)
+        checkbox_y = by1 + 3 + min(len(self._debug_filter_patterns), max_rows)
+        checked = "x" if self._debug_filter_highlight else " "
+        check_attr = theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_selected") if self._debug_filter_sel == len(self._debug_filter_patterns) + 1 else theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text")
+        self.safe_addstr(self.stdscr, checkbox_y, bx1 + 2, f"[{checked}] Highlight match", check_attr)
+        if self._debug_filter_error:
+            self.safe_addstr(self.stdscr, by2 - 1, bx1 + 2, self._debug_filter_error[:box_w - 4], theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_error"))
+        self.safe_addstr(self.stdscr, by2, bx1 + 2, "Enter: add/toggle  Up/Down: select  D/Del: remove  Esc: close"[:box_w - 4], theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_legend"))
+
     def refresh_screen(self):
         self.stdscr.erase()
         h, w = self.stdscr.getmaxyx()
@@ -6078,6 +6190,9 @@ class JJDlpDashboard:
         if self._mgmt_mode:
             self.draw_mgmt_overlay()
 
+        if self._debug_filter_popup_open:
+            self.draw_debug_filter_popup()
+
         # Sort popup — drawn on top of everything else.
         if self.sort_manager.popup_open:
             self.sort_manager.draw_popup(self.stdscr)
@@ -6137,6 +6252,9 @@ class JJDlpDashboard:
         # Exit-confirmation popup intercepts all keys while open.
         if self._exit_confirm_open:
             return self._handle_exit_confirm_key(key)
+
+        if self._debug_filter_popup_open:
+            return self._handle_debug_filter_key(key)
 
         # Changelog popup intercepts all keys while open.
         if self._changelog_popup_open:
@@ -6259,6 +6377,7 @@ class JJDlpDashboard:
                 sel = self.sites[self.selected_site_idx]
                 sel.show_debug_log = not sel.show_debug_log
                 self._log_scroll = 0
+                self._log_frozen_lines = None
             elif current_tab_name == "Stdout" and self.sites:
                 # "Show All" only means anything on the All Streamers view —
                 # a specific streamer never has checker JSON to show.
@@ -6273,6 +6392,9 @@ class JJDlpDashboard:
                     self._stderr_scroll = 0
             else:
                 self._start_mgmt("add")
+        elif key in (ord('f'), ord('F')):
+            if current_tab_name == "Log":
+                self._open_debug_filter_popup()
         elif key in (ord('r'), ord('R')):
             self._start_mgmt("remove")
         elif key in (ord('d'), ord('D')):

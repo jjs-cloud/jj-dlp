@@ -1,4 +1,5 @@
 - updated the OUTPUT_TMPL for tiktok-live to fix issues with special characters in the filename 
+- fixed an issue when under high disk/cpu load (innacurate file size)
 
 ====================
 ====================
