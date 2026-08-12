@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.20"
+__version__ = "1.26.19"
 
 import subprocess
 import time
@@ -2334,44 +2334,6 @@ def add_segment_suffix_to_tmpl(output_tmpl: str, segment_num: int) -> str:
     return f"{root}_part{segment_num:01d}{ext}"
 
 
-# Mirrors yt-dlp's STR_FORMAT_RE_TMPL format-spec: an optional conversion
-# string (flags [#0\-+ ], width, precision, len_mod) followed by a single
-# conversion type char from yt-dlp's set. Used to find every %(field)s in an
-# output template so we can rewrite string-typed fields with the `#S`
-# ("sanitize as restricted filename") conversion.
-_SIDECAR_FIELD_RE = _re.compile(
-    r'(?<!%)%\((?P<body>[^()\r\n]*)\)'
-    r'(?P<fmt>[#0\-+ ]*\d*(?:\.\d+)?[hlL]?[diouxXeEfFgGcrsaljhqBUDS])?'
-)
-
-
-def restrict_filename_tmpl(output_tmpl: str) -> str:
-    """
-    Rewrite *output_tmpl* so that, when yt-dlp prints it to the filename
-    sidecar, every string-typed %(field) is given the `#S` conversion —
-    yt-dlp's "sanitize as filename, restricted" conversion.
-
-    With that, the printed string matches exactly the filename yt-dlp
-    computes for the same template under `--restrict-filenames`: yt-dlp's
-    `-o` sanitization applies ``sanitize_filename(value, restricted=True)``
-    to each field whose resolved format type is a string type ('c'/'s'/'r'/
-    'a'), leaving the template's literal characters untouched — and that is
-    precisely what per-field `#S` produces. We therefore:
-
-      * rewrite fields with no explicit type or a string type  -> `#S`
-      * leave numeric-typed fields (%d/%f/...) untouched       (yt-dlp does
-        not sanitize those on the `-o` path either)
-      * leave fields that already carry an `S`/`#S` conversion alone
-        (yt-dlp resolves those identically on both the `-o` path and the
-        print path)
-    """
-    def _rewrite(m: 're.Match') -> str:
-        if not m.group('fmt') or m.group('fmt')[-1] in 'csraS':
-            return f'%({m.group("body")})#S'
-        return m.group(0)
-    return _SIDECAR_FIELD_RE.sub(_rewrite, output_tmpl)
-
-
 def wait_for_new_file_growth(filepath: str, timeout: float = 15.0,
                              stable_checks: int = 2,
                              interval: float = 1.0) -> bool:
@@ -2820,17 +2782,12 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             #
             # Two templates are written:
             #   1. %(filepath)s  → full path (some extractors return "NA")
-            #   2. the output template → filename-only (works for
+            #   2. the raw output template → filename-only (works for
             #      extractors like TikTok live where %(filepath)s is "NA"
             #      but individual fields like %(title)s are resolvable).
-            # Template #2 is passed through restrict_filename_tmpl(), which
-            # adds the `#S` conversion to every string-typed field, so the
-            # resolved line is already sanitized exactly like the `-o`
-            # filename under --restrict-filenames (per-field
-            # sanitize_filename with restricted=True; the template's literal
-            # characters are left alone). The sidecar reading code below
-            # picks the last non-"NA" line and, for a plain filename (not an
-            # absolute path), uses it as-is without any further sanitation.
+            # The sidecar reading code below picks the last non-"NA" line and
+            # applies Windows filename sanitisation when the value is a plain
+            # filename (not an absolute path).
             _sidecar_token = _re.sub(r"[^A-Za-z0-9_.-]", "_", streamer) or "streamer"
             _sidecar_path = os.path.join(
                 output_dir, f".jjdlp_filename_{_sidecar_token}_{uuid.uuid4().hex}.tmp"
@@ -2844,7 +2801,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     "-o", output_path,
                     "--print-to-file", "before_dl:%(filepath)s", _sidecar_path,
                     "--print-to-file", "%(filepath)s", _sidecar_path,
-                    "--print-to-file", restrict_filename_tmpl(current_output_tmpl), _sidecar_path,
+                    "--print-to-file", current_output_tmpl, _sidecar_path,
                     channel_url
                 ]
             )
@@ -2961,18 +2918,17 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         if os.path.isabs(raw_dest):
                             candidate = raw_dest
                         else:
-                            # The relative line is the output template printed
-                            # through restrict_filename_tmpl(): each %(field)s
-                            # carries the `#S` conversion, so yt-dlp already
-                            # sanitized the field values exactly the way the
-                            # `-o` filename is sanitized under
-                            # --restrict-filenames. The template's literal
-                            # characters (spaces, brackets, dashes, ...) are
-                            # intentionally left untouched by yt-dlp, so do
-                            # NOT re-sanitize here — that would corrupt the
-                            # literal text and break the match with the real
-                            # file on disk.
-                            candidate = os.path.join(output_dir, raw_dest)
+                            # This is the raw output template result (e.g.
+                            # from "%(uploader)s %(title)s ...").  yt-dlp
+                            # resolves the template but does NOT apply
+                            # filesystem sanitization — that happens later
+                            # when the file is created.  Replicate the
+                            # Windows sanitization here so the candidate
+                            # path matches the actual file on disk.
+                            _sanitized = _re.sub(r'[<>:"/\\|?*]', '_', raw_dest)
+                            _sanitized = _re.sub(r'[\x00-\x1f\x7f]', '', _sanitized)
+                            _sanitized = _sanitized.strip(' .')
+                            candidate = os.path.join(output_dir, _sanitized)
                         # The sidecar is written at before_dl, but the actual
                         # output file may not exist yet (yt-dlp opens it
                         # slightly after the hook fires).  Wait a few seconds
