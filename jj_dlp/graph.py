@@ -106,10 +106,18 @@ class Graph:
     _GRAPH_MIN_BAR_HEIGHT = 0
 
     # Spike cap: 0 = off. Else each bar's draw value is clamped to at most
-    # (1 + pct/100) × the tallest *other* visible bar — so a lone spike can
-    # never tower over the normal bars. E.g. 40 with a tallest bar of 10 MB/s
-    # lets a new bar reach at most 14 MB/s. Draw-time only; history stays raw.
+    # (1 + pct/100) × the Nth percentile of visible bars — so spikes (single
+    # or consecutive) can't dwarf the normal bars. E.g. 20 with a 75th
+    # percentile bar of 2 MB/s clamps spikes to 2.4 MB/s. Draw-time only;
+    # history stays raw.
     _GRAPH_MAX_PCT_ABOVE_TALLEST = 20
+
+    # Percentile used for spike-capping baseline (0-100). E.g. 75 = use the
+    # 75th percentile bar as the "normal" level, then clamp spikes to
+    # (percentile × factor). Higher = more lenient (harder to trigger clamp),
+    # lower = stricter. 75 is a good default that filters outliers while
+    # preserving legitimate elevated activity.
+    _GRAPH_PCT_BASELINE_PERCENTILE = 97
 
     # Show the auto-scale "max …" label above the graph's right edge. Off by
     # default; can be toggled live from the 'p' knob popup.
@@ -254,19 +262,23 @@ class Graph:
         visible = list(self.disk_rate_history)[-graph_w:]
         n = len(visible)
         # Spike cap (draw-time only): clamp each bar to at most
-        # (1 + pct/100) × the tallest *other* visible bar, so a lone spike
-        # can only ever reach pct% above the normal bars. Skipped when there
-        # is no taller bar to measure against (single bar, or all others 0).
+        # (1 + pct/100) × the Nth percentile of visible bars, so spikes
+        # (whether single or consecutive) don't dwarf the normal bars.
+        # This is robust against multi-bar bursts, unlike the old "max of others"
+        # approach which could get propped up by consecutive spikes.
         pct = self._GRAPH_MAX_PCT_ABOVE_TALLEST
         if pct > 0 and n >= 2:
             factor = 1.0 + pct / 100.0
-            clamped = []
-            for i, rate in enumerate(visible):
-                other_max = max(visible[:i] + visible[i + 1:])
-                if other_max > 0:
-                    rate = min(rate, other_max * factor)
-                clamped.append(rate)
-            visible = clamped
+            # Use the configured percentile as the "baseline normal"; anything spiking
+            # above (baseline * factor) gets clamped. This handles single spikes,
+            # consecutive spikes, and the burst-from-high-load cases.
+            sorted_visible = sorted(visible)
+            percentile_fraction = self._GRAPH_PCT_BASELINE_PERCENTILE / 100.0
+            pct_idx = max(0, int(len(sorted_visible) * percentile_fraction) - 1)
+            baseline = sorted_visible[pct_idx]
+            if baseline > 0:
+                cap = baseline * factor
+                visible = [min(rate, cap) for rate in visible]
         # Auto-scale to the samples currently visible, so the graph always
         # uses its full height instead of being capped by a constant. As soon
         # as two distinct bars are on screen, zoom the Y-axis to the visible
@@ -367,6 +379,8 @@ class Graph:
              "step": 1, "lo": 0, "hi": 11, "fmt": "{}"},
             {"label": "PCT_ABOVE_TALLEST", "attr": "_GRAPH_MAX_PCT_ABOVE_TALLEST", "kind": "int",
              "step": 5, "lo": 0, "hi": 1000, "fmt": "{}"},
+            {"label": "PCT_BASELINE",      "attr": "_GRAPH_PCT_BASELINE_PERCENTILE", "kind": "int",
+             "step": 5, "lo": 1, "hi": 99, "fmt": "{}"},
             {"label": "MAX LABEL",         "attr": "_GRAPH_SHOW_MAX_LABEL",    "kind": "enum",
              "choices": ["off", "on"]},
             {"label": "Clear tallest bar", "attr": None, "kind": "action", "action": "clear_tallest"},
