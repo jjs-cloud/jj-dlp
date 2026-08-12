@@ -2796,13 +2796,15 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             cmd = build_yt_dlp_command(
                 cfg["yt_dlp_path"],
                 _active_dl_cmd,
-                ["-o", output_path,
-                 "--print-to-file", "before_dl:%(filepath)s", _sidecar_path,
-                 "--print-to-file", "%(filepath)s", _sidecar_path,
-                 "--print-to-file", current_output_tmpl, _sidecar_path,
-                 channel_url]
+                [
+                    "--restrict-filenames",  # Restricts output templates & printed filepaths
+                    "-o", output_path,
+                    "--print-to-file", "before_dl:%(filepath)s", _sidecar_path,
+                    "--print-to-file", "%(filepath)s", _sidecar_path,
+                    "--print-to-file", current_output_tmpl, _sidecar_path,
+                    channel_url
+                ]
             )
-
             out_target, err_target, close_logs, log_out_fp, log_err_fp = open_log_streams(cfg, streamer)
 
             try:
