@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.17"
+__version__ = "1.26.18"
 
 import subprocess
 import time
@@ -765,6 +765,11 @@ class SiteState:
         # counts files actually being recorded by yt-dlp, never File Manager
         # artifacts (Move/Fixup/Trim/Split output files).
         self.recording_output_paths: Dict[str, str] = {}
+        # Streamers for which the File Manager's Split popup has requested an
+        # immediate recording restart ("Restart the recording instead"). Consumed
+        # by record_stream()'s split-timer loop, which forces the SPLIT_AFTER
+        # split to fire now (even when SPLIT_AFTER is 0). Guarded by self.lock.
+        self.manual_split_requests:  Set[str] = set()
         self.recording_threads:   List[threading.Thread] = []
         self.known_streamers:     Set[str] = set()
         self.trigger_event        = threading.Event()
@@ -894,6 +899,15 @@ class SiteState:
         across all streamers on this site. Thread-safe copy."""
         with self.lock:
             return set(self.recording_output_paths.values())
+
+    def request_manual_split(self, streamer: str) -> None:
+        """Ask record_stream() to force a SPLIT_AFTER split for *streamer*
+        right now (used by the File Manager's "Restart the recording instead"
+        option). The split reuses the normal SPLIT_AFTER machinery, so the
+        current segment is renamed to _partN and recording continues into
+        the next part, even when SPLIT_AFTER is configured to 0."""
+        with self.lock:
+            self.manual_split_requests.add(streamer)
 
     def kill_proc_for_streamer(self, streamer: str) -> None:
         with self._procs_lock:
@@ -3271,7 +3285,13 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     time.sleep(5)
                     break
 
-                if split_after_seconds > 0:
+                manual_split = False
+                with site.lock:
+                    if streamer in site.manual_split_requests:
+                        site.manual_split_requests.discard(streamer)
+                        manual_split = True
+
+                if split_after_seconds > 0 or manual_split:
                     elapsed = time.time() - recording_start_time
                     _split_log_counter += 1
                     if _split_log_counter % 30 == 0:  # log roughly every 30s
@@ -3280,7 +3300,13 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                             f"split_after_seconds={split_after_seconds}s "
                             f"remaining={max(0, split_after_seconds - elapsed):.1f}s")
 
-                    if elapsed >= split_after_seconds and time.time() >= next_split_retry_time:
+                    if manual_split or (
+                            elapsed >= split_after_seconds
+                            and time.time() >= next_split_retry_time):
+                        if manual_split:
+                            site.log_line(
+                                f"Manual split requested for {streamer} — starting part {segment_num + 1}"
+                            )
                         next_segment_num = segment_num + 1
 
                         next_output_tmpl = add_segment_suffix_to_tmpl(

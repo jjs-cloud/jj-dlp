@@ -67,11 +67,17 @@ current Delete mode) once the trimmed file has been written successfully.
 Selecting "Split" opens a popup with editable fields: Part length
 (minutes), Overlap (seconds), First part number, Part number offset, and
 Output directory (defaults to a "video_parts" folder beside the source
-file). Mode is automatic: IDLE files use Instant Mode, WRITING files use
-Catch-up Mode. Split runs on a background thread via ffmpeg. A file with
-a job running shows a "*" to its left. Opening Split again on that file
-offers "Stop Job" (kills ffmpeg immediately, no wait, after a Yes/No
-confirmation); with no job running it reports "Error: No job running".
+file), plus three action rows: "Start Job" (starts the split), "Stop Job"
+(cancels a running split after a Yes/No confirmation), and — for files
+jj-dlp is actively recording right now — "Restart the recording instead"
+(forces the live recording to split immediately through the same
+SPLIT_AFTER machinery, renaming the current file to _partN and
+continuing into the next part). Mode is automatic: IDLE files use
+Instant Mode, WRITING files use Catch-up Mode. Split runs on a background
+thread via ffmpeg. A file with a job running shows a "*" to its left.
+Opening Split again on that file offers "Stop Job" (kills ffmpeg
+immediately, no wait, after a Yes/No confirmation); with no job running
+it reports "Error: No job running".
 
 Delete mode
 -----------
@@ -154,7 +160,9 @@ SPLIT_FIELD_LABELS = [
     "Part number offset:",
     "Output directory:",
 ]
-SPLIT_ROW_STOP = len(SPLIT_FIELD_LABELS)  # trailing "Stop Job" row
+SPLIT_ROW_START_JOB = len(SPLIT_FIELD_LABELS)  # "Start Job" action row
+SPLIT_ROW_STOP = SPLIT_ROW_START_JOB + 1       # "Stop Job" action row
+SPLIT_ROW_RESTART = SPLIT_ROW_STOP + 1         # "Restart the recording instead" action row
 
 # ── "Fixup" checkbox popup ──────────────────────────────────────────────────
 FIXUP_CHECK_ITEMS = [
@@ -401,11 +409,11 @@ class FileManagerTab:
         self._trim_busy = False
         self._trim_lock = threading.Lock()
 
-        # "Split" popup (fields + Stop Job row) + background job state.
-        # self._split_jobs maps path -> {"proc": Popen|None, "stop": bool}.
+        # "Split" popup (fields + Start Job / Stop Job / Restart rows) +
+        # background job state. self._split_jobs maps path -> {"proc": ...}.
         self._split_open = False
         self._split_target = None
-        self._split_cursor = 0           # 0-3=fields, 4=output dir, 5=Stop Job
+        self._split_cursor = 0           # 0-4=fields, 5=Start Job, 6=Stop Job, 7=Restart
         self._split_field_cursor = 0
         self._split_len_buf = "30"
         self._split_overlap_buf = "5"
@@ -1873,7 +1881,8 @@ class FileManagerTab:
 
     def _split_active_buf(self):
         """Return (buf, attr_name) for the field row currently focused, or
-        (None, None) when the "Stop Job" row is focused instead."""
+        (None, None) when one of the action rows (Start Job / Stop Job /
+        Restart) is focused instead."""
         mapping = {
             0: "_split_len_buf",
             1: "_split_overlap_buf",
@@ -1885,6 +1894,45 @@ class FileManagerTab:
         if attr_name is None:
             return None, None
         return getattr(self, attr_name), attr_name
+
+    def _split_max_row(self):
+        """Highest selectable row index in the split popup. The "Restart the
+        recording now" row only exists for files jj-dlp is actively recording
+        right now; otherwise the popup ends at the Stop Job row."""
+        site, _streamer = self._find_recording_owner(self._split_target or "")
+        if site is not None:
+            return SPLIT_ROW_RESTART
+        return SPLIT_ROW_STOP
+
+    def _find_recording_owner(self, path):
+        """Return (site, streamer) whose yt-dlp process is currently writing
+        *path*, or (None, None) when no site is recording that exact file
+        right now. Paths are normalized so they line up across drive-letter
+        case differences on Windows."""
+        if not path:
+            return None, None
+        key = os.path.normcase(os.path.abspath(path))
+        try:
+            for site in self.dashboard.sites:
+                with site.lock:
+                    for streamer, out_path in site.recording_output_paths.items():
+                        if os.path.normcase(os.path.abspath(out_path)) == key:
+                            return site, streamer
+        except Exception:
+            pass
+        return None, None
+
+    def _restart_recording_now(self, path):
+        """"Restart the recording instead": force the SPLIT_AFTER split for the
+        streamer currently recording *path*, so the current file is renamed
+        to _partN and recording continues into the next part. Only valid for
+        files jj-dlp is actively recording."""
+        site, streamer = self._find_recording_owner(path)
+        if site is None or not streamer:
+            self._set_status("Restart failed: this file is not being recorded")
+            return
+        site.request_manual_split(streamer)
+        self._set_status(f"Recording restart requested: {streamer}")
 
     def _handle_split_popup_key(self, key) -> bool:
         path = self._split_target
@@ -1907,16 +1955,19 @@ class FileManagerTab:
             self._split_field_cursor = len(buf) if buf is not None else 0
             return True
         if key == curses.KEY_DOWN:
-            self._split_cursor = min(SPLIT_ROW_STOP, self._split_cursor + 1)
+            self._split_cursor = min(self._split_max_row(), self._split_cursor + 1)
             buf, _ = self._split_active_buf()
             self._split_field_cursor = len(buf) if buf is not None else 0
             return True
         if key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
-            if self._split_cursor == SPLIT_ROW_STOP:
+            if self._split_cursor == SPLIT_ROW_START_JOB:
+                self._submit_split_popup()
+            elif self._split_cursor == SPLIT_ROW_STOP:
                 self.close_split_popup()
                 self.open_split_confirm_popup(path)
-            else:
-                self._submit_split_popup()
+            elif self._split_cursor == SPLIT_ROW_RESTART:
+                self.close_split_popup()
+                self._restart_recording_now(path)
             return True
 
         buf, attr_name = self._split_active_buf()
@@ -2025,8 +2076,9 @@ class FileManagerTab:
                            theme.attr(db, "file_manager_filemanagertab_draw_split_popup_hilight_1"))
             return
 
+        restart_shown = (self._split_max_row() == SPLIT_ROW_RESTART)
         box_w = min(60, w - 4)
-        box_h = min(12, h - 4)
+        box_h = min(14 + (1 if restart_shown else 0), h - 4)
         by1 = (h - box_h) // 2
         bx1 = (w - box_w) // 2
         by2 = by1 + box_h
@@ -2040,7 +2092,7 @@ class FileManagerTab:
         db.safe_addstr(stdscr, by1, bx1 + 2, " SPLIT ",
                        theme.attr(db, "file_manager_filemanagertab_draw_split_popup_chrome_2"))
         db.safe_addstr(stdscr, by2, bx1 + 2,
-                       " Enter: Start  Esc: Cancel ",
+                       " Enter: Select  Esc: Cancel ",
                        theme.attr(db, "file_manager_filemanagertab_draw_split_popup_invhead_2"))
 
         target_name = os.path.basename(path or "")
@@ -2070,13 +2122,30 @@ class FileManagerTab:
             db.safe_addstr(stdscr, row_y, bx1 + 2,
                            f"{prefix}{label} {display}"[:box_w - 4], attr)
 
-        stop_row_y = by1 + 4 + len(SPLIT_FIELD_LABELS) + 1
+        start_job_y = by1 + 4 + len(SPLIT_FIELD_LABELS) + 1
+        is_sel = (self._split_cursor == SPLIT_ROW_START_JOB)
+        prefix = "> " if is_sel else "  "
+        attr = (theme.attr(db, "file_manager_filemanagertab_draw_split_popup_hilight_4")) if is_sel \
+            else theme.attr(db, "file_manager_filemanagertab_draw_split_popup_normal_5")
+        db.safe_addstr(stdscr, start_job_y, bx1 + 2,
+                       f"{prefix}Start Job"[:box_w - 4], attr)
+
+        stop_row_y = start_job_y + 1
         is_sel = (self._split_cursor == SPLIT_ROW_STOP)
         prefix = "> " if is_sel else "  "
         attr = (theme.attr(db, "file_manager_filemanagertab_draw_split_popup_hilight_3")) if is_sel \
             else theme.attr(db, "file_manager_filemanagertab_draw_split_popup_normal_4")
         db.safe_addstr(stdscr, stop_row_y, bx1 + 2,
                        f"{prefix}Stop Job"[:box_w - 4], attr)
+
+        if restart_shown:
+            restart_row_y = stop_row_y + 2
+            is_sel = (self._split_cursor == SPLIT_ROW_RESTART)
+            prefix = "> " if is_sel else "  "
+            attr = (theme.attr(db, "file_manager_filemanagertab_draw_split_popup_hilight_5")) if is_sel \
+                else theme.attr(db, "file_manager_filemanagertab_draw_split_popup_normal_6")
+            db.safe_addstr(stdscr, restart_row_y, bx1 + 2,
+                           f"{prefix}Restart the recording instead"[:box_w - 4], attr)
 
     # ── "Split" stop confirmation popup ─────────────────────────────────────
 
