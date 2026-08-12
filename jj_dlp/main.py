@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.19"
+__version__ = "1.26.20"
 
 import subprocess
 import time
@@ -3581,6 +3581,13 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                             f"stall_since={time.time() - last_growth_time:.2f}s",
                             site_name=streamer)
                         site.set_stall_since(streamer, last_growth_time)
+                        # Re-sync the comparison baseline to this poll's reading.
+                        # last_size is a rolling "previous poll" value, not an
+                        # all-time high water mark: if it stayed a permanent
+                        # ceiling, a single spuriously-low os.path.getsize()
+                        # sample (observed under brief heavy CPU/disk load
+                        # could permanently poison it.
+                        last_size = current_size
 
             else:
                 # FIX: this branch runs whenever the inner loop exits because

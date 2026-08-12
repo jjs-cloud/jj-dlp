@@ -1,3 +1,8 @@
+- updated the OUTPUT_TMPL for tiktok-live to fix issues with special characters in the filename 
+
+====================
+====================
+
 v1.26.17
 
 - when scrolled up on the log, stdout, and stderr tabs, output now freezes so you can read it
