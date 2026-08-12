@@ -5211,8 +5211,8 @@ class JJDlpDashboard:
                             s[:name_w_compact].ljust(name_w_compact), name_attr)
                 col += name_w_compact + 1
                 self.safe_addstr(self.stdscr, row_y, col,
-                            status_str[:7].ljust(7), status_attr)
-                col += 8
+                            status_str[:8].ljust(8), status_attr)
+                col += 9
                 if last_live_str:
                     if (ll_ts is not None
                             and _last_live_highlight_days > 0
@@ -5226,11 +5226,11 @@ class JJDlpDashboard:
         else:
             # Normal: 1 column with progress bar, duration, last_live
             # Column widths — bar_w honours PROGRESS_BAR_WIDTH but won't overflow the row.
-            # Row layout: [name_w] 1 [status=7] 1 [bar_w] 1 [dur=9] 1 [last_live_w]
+            # Row layout: [name_w] 1 [status=8] 1 [bar_w] 1 [dur=9] 1 [last_live_w]
             # So the actual space available for the bar is what's left after the fixed columns.
             name_w      = max(10, min(18, panel_width // 4))
             last_live_w = 12   # "Last Live" column
-            _fixed_cols = name_w + 1 + 7 + 1 + 1 + 9 + 1 + last_live_w  # everything except bar
+            _fixed_cols = name_w + 1 + 8 + 1 + 1 + 9 + 1 + last_live_w  # everything except bar
             bar_w       = max(4, min(_bar_cfg_w, panel_width - _fixed_cols))
 
             for i, s in enumerate(all_s):
@@ -5305,8 +5305,8 @@ class JJDlpDashboard:
                             s[:name_w].ljust(name_w), name_attr)
                 col += name_w + 1
                 self.safe_addstr(self.stdscr, row_y, col,
-                            status_str[:7].ljust(7), status_attr)
-                col += 8
+                            status_str[:8].ljust(8), status_attr)
+                col += 9
                 self.safe_addstr(self.stdscr, row_y, col, bar_str, bar_attr)
                 col += bar_w + 1
                 if dur_str:
