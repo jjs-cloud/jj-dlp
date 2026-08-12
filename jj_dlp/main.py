@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.16"
+__version__ = "1.26.17"
 
 import subprocess
 import time
@@ -796,6 +796,13 @@ class SiteState:
         self.dash_debug_lines:    deque = deque(maxlen=DEBUG_LOG_BUFFER_SIZE)      # recent debug-tag log
         self.dash_stdout_lines:   deque = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)   # recent stdout lines
         self.dash_stderr_lines:   deque = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)   # recent stderr lines
+        # Signature of the last "hard" checker-command failure we surfaced on
+        # the Log tab (see _CHECKER_HARD_ERROR_PATTERNS), or None if the
+        # checker is currently healthy. Only the monitor_site thread for this
+        # site touches this, so no lock is needed. Used to log a failure once
+        # (not every check_interval) and to log a single "recovered" line
+        # when the checker starts working again.
+        self._last_checker_error: Optional[str] = None
         # Same lines, additionally bucketed per-streamer so the STREAMERS
         # panel on the Stdout/Stderr tabs can show one streamer's output in
         # isolation. No liveness-checker output is shown. Buckets are
@@ -1227,6 +1234,28 @@ update_available_lock = threading.Lock()
 FFMPEG_ERROR_PATTERNS: List[str] = [
     "timestamp discontinuity",
     "Packet corrupt",
+]
+
+# Substrings that indicate the *checker* command itself is broken/misconfigured
+# (missing cookies DB, bad binary path, DNS/network failure, permissions, ...)
+# as opposed to a normal "this streamer is offline" result. Matching one of
+# these means every streamer in the check just silently failed to be
+# evaluated, so it's surfaced on the dashboard's Log tab — previously it only
+# went to the debug log (off by default) or the raw, easy-to-miss stderr
+# pipe view, so a broken checker looked identical to "nobody is live".
+_CHECKER_HARD_ERROR_PATTERNS: List[str] = [
+    "could not find",
+    "cookies database",
+    "unsupported browser",
+    "permission denied",
+    "no such file or directory",
+    "not recognized as an internal or external command",
+    "command not found",
+    "connection refused",
+    "network is unreachable",
+    "temporary failure in name resolution",
+    "name or service not known",
+    "certificate verify failed",
 ]
 
 # Lines from the checker command are stored with these prefixes so draw_stdout_tab
@@ -2127,6 +2156,40 @@ def get_live_streamers(streamers: List[str], cfg: dict,
     dbg(f"[CHECKER] returncode={result.returncode} stdout_len={len(result.stdout)} stderr_len={len(result.stderr)}")
     if result.stderr:
         dbg(f"[CHECKER] stderr (first 500 chars): {result.stderr[:500]!r}")
+
+    # Surface a broken checker command on the dashboard's Log tab. Without
+    # this, something like a missing browser-cookies database makes the
+    # checker fail on every single streamer, every cycle, forever — but
+    # get_live_streamers() just returns an empty {} either way, so the
+    # dashboard looks identical to "nobody is live" and the failure never
+    # shows up anywhere the user is likely to look.
+    if site is not None and result.stderr:
+        _err_lower = result.stderr.lower()
+        if any(pat in _err_lower for pat in _CHECKER_HARD_ERROR_PATTERNS):
+            _err_first_line = next(
+                (ln.strip() for ln in result.stderr.splitlines() if ln.strip()), ""
+            )[:300]
+            if _err_first_line != site._last_checker_error:
+                site._last_checker_error = _err_first_line
+                site.log_line(
+                    f"[!] CHECKER FAILED — liveness checks are not working: {_err_first_line}"
+                )
+                if "cookies database" in _err_lower or "could not find" in _err_lower:
+                    browser = _read_browser_from_config(site.config_path)
+                    if browser and browser != "disabled":
+                        site.log_line(
+                            f"[!] Fix: open {browser} & ensure you are logged in to the site(s), or "
+                            "restart jj-dlp and select a different browser (or "
+                            '"disabled <- remove cookies option") from the browser menu.'
+                        )
+                    else:
+                        site.log_line(
+                            "[!] Fix: restart jj-dlp and select a different browser from the browser menu."
+                        )
+        elif site._last_checker_error is not None:
+            site._last_checker_error = None
+            site.log_line("Checker command is working again.")
+
     if cfg["logging"]:
         checker_path = get_checker_log_path(cfg)
         try:
