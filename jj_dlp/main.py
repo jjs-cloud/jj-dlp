@@ -3142,9 +3142,25 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         and not growth_seen
                         and time.time() >= _no_confirm_deadline):
                     _no_confirm_warned = True
+                    if active_file:
+                        _nc_size, _, _, _nc_file_error = get_streamer_file_size(
+                            output_dir, streamer, cfg=cfg,
+                            proc_start_time=proc_start_time,
+                            known_filename=active_file,
+                        )
+                    else:
+                        _nc_size, _nc_file_error = 0, True
                     dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: file not confirmed for "
                         f"streamer={streamer!r} within {int(stall_timeout)}s "
-                        f"(deadline={_no_confirm_deadline:.2f}) — sending warning",
+                        f"(deadline={_no_confirm_deadline:.2f}) — sending warning; "
+                        f"anchor_src={_no_confirm_anchor_src} "
+                        f"anchor_val={_no_confirm_anchor_val:.2f} "
+                        f"live_since={site.get_live_since(streamer)} "
+                        f"enable_anchor={site.get_enable_anchor(streamer)} "
+                        f"attempt_age={time.time() - recording_start_time:.1f}s "
+                        f"active_file={active_file!r} last_size={last_size} "
+                        f"cur_size={_nc_size} file_error={_nc_file_error} "
+                        f"growth_seen={growth_seen}",
                         site_name=streamer)
                     _maybe_show_live_popup(
                         streamer, cfg, site, show_popup=show_popup,
@@ -3667,8 +3683,23 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 # Normal yt-dlp exit (return code 0) is a valid restart
                 # trigger too: the monitor loop sees the streamer still live
                 # and relaunches almost immediately.
+                if active_file:
+                    _final_size, _, _, _final_file_error = get_streamer_file_size(
+                        output_dir, streamer, cfg=cfg,
+                        proc_start_time=proc_start_time,
+                        known_filename=active_file,
+                    )
+                else:
+                    _final_size, _final_file_error = 0, True
                 _refresh_restart_anchor_if_growing(
                     site, streamer, growth_seen, reason="normal_exit")
+                dbg(f"[STALL] attempt ended (normal_exit): streamer={streamer!r} "
+                    f"returncode={proc.returncode} active_file={active_file!r} "
+                    f"last_size={last_size} final_size={_final_size} "
+                    f"file_error={_final_file_error} growth_seen={growth_seen} "
+                    f"attempt_duration={time.time() - proc_start_time:.1f}s "
+                    f"anchor_refreshed={bool(growth_seen)}",
+                    site_name=streamer)
 
                 # Safety net: if proc.poll() was already non-None before the
                 # loop got to sleep even once, _check_no_confirm_deadline()
