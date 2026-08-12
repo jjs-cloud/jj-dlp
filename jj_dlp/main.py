@@ -741,7 +741,7 @@ class SiteState:
         # but are still holding for their Intro Delay period — no yt-dlp
         # process has been launched yet. Guarded by self.lock, same as
         # currently_recording. Used purely so the dashboard can keep showing
-        # [●Live] instead of flashing [► REC] until recording actually starts.
+        # [● Live] instead of flashing [►  REC] until recording actually starts.
         self.intro_delay_pending: Set[str] = set()
         # Resolution (height, in px) each currently-recording streamer started
         # at, per the checker's --dump-json output. Used by UPGRADE_QUALITY to
@@ -2141,7 +2141,7 @@ def get_live_streamers(streamers: List[str], cfg: dict,
         return {}
     # NOTE: Do NOT filter out blocked streamers here. We still need to know
     # if a blocked/disabled streamer is live so the dashboard can flash
-    # [●Live] ↔ [DIS]. Recording is suppressed downstream in
+    # [● Live] ↔ [DIS]. Recording is suppressed downstream in
     # start_recording_if_needed(), not here.
     urls = [cfg["site_tmpl"].format(username=s) for s in streamers]
     cmd = build_yt_dlp_command(cfg["yt_dlp_path"], cfg["checker_cmd"], urls)
@@ -5179,31 +5179,31 @@ class JJDlpDashboard:
                     name_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_2")
                     if since is not None:
                         if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
-                            status_str = "[●Live]"
+                            status_str = "[● Live]"
                             status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_3")
                         else:
-                            status_str = "[x DIS]"
+                            status_str = "[x  DIS]"
                             status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_4")
                     else:
-                        status_str = "[x DIS]"
+                        status_str = "[x  DIS]"
                         status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_5")
                 elif since is not None:
                     name_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_2")
                     if is_rec:
                         if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
-                            status_str = "[●Live]"
+                            status_str = "[● Live]"
                             status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_3")
                         else:
-                            status_str = "[► REC] "
+                            status_str = "[►  REC] "
                             status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_rec_2")
                     else:
-                        status_str = "[●Live]"
+                        status_str = "[● Live]"
                         status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_4")
                     if not (is_rec and recording_res.get(s) is not None):
                         last_live_str = ""  # currently live, no "last live"
                 else:
                     name_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_2")
-                    status_str = "[○ off]"
+                    status_str = "[○  off]"
                     status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_3")
 
                 col = x1 + 2 + col_idx * (half_w + _col_gap)
@@ -5266,26 +5266,26 @@ class JJDlpDashboard:
                     dur_str     = ""
                     if since is not None:
                         if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
-                            status_str  = "[●Live]"
+                            status_str  = "[● Live]"
                             status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_8")
                         else:
-                            status_str  = "[x DIS]"
+                            status_str  = "[x  DIS]"
                             status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_9")
                     else:
-                        status_str  = "[x DIS]"
+                        status_str  = "[x  DIS]"
                         status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_10")
                 elif since is not None:
                     elapsed     = now - since
                     name_attr   = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_6")
                     if is_rec:
                         if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
-                            status_str  = "[●Live]"
+                            status_str  = "[● Live]"
                             status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_7")
                         else:
-                            status_str  = "[► REC] "
+                            status_str  = "[►  REC] "
                             status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_rec_3")
                     else:
-                        status_str  = "[●Live]"
+                        status_str  = "[● Live]"
                         status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_8")
                     bar_str     = _live_bar(elapsed, bar_w, _bar_max_secs)
                     bar_attr    = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_9")
@@ -5294,7 +5294,7 @@ class JJDlpDashboard:
                         last_live_str = ""  # currently live, no "last live"
                 else:
                     name_attr   = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_5")
-                    status_str  = "[○ off]"
+                    status_str  = "[○  off]"
                     status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_6")
                     bar_str     = "─" * bar_w
                     bar_attr    = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_7")
