@@ -78,7 +78,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("SITE_ORDER",            "site",   "999",   True,  "The position on the dashboard to display this site's panel (e.g. 0 for top-left, 1 for top-right, 2 for bottom-left, 3 for bottom-right, etc.)"),
     _KeyDef("CHECK_INTERVAL",        "site",   "60",    False, "How often to check if streamers are live (in seconds).  (Default: 60) (note: keep this <= STALL_TIMEOUT to avoid false write-failure alerts)"),
     _KeyDef("OUTPUT_DIR",            "site",   "recordings", True, 'Folder where recordings will be saved.  Can be an absolute path or relative path.  example: "C:\\recordings" or "recordings"'),
-    _KeyDef("OUTPUT_TMPL",           "site",   "%(title)s [%(id)s].%(ext)s", False, "Template for naming the video files. (Reference: https://github.com/yt-dlp/yt-dlp#output-templates)"),
+    _KeyDef("OUTPUT_TMPL",           "site",   "%(title)s [%(id)s].%(ext)s", False, "Template for naming the video files. Special value: \"override\" names files as \"{streamer} YYYY-MM-DD HH_MM_SS.%(ext)s\" while still letting yt-dlp supply the actual extension. (Reference: https://github.com/yt-dlp/yt-dlp#output-templates)"),
     _KeyDef("COOLDOWN_AFTER_RECORDING", "site", "60",   False, "Seconds to wait after a recording ends before checking again."),
     _KeyDef("SPLIT_AFTER",           "site",   "0",    True,  "When recording a stream, split the video file(s) every X minutes. (0 = no split)"),
     _KeyDef("STALL_CHECK_INTERVAL",  "site",   "30",   True, "How often to check if the recording has stalled (in seconds).  Disable by setting this to a large number. (Default: 30)"),

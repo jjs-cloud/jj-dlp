@@ -2323,6 +2323,25 @@ known_filename=None):
             site_name=streamer)
         return 0, False, "", True
 
+def resolve_output_tmpl(output_tmpl: str, streamer: str, dt: Optional[datetime] = None) -> str:
+    """Resolve a special OUTPUT_TMPL override value into a manual filename template.
+
+    When OUTPUT_TMPL is set to "override", generate a filename in the form
+    "{streamer} YYYY-MM-DD HH_MM_SS.%(ext)s" so the app controls the name
+    while still letting yt-dlp supply the real extension.
+    """
+    if output_tmpl is None:
+        return output_tmpl
+    if str(output_tmpl).strip().lower() != "override":
+        return output_tmpl
+
+    stamp = (dt or datetime.now()).strftime("%Y-%m-%d %H_%M_%S")
+    safe_streamer = _re.sub(r"[^A-Za-z0-9_.\- ]+", "_", (streamer or "streamer")).strip()
+    if not safe_streamer:
+        safe_streamer = "streamer"
+    return f"{safe_streamer} {stamp}.%(ext)s"
+
+
 def add_segment_suffix_to_tmpl(output_tmpl: str, segment_num: int) -> str:
     """
     Convert:
@@ -2752,7 +2771,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
         while True:
             if site._stop_event.is_set() or streamer in site.evicted_streamers:
                 break
-            current_output_tmpl = cfg["output_tmpl"]
+            current_output_tmpl = resolve_output_tmpl(cfg["output_tmpl"], streamer)
             # For segment 1 we intentionally omit the _part1 suffix — it will be
             # retroactively added (via rename) only if a second part is ever created.
             if split_after_seconds > 0 and segment_num > 1:
@@ -3213,7 +3232,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         next_segment_num = segment_num + 1
 
                         next_output_tmpl = add_segment_suffix_to_tmpl(
-                            cfg["output_tmpl"],
+                            resolve_output_tmpl(cfg["output_tmpl"], streamer),
                             next_segment_num
                         )
 
