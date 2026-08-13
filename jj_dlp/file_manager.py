@@ -895,7 +895,7 @@ class FileManagerTab:
         h, w = stdscr.getmaxyx()
         n = len(SORT_OPTIONS_FM)
 
-        box_w = min(42, w - 4)
+        box_w = min(53, w - 4)
         box_h = min(n + 4, h - 4)
         by1 = (h - box_h) // 2
         bx1 = (w - box_w) // 2
@@ -1062,7 +1062,7 @@ class FileManagerTab:
         h, w = stdscr.getmaxyx()
         n = len(FIXUP_CHECK_ITEMS)
 
-        box_w = min(52, w - 4)
+        box_w = min(65, w - 4)
         box_h = min(n + 5, h - 4)
         by1 = (h - box_h) // 2
         bx1 = (w - box_w) // 2
@@ -1176,7 +1176,7 @@ class FileManagerTab:
         n_dest = len(self._move_destinations)
         n_checks = len(MOVE_CHECK_ITEMS)
 
-        box_w = min(64, w - 4)
+        box_w = min(80, w - 4)
         # 1 "Select a destination:" + n_dest rows + 1 "Configure a new
         # destination" row + 1 blank + n_checks checkbox rows
         inner_rows = 1 + n_dest + 1 + 1 + n_checks
@@ -1289,7 +1289,7 @@ class FileManagerTab:
         db = self.dashboard
         h, w = stdscr.getmaxyx()
 
-        box_w = min(66, w - 4)
+        box_w = min(83, w - 4)
         box_h = min(6, h - 4)
         by1 = (h - box_h) // 2
         bx1 = (w - box_w) // 2
@@ -1713,7 +1713,7 @@ class FileManagerTab:
         db = self.dashboard
         h, w = stdscr.getmaxyx()
 
-        box_w = min(50, w - 4)
+        box_w = min(63, w - 4)
         box_h = min(9, h - 4)
         by1 = (h - box_h) // 2
         bx1 = (w - box_w) // 2
@@ -2049,7 +2049,7 @@ class FileManagerTab:
         running = path in self._split_jobs
 
         if running:
-            box_w = min(46, w - 4)
+            box_w = min(58, w - 4)
             box_h = min(5, h - 4)
             by1 = (h - box_h) // 2
             bx1 = (w - box_w) // 2
@@ -2077,7 +2077,7 @@ class FileManagerTab:
             return
 
         restart_shown = (self._split_max_row() == SPLIT_ROW_RESTART)
-        box_w = min(60, w - 4)
+        box_w = min(75, w - 4)
         box_h = min(14 + (1 if restart_shown else 0), h - 4)
         by1 = (h - box_h) // 2
         bx1 = (w - box_w) // 2
@@ -2175,7 +2175,7 @@ class FileManagerTab:
         h, w = stdscr.getmaxyx()
         msg = "Are you sure you want to cancel the splitting job?"
 
-        box_w = min(len(msg) + 6, w - 4)
+        box_w = min(int((len(msg) + 6) * 1.25), w - 4)
         box_h = min(5, h - 4)
         by1 = (h - box_h) // 2
         bx1 = (w - box_w) // 2
