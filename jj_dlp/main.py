@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.23"
+__version__ = "1.26.24"
 
 import subprocess
 import time
@@ -982,6 +982,13 @@ class SiteState:
             since = self._live_since_cache.get(streamer, time.time())
             self.live_sessions[streamer] = LiveSession(since=since)
             snapshot = {s: sess.since for s, sess in self.live_sessions.items()}
+        with self.lock:
+            _still_recording = streamer in self.currently_recording
+        if _still_recording:
+            dbg(f"[UPGRADE_QUALITY] mark_live() created a fresh LiveSession "
+                f"(quality_upgraded reset to False) while a recording is already "
+                f"in progress — likely a transient live_info miss on the prior "
+                f"poll cycle", site_name=streamer)
         _save_live_since_cache(self.config_path, snapshot)
 
     def mark_offline(self, streamer: str) -> None:
@@ -994,9 +1001,24 @@ class SiteState:
         with self.session_lock:
             if streamer not in self.live_sessions:
                 return
+            _session = self.live_sessions[streamer]
             del self.live_sessions[streamer]
             self._live_since_cache.pop(streamer, None)
             snapshot = {s: sess.since for s, sess in self.live_sessions.items()}
+        with self.lock:
+            _still_recording = streamer in self.currently_recording
+        if _still_recording:
+            # A recording is still actively in progress for this streamer
+            # while the checker reported it as not-live this cycle (a
+            # transient miss). This tears down the whole LiveSession —
+            # including quality_upgraded — even though nothing about the
+            # recording itself changed. If mark_live() re-fires shortly
+            # after, the once-per-session UPGRADE_QUALITY guard silently
+            # resets, letting a second (usually no-op) upgrade check run.
+            dbg(f"[UPGRADE_QUALITY] mark_offline() torn down LiveSession while still "
+                f"recording — quality_upgraded={_session.quality_upgraded!r} "
+                f"live_since={_session.since!r} (this resets the once-per-session guard)",
+                site_name=streamer)
         _save_live_since_cache(self.config_path, snapshot)
         with self.dash_lock:
             self.dash_last_live[streamer] = time.time()
@@ -3464,13 +3486,18 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     if file_error:
                         with site.lock:
                             site.display_resolution.pop(streamer, None)
+                        dbg(f"[QUALITY] file_error={file_error!r} - clearing measured resolution", site_name=streamer)
                     else:
                         _measured_height = probe_file_height(active_file)
                         with site.lock:
+                            _prev_measured = site.display_resolution.get(streamer)
                             if _measured_height is not None:
                                 site.display_resolution[streamer] = _measured_height
                             else:
                                 site.display_resolution.pop(streamer, None)
+                        dbg(f"[QUALITY] measured_height={_measured_height!r}p "
+                            f"(prev={_prev_measured!r}p) recording_resolution_baseline={site.recording_resolution.get(streamer)!r}p "
+                            f"file={active_file!r}", site_name=streamer)
 
                     if file_error:
                         # We couldn't even locate/read the recording file this
@@ -3855,6 +3882,10 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                 site.evicted_streamers.discard(streamer)
                 if resolution_map is not None:
                     _start_height = resolution_map.get(streamer)
+                    _prior_baseline = site.recording_resolution.get(streamer)
+                    dbg(f"[UPGRADE_QUALITY] start_recording_if_needed baseline set: "
+                        f"resolution_map_height={_start_height!r}p prior_baseline={_prior_baseline!r}p "
+                        f"source={source!r}", site_name=streamer)
                     if _start_height is not None:
                         site.recording_resolution[streamer] = _start_height
                     else:
