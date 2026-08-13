@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.21"
+__version__ = "1.26.22"
 
 import subprocess
 import time
@@ -5457,15 +5457,16 @@ class JJDlpDashboard:
                  if show_debug
                  else " ACTIVITY LOG — Show Debug: OFF (Press A to toggle) ")
 
-        self.draw_box(self.stdscr, y1 + 1, x1, y2, x2, self.C_DIM)
-        self.safe_addstr(self.stdscr, y1 + 1, x1 + 2, title,
+        # Keep the title, but leave the log itself unframed so terminal text
+        # selection can target just the log lines without collecting box art.
+        self.safe_addstr(self.stdscr, y1 + 1, x1, title,
                     theme.attr(self, "main_jjdlpdashboard_draw_log_tab_dim_2"))
 
         if sel_site is None:
             return
 
-        visible_rows = (y2 - y1) - 3
-        line_width   = max(1, (x2 - x1) - 4)   # 2 chars padding each side
+        visible_rows = (y2 - y1) - 2
+        line_width   = max(1, x2 - x1 + 1)
 
         with sel_site.dash_lock:
             raw_lines = list(sel_site.dash_log_lines)
@@ -5532,19 +5533,19 @@ class JJDlpDashboard:
                 attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_rec")
             elif "Warning" in line:
                 attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_warn_1")
-            self.safe_addstr(self.stdscr, y1 + 2 + i, x1 + 2, line, attr)
+            self.safe_addstr(self.stdscr, y1 + 2 + i, x1, line, attr)
             if is_debug and self._debug_filter_highlight:
                 for pattern in compiled_filters:
                     for match in pattern.finditer(line):
                         if match.start() != match.end():
                             self.safe_addstr(self.stdscr, y1 + 2 + i,
-                                x1 + 2 + match.start(), match.group(),
+                                x1 + match.start(), match.group(),
                                 theme.attr(self, "main_jjdlpdashboard_draw_log_tab_match"))
 
         # Scroll indicator
         if max_scroll > 0:
             scroll_info = f" ↑{self._log_scroll}/{max_scroll} " if self._log_scroll else " (end) "
-            self.safe_addstr(self.stdscr, y1 + 1, x2 - len(scroll_info) - 1,
+            self.safe_addstr(self.stdscr, y1 + 1, x2 - len(scroll_info) + 1,
                         scroll_info, theme.attr(self, "main_jjdlpdashboard_draw_log_tab_warn_2"))
 
     def _draw_pipe_tab_bar(self, y1, x1, x2) -> None:
@@ -6196,19 +6197,22 @@ class JJDlpDashboard:
         content_y1 = 10
         content_y2 = h - 2
 
-        # System panel sidebar (right column, always visible)
-        sidebar_w  = 28
-        sidebar_x1 = w - sidebar_w - 1
-        sidebar_x2 = w - 2
-        _t0 = time.time()
-        self.draw_system_panel(content_y1, sidebar_x1, content_y2, sidebar_x2)
-        _t_system_panel = time.time() - _t0
-
-        # Content area is to the left of the sidebar
-        content_x2 = sidebar_x1 - 1
-
         # Get the name of the currently selected tab
         current_tab_name = self.TABS[self.selected_tab]
+
+        # The Log tab uses the whole available width so its text can be
+        # selected and copied cleanly. Other tabs retain the system sidebar.
+        if current_tab_name == "Log":
+            content_x2 = w - 2
+            _t_system_panel = 0.0
+        else:
+            sidebar_w  = 28
+            sidebar_x1 = w - sidebar_w - 1
+            sidebar_x2 = w - 2
+            _t0 = time.time()
+            self.draw_system_panel(content_y1, sidebar_x1, content_y2, sidebar_x2)
+            _t_system_panel = time.time() - _t0
+            content_x2 = sidebar_x1 - 1
 
         _t0 = time.time()
         if current_tab_name == "Dashboard":
