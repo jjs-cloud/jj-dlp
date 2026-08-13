@@ -81,6 +81,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("OUTPUT_TMPL",           "site",   "%(title)s [%(id)s].%(ext)s", False, "Template for naming the video files. (Reference: https://github.com/yt-dlp/yt-dlp#output-templates)"),
     _KeyDef("COOLDOWN_AFTER_RECORDING", "site", "60",   False, "Seconds to wait after a recording ends before checking again."),
     _KeyDef("SPLIT_AFTER",           "site",   "0",    True,  "When recording a stream, split the video file(s) every X minutes. (0 = no split)"),
+    _KeyDef("AUTO_SUFFIX",           "site",   "true", True,  "When a recording restarts for any reason while the streamer is still on the same live stream, name the new file and the original file with a _partN suffix. (Default: true)"),
     _KeyDef("STALL_CHECK_INTERVAL",  "site",   "30",   True, "How often to check if the recording has stalled (in seconds).  Disable by setting this to a large number. (Default: 30)"),
     _KeyDef("STALL_TIMEOUT",         "site",   "120",  False, "Time to wait before considering a recording stalled (in seconds). (Default: 120) (note: also used with NOTIFY_NO_CONFIRM_FILE) (note: keep this >= CHECK_INTERVAL to avoid false write-failure alerts)"),
     _KeyDef("CONFIG_CHECK_INTERVAL", "site",   "3",    False, "How often to check for changes to the configuration file (in seconds). (Default: 3)"),
@@ -317,12 +318,17 @@ class PriorityEditor:
 
             has_intro_delay_override = bool(e.get("intro_delay_enabled", False))
 
+            # Auto-Suffix: tri-state "auto_suffix_mode" ("on" | "off");
+            # "inherit" is represented by the key being absent.
+            has_auto_suffix_override = e.get("auto_suffix_mode") in ("on", "off")
+
             saved_map[key] = {
                 "bypass":       e.get("bypass", False),
                 "priority":     i,
                 "has_override": (schedule_enabled or has_split_override
                                   or has_notif_override or has_lq_override
-                                  or has_intro_delay_override),
+                                  or has_intro_delay_override
+                                  or has_auto_suffix_override),
             }
 
         # Build enriched list with saved priority / bypass values.
@@ -412,7 +418,8 @@ class PriorityEditor:
                 for extra_key in ("schedule", "lq_enabled",
                                   "split_mode", "split_after", "split_enabled",
                                   "notifications_enabled",
-                                  "intro_delay_enabled", "intro_delay_minutes", "intro_delay_split"):
+                                  "intro_delay_enabled", "intro_delay_minutes", "intro_delay_split",
+                                  "auto_suffix_mode"):
                     if extra_key in ex:
                         entry_dict[extra_key] = ex[extra_key]
                 entries_data.append(entry_dict)
@@ -612,13 +619,14 @@ class StreamerSettingsPopup:
         self.entry     = entry
         self.config_id = config_id
 
-        self.options = ["Schedule", "Quality", "Split", "Intro Delay", "Notifications"]
+        self.options = ["Schedule", "Quality", "Split", "Intro Delay", "Notifications", "Auto-Suffix"]
         self._sel: int = 0
         self._schedule_popup: "Optional[ScheduleSettingsPopup]" = None
         self._quality_popup: "Optional[QualitySettingsPopup]" = None
         self._split_popup: "Optional[SplitSettingsPopup]" = None
         self._intro_delay_popup: "Optional[IntroDelaySettingsPopup]" = None
         self._notifications_popup: "Optional[NotificationSettingsPopup]" = None
+        self._auto_suffix_popup: "Optional[AutoSuffixSettingsPopup]" = None
 
     def handle_key(self, key) -> bool:
         if self._schedule_popup is not None:
@@ -653,6 +661,13 @@ class StreamerSettingsPopup:
             should_close = self._notifications_popup.handle_key(key)
             if should_close:
                 self._notifications_popup = None
+                return True
+            return False
+
+        if self._auto_suffix_popup is not None:
+            should_close = self._auto_suffix_popup.handle_key(key)
+            if should_close:
+                self._auto_suffix_popup = None
                 return True
             return False
 
@@ -693,6 +708,12 @@ class StreamerSettingsPopup:
                     self.entry,
                     self.config_id,
                 )
+            elif self.options[self._sel] == "Auto-Suffix":
+                self._auto_suffix_popup = AutoSuffixSettingsPopup(
+                    self.dashboard,
+                    self.entry,
+                    self.config_id,
+                )
         return False
 
     def draw(self, stdscr) -> None:
@@ -714,6 +735,10 @@ class StreamerSettingsPopup:
 
         if self._notifications_popup is not None:
             self._notifications_popup.draw(stdscr)
+            return
+
+        if self._auto_suffix_popup is not None:
+            self._auto_suffix_popup.draw(stdscr)
             return
 
         db = self.dashboard
@@ -971,6 +996,139 @@ class NotificationSettingsPopup:
         db.safe_addstr(stdscr, by1 + 4, bx1 + 13, eff_str, theme.attr(db, "config_editor_notificationsettings_draw_warn"))
 
         db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_notificationsettings_draw_invhead"))
+
+
+class AutoSuffixSettingsPopup:
+    """Per-streamer override for AUTO_SUFFIX.
+
+    Tri-state: "inherit" (default — use the site's AUTO_SUFFIX value),
+    "on", or "off". Only "on"/"off" are ever written to global.json;
+    "inherit" is represented by the *absence* of the "auto_suffix_mode"
+    key, which is exactly what main.py's _resolve_auto_suffix() checks
+    for (mirrors _resolve_split_after()'s tri-state handling).
+    """
+
+    _STATES = ("inherit", "on", "off")
+
+    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
+        self.dashboard = dashboard
+        self.entry     = entry
+        self.config_id = config_id
+        self.state: str = "inherit"   # "inherit" | "on" | "off"
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            from .main import _global_json_lock, _load_global_json
+            with _global_json_lock:
+                gdata = _load_global_json()
+            entries = (gdata.get("priorities", {})
+                           .get(self.config_id, {})
+                           .get("entries", []))
+            for e in entries:
+                if (e.get("streamer") == self.entry.streamer
+                        and e.get("site") == self.entry.site):
+                    raw = e.get("auto_suffix_mode", None)
+                    if raw not in ("on", "off"):
+                        self.state = "inherit"
+                    else:
+                        self.state = raw
+                    break
+        except Exception:
+            pass
+
+    def _save(self) -> None:
+        try:
+            from .main import _global_json_lock, _load_global_json, _save_global_json
+            with _global_json_lock:
+                gdata   = _load_global_json()
+                entries = (gdata.get("priorities", {})
+                               .get(self.config_id, {})
+                               .get("entries", []))
+                target = None
+                for e in entries:
+                    if (e.get("streamer") == self.entry.streamer
+                            and e.get("site") == self.entry.site):
+                        target = e
+                        break
+                if self.state == "inherit":
+                    # Nothing to override — remove any prior explicit value
+                    # rather than writing one, so this streamer stops
+                    # showing up as having an Auto-Suffix override.
+                    if target is not None:
+                        target.pop("auto_suffix_mode", None)
+                else:
+                    if target is None:
+                        target = {
+                            "streamer":   self.entry.streamer,
+                            "site":       self.entry.site,
+                            "config_sha": self.entry.config_sha,
+                            "priority":   len(entries),
+                            "bypass":     self.entry.bypass,
+                        }
+                        entries.append(target)
+                    target["auto_suffix_mode"] = self.state
+
+                gdata.setdefault("priorities", {}).setdefault(
+                    self.config_id, {"config_files": [], "entries": []}
+                )["entries"] = entries
+                _save_global_json(gdata)
+        except Exception:
+            pass
+
+    def _site_default(self) -> bool:
+        cfg = _get_site_default_cfg(self.dashboard, self.entry)
+        return bool(cfg.get("auto_suffix", True))
+
+    def handle_key(self, key) -> bool:
+        if key == 27:
+            return True
+        elif key == ord(' '):
+            idx = self._STATES.index(self.state)
+            self.state = self._STATES[(idx + 1) % len(self._STATES)]
+        elif key == curses.KEY_LEFT:
+            idx = self._STATES.index(self.state)
+            self.state = self._STATES[(idx - 1) % len(self._STATES)]
+        elif key == curses.KEY_RIGHT:
+            idx = self._STATES.index(self.state)
+            self.state = self._STATES[(idx + 1) % len(self._STATES)]
+        elif key in (10, 13, curses.KEY_ENTER, 459):
+            self._save()
+            return True
+        return False
+
+    def draw(self, stdscr) -> None:
+        db = self.dashboard
+        h, w = stdscr.getmaxyx()
+
+        box_w = min(46, w - 6)
+        box_h = 7
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_autosuffixsettingspo_draw_normal_1"))
+
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
+        title = f" {self.entry.streamer.upper()} SETTINGS "
+        db.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(db, "config_editor_autosuffixsettingspo_draw_system"))
+
+        state_label = {"inherit": "< Inherit >", "on": "< On >", "off": "< Off >"}[self.state]
+        db.safe_addstr(stdscr, by1 + 2, bx1 + 2, "> Auto-Suffix: ", theme.attr(db, "config_editor_autosuffixsettingspo_draw_hilight_1"))
+        db.safe_addstr(stdscr, by1 + 2, bx1 + 17, state_label, theme.attr(db, "config_editor_autosuffixsettingspo_draw_hilight_2"))
+
+        site_default = self._site_default()
+        if self.state == "inherit":
+            effective = site_default
+        else:
+            effective = (self.state == "on")
+        eff_str = "ON" if effective else "OFF"
+        db.safe_addstr(stdscr, by1 + 4, bx1 + 2, "Effective: ", theme.attr(db, "config_editor_autosuffixsettingspo_draw_normal_2"))
+        db.safe_addstr(stdscr, by1 + 4, bx1 + 13, eff_str, theme.attr(db, "config_editor_autosuffixsettingspo_draw_warn"))
+
+        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_autosuffixsettingspo_draw_invhead"))
 
 
 class SplitSettingsPopup:

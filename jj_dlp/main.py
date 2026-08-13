@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.25"
+__version__ = "1.26.26"
 
 import subprocess
 import time
@@ -721,6 +721,18 @@ class LiveSession:
     notif_shown: bool = False             # a non-recording notification has already fired this session
     last_restart_anchor: Optional[float] = None  # epoch of the most recent restart this session (stall, LQ, or quality upgrade); gives NOTIFY_NO_CONFIRM_FILE a fresh grace window on the following attempt without touching `since`/`enable_anchor`
     evicted_for_concurrency: bool = False  # evicted to free a slot for a higher-priority streamer, restart time unknown/unbounded; consumed at actual restart to refresh last_restart_anchor then instead of at eviction time (see was_evicted_for_concurrency)
+    # ── AUTO_SUFFIX / SPLIT_AFTER restart continuity ───────────────────────
+    # Lets a *new* record_stream() attempt (a separate thread/process
+    # launched after a restart — ffmpeg-error threshold, stall recovery,
+    # eviction, etc.) continue the _partN numbering of a previous attempt
+    # for the SAME live session, instead of starting over at a fresh,
+    # unsuffixed filename. Written/read by record_stream() via
+    # SiteState.get_segment_continuation()/set_segment_continuation().
+    # Deliberately NOT persisted across app restarts (unlike `since`) — a
+    # process restart just starts a fresh attempt at part 1 even if the
+    # live session (per the persisted `since`) is recognized as ongoing.
+    next_segment_part: int = 1
+    unsuffixed_file: Optional[str] = None
 
 
 class SiteState:
@@ -1047,6 +1059,37 @@ class SiteState:
         dashboard renderer — same shape dash_live_since used to provide."""
         with self.session_lock:
             return {s: sess.since for s, sess in self.live_sessions.items()}
+
+    def get_segment_continuation(self, streamer: str) -> Optional[Tuple[int, Optional[str]]]:
+        """Return (next_part, unsuffixed_file) for *streamer*'s current live
+        session, or None if the streamer isn't currently tracked as live.
+
+        Used by record_stream() at the top of a new attempt to decide
+        whether to resume _partN numbering from a prior attempt (same live
+        session) instead of starting fresh at part 1. See LiveSession's
+        next_segment_part / unsuffixed_file field comments.
+        """
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            if session is None:
+                return None
+            return (session.next_segment_part, session.unsuffixed_file)
+
+    def set_segment_continuation(self, streamer: str, next_part: int,
+                                  unsuffixed_file: Optional[str]) -> None:
+        """Persist the next _partN number (and the path of the most recent
+        unsuffixed file, if any, so it can be retroactively renamed once a
+        continuation file is confirmed) for *streamer*'s current live
+        session. A no-op if the live session already ended (e.g. a race
+        between the recording thread exiting and mark_offline() firing) —
+        there's nothing meaningful to continue into at that point.
+        """
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            if session is None:
+                return
+            session.next_segment_part = next_part
+            session.unsuffixed_file = unsuffixed_file
 
     def was_quality_upgraded(self, streamer: str) -> bool:
         with self.session_lock:
@@ -2505,6 +2548,7 @@ def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) ->
             "split_mode":    e.get("split_mode"),        # None = inherit (or legacy data)
             "split_enabled": e.get("split_enabled", False),  # legacy fallback
             "split_after":   e.get("split_after", 0),
+            "auto_suffix_mode": e.get("auto_suffix_mode"),  # None = inherit
         }
 
     # ── Condition 2: find eligible candidates ─────────────────────────────────
@@ -2539,7 +2583,7 @@ def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) ->
                 "site":      s,
                 "site_label": s_label,
                 "priority":  info.get("priority", 999999),
-                "cfg":       _resolve_split_after(s_cfg, info),
+                "cfg":       _resolve_auto_suffix(_resolve_split_after(s_cfg, info), info),
             })
 
     if not candidates:
@@ -2638,6 +2682,31 @@ def _resolve_split_after(cfg: dict, entry_info: dict) -> dict:
     return overridden
 
 
+def _resolve_auto_suffix(cfg: dict, entry_info: dict) -> dict:
+    """Return a cfg dict to use for a single streamer, applying that
+    streamer's per-streamer Auto-Suffix override (set via the Auto-Suffix
+    settings popup) on top of the site's AUTO_SUFFIX config value.
+
+    Mirrors _resolve_split_after()'s tri-state handling. entry_info is the
+    priorities[...][entries] dict-like info for the streamer, driven by
+    "auto_suffix_mode":
+      - "inherit" (or key absent) — no override; the site's AUTO_SUFFIX is
+        left untouched and the *same* cfg object is returned (no copy).
+      - "on"  — force AUTO_SUFFIX on for this streamer.
+      - "off" — force AUTO_SUFFIX off for this streamer.
+
+    The override never affects other streamers sharing the same site config.
+    """
+    if not entry_info:
+        return cfg
+    mode = entry_info.get("auto_suffix_mode")
+    if mode not in ("on", "off"):
+        return cfg
+    overridden = dict(cfg)
+    overridden["auto_suffix"] = (mode == "on")
+    return overridden
+
+
 def _resolve_intro_delay(cfg: dict, entry_info: dict) -> dict:
     """Return a cfg dict to use for a single streamer, applying that
     streamer's per-streamer Intro Delay override (set via the SETTINGS
@@ -2674,6 +2743,21 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
     split_after_minutes = max(0, cfg.get("split_after", 0))
     split_after_seconds = split_after_minutes * 60
+
+    # ── AUTO_SUFFIX / SPLIT_AFTER restart continuity ───────────────────────
+    # Whenever this is True, any restart of the recording for this streamer
+    # — whether an in-thread restart (ffmpeg-error threshold, stall
+    # recovery, normal yt-dlp exit while still live) or a brand-new
+    # record_stream() call for the same live session (e.g. after eviction)
+    # — continues _partN numbering instead of starting a fresh, separately
+    # named file. SPLIT_AFTER>0 already implies this (fixes a prior bug
+    # where in-thread restarts silently dropped the _partN suffix);
+    # AUTO_SUFFIX extends the same behavior to restarts even when
+    # SPLIT_AFTER is 0/off. Neither setting causes AUTO_SUFFIX by itself to
+    # trigger a *periodic* split — that's still governed purely by
+    # SPLIT_AFTER's timer loop further down.
+    auto_suffix_enabled = bool(cfg.get("auto_suffix", True))
+    continuity_active   = (split_after_minutes > 0) or auto_suffix_enabled
 
     _global_cfg_nc = load_global_config()
     notify_confirm_file = _global_cfg_nc.get("notify_confirm_file", True)
@@ -2776,6 +2860,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
     proc = None
     close_logs = lambda: None
     segment_num = 1
+    active_file = None   # pre-declared so the `finally` block can always
+                          # reference it, even if the thread exits before the
+                          # first outer-loop iteration ever sets it.
     # Backoff for split attempts: after a failed split (e.g. couldn't find/
     # confirm the new segment file), don't retry every second — wait a bit
     # so a persistent problem doesn't spawn a fresh yt-dlp probe process
@@ -2783,14 +2870,45 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
     _split_retry_cooldown_seconds = 60.0
     next_split_retry_time = 0.0
 
+    # ── Resume cross-thread continuity, if any ──────────────────────────────
+    # If a previous record_stream() attempt for this same live session (a
+    # different thread call — e.g. before an eviction) left off mid-way
+    # through a part sequence, pick up where it left off instead of
+    # starting back at part 1. See SiteState.get_segment_continuation().
+    _pending_rename_file = None
+    if continuity_active:
+        _cont = site.get_segment_continuation(streamer)
+        if _cont and _cont[0] > 1:
+            segment_num, _pending_rename_file = _cont
+            dbg(f"[SPLIT][record_stream] resuming cross-thread continuity for "
+                f"streamer={streamer!r}: segment_num={segment_num} "
+                f"pending_rename={_pending_rename_file!r}")
+
+    _outer_iteration = 0
+
     try:
         while True:
             if site._stop_event.is_set() or streamer in site.evicted_streamers:
                 break
+
+            _outer_iteration += 1
+            if _outer_iteration > 1 and continuity_active:
+                # Restarting within this same thread (ffmpeg-error threshold,
+                # stall recovery, or a normal yt-dlp exit while still live) —
+                # this new attempt is another part of the same recording.
+                _prev_segment_num = segment_num
+                segment_num = _prev_segment_num + 1
+                _pending_rename_file = (
+                    active_file if (_prev_segment_num == 1 and active_file) else None
+                )
+                dbg(f"[SPLIT][record_stream] in-thread restart continuity for "
+                    f"streamer={streamer!r}: segment_num {_prev_segment_num} -> "
+                    f"{segment_num} pending_rename={_pending_rename_file!r}")
+
             current_output_tmpl = cfg["output_tmpl"]
             # For segment 1 we intentionally omit the _part1 suffix — it will be
             # retroactively added (via rename) only if a second part is ever created.
-            if split_after_seconds > 0 and segment_num > 1:
+            if continuity_active and segment_num > 1:
                 current_output_tmpl = add_segment_suffix_to_tmpl(
                     current_output_tmpl,
                     segment_num
@@ -3009,6 +3127,32 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             # graph reads zero until the file resolves.
             if active_file:
                 site.set_recording_output(streamer, active_file)
+
+                # Continuation from a prior attempt (this thread's own
+                # in-thread restart, or a separate earlier record_stream()
+                # call for the same live session) is confirmed now that this
+                # attempt's file resolved — retroactively rename that prior
+                # attempt's unsuffixed file to _partN now that we know a
+                # later part exists. Mirrors the SPLIT_AFTER mid-recording
+                # rename-of-part1 logic further below, just triggered at a
+                # different point (attempt start vs. confirmed mid-recording
+                # split).
+                if (_pending_rename_file and _pending_rename_file != active_file
+                        and os.path.isfile(_pending_rename_file)):
+                    _prev_part_path = add_segment_suffix_to_tmpl(
+                        _pending_rename_file, segment_num - 1
+                    )
+                    try:
+                        os.rename(_pending_rename_file, _prev_part_path)
+                        site.log_line(
+                            f"Renamed previous segment to: {os.path.basename(_prev_part_path)}"
+                        )
+                        dbg(f"[SPLIT][record_stream] renamed continuation segment: "
+                            f"{_pending_rename_file!r} -> {_prev_part_path!r}")
+                    except Exception as _ren_err:
+                        dbg(f"[SPLIT][record_stream] rename of continuation segment "
+                            f"FAILED: {_ren_err!r}")
+                    _pending_rename_file = None
 
             last_size, _, _, _ = get_streamer_file_size(
                 output_dir,
@@ -3745,6 +3889,23 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             # stopped (normal end, eviction, or crash).
             site.evicted_streamers.discard(streamer)
 
+        # ── AUTO_SUFFIX / SPLIT_AFTER restart continuity ────────────────────
+        # Persist enough state for a *future* record_stream() attempt (a
+        # separate thread call for this same live session — e.g. after an
+        # eviction) to continue this part sequence instead of starting back
+        # at part 1. A no-op if the live session already ended (streamer
+        # went offline) — see SiteState.set_segment_continuation().
+        # segment_num==1 means this attempt's file was never suffixed, so
+        # it's the one that would need a retroactive rename if a
+        # continuation attempt follows; segment_num>1 means it was already
+        # suffixed at creation, so there's nothing pending.
+        _unsuffixed_for_continuation = (
+            active_file if (active_file and segment_num == 1) else None
+        )
+        site.set_segment_continuation(
+            streamer, segment_num + 1, _unsuffixed_for_continuation
+        )
+
         site.clear_ad_alert(streamer)
 
         # Interruptible: on shutdown this returns instantly instead of
@@ -3804,6 +3965,7 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
             "intro_delay_enabled": e.get("intro_delay_enabled", False),
             "intro_delay_minutes": e.get("intro_delay_minutes", 0),
             "intro_delay_split": e.get("intro_delay_split", False),
+            "auto_suffix_mode": e.get("auto_suffix_mode"),  # None = inherit
         }
 
     site_label = cfg.get("site_label", os.path.basename(site.config_path))
@@ -3822,6 +3984,7 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
             streamer_prio = streamer_info["priority"]
             is_lq = streamer_info.get("lq_enabled", False)
             streamer_cfg = _resolve_split_after(cfg, streamer_info)
+            streamer_cfg = _resolve_auto_suffix(streamer_cfg, streamer_info)
             streamer_cfg = _resolve_intro_delay(streamer_cfg, streamer_info)
             eviction_warning = ""
 

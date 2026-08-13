@@ -1,6 +1,7 @@
 - updated the OUTPUT_TMPL for tiktok-live to fix issues with special characters in the filename 
 - fixed an issue when under high disk/cpu load (innacurate file size)
 - when the stream is in portrait mode, the resolution is now correctly displayed on the site panel. (min of height/width instead of always the height)
+- when a recording restarts for any reason while the streamer is still on the same live stream, the new file and the original file are named/renamed with a _partN suffix. This can be disabled, if you prefer, in SITE SETTINGS > AUTO_SUFFIX.
 
 ====================
 ====================
