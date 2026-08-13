@@ -698,6 +698,61 @@ def _save_live_since_cache(config_path: str, live_since: Dict[str, float]) -> No
         _save_global_json(global_data)
 
 
+def _load_segment_continuation_cache(config_path: str) -> Dict[str, dict]:
+    """Return the persisted AUTO_SUFFIX/SPLIT_AFTER part-numbering
+    continuation state for the given site from global.json.
+
+    Each entry maps a streamer name to {"next_part": int, "unsuffixed_file":
+    str|None}. Read at startup (mirroring _load_live_since_cache) so that a
+    process restart mid-stream can still continue a part sequence rather
+    than silently resetting to part 1 — the same way live_since already
+    survives a restart. Only meaningful for a streamer that's also present
+    in the live_since cache; a stale/orphaned entry for a streamer that
+    isn't live is simply never consulted (mark_live() only seeds from this
+    cache, never reads it directly otherwise).
+    """
+    site_key = os.path.basename(config_path)
+    with _global_json_lock:
+        global_data = _load_global_json()
+    site_data = global_data.get("sites", {}).get(site_key, {})
+    raw = site_data.get("segment_continuation", {})
+    out: Dict[str, dict] = {}
+    if isinstance(raw, dict):
+        for streamer, entry in raw.items():
+            if not isinstance(entry, dict):
+                continue
+            try:
+                next_part = int(entry.get("next_part", 1))
+            except (TypeError, ValueError):
+                next_part = 1
+            unsuffixed_file = entry.get("unsuffixed_file")
+            if unsuffixed_file is not None:
+                unsuffixed_file = str(unsuffixed_file)
+            out[streamer] = {"next_part": next_part, "unsuffixed_file": unsuffixed_file}
+    return out
+
+
+def _save_segment_continuation_cache(config_path: str, mapping: Dict[str, dict]) -> None:
+    """Persist AUTO_SUFFIX/SPLIT_AFTER part-numbering continuation state for
+    the given site into global.json. Mirrors _save_live_since_cache's call
+    pattern — merges with any existing data so other sites' entries are
+    preserved.
+    """
+    site_key = os.path.basename(config_path)
+    with _global_json_lock:
+        global_data = _load_global_json()
+        if "sites" not in global_data or not isinstance(global_data["sites"], dict):
+            global_data["sites"] = {}
+        if site_key not in global_data["sites"] or not isinstance(global_data["sites"][site_key], dict):
+            global_data["sites"][site_key] = {}
+        global_data["sites"][site_key]["segment_continuation"] = {
+            streamer: {"next_part": entry.get("next_part", 1),
+                       "unsuffixed_file": entry.get("unsuffixed_file")}
+            for streamer, entry in mapping.items()
+        }
+        _save_global_json(global_data)
+
+
 @dataclass
 class LiveSession:
     """All state scoped to one continuous live session for one streamer.
@@ -728,9 +783,10 @@ class LiveSession:
     # for the SAME live session, instead of starting over at a fresh,
     # unsuffixed filename. Written/read by record_stream() via
     # SiteState.get_segment_continuation()/set_segment_continuation().
-    # Deliberately NOT persisted across app restarts (unlike `since`) — a
-    # process restart just starts a fresh attempt at part 1 even if the
-    # live session (per the persisted `since`) is recognized as ongoing.
+    # Persisted across app restarts in global.json (same as `since` —
+    # see _load_segment_continuation_cache/_save_segment_continuation_cache),
+    # so a process restart mid-stream can still continue a part sequence
+    # instead of resetting to part 1.
     next_segment_part: int = 1
     unsuffixed_file: Optional[str] = None
 
@@ -796,6 +852,12 @@ class SiteState:
         # recovers the true start time instead of resetting it to "now" —
         # see mark_live()'s use of this as a one-shot recovery source.
         self._live_since_cache:   Dict[str, float] = _load_live_since_cache(config_path)
+        # Persisted AUTO_SUFFIX/SPLIT_AFTER part-numbering continuation state
+        # (see LiveSession.next_segment_part/unsuffixed_file). Loaded once
+        # here, mirroring _live_since_cache, so a process restart mid-stream
+        # recovers where a part sequence left off instead of resetting to
+        # part 1. Consulted by mark_live() when creating a fresh LiveSession.
+        self._segment_continuation_cache: Dict[str, dict] = _load_segment_continuation_cache(config_path)
 
         # Dashboard display state (written by monitor thread, read by renderer)
         self.dash_lock            = threading.Lock()
@@ -992,7 +1054,15 @@ class SiteState:
             if streamer in self.live_sessions:
                 return
             since = self._live_since_cache.get(streamer, time.time())
-            self.live_sessions[streamer] = LiveSession(since=since)
+            _cont = self._segment_continuation_cache.get(streamer)
+            if _cont:
+                self.live_sessions[streamer] = LiveSession(
+                    since=since,
+                    next_segment_part=_cont.get("next_part", 1),
+                    unsuffixed_file=_cont.get("unsuffixed_file"),
+                )
+            else:
+                self.live_sessions[streamer] = LiveSession(since=since)
             snapshot = {s: sess.since for s, sess in self.live_sessions.items()}
         with self.lock:
             _still_recording = streamer in self.currently_recording
@@ -1016,7 +1086,9 @@ class SiteState:
             _session = self.live_sessions[streamer]
             del self.live_sessions[streamer]
             self._live_since_cache.pop(streamer, None)
+            self._segment_continuation_cache.pop(streamer, None)
             snapshot = {s: sess.since for s, sess in self.live_sessions.items()}
+            segment_snapshot = dict(self._segment_continuation_cache)
         with self.lock:
             _still_recording = streamer in self.currently_recording
         if _still_recording:
@@ -1032,6 +1104,7 @@ class SiteState:
                 f"live_since={_session.since!r} (this resets the once-per-session guard)",
                 site_name=streamer)
         _save_live_since_cache(self.config_path, snapshot)
+        _save_segment_continuation_cache(self.config_path, segment_snapshot)
         with self.dash_lock:
             self.dash_last_live[streamer] = time.time()
             last_live_snapshot = dict(self.dash_last_live)
@@ -1083,6 +1156,9 @@ class SiteState:
         session. A no-op if the live session already ended (e.g. a race
         between the recording thread exiting and mark_offline() firing) —
         there's nothing meaningful to continue into at that point.
+
+        Also written through to global.json (mirroring live_since) so this
+        survives an app restart mid-stream.
         """
         with self.session_lock:
             session = self.live_sessions.get(streamer)
@@ -1090,6 +1166,12 @@ class SiteState:
                 return
             session.next_segment_part = next_part
             session.unsuffixed_file = unsuffixed_file
+            self._segment_continuation_cache[streamer] = {
+                "next_part": next_part,
+                "unsuffixed_file": unsuffixed_file,
+            }
+            segment_snapshot = dict(self._segment_continuation_cache)
+        _save_segment_continuation_cache(self.config_path, segment_snapshot)
 
     def was_quality_upgraded(self, streamer: str) -> bool:
         with self.session_lock:
