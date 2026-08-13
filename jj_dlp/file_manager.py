@@ -1290,7 +1290,7 @@ class FileManagerTab:
         h, w = stdscr.getmaxyx()
 
         box_w = min(83, w - 4)
-        box_h = min(7, h - 4)
+        box_h = min(9, h - 4)
         by1 = (h - box_h) // 2
         bx1 = (w - box_w) // 2
         by2 = by1 + box_h
@@ -1309,11 +1309,11 @@ class FileManagerTab:
         db.safe_addstr(stdscr, row, bx1 + 2,
                        f"Streamer: {self._move_filename_streamer}",
                        theme.attr(db, "file_manager_filemanagertab_draw_move_filename_p_dim"))
-        row += 1
+        row += 2
         db.safe_addstr(stdscr, row, bx1 + 2,
-                       f"Path: {self._move_target}"[:box_w - 4],
+                       f"Path: {os.path.dirname(self._move_target) if self._move_target else ''}"[:box_w - 4],
                        theme.attr(db, "file_manager_filemanagertab_draw_move_filename_p_dim"))
-        row += 1
+        row += 2
         db.safe_addstr(stdscr, row, bx1 + 2, "Filename:",
                        theme.attr(db, "file_manager_filemanagertab_draw_move_filename_p_warn"))
         row += 1
