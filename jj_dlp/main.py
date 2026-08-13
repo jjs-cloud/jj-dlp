@@ -2136,7 +2136,13 @@ def _extract_resolution_height(info: dict) -> Optional[int]:
     if isinstance(res, str):
         m = _RESOLUTION_RE.search(res)
         if m:
-            return int(m.group(2))
+            first, second = int(m.group(1)), int(m.group(2))
+            # Normally "WIDTHxHEIGHT" and the smaller number (the height)
+            # is the meaningful "Xp" quality figure. Portrait streams (e.g.
+            # TikTok, commonly "720x1280") report width < height, so the
+            # first number is actually the smaller/quality-relevant one.
+            # Just take the smaller of the two either way.
+            return min(first, second)
 
     return None
 
@@ -2292,7 +2298,7 @@ def probe_file_height(filepath: str) -> Optional[int]:
     cmd = [
         ffprobe_path, "-v", "error",
         "-select_streams", "v:0",
-        "-show_entries", "stream=height",
+        "-show_entries", "stream=width,height",
         "-of", "csv=p=0",
         filepath,
     ]
@@ -2305,11 +2311,18 @@ def probe_file_height(filepath: str) -> Optional[int]:
         out = (result.stdout or "").strip()
         if not out:
             return None
-        # First line, first field — ffprobe can print multiple lines if the
-        # container somehow has more than one video stream.
+        # First line, fields "width,height" — ffprobe can print multiple
+        # lines if the container somehow has more than one video stream.
         first_line = out.splitlines()[0].strip()
-        height = int(first_line.split(",")[0])
-        return height if height > 0 else None
+        parts = first_line.split(",")
+        width = int(parts[0])
+        height = int(parts[1])
+        # Use the smaller dimension as the "Xp" quality figure. Landscape
+        # video stores width > height, so height is normally the right
+        # figure; portrait video (e.g. TikTok, stored 720x1280) has
+        # width < height, so width is the meaningful one there.
+        result_px = min(width, height)
+        return result_px if result_px > 0 else None
     except Exception as e:
         dbg(f"[QUALITY] ffprobe probe failed for {filepath!r}: {type(e).__name__}: {e}")
         return None
