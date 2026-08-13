@@ -1311,7 +1311,7 @@ class FileManagerTab:
                        theme.attr(db, "file_manager_filemanagertab_draw_move_filename_p_dim"))
         row += 2
         db.safe_addstr(stdscr, row, bx1 + 2,
-                       f"Path: {os.path.dirname(self._move_target) if self._move_target else ''}"[:box_w - 4],
+                       f"Path: {self._move_filename_dest or ''}"[:box_w - 4],
                        theme.attr(db, "file_manager_filemanagertab_draw_move_filename_p_dim"))
         row += 2
         db.safe_addstr(stdscr, row, bx1 + 2, "Filename:",
