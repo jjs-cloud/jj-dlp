@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.22"
+__version__ = "1.26.23"
 
 import subprocess
 import time
@@ -4504,7 +4504,7 @@ class JJDlpDashboard:
         self._debug_filter_patterns: List[str] = []
         self._debug_filter_buf = ""
         self._debug_filter_cursor = 0
-        self._debug_filter_sel = 0       # 0=input, 1..N=patterns, N+1=checkbox
+        self._debug_filter_sel = 0       # 0=input, 1..N=patterns, N+1=highlight, N+2=export
         self._debug_filter_highlight = False
         self._debug_filter_error = ""
         # When scrolled up (scroll > 0), the displayed lines are frozen to a
@@ -6035,16 +6035,53 @@ class JJDlpDashboard:
         self._debug_filter_sel = 0
         self._debug_filter_error = ""
 
+    def _write_filtered_debug_view(self) -> None:
+        """Write the selected site's regex-matched debug lines to a new file."""
+        if not self.sites:
+            self._debug_filter_error = "No site is selected."
+            return
+        if not self._debug_filter_patterns:
+            self._debug_filter_error = "Add a regex filter before exporting."
+            return
+
+        try:
+            patterns = [_re.compile(expression) for expression in self._debug_filter_patterns]
+        except _re.error as exc:
+            self._debug_filter_error = f"Invalid regex: {exc}"
+            return
+
+        site = self.sites[self.selected_site_idx]
+        with site.dash_lock:
+            matched_lines = [line for line in site.dash_debug_lines
+                             if any(pattern.search(line) for pattern in patterns)]
+
+        cfg = site.get_cached_config()
+        debug_path = get_debug_log_path(cfg)
+        export_dir = os.path.dirname(os.path.abspath(debug_path)) or os.getcwd()
+        stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        export_path = os.path.join(export_dir, f"debug-filtered-{stamp}.log")
+        try:
+            os.makedirs(export_dir, exist_ok=True)
+            with open(export_path, "x", encoding="utf-8", newline="\n") as f:
+                for line in matched_lines:
+                    f.write(line.rstrip("\r\n") + "\n")
+        except OSError as exc:
+            self._debug_filter_error = f"Could not write export: {exc}"
+            return
+
+        self._debug_filter_error = f"Wrote {len(matched_lines)} lines: {export_path}"
+
     def _handle_debug_filter_key(self, key) -> bool:
         """Handle the filter-list popup (not the regex text editor)."""
         count = len(self._debug_filter_patterns)
         checkbox_row = count + 1   # 0=create, 1..N=filters, N+1=highlight
+        export_row = count + 2
         if key in (27, ord('q'), ord('Q')):
             self._debug_filter_popup_open = False
         elif key in (curses.KEY_UP, ord('k')):
             self._debug_filter_sel = max(0, self._debug_filter_sel - 1)
         elif key in (curses.KEY_DOWN, ord('j')):
-            self._debug_filter_sel = min(checkbox_row, self._debug_filter_sel + 1)
+            self._debug_filter_sel = min(export_row, self._debug_filter_sel + 1)
         elif key == ord(' ') and self._debug_filter_sel == checkbox_row:
             self._debug_filter_highlight = not self._debug_filter_highlight
         elif key in (curses.KEY_DC, ord('d'), ord('D')) and 1 <= self._debug_filter_sel <= count:
@@ -6059,6 +6096,8 @@ class JJDlpDashboard:
                 self._debug_filter_entry_open = True
             elif self._debug_filter_sel == checkbox_row:
                 self._debug_filter_highlight = not self._debug_filter_highlight
+            elif self._debug_filter_sel == export_row:
+                self._write_filtered_debug_view()
         return True
 
     def _handle_debug_filter_entry_key(self, key) -> bool:
@@ -6100,7 +6139,7 @@ class JJDlpDashboard:
     def draw_debug_filter_popup(self) -> None:
         h, w = self.stdscr.getmaxyx()
         box_w = min(max(58, min(96, w - 4)), w - 4)
-        box_h = min(max(9, len(self._debug_filter_patterns) + 8), h - 4)
+        box_h = min(max(10, len(self._debug_filter_patterns) + 9), h - 4)
         by1, bx1 = max(0, (h - box_h) // 2), max(0, (w - box_w) // 2)
         by2, bx2 = by1 + box_h, bx1 + box_w
         for y in range(by1, by2 + 1):
@@ -6110,7 +6149,7 @@ class JJDlpDashboard:
         self.safe_addstr(self.stdscr, by1 + 1, bx1 + 2, "Show matching debug lines only; regular log lines are unaffected.", theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text"))
         create_attr = theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_selected") if self._debug_filter_sel == 0 else theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text")
         self.safe_addstr(self.stdscr, by1 + 2, bx1 + 2, "> Create new filter" if self._debug_filter_sel == 0 else "  Create new filter", create_attr)
-        max_rows = max(0, box_h - 7)
+        max_rows = max(0, box_h - 8)
         for index, expression in enumerate(self._debug_filter_patterns[:max_rows]):
             attr = theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_selected") if self._debug_filter_sel == index + 1 else theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text")
             prefix = ">" if self._debug_filter_sel == index + 1 else " "
@@ -6119,6 +6158,9 @@ class JJDlpDashboard:
         checked = "x" if self._debug_filter_highlight else " "
         check_attr = theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_selected") if self._debug_filter_sel == len(self._debug_filter_patterns) + 1 else theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text")
         self.safe_addstr(self.stdscr, checkbox_y, bx1 + 2, f"[{checked}] Highlight match", check_attr)
+        export_y = checkbox_y + 1
+        export_attr = theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_selected") if self._debug_filter_sel == len(self._debug_filter_patterns) + 2 else theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text")
+        self.safe_addstr(self.stdscr, export_y, bx1 + 2, "Write filtered view to file", export_attr)
         if self._debug_filter_error:
             self.safe_addstr(self.stdscr, by2 - 1, bx1 + 2, self._debug_filter_error[:box_w - 4], theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_error"))
         self.safe_addstr(self.stdscr, by2, bx1 + 2, "Enter: select  Up/Down: select  D/Del: remove  Esc: close"[:box_w - 4], theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_legend"))
