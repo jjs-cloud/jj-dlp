@@ -43,6 +43,7 @@ from .browser_config import (
     _write_ask_for_browser_to_config,
 )
 from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS, _compute_config_id, SiteSortManager, SORT_OPTIONS, _SORT_LABELS
+from .config_editor import load_global_config as _load_global_config_typed
 from .file_manager import FileManagerTab
 from . import graph as _graph
 from . import simulation as _simulation
@@ -351,83 +352,13 @@ def get_global_conf_path() -> str:
 
 
 def load_global_config() -> dict:
-    """Load global.conf and return the keys that are truly global.
+    """Load global.conf and return the keys that are truly global, fully typed.
 
-    Returns a dict with the following keys (with safe defaults if the file does
-    not exist or a key is absent):
-        disk_drives       – list[str]
-        destinations      – list[str]  (paths offered in File Options - Move)
-        debug_logs        – bool
-        debug_log_path    – str
-        check_for_updates – bool
-        update_interval   – int
-        update_branch     – str   ("main", "testing", or "experimental")
-        ask_for_browser   – bool
-        graph_scale       – int   (seconds per bar on the top disk-rate graph)
+    All key names, defaults, and types live in config_editor.CONFIG_KEYS — the
+    single source of truth. This just resolves the file path and delegates the
+    actual parsing/coercion to config_editor.load_global_config().
     """
-    path = get_global_conf_path()
-    parser = configparser.ConfigParser(allow_no_value=True, interpolation=None, delimiters=('=',))
-    try:
-        parser.read(path, encoding="utf-8")
-    except Exception:
-        pass
-
-    general = parser["General"] if parser.has_section("General") else {}
-
-    def _bool(key: str, default: bool) -> bool:
-        raw = general.get(key, "").strip().lower()
-        if raw in ("true", "1", "yes"):
-            return True
-        if raw in ("false", "0", "no"):
-            return False
-        return default
-
-    disk_drives_raw = general.get("DISK_DRIVES", "").strip().strip('"\'')
-    disk_drives = [d.strip() for d in disk_drives_raw.split(",") if d.strip()] if disk_drives_raw else []
-
-    destinations_raw = general.get("DESTINATIONS", "").strip().strip('"\'')
-    destinations = [d.strip() for d in destinations_raw.split(",") if d.strip()] if destinations_raw else []
-
-    def _int(key: str, default: int) -> int:
-        raw = general.get(key, "").strip()
-        try:
-            value = int(raw)
-            # Allow 0 explicitly (e.g. MAX_CONCURRENT_REC = 0 means "unlimited").
-            # Only fall back to the default when the raw string is absent/empty.
-            return value if value >= 0 else default
-        except Exception:
-            return default
-
-    debug_log_path_raw = general.get("DEBUG_LOG_PATH", "").strip().strip('"\'')
-    update_interval = _int("UPDATE_INTERVAL", 30)
-
-    update_branch = general.get("UPDATE_BRANCH", "main").strip().lower()
-
-    return {
-        "disk_drives":        disk_drives,
-        "debug_logs":         _bool("DEBUG_LOGS", False),
-        "debug_log_path":     debug_log_path_raw,
-        "check_for_updates":  _bool("CHECK_FOR_UPDATES", True),
-        "update_interval":    update_interval,
-        "update_branch":      update_branch,
-        "ask_for_browser":    _bool("ASK_FOR_BROWSER", True),
-        "ask_for_config":     _bool("ASK_FOR_CONFIG", True),
-        "max_concurrent_rec": _int("MAX_CONCURRENT_REC", 0),
-        "lq_downloader":      _bool("LQ_DOWNLOADER", False),
-        "ff_err_thresh":      _int("FF_ERR_THRESH", 200),
-        "subfolders":         _bool("SUBFOLDERS", False),
-        "destinations":       destinations,
-        "ntfy_topic":         general.get("NTFY_TOPIC", "").strip().strip('"\''),
-        "notify_confirm_file":_bool("NOTIFY_CONFIRM_FILE", True),
-        "notify_no_confirm_file":_bool("NOTIFY_NO_CONFIRM_FILE", False),
-        "compact_view": general.get("COMPACT_VIEW", "auto").strip().strip('"\'') or "auto",
-        "web_ui":             _bool("WEB_UI", False),
-        "web_ui_port":        _int("WEB_UI_PORT", 8765),
-        "web_ui_user":        general.get("WEB_UI_USER", "").strip().strip('"\''),
-        "web_ui_pass":        general.get("WEB_UI_PASS", "").strip().strip('"\''),
-        "graph_scale":        max(1, _int("GRAPH_SCALE", 1)),
-        "rgb_mode":           _bool("RGB_MODE", False),
-    }
+    return _load_global_config_typed(get_global_conf_path())
 
 def _write_global_conf_key(key: str, value: str) -> None:
     path = get_global_conf_path()
