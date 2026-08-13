@@ -1195,19 +1195,32 @@ class SiteState:
             if session:
                 session.was_blocked_while_live = True
 
+    def clear_blocked_while_live(self, streamer: str) -> None:
+        """Consume the was_blocked_while_live flag. Called once the
+        blocked->enabled transition has actually been used to refresh the
+        enable_anchor, so a *later* block/re-enable within the same live
+        session gets treated as its own fresh transition instead of being
+        silently absorbed by set_enable_anchor's now-a-no-op guard."""
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            if session:
+                session.was_blocked_while_live = False
+
     def get_enable_anchor(self, streamer: str) -> Optional[float]:
         with self.session_lock:
             session = self.live_sessions.get(streamer)
             return session.enable_anchor if session else None
 
-    def set_enable_anchor_if_unset(self, streamer: str, epoch: float) -> None:
-        """Set the NOTIFY_NO_CONFIRM_FILE override anchor once, on the
-        blocked->enabled transition. Left in place (not overwritten) for
-        every retry for the rest of the live session — mirrors the old
-        enable_anchor_time semantics exactly."""
+    def set_enable_anchor(self, streamer: str, epoch: float) -> None:
+        """Set (and refresh) the NOTIFY_NO_CONFIRM_FILE override anchor on
+        every blocked->enabled transition. Unlike the old
+        set_enable_anchor_if_unset, this always overwrites: each transition
+        should get its own fresh 120s grace window, since a manual
+        disable/re-enable gap can otherwise leave the previous anchor's
+        deadline already in the past by the time the new attempt starts."""
         with self.session_lock:
             session = self.live_sessions.get(streamer)
-            if session and session.enable_anchor is None:
+            if session:
                 session.enable_anchor = epoch
 
     def get_last_restart_anchor(self, streamer: str) -> Optional[float]:
@@ -4157,7 +4170,8 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
             # retry for the rest of this live session — live-since itself
             # is never touched or treated as stale.
             if site.was_blocked_while_live(streamer):
-                site.set_enable_anchor_if_unset(streamer, time.time())
+                site.set_enable_anchor(streamer, time.time())
+                site.clear_blocked_while_live(streamer)
             # Same idea, for the other deferred-restart case: if this
             # streamer was evicted for concurrency at some earlier point,
             # this is the actual restart, so refresh last_restart_anchor
