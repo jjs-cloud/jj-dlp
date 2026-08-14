@@ -319,7 +319,11 @@ def load_config(config_path: str) -> dict:
     # default ':' delimiter would misparse the colon in "ffmpeg:..." as a
     # key/value split, silently truncating the argument. Restricting to '='
     # avoids that while matching how every value in these configs is written.
-    parser = configparser.ConfigParser(allow_no_value=True, interpolation=None, delimiters=('=',))
+    # strict=False: tolerate duplicate keys/sections in hand-edited config
+    # files (e.g. the same streamer accidentally added twice) instead of
+    # raising DuplicateOptionError/DuplicateSectionError. The last value for
+    # a duplicated key wins.
+    parser = configparser.ConfigParser(allow_no_value=True, interpolation=None, delimiters=('=',), strict=False)
     try:
         parser.read(config_path, encoding="utf-8")
     except Exception as _e:
