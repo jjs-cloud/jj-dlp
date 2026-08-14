@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.27"
+__version__ = "1.26.28"
 
 import subprocess
 import time
@@ -49,6 +49,21 @@ from . import graph as _graph
 from . import simulation as _simulation
 
 import curses  # noqa: E402
+
+# ── Debug filter per-filter mode ──────────────────────────────────────────────
+# Each debug-log filter now carries its own mode instead of a single global
+# "highlight" checkbox applying to every filter.
+DEBUG_FILTER_MODES: List[str] = ["filter_highlight", "filter_only", "highlight_only"]
+DEBUG_FILTER_MODE_LABELS: Dict[str, str] = {
+    "filter_highlight": "Filter+Highlight",
+    "filter_only":       "Filter Only",
+    "highlight_only":    "Highlight Only",
+}
+DEBUG_FILTER_MODE_TAGS: Dict[str, str] = {
+    "filter_highlight": "F+H",
+    "filter_only":       "F",
+    "highlight_only":    "H",
+}
 
 
 # ── Script start time (for uptime display)) ──────────────────────────────────
@@ -4735,12 +4750,18 @@ class JJDlpDashboard:
         # expressions are combined with OR; no expression shows all debug.
         self._debug_filter_popup_open = False
         self._debug_filter_entry_open = False
-        self._debug_filter_patterns: List[str] = []
+        # Each entry: {"pattern": <regex str>, "mode": one of
+        # DEBUG_FILTER_MODES} — mode (Filter+Highlight / Filter Only /
+        # Highlight Only) is per-filter, not a single global toggle.
+        self._debug_filter_patterns: List[dict] = []
         self._debug_filter_buf = ""
         self._debug_filter_cursor = 0
-        self._debug_filter_sel = 0       # 0=input, 1..N=patterns, N+1=highlight, N+2=export
-        self._debug_filter_highlight = False
+        self._debug_filter_sel = 0       # 0=input, 1..N=patterns, N+1=export
         self._debug_filter_error = ""
+        # ── "create/edit filter" sub-popup state ──────────────────────────
+        self._debug_filter_edit_index = None    # None=creating new filter, else index of filter being edited
+        self._debug_filter_entry_sel = 0        # 0=regex text field, 1=mode selector
+        self._debug_filter_mode = DEBUG_FILTER_MODES[0]
         # When scrolled up (scroll > 0), the displayed lines are frozen to a
         # snapshot so live output can't keep shoving the viewport around. Set
         # while scroll > 0, cleared when the user scrolls back to 0 (live).
@@ -5706,15 +5727,21 @@ class JJDlpDashboard:
             raw_lines = list(sel_site.dash_log_lines)
             raw_debug = list(sel_site.dash_debug_lines) if show_debug else []
 
-        compiled_filters = []
-        for expression in self._debug_filter_patterns:
+        # Compile per-filter, keeping each filter's own mode alongside it.
+        # "filter_only"/"filter_highlight" filters restrict which debug
+        # lines are shown; "highlight_only" filters never hide lines, they
+        # only mark up matches on lines that are already shown.
+        compiled_entries = []
+        for entry in self._debug_filter_patterns:
             try:
-                compiled_filters.append(_re.compile(expression))
+                compiled_entries.append((_re.compile(entry["pattern"]), entry.get("mode", "filter_highlight")))
             except _re.error:
                 continue
-        if compiled_filters:
+        filtering_patterns = [c for c, mode in compiled_entries if mode != "highlight_only"]
+        highlighting_patterns = [c for c, mode in compiled_entries if mode != "filter_only"]
+        if filtering_patterns:
             raw_debug = [line for line in raw_debug
-                         if any(pattern.search(line) for pattern in compiled_filters)]
+                         if any(pattern.search(line) for pattern in filtering_patterns)]
 
         # Activity lines are always shown. Debug lines are only pulled in
         # (and merged back into chronological order) when the toggle is on —
@@ -5768,8 +5795,8 @@ class JJDlpDashboard:
             elif "Warning" in line:
                 attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_warn_1")
             self.safe_addstr(self.stdscr, y1 + 2 + i, x1, line, attr)
-            if is_debug and self._debug_filter_highlight:
-                for pattern in compiled_filters:
+            if is_debug and highlighting_patterns:
+                for pattern in highlighting_patterns:
                     for match in pattern.finditer(line):
                         if match.start() != match.end():
                             self.safe_addstr(self.stdscr, y1 + 2 + i,
@@ -6274,12 +6301,14 @@ class JJDlpDashboard:
         if not self.sites:
             self._debug_filter_error = "No site is selected."
             return
-        if not self._debug_filter_patterns:
-            self._debug_filter_error = "Add a regex filter before exporting."
+        filter_entries = [entry for entry in self._debug_filter_patterns
+                          if entry.get("mode", "filter_highlight") != "highlight_only"]
+        if not filter_entries:
+            self._debug_filter_error = "Add a Filter (not Highlight-only) filter before exporting."
             return
 
         try:
-            patterns = [_re.compile(expression) for expression in self._debug_filter_patterns]
+            patterns = [_re.compile(entry["pattern"]) for entry in filter_entries]
         except _re.error as exc:
             self._debug_filter_error = f"Invalid regex: {exc}"
             return
@@ -6305,53 +6334,79 @@ class JJDlpDashboard:
 
         self._debug_filter_error = f"Wrote {len(matched_lines)} lines: {export_path}"
 
+    def _open_debug_filter_entry(self, edit_index: "int | None") -> None:
+        """Open the CREATE/EDIT DEBUG FILTER sub-popup.
+
+        edit_index=None opens it blank for creating a new filter; otherwise
+        it's pre-filled with the pattern/mode of the filter at that index
+        so the user can edit it in place.
+        """
+        if edit_index is None:
+            self._debug_filter_buf = ""
+            self._debug_filter_mode = DEBUG_FILTER_MODES[0]
+        else:
+            entry = self._debug_filter_patterns[edit_index]
+            self._debug_filter_buf = entry["pattern"]
+            self._debug_filter_mode = entry.get("mode", DEBUG_FILTER_MODES[0])
+        self._debug_filter_cursor = len(self._debug_filter_buf)
+        self._debug_filter_edit_index = edit_index
+        self._debug_filter_entry_sel = 0
+        self._debug_filter_error = ""
+        self._debug_filter_entry_open = True
+
     def _handle_debug_filter_key(self, key) -> bool:
         """Handle the filter-list popup (not the regex text editor)."""
         count = len(self._debug_filter_patterns)
-        checkbox_row = count + 1   # 0=create, 1..N=filters, N+1=highlight
-        export_row = count + 2
+        export_row = count + 1   # 0=create, 1..N=filters, N+1=export
         if key in (27, ord('q'), ord('Q')):
             self._debug_filter_popup_open = False
         elif key in (curses.KEY_UP, ord('k')):
             self._debug_filter_sel = max(0, self._debug_filter_sel - 1)
         elif key in (curses.KEY_DOWN, ord('j')):
             self._debug_filter_sel = min(export_row, self._debug_filter_sel + 1)
-        elif key == ord(' ') and self._debug_filter_sel == checkbox_row:
-            self._debug_filter_highlight = not self._debug_filter_highlight
         elif key in (curses.KEY_DC, ord('d'), ord('D')) and 1 <= self._debug_filter_sel <= count:
             del self._debug_filter_patterns[self._debug_filter_sel - 1]
             self._debug_filter_sel = min(self._debug_filter_sel, len(self._debug_filter_patterns) + 1)
             self._log_scroll = 0
         elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
             if self._debug_filter_sel == 0:
-                self._debug_filter_buf = ""
-                self._debug_filter_cursor = 0
-                self._debug_filter_error = ""
-                self._debug_filter_entry_open = True
-            elif self._debug_filter_sel == checkbox_row:
-                self._debug_filter_highlight = not self._debug_filter_highlight
+                self._open_debug_filter_entry(None)
             elif self._debug_filter_sel == export_row:
                 self._write_filtered_debug_view()
+            elif 1 <= self._debug_filter_sel <= count:
+                # Select an existing filter to reopen it for editing.
+                self._open_debug_filter_entry(self._debug_filter_sel - 1)
         return True
 
     def _handle_debug_filter_entry_key(self, key) -> bool:
-        """Mirror File Manager's Move filename editor for regex entry."""
+        """Handle the CREATE/EDIT DEBUG FILTER sub-popup: a regex text field
+        plus a per-filter Mode multi-select (Left/Right to switch)."""
         cur = self._debug_filter_cursor
         if key == 27:
             self._debug_filter_entry_open = False
-        elif key in (curses.KEY_BACKSPACE, 127, 8):
+        elif key in (curses.KEY_UP, curses.KEY_DOWN):
+            self._debug_filter_entry_sel = 1 - self._debug_filter_entry_sel
+        elif key in (curses.KEY_BACKSPACE, 127, 8) and self._debug_filter_entry_sel == 0:
             if cur > 0:
                 self._debug_filter_buf = self._debug_filter_buf[:cur - 1] + self._debug_filter_buf[cur:]
                 self._debug_filter_cursor = cur - 1
-        elif key == curses.KEY_DC and cur < len(self._debug_filter_buf):
+        elif key == curses.KEY_DC and self._debug_filter_entry_sel == 0 and cur < len(self._debug_filter_buf):
             self._debug_filter_buf = self._debug_filter_buf[:cur] + self._debug_filter_buf[cur + 1:]
-        elif key == curses.KEY_LEFT and cur > 0:
-            self._debug_filter_cursor = cur - 1
-        elif key == curses.KEY_RIGHT and cur < len(self._debug_filter_buf):
-            self._debug_filter_cursor = cur + 1
-        elif key == curses.KEY_HOME:
+        elif key == curses.KEY_LEFT:
+            if self._debug_filter_entry_sel == 1:
+                idx = DEBUG_FILTER_MODES.index(self._debug_filter_mode)
+                self._debug_filter_mode = DEBUG_FILTER_MODES[(idx - 1) % len(DEBUG_FILTER_MODES)]
+            elif cur > 0:
+                self._debug_filter_cursor = cur - 1
+        elif key == curses.KEY_RIGHT:
+            if self._debug_filter_entry_sel == 1:
+                idx = DEBUG_FILTER_MODES.index(self._debug_filter_mode)
+                self._debug_filter_mode = DEBUG_FILTER_MODES[(idx + 1) % len(DEBUG_FILTER_MODES)]
+            elif cur < len(self._debug_filter_buf):
+                self._debug_filter_cursor = cur + 1
+        elif key == curses.KEY_HOME and self._debug_filter_entry_sel == 0:
             self._debug_filter_cursor = 0
-        elif key == curses.KEY_END:
+        elif key == curses.KEY_END and self._debug_filter_entry_sel == 0:
             self._debug_filter_cursor = len(self._debug_filter_buf)
         elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
             expression = self._debug_filter_buf.strip()
@@ -6361,10 +6416,14 @@ class JJDlpDashboard:
                 self._debug_filter_error = f"Invalid regex: {exc}"
             else:
                 if expression:
-                    self._debug_filter_patterns.append(expression)
+                    entry = {"pattern": expression, "mode": self._debug_filter_mode}
+                    if self._debug_filter_edit_index is not None:
+                        self._debug_filter_patterns[self._debug_filter_edit_index] = entry
+                    else:
+                        self._debug_filter_patterns.append(entry)
                     self._log_scroll = 0
                 self._debug_filter_entry_open = False
-        elif 32 <= key < 127:
+        elif 32 <= key < 127 and self._debug_filter_entry_sel == 0:
             self._debug_filter_buf = self._debug_filter_buf[:cur] + chr(key) + self._debug_filter_buf[cur:]
             self._debug_filter_cursor = cur + 1
             self._debug_filter_error = ""
@@ -6373,7 +6432,7 @@ class JJDlpDashboard:
     def draw_debug_filter_popup(self) -> None:
         h, w = self.stdscr.getmaxyx()
         box_w = min(max(58, min(96, w - 4)), w - 4)
-        box_h = min(max(10, len(self._debug_filter_patterns) + 9), h - 4)
+        box_h = min(max(10, len(self._debug_filter_patterns) + 8), h - 4)
         by1, bx1 = max(0, (h - box_h) // 2), max(0, (w - box_w) // 2)
         by2, bx2 = by1 + box_h, bx1 + box_w
         for y in range(by1, by2 + 1):
@@ -6383,37 +6442,53 @@ class JJDlpDashboard:
         self.safe_addstr(self.stdscr, by1 + 1, bx1 + 2, "Show matching debug lines only; regular log lines are unaffected.", theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text"))
         create_attr = theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_selected") if self._debug_filter_sel == 0 else theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text")
         self.safe_addstr(self.stdscr, by1 + 2, bx1 + 2, "> Create new filter" if self._debug_filter_sel == 0 else "  Create new filter", create_attr)
-        max_rows = max(0, box_h - 8)
-        for index, expression in enumerate(self._debug_filter_patterns[:max_rows]):
+        max_rows = max(0, box_h - 7)
+        for index, entry in enumerate(self._debug_filter_patterns[:max_rows]):
             attr = theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_selected") if self._debug_filter_sel == index + 1 else theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text")
             prefix = ">" if self._debug_filter_sel == index + 1 else " "
-            self.safe_addstr(self.stdscr, by1 + 3 + index, bx1 + 2, f"{prefix} {expression}"[:box_w - 4], attr)
-        checkbox_y = by1 + 3 + min(len(self._debug_filter_patterns), max_rows)
-        checked = "x" if self._debug_filter_highlight else " "
-        check_attr = theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_selected") if self._debug_filter_sel == len(self._debug_filter_patterns) + 1 else theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text")
-        self.safe_addstr(self.stdscr, checkbox_y, bx1 + 2, f"[{checked}] Highlight match", check_attr)
-        export_y = checkbox_y + 1
-        export_attr = theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_selected") if self._debug_filter_sel == len(self._debug_filter_patterns) + 2 else theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text")
+            tag = DEBUG_FILTER_MODE_TAGS.get(entry.get("mode", "filter_highlight"), "F+H")
+            self.safe_addstr(self.stdscr, by1 + 3 + index, bx1 + 2, f"{prefix} [{tag}] {entry['pattern']}"[:box_w - 4], attr)
+        export_y = by1 + 3 + min(len(self._debug_filter_patterns), max_rows)
+        export_attr = theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_selected") if self._debug_filter_sel == len(self._debug_filter_patterns) + 1 else theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text")
         self.safe_addstr(self.stdscr, export_y, bx1 + 2, "Write filtered view to file", export_attr)
         if self._debug_filter_error:
             self.safe_addstr(self.stdscr, by2 - 1, bx1 + 2, self._debug_filter_error[:box_w - 4], theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_error"))
-        self.safe_addstr(self.stdscr, by2, bx1 + 2, "Enter: select  Up/Down: select  D/Del: remove  Esc: close"[:box_w - 4], theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_legend"))
+        self.safe_addstr(self.stdscr, by2, bx1 + 2, "Enter: select/edit  Up/Down: select  D/Del: remove  Esc: close"[:box_w - 4], theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_legend"))
 
     def draw_debug_filter_entry_popup(self) -> None:
         h, w = self.stdscr.getmaxyx()
-        box_w, box_h = min(70, w - 4), min(7, h - 4)
+        box_w, box_h = min(70, w - 4), min(9, h - 4)
         by1, bx1 = (h - box_h) // 2, (w - box_w) // 2
         by2, bx2 = by1 + box_h, bx1 + box_w
         for y in range(by1, by2 + 1):
             self.safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1), theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_normal"))
         self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_CHROME)
-        self.safe_addstr(self.stdscr, by1, bx1 + 2, " CREATE DEBUG FILTER ", theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_title"))
+        editing = self._debug_filter_edit_index is not None
+        title = " EDIT DEBUG FILTER " if editing else " CREATE DEBUG FILTER "
+        self.safe_addstr(self.stdscr, by1, bx1 + 2, title, theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_title"))
         self.safe_addstr(self.stdscr, by1 + 1, bx1 + 2, "Regex expression:", theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text"))
-        display = self._debug_filter_buf[:self._debug_filter_cursor] + "_" + self._debug_filter_buf[self._debug_filter_cursor:]
-        self.safe_addstr(self.stdscr, by1 + 3, bx1 + 2, display[:box_w - 4], theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_selected"))
+        text_attr = (theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_selected")
+                     if self._debug_filter_entry_sel == 0
+                     else theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text"))
+        if self._debug_filter_entry_sel == 0:
+            display = self._debug_filter_buf[:self._debug_filter_cursor] + "_" + self._debug_filter_buf[self._debug_filter_cursor:]
+        else:
+            display = self._debug_filter_buf
+        self.safe_addstr(self.stdscr, by1 + 3, bx1 + 2, display[:box_w - 4], text_attr)
+
+        # Per-filter Mode multi-select: Left/Right arrows cycle through the
+        # three modes. This setting is saved with this filter only.
+        mode_attr = (theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_selected")
+                     if self._debug_filter_entry_sel == 1
+                     else theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text"))
+        mode_label = DEBUG_FILTER_MODE_LABELS[self._debug_filter_mode]
+        mode_line = f"Mode: < {mode_label} >"
+        self.safe_addstr(self.stdscr, by1 + 5, bx1 + 2, mode_line[:box_w - 4], mode_attr)
+
         if self._debug_filter_error:
-            self.safe_addstr(self.stdscr, by1 + 4, bx1 + 2, self._debug_filter_error[:box_w - 4], theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_error"))
-        self.safe_addstr(self.stdscr, by2, bx1 + 2, "Enter: add filter  Esc: cancel"[:box_w - 4], theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_legend"))
+            self.safe_addstr(self.stdscr, by1 + 6, bx1 + 2, self._debug_filter_error[:box_w - 4], theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_error"))
+        legend = "Enter: save  Up/Down: field  Left/Right: mode  Esc: cancel"
+        self.safe_addstr(self.stdscr, by2, bx1 + 2, legend[:box_w - 4], theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_legend"))
 
     def refresh_screen(self):
         self.stdscr.erase()
