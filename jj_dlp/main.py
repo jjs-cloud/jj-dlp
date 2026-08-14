@@ -5530,7 +5530,9 @@ class JJDlpDashboard:
                     else:
                         status_str  = "[● Live]"
                         status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_8")
-                    bar_str     = _live_bar(elapsed, bar_w, _bar_max_secs)
+                    bar_str     = (_live_bar_dashed(elapsed, bar_w, _bar_max_secs)
+                                   if recording_res.get(s) is None
+                                   else _live_bar(elapsed, bar_w, _bar_max_secs))
                     bar_attr    = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_9")
                     dur_str     = _fmt_duration(elapsed)
                     if not (is_rec and recording_res.get(s) is not None):
