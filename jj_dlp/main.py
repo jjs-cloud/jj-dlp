@@ -5346,15 +5346,18 @@ class JJDlpDashboard:
         # Status badge row
         badge_y = y1 + 1
         bx = x1 + 2
+        live_text = f"LIVE:{live_cnt}"
         self.safe_addstr(self.stdscr, badge_y, bx,
-                    f"LIVE:{live_cnt}",  theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_1"))
-        bx += 7
+                    live_text,  theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_1"))
+        bx += len(live_text) + 1
+        rec_text = f"REC:{rec_cnt}"
         self.safe_addstr(self.stdscr, badge_y, bx,
-                    f"REC:{rec_cnt}",    theme.attr(self, "main_jjdlpdashboard_draw_site_panel_rec_1"))
-        bx += 6
+                    rec_text,    theme.attr(self, "main_jjdlpdashboard_draw_site_panel_rec_1"))
+        bx += len(rec_text) + 1
+        off_text = f"OFF:{off_cnt}"
         self.safe_addstr(self.stdscr, badge_y, bx,
-                    f"OFF:{off_cnt}",    theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_1"))
-        bx += 6
+                    off_text,    theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_1"))
+        bx += len(off_text) + 1
         if dis_cnt:
             self.safe_addstr(self.stdscr, badge_y, bx,
                         f"DIS:{dis_cnt}", theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_1"))
