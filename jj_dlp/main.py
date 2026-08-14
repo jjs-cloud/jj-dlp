@@ -2,9 +2,10 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.28"
+__version__ = "1.26.29"
 
 import subprocess
+import textwrap
 import time
 import sys
 import os
@@ -5694,7 +5695,13 @@ class JJDlpDashboard:
 
     @classmethod
     def _wrap_lines(cls, lines: List[str], max_width: int) -> List[str]:
-        """Wrap each line to max_width characters, preserving order."""
+        """Wrap each line to max_width characters, preserving order.
+
+        Wraps on word boundaries so a word that would run into the margin
+        is pushed to the next line whole, rather than being cut off
+        mid-word. Words longer than max_width on their own are still
+        hard-broken (there's nowhere else to put them).
+        """
         if max_width <= 0:
             return lines
         wrapped = []
@@ -5703,10 +5710,15 @@ class JJDlpDashboard:
             if not line:
                 wrapped.append("")
                 continue
-            while len(line) > max_width:
-                wrapped.append(line[:max_width])
-                line = line[max_width:]
-            wrapped.append(line)
+            if len(line) <= max_width:
+                wrapped.append(line)
+                continue
+            wrapped.extend(textwrap.wrap(
+                line,
+                width=max_width,
+                break_long_words=True,
+                break_on_hyphens=False,
+            ) or [""])
         return wrapped
 
     # ── Log tab ──────────────────────────────────────────────────────────────

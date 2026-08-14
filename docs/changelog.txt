@@ -3,7 +3,7 @@
 - when the stream is in portrait mode, the resolution is now correctly displayed on the site panel. (min of height/width instead of always the height)
 - when a recording restarts for any reason while the streamer is still on the same live stream, the new file and the original file are named/renamed with a _partN suffix. This can be disabled, if you prefer, in SITE SETTINGS > AUTO_SUFFIX.
 - the progress bar now shows a dashed line when the streamer is live but not currently recording
-- fixed a minor spacing issue with the site panel statues (LIVE:4 REC:3 OFF:23DIS:1)
+- fixed minor spacing issues with the site panel statues (LIVE:4 REC:3 OFF:23DIS:1 and [● Live]/[►  REC]/[○  off])
 
 ====================
 ====================
