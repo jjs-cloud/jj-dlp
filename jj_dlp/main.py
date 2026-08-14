@@ -4657,6 +4657,14 @@ def _live_bar(seconds: float, width: int = 14, max_secs: int = 6 * 3600) -> str:
     filled = min(int(width * seconds / max(1, max_secs)), width)
     return "█" * filled + "░" * (width - filled)
 
+def _live_bar_dashed(seconds: float, width: int = 14, max_secs: int = 6 * 3600) -> str:
+    """Like _live_bar(), but for disabled streamers: the filled portion is a
+    dashed line (the "─" character with spaces between each dash) and the
+    unfilled portion is a solid "─" line. Total length is always `width`."""
+    filled = min(int(width * seconds / max(1, max_secs)), width)
+    dashed = ("─ " * filled)[:width]
+    return dashed + "─" * (width - len(dashed))
+
 class JJDlpDashboard:
     """
     MenuWorks-style curses TUI.
@@ -5493,10 +5501,11 @@ class JJDlpDashboard:
 
                 if is_dis:
                     name_attr   = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_6")
-                    bar_str     = "─" * bar_w
                     bar_attr    = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_7")
-                    dur_str     = ""
                     if since is not None:
+                        elapsed     = now - since
+                        bar_str     = _live_bar_dashed(elapsed, bar_w, _bar_max_secs)
+                        dur_str     = _fmt_duration(elapsed)
                         if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
                             status_str  = "[● Live]"
                             status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_8")
@@ -5504,6 +5513,8 @@ class JJDlpDashboard:
                             status_str  = "[x  DIS]"
                             status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_9")
                     else:
+                        bar_str     = _live_bar_dashed(0, bar_w, _bar_max_secs)
+                        dur_str     = ""
                         status_str  = "[x  DIS]"
                         status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_10")
                 elif since is not None:
