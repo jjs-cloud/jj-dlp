@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.32"
+__version__ = "1.26.31"
 
 import subprocess
 import textwrap
@@ -4646,6 +4646,12 @@ def monitor_site(site: "SiteState") -> None:
     # Stagger startup liveness checks slightly so the curses UI finishes
     # drawing its initial frames smoothly before external processes launch.
     time.sleep(2.0)
+
+    # Fires at most once per process; the actual 24h throttling is enforced
+    # inside maybe_backfill_last_live() via a timestamp persisted in
+    # global.json, so a restart within 24h of the last fire is a no-op and
+    # a restart after 24h fires again automatically.
+    _gql_backfill_done = False
 
     while not site._stop_event.is_set():
         # Evaluate schedule-based enable/disable for all streamers before the
