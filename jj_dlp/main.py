@@ -75,6 +75,60 @@ _global_sites: List["SiteState"] = []
 _recording_start_lock = threading.Lock()
 
 
+def _install_thread_excepthook() -> None:
+    """Route uncaught exceptions from *any* background thread to the Log tab.
+
+    A silently-dying thread — e.g. a site's monitor loop raising on one
+    iteration — used to leave the dashboard looking normal while the site
+    stopped doing anything ("Next check" frozen, no debug output). Install a
+    global excepthook so no background thread can crash invisibly again:
+    every unhandled exception is surfaced on the Log tab and written to the
+    debug/crash logs, with the full traceback preserved for diagnosis.
+    """
+    import traceback as _tb
+
+    def _hook(args: "threading.ExceptHookArgs") -> None:
+        exc_type  = args.exc_type
+        exc_val   = args.exc_value
+        exc_tb    = args.exc_traceback
+        thread    = args.thread
+        name      = thread.name if thread else "?"
+
+        one_line = (
+            f"BACKGROUND THREAD CRASHED ({name}): "
+            f"{exc_type.__name__}: {exc_val}"
+        )
+        tb_text = "".join(_tb.format_exception(exc_type, exc_val, exc_tb))
+
+        # Always persist the full traceback to the debug/crash logs.
+        try:
+            _logger.log_crash(exc_val)
+        except Exception:
+            pass
+        try:
+            startup_dbg(f"THREAD CRASH: {one_line}\n{tb_text}")
+        except Exception:
+            pass
+        # Preserve the default behaviour of printing to stderr (useful when
+        # running outside the curses UI).
+        try:
+            print(f"Exception in thread {name}:\n{tb_text}", file=sys.stderr)
+        except Exception:
+            pass
+
+        # Surface on the Log tab for every site — the user-visible part.
+        for s in list(_global_sites):
+            try:
+                s.log_line(f"ERROR: {one_line}")
+            except Exception:
+                pass
+
+    threading.excepthook = _hook
+
+
+_install_thread_excepthook()
+
+
 def _get_config_id() -> str:
     """Return a stable short ID for the current set of loaded config file paths.
 
@@ -7976,7 +8030,8 @@ def main() -> None:
 
     for site in sites:
         # Monitor thread (liveness check loop)
-        mt = threading.Thread(target=monitor_site, args=(site,), daemon=True)
+        mt = threading.Thread(target=monitor_site, args=(site,), daemon=True,
+                              name=f"monitor:{site.label}")
         mt.start()
         site.monitor_thread = mt
 
@@ -7984,7 +8039,7 @@ def main() -> None:
         cfg_i = load_config(site.config_path)
         wt = threading.Thread(target=config_watcher,
                               args=(site, cfg_i.get("config_check_interval", 3)),
-                              daemon=True)
+                              daemon=True, name=f"watcher:{site.label}")
         wt.start()
         site.watcher_thread = wt
 
