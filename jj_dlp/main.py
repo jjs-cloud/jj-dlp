@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.31"
+__version__ = "1.26.32"
 
 import subprocess
 import textwrap
@@ -490,6 +490,68 @@ def _write_global_conf_key(key: str, value: str) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 _global_json_lock: threading.Lock = threading.Lock()
+
+# ── Single-instance guard ───────────────────────────────────────────────────
+# Prevents two jj-dlp processes from running at once, since global.json has
+# no cross-process locking and concurrent writers can silently overwrite
+# each other's data.
+_instance_lock_handle = None  # kept open for the process lifetime; GC'd handle == released lock
+
+
+def _instance_lock_path() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "jj-dlp.instance.lock")
+
+
+def acquire_single_instance_lock() -> bool:
+    """Try to take an OS-level exclusive lock on the instance lock file.
+
+    Returns True if acquired (safe to proceed) or False if another instance
+    already holds it. The lock is released automatically on process exit.
+    """
+    global _instance_lock_handle
+    path = _instance_lock_path()
+    try:
+        f = open(path, "a+")
+    except Exception as e:
+        # If we can't even open the lock file, don't block startup over it —
+        # log and let the app run rather than failing closed on e.g. a
+        # permissions hiccup.
+        dbg(f"[GLOBAL_JSON][DIAG] instance lock: could not open {path!r}: {e!r} — proceeding without the guard")
+        return True
+
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            f.seek(0)
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                f.close()
+                return False
+        else:
+            import fcntl
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                f.close()
+                return False
+    except Exception as e:
+        dbg(f"[GLOBAL_JSON][DIAG] instance lock: locking primitive failed unexpectedly: {e!r} — proceeding without the guard")
+        f.close()
+        return True
+
+    # Lock acquired — record our PID for anyone who opens the file to look.
+    try:
+        f.seek(0)
+        f.truncate()
+        f.write(f"{os.getpid()}\n")
+        f.flush()
+    except Exception:
+        pass  # Best-effort diagnostics only; the lock itself is already held.
+
+    _instance_lock_handle = f  # keep alive so the lock isn't released early
+    dbg(f"[GLOBAL_JSON][DIAG] instance lock acquired: pid={os.getpid()} path={path!r}")
+    return True
 
 # How often global.json should be backed up.  The timestamp of the last
 # backup is stored inside global.json itself (key "_last_backup_ts"), so the
@@ -7885,6 +7947,18 @@ def main() -> None:
         from .updater import perform_update
         perform_update()
         sys.exit(0)
+
+    # ── Refuse to start a second instance ─────────────────────────────────────
+    if not acquire_single_instance_lock():
+        print(
+            f"\njj-dlp v{__version__}  ·  Another instance of jj-dlp already appears to be running.\n"
+            f"Running two instances at once can corrupt global.json (priorities, bypass "
+            f"settings, etc.), so this launch is refusing to start.\n"
+            f"If you're sure no other instance is running (e.g. after a crash on a "
+            f"different machine that didn't get a chance to exit cleanly), delete "
+            f"jj-dlp.instance.lock next to global.json and try again."
+        )
+        sys.exit(1)
 
     # ── Config discovery / selection ──────────────────────────────────────────
     if args.config is not None:
