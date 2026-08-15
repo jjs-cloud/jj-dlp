@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.31"
+__version__ = "1.26.32"
 
 import subprocess
 import textwrap
@@ -48,6 +48,7 @@ from .config_editor import load_global_config as _load_global_config_typed
 from .file_manager import FileManagerTab
 from . import graph as _graph
 from . import simulation as _simulation
+from .twitch_eventsub import maybe_backfill_last_live
 
 import curses  # noqa: E402
 
@@ -629,6 +630,33 @@ def _save_last_live_cache(config_path: str, last_live: Dict[str, float]) -> None
 # Deliberately larger than any realistic terminal width so a wider window on
 # relaunch still shows a full graph.
 _GRAPH_PERSIST_BARS: int = 500
+
+
+def _load_last_gql_backfill_ts(config_path: str) -> Optional[float]:
+    """Return the epoch this site's last_live GQL backfill last fired, or
+    None if it has never run for this site."""
+    site_key = os.path.basename(config_path)
+    with _global_json_lock:
+        global_data = _load_global_json()
+    site_data = global_data.get("sites", {}).get(site_key, {})
+    ts = site_data.get("last_gql_backfill_ts")
+    try:
+        return float(ts) if ts is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _save_last_gql_backfill_ts(config_path: str, ts: float) -> None:
+    """Persist the epoch this site's last_live GQL backfill last fired."""
+    site_key = os.path.basename(config_path)
+    with _global_json_lock:
+        global_data = _load_global_json()
+        if "sites" not in global_data or not isinstance(global_data["sites"], dict):
+            global_data["sites"] = {}
+        if site_key not in global_data["sites"] or not isinstance(global_data["sites"][site_key], dict):
+            global_data["sites"][site_key] = {}
+        global_data["sites"][site_key]["last_gql_backfill_ts"] = ts
+        _save_global_json(global_data)
 
 
 def _load_disk_rate_history() -> List[float]:
