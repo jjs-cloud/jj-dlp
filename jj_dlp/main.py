@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.29"
+__version__ = "1.26.30"
 
 import subprocess
 import textwrap
@@ -3561,11 +3561,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                                     _part1_path = add_segment_suffix_to_tmpl(active_file, 1)
                                     try:
                                         os.rename(active_file, _part1_path)
-                                        site.log_line(
-                                            f"Renamed first segment to: {os.path.basename(_part1_path)}"
-                                        )
-                                        dbg(f"[SPLIT][record_stream] renamed first segment: "
-                                            f"{active_file!r} -> {_part1_path!r}")
+                                        dbg(f"[SPLIT][record_stream] renamed first segment to: "
+                                            f"{os.path.basename(_part1_path)} "
+                                            f"({active_file!r} -> {_part1_path!r})")
                                     except Exception as _ren_err:
                                         dbg(f"[SPLIT][record_stream] rename of first segment FAILED: "
                                             f"{_ren_err!r}")
