@@ -50,11 +50,18 @@ from typing import Callable, Dict, List, Optional
 
 # ── Last-live backfill via Twitch's public GQL endpoint ───────────────────────
 #
-# This is a *separate* mechanism from EventSub
+# This is a *separate* mechanism from EventSub above and needs none of its
+# setup (no CLIENT_ID/CLIENT_SECRET/CALLBACK_URL, no webhook server). It uses
+# the same public, unauthenticated Client-Id the Twitch website itself embeds
+# in its own web client, purely to ask "when did this channel last broadcast"
+# for streamers whose "Last Live" field on the dashboard is blank (never
+# finished a recording, or the cache was lost).
 #
 # Fires at most once per _LAST_LIVE_BACKFILL_INTERVAL (24h), driven by a
 # timestamp persisted in global.json (via the get/set callbacks passed in by
-# the caller)
+# the caller) rather than a background thread — main.py calls
+# maybe_backfill_last_live() once at site startup, and the 24h gate decides
+# whether it actually does anything.
 
 _TWITCH_GQL_URL = "https://gql.twitch.tv/gql"
 _TWITCH_GQL_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"  # public — same one gql.twitch.tv sees from the Twitch web client
@@ -113,7 +120,20 @@ def _gql_fetch_last_broadcasts(usernames: List[str],
             user = (result or {}).get("data", {}).get("user")
             started_at = user["lastBroadcast"]["startedAt"] if user else None
             if started_at:
-                dt = datetime.strptime(started_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                # Twitch's GQL inconsistently includes fractional seconds,
+                # and the fractional part isn't a fixed length either
+                # ("...T01:38:20.55557Z" vs "...T01:38:20Z"), so pad/trim
+                # it to exactly 6 digits (microseconds) before strptime
+                # rather than relying on fromisoformat's 3.11+-only lenient
+                # parsing, which older Python builds don't support.
+                s = started_at.rstrip("Z")
+                if "." in s:
+                    whole, frac = s.split(".", 1)
+                    frac = (frac + "000000")[:6]
+                    s = f"{whole}.{frac}"
+                    dt = datetime.strptime(s, "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=timezone.utc)
+                else:
+                    dt = datetime.strptime(s, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
                 out[username] = dt.timestamp()
             else:
                 out[username] = None
@@ -134,6 +154,16 @@ def maybe_backfill_last_live(
 ) -> None:
     """Backfill blank "Last Live" entries for *site* via Twitch's public GQL
     endpoint, at most once per _LAST_LIVE_BACKFILL_INTERVAL (24h).
+
+    Intended to be called once at site startup (not from a loop/thread) —
+    the 24h gate is enforced via a timestamp persisted through
+    get_last_backfill_ts_fn/set_last_backfill_ts_fn (backed by global.json
+    in main.py), so a restart within the same 24h window is a no-op, and a
+    restart after 24h have passed fires again automatically.
+
+    Only ever fills in streamers with NO existing dash_last_live entry — a
+    real, previously-recorded last_live timestamp is never overwritten.
+    Twitch-only: a no-op if this site's SITE_TMPL isn't a twitch.tv URL.
     """
     dbg_fn = dbg_fn or (lambda *a, **k: None)
     log_fn = log_fn or (lambda *a, **k: None)
