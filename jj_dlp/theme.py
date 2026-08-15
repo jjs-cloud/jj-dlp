@@ -212,7 +212,7 @@ _SCHEME_BACKGROUND = {
 
 # Default base scheme index. Used as the fallback whenever
 # theme.json doesn't specify a base_scheme_idx.
-DEFAULT_SCHEME_IDX = 6
+DEFAULT_SCHEME_IDX = 0
 
 # Scheme index pushed to all users once. Change this to a new scheme
 # index to push that theme whenever it differs from the recorded
@@ -657,6 +657,8 @@ def load_theme():
         data.setdefault('site_overrides', {})
         return data
     except FileNotFoundError:
+        default['theme_pushed'] = THEME_PUSH
+        save_theme(default)
         return default
     except Exception:
         # Torn/corrupt write — don't crash startup, just fall back to defaults.

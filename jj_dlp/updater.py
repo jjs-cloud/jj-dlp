@@ -125,6 +125,7 @@ def check_for_updates_background():
         if current_sha:
             update_info['update_available'] = current_sha != latest_sha
         else:
+            # ← takes this branch on fresh clone
             update_info['current_sha'] = latest_sha
             update_info['update_available'] = False
 
