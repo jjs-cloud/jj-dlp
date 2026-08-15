@@ -4,6 +4,8 @@
 - when a recording restarts for any reason while the streamer is still on the same live stream, the new file and the original file are named/renamed with a _partN suffix. This can be disabled, if you prefer, in SITE SETTINGS > AUTO_SUFFIX.
 - the progress bar now shows a dashed line when the streamer is live but not currently recording
 - fixed minor spacing issues with the site panel statues (LIVE:4 REC:3 OFF:23DIS:1 and [● Live]/[►  REC]/[○  off])
+- words now wrap to the next line instead of getting cut mid-word. (changelog, log tab, stdout tab, stderr tab)
+- decresed verbosity of SPLIT_AFTER log lines
 
 ====================
 ====================

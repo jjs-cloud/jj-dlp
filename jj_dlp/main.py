@@ -3449,9 +3449,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                             f"segment_num={segment_num} -> next_segment_num={next_segment_num} "
                             f"next_output_path={next_output_path!r}")
 
-                        site.log_line(
-                            f"SPLIT_AFTER reached for {streamer} — starting part {next_segment_num}"
-                        )
+                        dbg(f"[SPLIT][record_stream] SPLIT_AFTER reached for {streamer} — "
+                            f"starting part {next_segment_num}")
 
                         next_cmd = build_yt_dlp_command(
                             cfg["yt_dlp_path"],
