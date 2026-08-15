@@ -6,6 +6,7 @@
 - fixed minor spacing issues with the site panel statues (LIVE:4 REC:3 OFF:23DIS:1 and [● Live]/[►  REC]/[○  off])
 - words now wrap to the next line instead of getting cut mid-word. (changelog, log tab, stdout tab, stderr tab)
 - decresed verbosity of SPLIT_AFTER log lines
+- on the twitch site panel only, the last_live counter for each streamer will now be backfilled (if needed) via twitch's public GQL api
 
 ====================
 ====================

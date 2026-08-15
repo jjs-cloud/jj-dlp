@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.30"
+__version__ = "1.26.31"
 
 import subprocess
 import textwrap
@@ -4595,6 +4595,20 @@ def monitor_site(site: "SiteState") -> None:
                 site.dash_all_streamers.extend(streamers)
                 site.dash_blocked.clear()
                 site.dash_blocked.update(cfg["blocked"])
+
+            if not _gql_backfill_done:
+                _gql_backfill_done = True
+                try:
+                    maybe_backfill_last_live(
+                        site, cfg,
+                        get_last_backfill_ts_fn=lambda: _load_last_gql_backfill_ts(site.config_path),
+                        set_last_backfill_ts_fn=lambda ts: _save_last_gql_backfill_ts(site.config_path, ts),
+                        save_last_live_fn=_save_last_live_cache,
+                        dbg_fn=dbg,
+                        log_fn=site.log_line,
+                    )
+                except Exception as e:
+                    dbg(f"[GQL] last_live backfill error: {type(e).__name__}: {e}")
 
             # One call each — mark_offline() tears down the whole
             # LiveSession (quality_upgraded, blocked_while_live,

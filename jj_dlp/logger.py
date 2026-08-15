@@ -139,6 +139,7 @@ def configure(dashboard_log_fn=None, dashboard_dbg_fn=None) -> None:
 #   DISK     — disk usage display in the system panel
 #   UPDATER  — update checker and periodic updater thread
 #   TWITCH   — twitch eventsub and token operations
+#   GQL      — twitch public GQL last_live backfill
 #   KILL     — yt-dlp process termination
 #   CONFIG   — config editor save/backup operations
 #   POPUP    — live popup notification creation and suppression
@@ -169,6 +170,7 @@ DBG_TAGS: list[str] = [
     "DISK",
     "UPDATER",
     "TWITCH",
+    "GQL",
     "AD",
     "CONFIG",
     "KILL",
