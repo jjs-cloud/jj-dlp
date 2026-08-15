@@ -17,7 +17,7 @@ _API_BASE   = "https://api.github.com/repos/jjs-cloud/jj-dlp"
 # ── Updater version ───────────────────────────────────────────────────────────
 # Incremented independently of the main jj-dlp version so we can tell which
 # updater logic is actually running during an update.
-UPDATER_VERSION = "2.3.0"
+UPDATER_VERSION = "2.3.1"
 
 # ── Lazy package imports ──────────────────────────────────────────────────────
 # Relative imports are deferred to call time so this file is also safe to
@@ -185,8 +185,10 @@ def perform_update():
         _logger().dbg(f"[UPDATER] perform_update: downloaded zip to {zip_path}")
     except Exception as e:
         _logger().dbg(f"[UPDATER] perform_update: download failed: {e}")
-        print(f"Error downloading update: {e}")
+        print(f"\nError downloading update: {e}")
+        print("Could not reach GitHub. Check your internet connection (e.g. make sure Wi-Fi is on) and try again.")
         shutil.rmtree(temp_dir, ignore_errors=True)
+        input("\nPress Enter to exit...")
         return
 
     # ── Step 2: Extract ───────────────────────────────────────────────────────
@@ -199,8 +201,9 @@ def perform_update():
         _logger().dbg(f"[UPDATER] perform_update: extracted zip to {extract_dir}")
     except Exception as e:
         _logger().dbg(f"[UPDATER] perform_update: extraction failed: {e}")
-        print(f"Error extracting update: {e}")
+        print(f"\nError extracting update: {e}")
         shutil.rmtree(temp_dir, ignore_errors=True)
+        input("\nPress Enter to exit...")
         return
 
     # The zip usually contains a single folder like 'jj-dlp-main'

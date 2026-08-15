@@ -139,6 +139,7 @@ def configure(dashboard_log_fn=None, dashboard_dbg_fn=None) -> None:
 #   DISK     — disk usage display in the system panel
 #   UPDATER  — update checker and periodic updater thread
 #   TWITCH   — twitch eventsub and token operations
+#   GQL      — twitch public GQL last_live backfill
 #   KILL     — yt-dlp process termination
 #   CONFIG   — config editor save/backup operations
 #   POPUP    — live popup notification creation and suppression
@@ -169,6 +170,7 @@ DBG_TAGS: list[str] = [
     "DISK",
     "UPDATER",
     "TWITCH",
+    "GQL",
     "AD",
     "CONFIG",
     "KILL",
@@ -355,6 +357,13 @@ def startup_dbg_flush() -> None:
 # ── Runtime debug log ─────────────────────────────────────────────────────────
 
 _last_debug_err = ""
+# Serializes actual file writes/opens so concurrent dbg() calls from
+# different threads (DRAIN, PERF, CHECKER, STALL, etc.) can't interleave
+# or corrupt lines, and can't race each other's open() on Windows (which
+# can otherwise surface as a transient PermissionError/Errno 13). Kept
+# separate from _debug_cfg_lock so we don't hold that lock through file
+# I/O.
+_write_lock = threading.Lock()
 
 def _write_debug_log(msg: str) -> None:
     global _last_debug_err
@@ -368,8 +377,9 @@ def _write_debug_log(msg: str) -> None:
         dir_part = os.path.dirname(path)
         if dir_part:
             os.makedirs(dir_part, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(msg + "\n")
+        with _write_lock:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(msg + "\n")
         with _debug_cfg_lock:
             _last_debug_err = ""
     except Exception as e:

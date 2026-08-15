@@ -44,8 +44,178 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime
-from typing import Callable, Optional
+from datetime import datetime, timezone
+from typing import Callable, Dict, List, Optional
+
+
+# ── Last-live backfill via Twitch's public GQL endpoint ───────────────────────
+#
+# This is a *separate* mechanism from EventSub above and needs none of its
+# setup (no CLIENT_ID/CLIENT_SECRET/CALLBACK_URL, no webhook server). It uses
+# the same public, unauthenticated Client-Id the Twitch website itself embeds
+# in its own web client, purely to ask "when did this channel last broadcast"
+# for streamers whose "Last Live" field on the dashboard is blank (never
+# finished a recording, or the cache was lost).
+#
+# Fires at most once per _LAST_LIVE_BACKFILL_INTERVAL (24h), driven by a
+# timestamp persisted in global.json (via the get/set callbacks passed in by
+# the caller) rather than a background thread — main.py calls
+# maybe_backfill_last_live() once at site startup, and the 24h gate decides
+# whether it actually does anything.
+
+_TWITCH_GQL_URL = "https://gql.twitch.tv/gql"
+_TWITCH_GQL_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"  # public — same one gql.twitch.tv sees from the Twitch web client
+_LAST_LIVE_BACKFILL_INTERVAL = 24 * 60 * 60  # seconds
+
+
+def _gql_fetch_last_broadcasts(usernames: List[str],
+                               dbg_fn: Optional[Callable] = None) -> Dict[str, Optional[float]]:
+    """Query Twitch's public (unauthenticated) GQL endpoint for each
+    username's lastBroadcast.startedAt, batched into a single POST.
+
+    Returns {username: epoch_seconds_or_None}. Usernames Twitch doesn't
+    recognize, or that have never broadcast, map to None.
+    """
+    dbg_fn = dbg_fn or (lambda *a, **k: None)
+    if not usernames:
+        return {}
+
+    ops = [
+        {
+            "operationName": "ChannelLastBroadcast",
+            "variables": {"login": u},
+            "query": (
+                "query ChannelLastBroadcast($login: String!) {"
+                " user(login: $login) {"
+                "   id"
+                "   lastBroadcast { startedAt }"
+                " } }"
+            ),
+        }
+        for u in usernames
+    ]
+
+    body = json.dumps(ops).encode("utf-8")
+    req = urllib.request.Request(
+        _TWITCH_GQL_URL,
+        data=body,
+        headers={
+            "Client-Id": _TWITCH_GQL_CLIENT_ID,
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            results = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        dbg_fn(f"[GQL] last-broadcast batch fetch FAILED for {len(usernames)} streamer(s): "
+               f"{type(e).__name__}: {e}")
+        return {u: None for u in usernames}
+
+    out: Dict[str, Optional[float]] = {}
+    for username, result in zip(usernames, results):
+        try:
+            user = (result or {}).get("data", {}).get("user")
+            started_at = user["lastBroadcast"]["startedAt"] if user else None
+            if started_at:
+                # Twitch's GQL inconsistently includes fractional seconds,
+                # and the fractional part isn't a fixed length either
+                # ("...T01:38:20.55557Z" vs "...T01:38:20Z"), so pad/trim
+                # it to exactly 6 digits (microseconds) before strptime
+                # rather than relying on fromisoformat's 3.11+-only lenient
+                # parsing, which older Python builds don't support.
+                s = started_at.rstrip("Z")
+                if "." in s:
+                    whole, frac = s.split(".", 1)
+                    frac = (frac + "000000")[:6]
+                    s = f"{whole}.{frac}"
+                    dt = datetime.strptime(s, "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=timezone.utc)
+                else:
+                    dt = datetime.strptime(s, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+                out[username] = dt.timestamp()
+            else:
+                out[username] = None
+        except Exception as e:
+            dbg_fn(f"[GQL] failed to parse lastBroadcast for {username!r}: {type(e).__name__}: {e}")
+            out[username] = None
+    return out
+
+
+def maybe_backfill_last_live(
+    site,
+    cfg: dict,
+    get_last_backfill_ts_fn: Callable[[], Optional[float]],
+    set_last_backfill_ts_fn: Callable[[float], None],
+    save_last_live_fn: Callable[[str, Dict[str, float]], None],
+    dbg_fn: Optional[Callable] = None,
+    log_fn: Optional[Callable] = None,
+) -> None:
+    """Backfill blank "Last Live" entries for *site* via Twitch's public GQL
+    endpoint, at most once per _LAST_LIVE_BACKFILL_INTERVAL (24h).
+
+    Intended to be called once at site startup (not from a loop/thread) —
+    the 24h gate is enforced via a timestamp persisted through
+    get_last_backfill_ts_fn/set_last_backfill_ts_fn (backed by global.json
+    in main.py), so a restart within the same 24h window is a no-op, and a
+    restart after 24h have passed fires again automatically.
+
+    Only ever fills in streamers with NO existing dash_last_live entry — a
+    real, previously-recorded last_live timestamp is never overwritten.
+    Twitch-only: a no-op if this site's SITE_TMPL isn't a twitch.tv URL.
+    """
+    dbg_fn = dbg_fn or (lambda *a, **k: None)
+    log_fn = log_fn or (lambda *a, **k: None)
+
+    if "twitch.tv" not in cfg.get("site_tmpl", ""):
+        dbg_fn(f"[GQL] last_live backfill: {site.label} is not a Twitch site — skipping")
+        return
+
+    now = time.time()
+    last_ts = get_last_backfill_ts_fn()
+    if last_ts is not None:
+        elapsed = now - last_ts
+        if elapsed < _LAST_LIVE_BACKFILL_INTERVAL:
+            dbg_fn(f"[GQL] last_live backfill: {site.label} last fired "
+                   f"{elapsed:.0f}s ago (< {_LAST_LIVE_BACKFILL_INTERVAL}s) — skipping")
+            return
+
+    with site.dash_lock:
+        all_streamers = list(site.dash_all_streamers)
+        missing = [s for s in all_streamers if s not in site.dash_last_live]
+
+    dbg_fn(f"[GQL] last_live backfill FIRING for {site.label} "
+           f"({len(missing)} of {len(all_streamers)} streamer(s) have a blank last_live)")
+
+    if missing:
+        fetched = _gql_fetch_last_broadcasts(missing, dbg_fn=dbg_fn)
+
+        updated: Dict[str, float] = {}
+        with site.dash_lock:
+            for username, epoch in fetched.items():
+                if epoch is not None and username not in site.dash_last_live:
+                    site.dash_last_live[username] = epoch
+                    updated[username] = epoch
+            snapshot = dict(site.dash_last_live) if updated else None
+
+        if updated:
+            save_last_live_fn(site.config_path, snapshot)
+            _updated_str = ", ".join(
+                f"{u}={datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')}"
+                for u, ts in updated.items()
+            )
+            dbg_fn(f"[GQL] last_live backfill: updated {len(updated)} streamer(s) "
+                   f"on {site.label}: {_updated_str}")
+            log_fn(f"Backfilled last-live time via Twitch GQL for {len(updated)} "
+                   f"streamer(s): {', '.join(updated.keys())}")
+        else:
+            dbg_fn(f"[GQL] last_live backfill: GQL returned no lastBroadcast data for "
+                   f"any of {len(missing)} streamer(s) on {site.label} — nothing updated")
+    else:
+        dbg_fn(f"[GQL] last_live backfill: no blank last_live entries for {site.label} — nothing to query")
+
+    set_last_backfill_ts_fn(now)
 
 
 # ── Public state container ────────────────────────────────────────────────────

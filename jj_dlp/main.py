@@ -2,9 +2,10 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.17"
+__version__ = "1.27.0"
 
 import subprocess
+import textwrap
 import time
 import sys
 import os
@@ -43,11 +44,28 @@ from .browser_config import (
     _write_ask_for_browser_to_config,
 )
 from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS, _compute_config_id, SiteSortManager, SORT_OPTIONS, _SORT_LABELS
+from .config_editor import load_global_config as _load_global_config_typed
 from .file_manager import FileManagerTab
 from . import graph as _graph
 from . import simulation as _simulation
+from .twitch_eventsub import maybe_backfill_last_live
 
 import curses  # noqa: E402
+
+# ── Debug filter per-filter mode ──────────────────────────────────────────────
+# Each debug-log filter now carries its own mode instead of a single global
+# "highlight" checkbox applying to every filter.
+DEBUG_FILTER_MODES: List[str] = ["filter_highlight", "filter_only", "highlight_only"]
+DEBUG_FILTER_MODE_LABELS: Dict[str, str] = {
+    "filter_highlight": "Filter+Highlight",
+    "filter_only":       "Filter Only",
+    "highlight_only":    "Highlight Only",
+}
+DEBUG_FILTER_MODE_TAGS: Dict[str, str] = {
+    "filter_highlight": "F+H",
+    "filter_only":       "F",
+    "highlight_only":    "H",
+}
 
 
 # ── Script start time (for uptime display)) ──────────────────────────────────
@@ -56,6 +74,60 @@ _SCRIPT_START_TIME: float = time.time()
 # ── Global structures for concurrency control ────────────────────────────────
 _global_sites: List["SiteState"] = []
 _recording_start_lock = threading.Lock()
+
+
+def _install_thread_excepthook() -> None:
+    """Route uncaught exceptions from *any* background thread to the Log tab.
+
+    A silently-dying thread — e.g. a site's monitor loop raising on one
+    iteration — used to leave the dashboard looking normal while the site
+    stopped doing anything ("Next check" frozen, no debug output). Install a
+    global excepthook so no background thread can crash invisibly again:
+    every unhandled exception is surfaced on the Log tab and written to the
+    debug/crash logs, with the full traceback preserved for diagnosis.
+    """
+    import traceback as _tb
+
+    def _hook(args: "threading.ExceptHookArgs") -> None:
+        exc_type  = args.exc_type
+        exc_val   = args.exc_value
+        exc_tb    = args.exc_traceback
+        thread    = args.thread
+        name      = thread.name if thread else "?"
+
+        one_line = (
+            f"BACKGROUND THREAD CRASHED ({name}): "
+            f"{exc_type.__name__}: {exc_val}"
+        )
+        tb_text = "".join(_tb.format_exception(exc_type, exc_val, exc_tb))
+
+        # Always persist the full traceback to the debug/crash logs.
+        try:
+            _logger.log_crash(exc_val)
+        except Exception:
+            pass
+        try:
+            startup_dbg(f"THREAD CRASH: {one_line}\n{tb_text}")
+        except Exception:
+            pass
+        # Preserve the default behaviour of printing to stderr (useful when
+        # running outside the curses UI).
+        try:
+            print(f"Exception in thread {name}:\n{tb_text}", file=sys.stderr)
+        except Exception:
+            pass
+
+        # Surface on the Log tab for every site — the user-visible part.
+        for s in list(_global_sites):
+            try:
+                s.log_line(f"ERROR: {one_line}")
+            except Exception:
+                pass
+
+    threading.excepthook = _hook
+
+
+_install_thread_excepthook()
 
 
 def _get_config_id() -> str:
@@ -303,7 +375,11 @@ def load_config(config_path: str) -> dict:
     # default ':' delimiter would misparse the colon in "ffmpeg:..." as a
     # key/value split, silently truncating the argument. Restricting to '='
     # avoids that while matching how every value in these configs is written.
-    parser = configparser.ConfigParser(allow_no_value=True, interpolation=None, delimiters=('=',))
+    # strict=False: tolerate duplicate keys/sections in hand-edited config
+    # files (e.g. the same streamer accidentally added twice) instead of
+    # raising DuplicateOptionError/DuplicateSectionError. The last value for
+    # a duplicated key wins.
+    parser = configparser.ConfigParser(allow_no_value=True, interpolation=None, delimiters=('=',), strict=False)
     try:
         parser.read(config_path, encoding="utf-8")
     except Exception as _e:
@@ -351,83 +427,13 @@ def get_global_conf_path() -> str:
 
 
 def load_global_config() -> dict:
-    """Load global.conf and return the keys that are truly global.
+    """Load global.conf and return the keys that are truly global, fully typed.
 
-    Returns a dict with the following keys (with safe defaults if the file does
-    not exist or a key is absent):
-        disk_drives       – list[str]
-        destinations      – list[str]  (paths offered in File Options - Move)
-        debug_logs        – bool
-        debug_log_path    – str
-        check_for_updates – bool
-        update_interval   – int
-        update_branch     – str   ("main", "testing", or "experimental")
-        ask_for_browser   – bool
-        graph_scale       – int   (seconds per bar on the top disk-rate graph)
+    All key names, defaults, and types live in config_editor.CONFIG_KEYS — the
+    single source of truth. This just resolves the file path and delegates the
+    actual parsing/coercion to config_editor.load_global_config().
     """
-    path = get_global_conf_path()
-    parser = configparser.ConfigParser(allow_no_value=True, interpolation=None, delimiters=('=',))
-    try:
-        parser.read(path, encoding="utf-8")
-    except Exception:
-        pass
-
-    general = parser["General"] if parser.has_section("General") else {}
-
-    def _bool(key: str, default: bool) -> bool:
-        raw = general.get(key, "").strip().lower()
-        if raw in ("true", "1", "yes"):
-            return True
-        if raw in ("false", "0", "no"):
-            return False
-        return default
-
-    disk_drives_raw = general.get("DISK_DRIVES", "").strip().strip('"\'')
-    disk_drives = [d.strip() for d in disk_drives_raw.split(",") if d.strip()] if disk_drives_raw else []
-
-    destinations_raw = general.get("DESTINATIONS", "").strip().strip('"\'')
-    destinations = [d.strip() for d in destinations_raw.split(",") if d.strip()] if destinations_raw else []
-
-    def _int(key: str, default: int) -> int:
-        raw = general.get(key, "").strip()
-        try:
-            value = int(raw)
-            # Allow 0 explicitly (e.g. MAX_CONCURRENT_REC = 0 means "unlimited").
-            # Only fall back to the default when the raw string is absent/empty.
-            return value if value >= 0 else default
-        except Exception:
-            return default
-
-    debug_log_path_raw = general.get("DEBUG_LOG_PATH", "").strip().strip('"\'')
-    update_interval = _int("UPDATE_INTERVAL", 30)
-
-    update_branch = general.get("UPDATE_BRANCH", "main").strip().lower()
-
-    return {
-        "disk_drives":        disk_drives,
-        "debug_logs":         _bool("DEBUG_LOGS", False),
-        "debug_log_path":     debug_log_path_raw,
-        "check_for_updates":  _bool("CHECK_FOR_UPDATES", True),
-        "update_interval":    update_interval,
-        "update_branch":      update_branch,
-        "ask_for_browser":    _bool("ASK_FOR_BROWSER", True),
-        "ask_for_config":     _bool("ASK_FOR_CONFIG", True),
-        "max_concurrent_rec": _int("MAX_CONCURRENT_REC", 0),
-        "lq_downloader":      _bool("LQ_DOWNLOADER", False),
-        "ff_err_thresh":      _int("FF_ERR_THRESH", 200),
-        "subfolders":         _bool("SUBFOLDERS", False),
-        "destinations":       destinations,
-        "ntfy_topic":         general.get("NTFY_TOPIC", "").strip().strip('"\''),
-        "notify_confirm_file":_bool("NOTIFY_CONFIRM_FILE", True),
-        "notify_no_confirm_file":_bool("NOTIFY_NO_CONFIRM_FILE", False),
-        "compact_view": general.get("COMPACT_VIEW", "auto").strip().strip('"\'') or "auto",
-        "web_ui":             _bool("WEB_UI", False),
-        "web_ui_port":        _int("WEB_UI_PORT", 8765),
-        "web_ui_user":        general.get("WEB_UI_USER", "").strip().strip('"\''),
-        "web_ui_pass":        general.get("WEB_UI_PASS", "").strip().strip('"\''),
-        "graph_scale":        max(1, _int("GRAPH_SCALE", 1)),
-        "rgb_mode":           _bool("RGB_MODE", False),
-    }
+    return _load_global_config_typed(get_global_conf_path())
 
 def _write_global_conf_key(key: str, value: str) -> None:
     path = get_global_conf_path()
@@ -484,6 +490,68 @@ def _write_global_conf_key(key: str, value: str) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 _global_json_lock: threading.Lock = threading.Lock()
+
+# ── Single-instance guard ───────────────────────────────────────────────────
+# Prevents two jj-dlp processes from running at once, since global.json has
+# no cross-process locking and concurrent writers can silently overwrite
+# each other's data.
+_instance_lock_handle = None  # kept open for the process lifetime; GC'd handle == released lock
+
+
+def _instance_lock_path() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "jj-dlp.instance.lock")
+
+
+def acquire_single_instance_lock() -> bool:
+    """Try to take an OS-level exclusive lock on the instance lock file.
+
+    Returns True if acquired (safe to proceed) or False if another instance
+    already holds it. The lock is released automatically on process exit.
+    """
+    global _instance_lock_handle
+    path = _instance_lock_path()
+    try:
+        f = open(path, "a+")
+    except Exception as e:
+        # If we can't even open the lock file, don't block startup over it —
+        # log and let the app run rather than failing closed on e.g. a
+        # permissions hiccup.
+        dbg(f"[GLOBAL_JSON][DIAG] instance lock: could not open {path!r}: {e!r} — proceeding without the guard")
+        return True
+
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            f.seek(0)
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                f.close()
+                return False
+        else:
+            import fcntl
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                f.close()
+                return False
+    except Exception as e:
+        dbg(f"[GLOBAL_JSON][DIAG] instance lock: locking primitive failed unexpectedly: {e!r} — proceeding without the guard")
+        f.close()
+        return True
+
+    # Lock acquired — record our PID for anyone who opens the file to look.
+    try:
+        f.seek(0)
+        f.truncate()
+        f.write(f"{os.getpid()}\n")
+        f.flush()
+    except Exception:
+        pass  # Best-effort diagnostics only; the lock itself is already held.
+
+    _instance_lock_handle = f  # keep alive so the lock isn't released early
+    dbg(f"[GLOBAL_JSON][DIAG] instance lock acquired: pid={os.getpid()} path={path!r}")
+    return True
 
 # How often global.json should be backed up.  The timestamp of the last
 # backup is stored inside global.json itself (key "_last_backup_ts"), so the
@@ -626,6 +694,33 @@ def _save_last_live_cache(config_path: str, last_live: Dict[str, float]) -> None
 _GRAPH_PERSIST_BARS: int = 500
 
 
+def _load_last_gql_backfill_ts(config_path: str) -> Optional[float]:
+    """Return the epoch this site's last_live GQL backfill last fired, or
+    None if it has never run for this site."""
+    site_key = os.path.basename(config_path)
+    with _global_json_lock:
+        global_data = _load_global_json()
+    site_data = global_data.get("sites", {}).get(site_key, {})
+    ts = site_data.get("last_gql_backfill_ts")
+    try:
+        return float(ts) if ts is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _save_last_gql_backfill_ts(config_path: str, ts: float) -> None:
+    """Persist the epoch this site's last_live GQL backfill last fired."""
+    site_key = os.path.basename(config_path)
+    with _global_json_lock:
+        global_data = _load_global_json()
+        if "sites" not in global_data or not isinstance(global_data["sites"], dict):
+            global_data["sites"] = {}
+        if site_key not in global_data["sites"] or not isinstance(global_data["sites"][site_key], dict):
+            global_data["sites"][site_key] = {}
+        global_data["sites"][site_key]["last_gql_backfill_ts"] = ts
+        _save_global_json(global_data)
+
+
 def _load_disk_rate_history() -> List[float]:
     """Return the persisted top-graph disk-rate bars from global.json."""
     with _global_json_lock:
@@ -698,6 +793,61 @@ def _save_live_since_cache(config_path: str, live_since: Dict[str, float]) -> No
         _save_global_json(global_data)
 
 
+def _load_segment_continuation_cache(config_path: str) -> Dict[str, dict]:
+    """Return the persisted AUTO_SUFFIX/SPLIT_AFTER part-numbering
+    continuation state for the given site from global.json.
+
+    Each entry maps a streamer name to {"next_part": int, "unsuffixed_file":
+    str|None}. Read at startup (mirroring _load_live_since_cache) so that a
+    process restart mid-stream can still continue a part sequence rather
+    than silently resetting to part 1 — the same way live_since already
+    survives a restart. Only meaningful for a streamer that's also present
+    in the live_since cache; a stale/orphaned entry for a streamer that
+    isn't live is simply never consulted (mark_live() only seeds from this
+    cache, never reads it directly otherwise).
+    """
+    site_key = os.path.basename(config_path)
+    with _global_json_lock:
+        global_data = _load_global_json()
+    site_data = global_data.get("sites", {}).get(site_key, {})
+    raw = site_data.get("segment_continuation", {})
+    out: Dict[str, dict] = {}
+    if isinstance(raw, dict):
+        for streamer, entry in raw.items():
+            if not isinstance(entry, dict):
+                continue
+            try:
+                next_part = int(entry.get("next_part", 1))
+            except (TypeError, ValueError):
+                next_part = 1
+            unsuffixed_file = entry.get("unsuffixed_file")
+            if unsuffixed_file is not None:
+                unsuffixed_file = str(unsuffixed_file)
+            out[streamer] = {"next_part": next_part, "unsuffixed_file": unsuffixed_file}
+    return out
+
+
+def _save_segment_continuation_cache(config_path: str, mapping: Dict[str, dict]) -> None:
+    """Persist AUTO_SUFFIX/SPLIT_AFTER part-numbering continuation state for
+    the given site into global.json. Mirrors _save_live_since_cache's call
+    pattern — merges with any existing data so other sites' entries are
+    preserved.
+    """
+    site_key = os.path.basename(config_path)
+    with _global_json_lock:
+        global_data = _load_global_json()
+        if "sites" not in global_data or not isinstance(global_data["sites"], dict):
+            global_data["sites"] = {}
+        if site_key not in global_data["sites"] or not isinstance(global_data["sites"][site_key], dict):
+            global_data["sites"][site_key] = {}
+        global_data["sites"][site_key]["segment_continuation"] = {
+            streamer: {"next_part": entry.get("next_part", 1),
+                       "unsuffixed_file": entry.get("unsuffixed_file")}
+            for streamer, entry in mapping.items()
+        }
+        _save_global_json(global_data)
+
+
 @dataclass
 class LiveSession:
     """All state scoped to one continuous live session for one streamer.
@@ -721,6 +871,19 @@ class LiveSession:
     notif_shown: bool = False             # a non-recording notification has already fired this session
     last_restart_anchor: Optional[float] = None  # epoch of the most recent restart this session (stall, LQ, or quality upgrade); gives NOTIFY_NO_CONFIRM_FILE a fresh grace window on the following attempt without touching `since`/`enable_anchor`
     evicted_for_concurrency: bool = False  # evicted to free a slot for a higher-priority streamer, restart time unknown/unbounded; consumed at actual restart to refresh last_restart_anchor then instead of at eviction time (see was_evicted_for_concurrency)
+    # ── AUTO_SUFFIX / SPLIT_AFTER restart continuity ───────────────────────
+    # Lets a *new* record_stream() attempt (a separate thread/process
+    # launched after a restart — ffmpeg-error threshold, stall recovery,
+    # eviction, etc.) continue the _partN numbering of a previous attempt
+    # for the SAME live session, instead of starting over at a fresh,
+    # unsuffixed filename. Written/read by record_stream() via
+    # SiteState.get_segment_continuation()/set_segment_continuation().
+    # Persisted across app restarts in global.json (same as `since` —
+    # see _load_segment_continuation_cache/_save_segment_continuation_cache),
+    # so a process restart mid-stream can still continue a part sequence
+    # instead of resetting to part 1.
+    next_segment_part: int = 1
+    unsuffixed_file: Optional[str] = None
 
 
 class SiteState:
@@ -765,6 +928,11 @@ class SiteState:
         # counts files actually being recorded by yt-dlp, never File Manager
         # artifacts (Move/Fixup/Trim/Split output files).
         self.recording_output_paths: Dict[str, str] = {}
+        # Streamers for which the File Manager's Split popup has requested an
+        # immediate recording restart ("Restart the recording instead"). Consumed
+        # by record_stream()'s split-timer loop, which forces the SPLIT_AFTER
+        # split to fire now (even when SPLIT_AFTER is 0). Guarded by self.lock.
+        self.manual_split_requests:  Set[str] = set()
         self.recording_threads:   List[threading.Thread] = []
         self.known_streamers:     Set[str] = set()
         self.trigger_event        = threading.Event()
@@ -779,6 +947,12 @@ class SiteState:
         # recovers the true start time instead of resetting it to "now" —
         # see mark_live()'s use of this as a one-shot recovery source.
         self._live_since_cache:   Dict[str, float] = _load_live_since_cache(config_path)
+        # Persisted AUTO_SUFFIX/SPLIT_AFTER part-numbering continuation state
+        # (see LiveSession.next_segment_part/unsuffixed_file). Loaded once
+        # here, mirroring _live_since_cache, so a process restart mid-stream
+        # recovers where a part sequence left off instead of resetting to
+        # part 1. Consulted by mark_live() when creating a fresh LiveSession.
+        self._segment_continuation_cache: Dict[str, dict] = _load_segment_continuation_cache(config_path)
 
         # Dashboard display state (written by monitor thread, read by renderer)
         self.dash_lock            = threading.Lock()
@@ -895,6 +1069,15 @@ class SiteState:
         with self.lock:
             return set(self.recording_output_paths.values())
 
+    def request_manual_split(self, streamer: str) -> None:
+        """Ask record_stream() to force a SPLIT_AFTER split for *streamer*
+        right now (used by the File Manager's "Restart the recording instead"
+        option). The split reuses the normal SPLIT_AFTER machinery, so the
+        current segment is renamed to _partN and recording continues into
+        the next part, even when SPLIT_AFTER is configured to 0."""
+        with self.lock:
+            self.manual_split_requests.add(streamer)
+
     def kill_proc_for_streamer(self, streamer: str) -> None:
         with self._procs_lock:
             proc = self._active_procs.get(streamer)
@@ -966,8 +1149,23 @@ class SiteState:
             if streamer in self.live_sessions:
                 return
             since = self._live_since_cache.get(streamer, time.time())
-            self.live_sessions[streamer] = LiveSession(since=since)
+            _cont = self._segment_continuation_cache.get(streamer)
+            if _cont:
+                self.live_sessions[streamer] = LiveSession(
+                    since=since,
+                    next_segment_part=_cont.get("next_part", 1),
+                    unsuffixed_file=_cont.get("unsuffixed_file"),
+                )
+            else:
+                self.live_sessions[streamer] = LiveSession(since=since)
             snapshot = {s: sess.since for s, sess in self.live_sessions.items()}
+        with self.lock:
+            _still_recording = streamer in self.currently_recording
+        if _still_recording:
+            dbg(f"[UPGRADE_QUALITY] mark_live() created a fresh LiveSession "
+                f"(quality_upgraded reset to False) while a recording is already "
+                f"in progress — likely a transient live_info miss on the prior "
+                f"poll cycle", site_name=streamer)
         _save_live_since_cache(self.config_path, snapshot)
 
     def mark_offline(self, streamer: str) -> None:
@@ -980,10 +1178,28 @@ class SiteState:
         with self.session_lock:
             if streamer not in self.live_sessions:
                 return
+            _session = self.live_sessions[streamer]
             del self.live_sessions[streamer]
             self._live_since_cache.pop(streamer, None)
+            self._segment_continuation_cache.pop(streamer, None)
             snapshot = {s: sess.since for s, sess in self.live_sessions.items()}
+            segment_snapshot = dict(self._segment_continuation_cache)
+        with self.lock:
+            _still_recording = streamer in self.currently_recording
+        if _still_recording:
+            # A recording is still actively in progress for this streamer
+            # while the checker reported it as not-live this cycle (a
+            # transient miss). This tears down the whole LiveSession —
+            # including quality_upgraded — even though nothing about the
+            # recording itself changed. If mark_live() re-fires shortly
+            # after, the once-per-session UPGRADE_QUALITY guard silently
+            # resets, letting a second (usually no-op) upgrade check run.
+            dbg(f"[UPGRADE_QUALITY] mark_offline() torn down LiveSession while still "
+                f"recording — quality_upgraded={_session.quality_upgraded!r} "
+                f"live_since={_session.since!r} (this resets the once-per-session guard)",
+                site_name=streamer)
         _save_live_since_cache(self.config_path, snapshot)
+        _save_segment_continuation_cache(self.config_path, segment_snapshot)
         with self.dash_lock:
             self.dash_last_live[streamer] = time.time()
             last_live_snapshot = dict(self.dash_last_live)
@@ -1012,6 +1228,46 @@ class SiteState:
         with self.session_lock:
             return {s: sess.since for s, sess in self.live_sessions.items()}
 
+    def get_segment_continuation(self, streamer: str) -> Optional[Tuple[int, Optional[str]]]:
+        """Return (next_part, unsuffixed_file) for *streamer*'s current live
+        session, or None if the streamer isn't currently tracked as live.
+
+        Used by record_stream() at the top of a new attempt to decide
+        whether to resume _partN numbering from a prior attempt (same live
+        session) instead of starting fresh at part 1. See LiveSession's
+        next_segment_part / unsuffixed_file field comments.
+        """
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            if session is None:
+                return None
+            return (session.next_segment_part, session.unsuffixed_file)
+
+    def set_segment_continuation(self, streamer: str, next_part: int,
+                                  unsuffixed_file: Optional[str]) -> None:
+        """Persist the next _partN number (and the path of the most recent
+        unsuffixed file, if any, so it can be retroactively renamed once a
+        continuation file is confirmed) for *streamer*'s current live
+        session. A no-op if the live session already ended (e.g. a race
+        between the recording thread exiting and mark_offline() firing) —
+        there's nothing meaningful to continue into at that point.
+
+        Also written through to global.json (mirroring live_since) so this
+        survives an app restart mid-stream.
+        """
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            if session is None:
+                return
+            session.next_segment_part = next_part
+            session.unsuffixed_file = unsuffixed_file
+            self._segment_continuation_cache[streamer] = {
+                "next_part": next_part,
+                "unsuffixed_file": unsuffixed_file,
+            }
+            segment_snapshot = dict(self._segment_continuation_cache)
+        _save_segment_continuation_cache(self.config_path, segment_snapshot)
+
     def was_quality_upgraded(self, streamer: str) -> bool:
         with self.session_lock:
             session = self.live_sessions.get(streamer)
@@ -1034,19 +1290,32 @@ class SiteState:
             if session:
                 session.was_blocked_while_live = True
 
+    def clear_blocked_while_live(self, streamer: str) -> None:
+        """Consume the was_blocked_while_live flag. Called once the
+        blocked->enabled transition has actually been used to refresh the
+        enable_anchor, so a *later* block/re-enable within the same live
+        session gets treated as its own fresh transition instead of being
+        silently absorbed by set_enable_anchor's now-a-no-op guard."""
+        with self.session_lock:
+            session = self.live_sessions.get(streamer)
+            if session:
+                session.was_blocked_while_live = False
+
     def get_enable_anchor(self, streamer: str) -> Optional[float]:
         with self.session_lock:
             session = self.live_sessions.get(streamer)
             return session.enable_anchor if session else None
 
-    def set_enable_anchor_if_unset(self, streamer: str, epoch: float) -> None:
-        """Set the NOTIFY_NO_CONFIRM_FILE override anchor once, on the
-        blocked->enabled transition. Left in place (not overwritten) for
-        every retry for the rest of the live session — mirrors the old
-        enable_anchor_time semantics exactly."""
+    def set_enable_anchor(self, streamer: str, epoch: float) -> None:
+        """Set (and refresh) the NOTIFY_NO_CONFIRM_FILE override anchor on
+        every blocked->enabled transition. Unlike the old
+        set_enable_anchor_if_unset, this always overwrites: each transition
+        should get its own fresh 120s grace window, since a manual
+        disable/re-enable gap can otherwise leave the previous anchor's
+        deadline already in the past by the time the new attempt starts."""
         with self.session_lock:
             session = self.live_sessions.get(streamer)
-            if session and session.enable_anchor is None:
+            if session:
                 session.enable_anchor = epoch
 
     def get_last_restart_anchor(self, streamer: str) -> Optional[float]:
@@ -1968,23 +2237,11 @@ def open_log_streams(cfg: dict, streamer: str):
     return subprocess.PIPE, subprocess.PIPE, _close, log_out_fp, log_err_fp
 
 
-_YTDLP_DESTINATION_PREFIX: str = "[download] Destination: "
-
-
 def _drain_pipe(pipe, log_fp, pipe_type: str,
                 ffmpeg_error_counter=None, ffmpeg_error_event=None,
                 streamer: str = "", site: Optional[SiteState] = None,
-                filename_holder: Optional[List[str]] = None,
-                filename_event: Optional[threading.Event] = None,
                 ad_alerts_enabled: bool = False) -> None:
-    """Drain one pipe (stdout or stderr) from a yt-dlp subprocess.
-
-    If *filename_holder* and *filename_event* are provided, the first
-    ``[download] Destination: <path>`` line seen on either pipe is stored in
-    ``filename_holder[0]`` and *filename_event* is set, allowing
-    ``record_stream`` to learn the exact output path without scanning the
-    directory.
-    """
+    """Drain one pipe (stdout or stderr) from a yt-dlp subprocess."""
     dbg(f"[DRAIN] thread started pipe_type={pipe_type!r} streamer={streamer!r} pipe={pipe!r}")
     line_count = 0
 
@@ -2044,18 +2301,6 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
                 line_count += 1
                 if line_count <= 3:
                     dbg(f"[DRAIN] pipe_type={pipe_type!r} streamer={streamer!r} line#{line_count}: {line[:200]!r}")
-
-                # ── Parse yt-dlp destination filename ────────────────────────────
-                if (filename_holder is not None and filename_event is not None
-                        and not filename_event.is_set()):
-                    stripped = line.strip()
-                    if stripped.startswith(_YTDLP_DESTINATION_PREFIX):
-                        dest = stripped[len(_YTDLP_DESTINATION_PREFIX):].strip()
-                        if dest:
-                            filename_holder.append(dest)
-                            filename_event.set()
-                            dbg(f"[DRAIN] parsed destination filename={dest!r} "
-                                f"pipe_type={pipe_type!r} streamer={streamer!r}")
 
                 if log_fp is not None:
                     try:
@@ -2124,7 +2369,13 @@ def _extract_resolution_height(info: dict) -> Optional[int]:
     if isinstance(res, str):
         m = _RESOLUTION_RE.search(res)
         if m:
-            return int(m.group(2))
+            first, second = int(m.group(1)), int(m.group(2))
+            # Normally "WIDTHxHEIGHT" and the smaller number (the height)
+            # is the meaningful "Xp" quality figure. Portrait streams (e.g.
+            # TikTok, commonly "720x1280") report width < height, so the
+            # first number is actually the smaller/quality-relevant one.
+            # Just take the smaller of the two either way.
+            return min(first, second)
 
     return None
 
@@ -2280,7 +2531,7 @@ def probe_file_height(filepath: str) -> Optional[int]:
     cmd = [
         ffprobe_path, "-v", "error",
         "-select_streams", "v:0",
-        "-show_entries", "stream=height",
+        "-show_entries", "stream=width,height",
         "-of", "csv=p=0",
         filepath,
     ]
@@ -2293,11 +2544,18 @@ def probe_file_height(filepath: str) -> Optional[int]:
         out = (result.stdout or "").strip()
         if not out:
             return None
-        # First line, first field — ffprobe can print multiple lines if the
-        # container somehow has more than one video stream.
+        # First line, fields "width,height" — ffprobe can print multiple
+        # lines if the container somehow has more than one video stream.
         first_line = out.splitlines()[0].strip()
-        height = int(first_line.split(",")[0])
-        return height if height > 0 else None
+        parts = first_line.split(",")
+        width = int(parts[0])
+        height = int(parts[1])
+        # Use the smaller dimension as the "Xp" quality figure. Landscape
+        # video stores width > height, so height is normally the right
+        # figure; portrait video (e.g. TikTok, stored 720x1280) has
+        # width < height, so width is the meaningful one there.
+        result_px = min(width, height)
+        return result_px if result_px > 0 else None
     except Exception as e:
         dbg(f"[QUALITY] ffprobe probe failed for {filepath!r}: {type(e).__name__}: {e}")
         return None
@@ -2480,6 +2738,7 @@ def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) ->
             "split_mode":    e.get("split_mode"),        # None = inherit (or legacy data)
             "split_enabled": e.get("split_enabled", False),  # legacy fallback
             "split_after":   e.get("split_after", 0),
+            "auto_suffix_mode": e.get("auto_suffix_mode"),  # None = inherit
         }
 
     # ── Condition 2: find eligible candidates ─────────────────────────────────
@@ -2514,7 +2773,7 @@ def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) ->
                 "site":      s,
                 "site_label": s_label,
                 "priority":  info.get("priority", 999999),
-                "cfg":       _resolve_split_after(s_cfg, info),
+                "cfg":       _resolve_auto_suffix(_resolve_split_after(s_cfg, info), info),
             })
 
     if not candidates:
@@ -2613,6 +2872,31 @@ def _resolve_split_after(cfg: dict, entry_info: dict) -> dict:
     return overridden
 
 
+def _resolve_auto_suffix(cfg: dict, entry_info: dict) -> dict:
+    """Return a cfg dict to use for a single streamer, applying that
+    streamer's per-streamer Auto-Suffix override (set via the Auto-Suffix
+    settings popup) on top of the site's AUTO_SUFFIX config value.
+
+    Mirrors _resolve_split_after()'s tri-state handling. entry_info is the
+    priorities[...][entries] dict-like info for the streamer, driven by
+    "auto_suffix_mode":
+      - "inherit" (or key absent) — no override; the site's AUTO_SUFFIX is
+        left untouched and the *same* cfg object is returned (no copy).
+      - "on"  — force AUTO_SUFFIX on for this streamer.
+      - "off" — force AUTO_SUFFIX off for this streamer.
+
+    The override never affects other streamers sharing the same site config.
+    """
+    if not entry_info:
+        return cfg
+    mode = entry_info.get("auto_suffix_mode")
+    if mode not in ("on", "off"):
+        return cfg
+    overridden = dict(cfg)
+    overridden["auto_suffix"] = (mode == "on")
+    return overridden
+
+
 def _resolve_intro_delay(cfg: dict, entry_info: dict) -> dict:
     """Return a cfg dict to use for a single streamer, applying that
     streamer's per-streamer Intro Delay override (set via the SETTINGS
@@ -2649,6 +2933,21 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
     split_after_minutes = max(0, cfg.get("split_after", 0))
     split_after_seconds = split_after_minutes * 60
+
+    # ── AUTO_SUFFIX / SPLIT_AFTER restart continuity ───────────────────────
+    # Whenever this is True, any restart of the recording for this streamer
+    # — whether an in-thread restart (ffmpeg-error threshold, stall
+    # recovery, normal yt-dlp exit while still live) or a brand-new
+    # record_stream() call for the same live session (e.g. after eviction)
+    # — continues _partN numbering instead of starting a fresh, separately
+    # named file. SPLIT_AFTER>0 already implies this (fixes a prior bug
+    # where in-thread restarts silently dropped the _partN suffix);
+    # AUTO_SUFFIX extends the same behavior to restarts even when
+    # SPLIT_AFTER is 0/off. Neither setting causes AUTO_SUFFIX by itself to
+    # trigger a *periodic* split — that's still governed purely by
+    # SPLIT_AFTER's timer loop further down.
+    auto_suffix_enabled = bool(cfg.get("auto_suffix", True))
+    continuity_active   = (split_after_minutes > 0) or auto_suffix_enabled
 
     _global_cfg_nc = load_global_config()
     notify_confirm_file = _global_cfg_nc.get("notify_confirm_file", True)
@@ -2751,6 +3050,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
     proc = None
     close_logs = lambda: None
     segment_num = 1
+    active_file = None   # pre-declared so the `finally` block can always
+                          # reference it, even if the thread exits before the
+                          # first outer-loop iteration ever sets it.
     # Backoff for split attempts: after a failed split (e.g. couldn't find/
     # confirm the new segment file), don't retry every second — wait a bit
     # so a persistent problem doesn't spawn a fresh yt-dlp probe process
@@ -2758,14 +3060,45 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
     _split_retry_cooldown_seconds = 60.0
     next_split_retry_time = 0.0
 
+    # ── Resume cross-thread continuity, if any ──────────────────────────────
+    # If a previous record_stream() attempt for this same live session (a
+    # different thread call — e.g. before an eviction) left off mid-way
+    # through a part sequence, pick up where it left off instead of
+    # starting back at part 1. See SiteState.get_segment_continuation().
+    _pending_rename_file = None
+    if continuity_active:
+        _cont = site.get_segment_continuation(streamer)
+        if _cont and _cont[0] > 1:
+            segment_num, _pending_rename_file = _cont
+            dbg(f"[SPLIT][record_stream] resuming cross-thread continuity for "
+                f"streamer={streamer!r}: segment_num={segment_num} "
+                f"pending_rename={_pending_rename_file!r}")
+
+    _outer_iteration = 0
+
     try:
         while True:
             if site._stop_event.is_set() or streamer in site.evicted_streamers:
                 break
+
+            _outer_iteration += 1
+            if _outer_iteration > 1 and continuity_active:
+                # Restarting within this same thread (ffmpeg-error threshold,
+                # stall recovery, or a normal yt-dlp exit while still live) —
+                # this new attempt is another part of the same recording.
+                _prev_segment_num = segment_num
+                segment_num = _prev_segment_num + 1
+                _pending_rename_file = (
+                    active_file if (_prev_segment_num == 1 and active_file) else None
+                )
+                dbg(f"[SPLIT][record_stream] in-thread restart continuity for "
+                    f"streamer={streamer!r}: segment_num {_prev_segment_num} -> "
+                    f"{segment_num} pending_rename={_pending_rename_file!r}")
+
             current_output_tmpl = cfg["output_tmpl"]
             # For segment 1 we intentionally omit the _part1 suffix — it will be
             # retroactively added (via rename) only if a second part is ever created.
-            if split_after_seconds > 0 and segment_num > 1:
+            if continuity_active and segment_num > 1:
                 current_output_tmpl = add_segment_suffix_to_tmpl(
                     current_output_tmpl,
                     segment_num
@@ -2837,15 +3170,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 site.clear_ffmpeg_error_count(streamer)
                 site.clear_stall_since(streamer)
 
-                # Shared container for the filename parsed from yt-dlp's
-                # stdout/stderr "[download] Destination: ..." line. This is
-                # the 2nd-tier fallback (after the sidecar file, before the
-                # --dump-json fallback) — some extractors never populate 
-                # %(filepath)s at the "before_dl" hook the sidecar relies on,
-                # so we still want this as a backstop.
-                filename_holder: List[str] = []
-                filename_event  = threading.Event()
-
                 threading.Thread(
                     target=_drain_pipe,
                     args=(proc.stdout, log_out_fp, "stdout"),
@@ -2854,8 +3178,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         "ffmpeg_error_event": ffmpeg_error_event,
                         "streamer": streamer,
                         "site": site,
-                        "filename_holder": filename_holder,
-                        "filename_event": filename_event,
                         "ad_alerts_enabled": cfg.get("ad_alerts", False),
                     },
                     daemon=True
@@ -2869,8 +3191,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         "ffmpeg_error_event": ffmpeg_error_event,
                         "streamer": streamer,
                         "site": site,
-                        "filename_holder": filename_holder,
-                        "filename_event": filename_event,
                         "ad_alerts_enabled": cfg.get("ad_alerts", False),
                     },
                     daemon=True
@@ -2990,66 +3310,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 except OSError:
                     pass
 
-            # ── Tier 2 fallback: yt-dlp's own "[download] Destination: ..."
-            # stdout/stderr line, parsed live by _drain_pipe into
-            # filename_holder/filename_event. Some extractors never populate 
-            # %(filepath)s at the "before_dl" hook the sidecar relies on,
-            # so the sidecar comes back empty/"NA" —
-            # this catches those. The drain threads have been running the
-            # whole time the sidecar loop above was waiting, so the event is
-            # usually already set here; the short wait just covers the case
-            # where the process exited (or the sidecar timed out) slightly
-            # before the Destination line made it through.
-            if not active_file and filename_event.wait(timeout=2.0) and filename_holder:
-                raw_dest = filename_holder[0]
-                candidate = raw_dest if os.path.isabs(raw_dest) else os.path.join(output_dir, raw_dest)
-
-                # Wait briefly in case it's still being written to disk.
-                _chk_start = time.time()
-                while time.time() - _chk_start < 2.0:
-                    if os.path.exists(candidate):
-                        break
-                    time.sleep(0.5)
-
-                if os.path.exists(candidate):
-                    active_file = candidate
-                    dbg(f"[STALL] resolved active_file from Destination line "
-                        f"(tier-2 fallback): {active_file!r}", site_name=streamer)
-                else:
-                    dbg(f"[STALL] active_file {candidate!r} from Destination line "
-                        f"does not exist, discarding.", site_name=streamer)
-
-            if not active_file:
-                dbg(f"[STALL] falling back to JSON parsing for streamer={streamer!r}",
-                    site_name=streamer)
-                json_cmd = build_yt_dlp_command(
-                    cfg["yt_dlp_path"],
-                    [],
-                    ["--dump-json", "--no-warnings", "-o", output_path, channel_url]
-                )
-                try:
-                    _run_kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
-                    if sys.platform == "win32":
-                        _run_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-                    
-                    dbg(f"[STALL] running json_cmd: {cmd_display_str(json_cmd)!r}", site_name=streamer)
-                    res = subprocess.run(json_cmd, **_run_kwargs)
-                    if res.stdout:
-                        for line in reversed(res.stdout.splitlines()):
-                            line = line.strip()
-                            if line.startswith('{') and line.endswith('}'):
-                                data = json.loads(line)
-                                raw_json_dest = data.get("filename") or data.get("_filename")
-                                if raw_json_dest:
-                                    if not os.path.isabs(raw_json_dest):
-                                        active_file = os.path.join(output_dir, raw_json_dest)
-                                    else:
-                                        active_file = raw_json_dest
-                                    dbg(f"[STALL] resolved active_file from JSON: {active_file!r}", site_name=streamer)
-                                break
-                except Exception as e:
-                    dbg(f"[STALL] json fallback failed: {e}", site_name=streamer)
-
             # Publish the resolved output file so the top-bar disk-rate graph
             # can count exactly which file(s) yt-dlp is actively recording
             # (and only those — never File Manager Move/Fixup/Trim/Split
@@ -3057,6 +3317,32 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             # graph reads zero until the file resolves.
             if active_file:
                 site.set_recording_output(streamer, active_file)
+
+                # Continuation from a prior attempt (this thread's own
+                # in-thread restart, or a separate earlier record_stream()
+                # call for the same live session) is confirmed now that this
+                # attempt's file resolved — retroactively rename that prior
+                # attempt's unsuffixed file to _partN now that we know a
+                # later part exists. Mirrors the SPLIT_AFTER mid-recording
+                # rename-of-part1 logic further below, just triggered at a
+                # different point (attempt start vs. confirmed mid-recording
+                # split).
+                if (_pending_rename_file and _pending_rename_file != active_file
+                        and os.path.isfile(_pending_rename_file)):
+                    _prev_part_path = add_segment_suffix_to_tmpl(
+                        _pending_rename_file, segment_num - 1
+                    )
+                    try:
+                        os.rename(_pending_rename_file, _prev_part_path)
+                        site.log_line(
+                            f"Renamed previous segment to: {os.path.basename(_prev_part_path)}"
+                        )
+                        dbg(f"[SPLIT][record_stream] renamed continuation segment: "
+                            f"{_pending_rename_file!r} -> {_prev_part_path!r}")
+                    except Exception as _ren_err:
+                        dbg(f"[SPLIT][record_stream] rename of continuation segment "
+                            f"FAILED: {_ren_err!r}")
+                    _pending_rename_file = None
 
             last_size, _, _, _ = get_streamer_file_size(
                 output_dir,
@@ -3142,9 +3428,25 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         and not growth_seen
                         and time.time() >= _no_confirm_deadline):
                     _no_confirm_warned = True
+                    if active_file:
+                        _nc_size, _, _, _nc_file_error = get_streamer_file_size(
+                            output_dir, streamer, cfg=cfg,
+                            proc_start_time=proc_start_time,
+                            known_filename=active_file,
+                        )
+                    else:
+                        _nc_size, _nc_file_error = 0, True
                     dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: file not confirmed for "
                         f"streamer={streamer!r} within {int(stall_timeout)}s "
-                        f"(deadline={_no_confirm_deadline:.2f}) — sending warning",
+                        f"(deadline={_no_confirm_deadline:.2f}) — sending warning; "
+                        f"anchor_src={_no_confirm_anchor_src} "
+                        f"anchor_val={_no_confirm_anchor_val:.2f} "
+                        f"live_since={site.get_live_since(streamer)} "
+                        f"enable_anchor={site.get_enable_anchor(streamer)} "
+                        f"attempt_age={time.time() - recording_start_time:.1f}s "
+                        f"active_file={active_file!r} last_size={last_size} "
+                        f"cur_size={_nc_size} file_error={_nc_file_error} "
+                        f"growth_seen={growth_seen}",
                         site_name=streamer)
                     _maybe_show_live_popup(
                         streamer, cfg, site, show_popup=show_popup,
@@ -3255,7 +3557,13 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     time.sleep(5)
                     break
 
-                if split_after_seconds > 0:
+                manual_split = False
+                with site.lock:
+                    if streamer in site.manual_split_requests:
+                        site.manual_split_requests.discard(streamer)
+                        manual_split = True
+
+                if split_after_seconds > 0 or manual_split:
                     elapsed = time.time() - recording_start_time
                     _split_log_counter += 1
                     if _split_log_counter % 30 == 0:  # log roughly every 30s
@@ -3264,7 +3572,13 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                             f"split_after_seconds={split_after_seconds}s "
                             f"remaining={max(0, split_after_seconds - elapsed):.1f}s")
 
-                    if elapsed >= split_after_seconds and time.time() >= next_split_retry_time:
+                    if manual_split or (
+                            elapsed >= split_after_seconds
+                            and time.time() >= next_split_retry_time):
+                        if manual_split:
+                            site.log_line(
+                                f"Manual split requested for {streamer} — starting part {segment_num + 1}"
+                            )
                         next_segment_num = segment_num + 1
 
                         next_output_tmpl = add_segment_suffix_to_tmpl(
@@ -3279,9 +3593,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                             f"segment_num={segment_num} -> next_segment_num={next_segment_num} "
                             f"next_output_path={next_output_path!r}")
 
-                        site.log_line(
-                            f"SPLIT_AFTER reached for {streamer} — starting part {next_segment_num}"
-                        )
+                        dbg(f"[SPLIT][record_stream] SPLIT_AFTER reached for {streamer} — "
+                            f"starting part {next_segment_num}")
 
                         next_cmd = build_yt_dlp_command(
                             cfg["yt_dlp_path"],
@@ -3392,11 +3705,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                                     _part1_path = add_segment_suffix_to_tmpl(active_file, 1)
                                     try:
                                         os.rename(active_file, _part1_path)
-                                        site.log_line(
-                                            f"Renamed first segment to: {os.path.basename(_part1_path)}"
-                                        )
-                                        dbg(f"[SPLIT][record_stream] renamed first segment: "
-                                            f"{active_file!r} -> {_part1_path!r}")
+                                        dbg(f"[SPLIT][record_stream] renamed first segment to: "
+                                            f"{os.path.basename(_part1_path)} "
+                                            f"({active_file!r} -> {_part1_path!r})")
                                     except Exception as _ren_err:
                                         dbg(f"[SPLIT][record_stream] rename of first segment FAILED: "
                                             f"{_ren_err!r}")
@@ -3519,13 +3830,18 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     if file_error:
                         with site.lock:
                             site.display_resolution.pop(streamer, None)
+                        dbg(f"[QUALITY] file_error={file_error!r} - clearing measured resolution", site_name=streamer)
                     else:
                         _measured_height = probe_file_height(active_file)
                         with site.lock:
+                            _prev_measured = site.display_resolution.get(streamer)
                             if _measured_height is not None:
                                 site.display_resolution[streamer] = _measured_height
                             else:
                                 site.display_resolution.pop(streamer, None)
+                        dbg(f"[QUALITY] measured_height={_measured_height!r}p "
+                            f"(prev={_prev_measured!r}p) recording_resolution_baseline={site.recording_resolution.get(streamer)!r}p "
+                            f"file={active_file!r}", site_name=streamer)
 
                     if file_error:
                         # We couldn't even locate/read the recording file this
@@ -3636,6 +3952,13 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                             f"stall_since={time.time() - last_growth_time:.2f}s",
                             site_name=streamer)
                         site.set_stall_since(streamer, last_growth_time)
+                        # Re-sync the comparison baseline to this poll's reading.
+                        # last_size is a rolling "previous poll" value, not an
+                        # all-time high water mark: if it stayed a permanent
+                        # ceiling, a single spuriously-low os.path.getsize()
+                        # sample (observed under brief heavy CPU/disk load
+                        # could permanently poison it.
+                        last_size = current_size
 
             else:
                 # FIX: this branch runs whenever the inner loop exits because
@@ -3667,8 +3990,23 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 # Normal yt-dlp exit (return code 0) is a valid restart
                 # trigger too: the monitor loop sees the streamer still live
                 # and relaunches almost immediately.
+                if active_file:
+                    _final_size, _, _, _final_file_error = get_streamer_file_size(
+                        output_dir, streamer, cfg=cfg,
+                        proc_start_time=proc_start_time,
+                        known_filename=active_file,
+                    )
+                else:
+                    _final_size, _final_file_error = 0, True
                 _refresh_restart_anchor_if_growing(
                     site, streamer, growth_seen, reason="normal_exit")
+                dbg(f"[STALL] attempt ended (normal_exit): streamer={streamer!r} "
+                    f"returncode={proc.returncode} active_file={active_file!r} "
+                    f"last_size={last_size} final_size={_final_size} "
+                    f"file_error={_final_file_error} growth_seen={growth_seen} "
+                    f"attempt_duration={time.time() - proc_start_time:.1f}s "
+                    f"anchor_refreshed={bool(growth_seen)}",
+                    site_name=streamer)
 
                 # Safety net: if proc.poll() was already non-None before the
                 # loop got to sleep even once, _check_no_confirm_deadline()
@@ -3738,6 +4076,23 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             # stopped (normal end, eviction, or crash).
             site.evicted_streamers.discard(streamer)
 
+        # ── AUTO_SUFFIX / SPLIT_AFTER restart continuity ────────────────────
+        # Persist enough state for a *future* record_stream() attempt (a
+        # separate thread call for this same live session — e.g. after an
+        # eviction) to continue this part sequence instead of starting back
+        # at part 1. A no-op if the live session already ended (streamer
+        # went offline) — see SiteState.set_segment_continuation().
+        # segment_num==1 means this attempt's file was never suffixed, so
+        # it's the one that would need a retroactive rename if a
+        # continuation attempt follows; segment_num>1 means it was already
+        # suffixed at creation, so there's nothing pending.
+        _unsuffixed_for_continuation = (
+            active_file if (active_file and segment_num == 1) else None
+        )
+        site.set_segment_continuation(
+            streamer, segment_num + 1, _unsuffixed_for_continuation
+        )
+
         site.clear_ad_alert(streamer)
 
         # Interruptible: on shutdown this returns instantly instead of
@@ -3797,6 +4152,7 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
             "intro_delay_enabled": e.get("intro_delay_enabled", False),
             "intro_delay_minutes": e.get("intro_delay_minutes", 0),
             "intro_delay_split": e.get("intro_delay_split", False),
+            "auto_suffix_mode": e.get("auto_suffix_mode"),  # None = inherit
         }
 
     site_label = cfg.get("site_label", os.path.basename(site.config_path))
@@ -3815,6 +4171,7 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
             streamer_prio = streamer_info["priority"]
             is_lq = streamer_info.get("lq_enabled", False)
             streamer_cfg = _resolve_split_after(cfg, streamer_info)
+            streamer_cfg = _resolve_auto_suffix(streamer_cfg, streamer_info)
             streamer_cfg = _resolve_intro_delay(streamer_cfg, streamer_info)
             eviction_warning = ""
 
@@ -3888,6 +4245,10 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
                 site.evicted_streamers.discard(streamer)
                 if resolution_map is not None:
                     _start_height = resolution_map.get(streamer)
+                    _prior_baseline = site.recording_resolution.get(streamer)
+                    dbg(f"[UPGRADE_QUALITY] start_recording_if_needed baseline set: "
+                        f"resolution_map_height={_start_height!r}p prior_baseline={_prior_baseline!r}p "
+                        f"source={source!r}", site_name=streamer)
                     if _start_height is not None:
                         site.recording_resolution[streamer] = _start_height
                     else:
@@ -3901,7 +4262,8 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
             # retry for the rest of this live session — live-since itself
             # is never touched or treated as stale.
             if site.was_blocked_while_live(streamer):
-                site.set_enable_anchor_if_unset(streamer, time.time())
+                site.set_enable_anchor(streamer, time.time())
+                site.clear_blocked_while_live(streamer)
             # Same idea, for the other deferred-restart case: if this
             # streamer was evicted for concurrency at some earlier point,
             # this is the actual restart, so refresh last_restart_anchor
@@ -4347,6 +4709,12 @@ def monitor_site(site: "SiteState") -> None:
     # drawing its initial frames smoothly before external processes launch.
     time.sleep(2.0)
 
+    # Fires at most once per process; the actual 24h throttling is enforced
+    # inside maybe_backfill_last_live() via a timestamp persisted in
+    # global.json, so a restart within 24h of the last fire is a no-op and
+    # a restart after 24h fires again automatically.
+    _gql_backfill_done = False
+
     while not site._stop_event.is_set():
         # Evaluate schedule-based enable/disable for all streamers before the
         # liveness check so any config changes take effect this iteration.
@@ -4377,6 +4745,20 @@ def monitor_site(site: "SiteState") -> None:
                 site.dash_all_streamers.extend(streamers)
                 site.dash_blocked.clear()
                 site.dash_blocked.update(cfg["blocked"])
+
+            if not _gql_backfill_done:
+                _gql_backfill_done = True
+                try:
+                    maybe_backfill_last_live(
+                        site, cfg,
+                        get_last_backfill_ts_fn=lambda: _load_last_gql_backfill_ts(site.config_path),
+                        set_last_backfill_ts_fn=lambda ts: _save_last_gql_backfill_ts(site.config_path, ts),
+                        save_last_live_fn=_save_last_live_cache,
+                        dbg_fn=dbg,
+                        log_fn=site.log_line,
+                    )
+                except Exception as e:
+                    dbg(f"[GQL] last_live backfill error: {type(e).__name__}: {e}")
 
             # One call each — mark_offline() tears down the whole
             # LiveSession (quality_upgraded, blocked_while_live,
@@ -4440,6 +4822,14 @@ def _fmt_duration(seconds: float) -> str:
 def _live_bar(seconds: float, width: int = 14, max_secs: int = 6 * 3600) -> str:
     filled = min(int(width * seconds / max(1, max_secs)), width)
     return "█" * filled + "░" * (width - filled)
+
+def _live_bar_dashed(seconds: float, width: int = 14, max_secs: int = 6 * 3600) -> str:
+    """Like _live_bar(), but for disabled streamers: the filled portion is a
+    dashed line (the "─" character with spaces between each dash) and the
+    unfilled portion is a solid "─" line. Total length is always `width`."""
+    filled = min(int(width * seconds / max(1, max_secs)), width)
+    dashed = ("─ " * filled)[:width]
+    return dashed + "─" * (width - len(dashed))
 
 class JJDlpDashboard:
     """
@@ -4530,6 +4920,22 @@ class JJDlpDashboard:
         self._log_scroll    = 0
         self._stdout_scroll = 0
         self._stderr_scroll = 0
+        # Filters apply only to debug lines in the Log tab.  Multiple
+        # expressions are combined with OR; no expression shows all debug.
+        self._debug_filter_popup_open = False
+        self._debug_filter_entry_open = False
+        # Each entry: {"pattern": <regex str>, "mode": one of
+        # DEBUG_FILTER_MODES} — mode (Filter+Highlight / Filter Only /
+        # Highlight Only) is per-filter, not a single global toggle.
+        self._debug_filter_patterns: List[dict] = []
+        self._debug_filter_buf = ""
+        self._debug_filter_cursor = 0
+        self._debug_filter_sel = 0       # 0=input, 1..N=patterns, N+1=export
+        self._debug_filter_error = ""
+        # ── "create/edit filter" sub-popup state ──────────────────────────
+        self._debug_filter_edit_index = None    # None=creating new filter, else index of filter being edited
+        self._debug_filter_entry_sel = 0        # 0=regex text field, 1=mode selector
+        self._debug_filter_mode = DEBUG_FILTER_MODES[0]
         # When scrolled up (scroll > 0), the displayed lines are frozen to a
         # snapshot so live output can't keep shoving the viewport around. Set
         # while scroll > 0, cleared when the user scrolls back to 0 (live).
@@ -5106,15 +5512,18 @@ class JJDlpDashboard:
         # Status badge row
         badge_y = y1 + 1
         bx = x1 + 2
+        live_text = f"LIVE:{live_cnt}"
         self.safe_addstr(self.stdscr, badge_y, bx,
-                    f"LIVE:{live_cnt}",  theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_1"))
-        bx += 7
+                    live_text,  theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_1"))
+        bx += len(live_text) + 1
+        rec_text = f"REC:{rec_cnt}"
         self.safe_addstr(self.stdscr, badge_y, bx,
-                    f"REC:{rec_cnt}",    theme.attr(self, "main_jjdlpdashboard_draw_site_panel_rec_1"))
-        bx += 6
+                    rec_text,    theme.attr(self, "main_jjdlpdashboard_draw_site_panel_rec_1"))
+        bx += len(rec_text) + 1
+        off_text = f"OFF:{off_cnt}"
         self.safe_addstr(self.stdscr, badge_y, bx,
-                    f"OFF:{off_cnt}",    theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_1"))
-        bx += 6
+                    off_text,    theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_1"))
+        bx += len(off_text) + 1
         if dis_cnt:
             self.safe_addstr(self.stdscr, badge_y, bx,
                         f"DIS:{dis_cnt}", theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_1"))
@@ -5261,10 +5670,11 @@ class JJDlpDashboard:
 
                 if is_dis:
                     name_attr   = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_6")
-                    bar_str     = "─" * bar_w
                     bar_attr    = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_7")
-                    dur_str     = ""
                     if since is not None:
+                        elapsed     = now - since
+                        bar_str     = _live_bar_dashed(elapsed, bar_w, _bar_max_secs)
+                        dur_str     = _fmt_duration(elapsed)
                         if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
                             status_str  = "[● Live]"
                             status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_8")
@@ -5272,6 +5682,8 @@ class JJDlpDashboard:
                             status_str  = "[x  DIS]"
                             status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_9")
                     else:
+                        bar_str     = _live_bar_dashed(0, bar_w, _bar_max_secs)
+                        dur_str     = ""
                         status_str  = "[x  DIS]"
                         status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_10")
                 elif since is not None:
@@ -5287,7 +5699,9 @@ class JJDlpDashboard:
                     else:
                         status_str  = "[● Live]"
                         status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_8")
-                    bar_str     = _live_bar(elapsed, bar_w, _bar_max_secs)
+                    bar_str     = (_live_bar_dashed(elapsed, bar_w, _bar_max_secs)
+                                   if recording_res.get(s) is None
+                                   else _live_bar(elapsed, bar_w, _bar_max_secs))
                     bar_attr    = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_9")
                     dur_str     = _fmt_duration(elapsed)
                     if not (is_rec and recording_res.get(s) is not None):
@@ -5442,7 +5856,13 @@ class JJDlpDashboard:
 
     @classmethod
     def _wrap_lines(cls, lines: List[str], max_width: int) -> List[str]:
-        """Wrap each line to max_width characters, preserving order."""
+        """Wrap each line to max_width characters, preserving order.
+
+        Wraps on word boundaries so a word that would run into the margin
+        is pushed to the next line whole, rather than being cut off
+        mid-word. Words longer than max_width on their own are still
+        hard-broken (there's nowhere else to put them).
+        """
         if max_width <= 0:
             return lines
         wrapped = []
@@ -5451,10 +5871,15 @@ class JJDlpDashboard:
             if not line:
                 wrapped.append("")
                 continue
-            while len(line) > max_width:
-                wrapped.append(line[:max_width])
-                line = line[max_width:]
-            wrapped.append(line)
+            if len(line) <= max_width:
+                wrapped.append(line)
+                continue
+            wrapped.extend(textwrap.wrap(
+                line,
+                width=max_width,
+                break_long_words=True,
+                break_on_hyphens=False,
+            ) or [""])
         return wrapped
 
     # ── Log tab ──────────────────────────────────────────────────────────────
@@ -5476,36 +5901,75 @@ class JJDlpDashboard:
             tab_x += len(label) + 1
 
         show_debug = sel_site.show_debug_log if sel_site is not None else False
-        title = (" ACTIVITY LOG — Show Debug: ON  (Press A to toggle) "
+        title = (" ACTIVITY LOG — Show Debug: ON  (Press A to toggle) (Press F to configure filters) "
                  if show_debug
                  else " ACTIVITY LOG — Show Debug: OFF (Press A to toggle) ")
 
-        self.draw_box(self.stdscr, y1 + 1, x1, y2, x2, self.C_DIM)
-        self.safe_addstr(self.stdscr, y1 + 1, x1 + 2, title,
+        # Keep the title, but leave the log itself unframed so terminal text
+        # selection can target just the log lines without collecting box art.
+        self.safe_addstr(self.stdscr, y1 + 1, x1, title,
                     theme.attr(self, "main_jjdlpdashboard_draw_log_tab_dim_2"))
 
         if sel_site is None:
             return
 
-        visible_rows = (y2 - y1) - 3
-        line_width   = max(1, (x2 - x1) - 4)   # 2 chars padding each side
+        visible_rows = (y2 - y1) - 2
+        line_width   = max(1, x2 - x1 + 1)
 
         with sel_site.dash_lock:
             raw_lines = list(sel_site.dash_log_lines)
             raw_debug = list(sel_site.dash_debug_lines) if show_debug else []
 
+        # Compile per-filter, keeping each filter's own mode alongside it.
+        # "filter_only"/"filter_highlight" filters restrict which debug
+        # lines are shown; "highlight_only" filters never hide lines, they
+        # only mark up matches on lines that are already shown.
+        compiled_entries = []
+        for entry in self._debug_filter_patterns:
+            try:
+                compiled_entries.append((_re.compile(entry["pattern"]), entry.get("mode", "filter_highlight")))
+            except _re.error:
+                continue
+        filtering_patterns = [c for c, mode in compiled_entries if mode != "highlight_only"]
+        highlighting_patterns = [c for c, mode in compiled_entries if mode != "filter_only"]
+        if filtering_patterns:
+            raw_debug = [line for line in raw_debug
+                         if any(pattern.search(line) for pattern in filtering_patterns)]
+
         # Activity lines are always shown. Debug lines are only pulled in
         # (and merged back into chronological order) when the toggle is on —
         # they live in their own buffer so they never displaced activity
         # lines in the first place.
-        display_lines = (
-            _merge_lines_by_timestamp(raw_lines, raw_debug) if raw_debug else raw_lines
-        )
+        def _timestamp(line: str) -> str:
+            return line[:20] if line[:1] == "[" else ""
+
+        # Preserve the source type for optional match highlighting.  Activity
+        # lines remain visible regardless of the debug-filter configuration.
+        activity_entries = [(line, False) for line in raw_lines]
+        debug_entries = [(line, True) for line in raw_debug]
+        display_lines = []
+        i = j = 0
+        while i < len(activity_entries) and j < len(debug_entries):
+            if _timestamp(activity_entries[i][0]) <= _timestamp(debug_entries[j][0]):
+                display_lines.append(activity_entries[i]); i += 1
+            else:
+                display_lines.append(debug_entries[j]); j += 1
+        display_lines.extend(activity_entries[i:])
+        display_lines.extend(debug_entries[j:])
 
         self._log_frozen_lines, display_lines = self._apply_freeze(
             self._log_scroll, display_lines, self._log_frozen_lines)
 
-        wrapped = self._wrap_lines(display_lines, line_width)
+        wrapped = []
+        for line, is_debug in display_lines:
+            line = self._sanitize_line(line)
+            if not line:
+                wrapped.append(("", is_debug))
+                continue
+            while len(line) > line_width:
+                wrapped.append((line[:line_width], is_debug))
+                line = line[line_width:]
+            wrapped.append((line, is_debug))
 
         # Clamp scroll so it never exceeds available history
         max_scroll = max(0, len(wrapped) - visible_rows)
@@ -5515,7 +5979,7 @@ class JJDlpDashboard:
         start = max(0, len(wrapped) - visible_rows - self._log_scroll)
         view  = wrapped[start : start + visible_rows]
 
-        for i, line in enumerate(view):
+        for i, (line, is_debug) in enumerate(view):
             attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_dim_3")
             if "Live now" in line or "Recording started" in line:
                 attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_live")
@@ -5523,12 +5987,19 @@ class JJDlpDashboard:
                 attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_rec")
             elif "Warning" in line:
                 attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_warn_1")
-            self.safe_addstr(self.stdscr, y1 + 2 + i, x1 + 2, line, attr)
+            self.safe_addstr(self.stdscr, y1 + 2 + i, x1, line, attr)
+            if is_debug and highlighting_patterns:
+                for pattern in highlighting_patterns:
+                    for match in pattern.finditer(line):
+                        if match.start() != match.end():
+                            self.safe_addstr(self.stdscr, y1 + 2 + i,
+                                x1 + match.start(), match.group(),
+                                theme.attr(self, "main_jjdlpdashboard_draw_log_tab_match"))
 
         # Scroll indicator
         if max_scroll > 0:
             scroll_info = f" ↑{self._log_scroll}/{max_scroll} " if self._log_scroll else " (end) "
-            self.safe_addstr(self.stdscr, y1 + 1, x2 - len(scroll_info) - 1,
+            self.safe_addstr(self.stdscr, y1 + 1, x2 - len(scroll_info) + 1,
                         scroll_info, theme.attr(self, "main_jjdlpdashboard_draw_log_tab_warn_2"))
 
     def _draw_pipe_tab_bar(self, y1, x1, x2) -> None:
@@ -6013,6 +6484,205 @@ class JJDlpDashboard:
                         theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_invhead_3"))
 
     # ── Full screen refresh ───────────────────────────────────────────────────
+    def _open_debug_filter_popup(self) -> None:
+        self._debug_filter_popup_open = True
+        self._debug_filter_sel = 0
+        self._debug_filter_error = ""
+
+    def _write_filtered_debug_view(self) -> None:
+        """Write the selected site's regex-matched debug lines to a new file."""
+        if not self.sites:
+            self._debug_filter_error = "No site is selected."
+            return
+        filter_entries = [entry for entry in self._debug_filter_patterns
+                          if entry.get("mode", "filter_highlight") != "highlight_only"]
+        if not filter_entries:
+            self._debug_filter_error = "Add a Filter (not Highlight-only) filter before exporting."
+            return
+
+        try:
+            patterns = [_re.compile(entry["pattern"]) for entry in filter_entries]
+        except _re.error as exc:
+            self._debug_filter_error = f"Invalid regex: {exc}"
+            return
+
+        site = self.sites[self.selected_site_idx]
+        with site.dash_lock:
+            matched_lines = [line for line in site.dash_debug_lines
+                             if any(pattern.search(line) for pattern in patterns)]
+
+        cfg = site.get_cached_config()
+        debug_path = get_debug_log_path(cfg)
+        export_dir = os.path.dirname(os.path.abspath(debug_path)) or os.getcwd()
+        stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        export_path = os.path.join(export_dir, f"debug-filtered-{stamp}.log")
+        try:
+            os.makedirs(export_dir, exist_ok=True)
+            with open(export_path, "x", encoding="utf-8", newline="\n") as f:
+                for line in matched_lines:
+                    f.write(line.rstrip("\r\n") + "\n")
+        except OSError as exc:
+            self._debug_filter_error = f"Could not write export: {exc}"
+            return
+
+        self._debug_filter_error = f"Wrote {len(matched_lines)} lines: {export_path}"
+
+    def _open_debug_filter_entry(self, edit_index: "int | None") -> None:
+        """Open the CREATE/EDIT DEBUG FILTER sub-popup.
+
+        edit_index=None opens it blank for creating a new filter; otherwise
+        it's pre-filled with the pattern/mode of the filter at that index
+        so the user can edit it in place.
+        """
+        if edit_index is None:
+            self._debug_filter_buf = ""
+            self._debug_filter_mode = DEBUG_FILTER_MODES[0]
+        else:
+            entry = self._debug_filter_patterns[edit_index]
+            self._debug_filter_buf = entry["pattern"]
+            self._debug_filter_mode = entry.get("mode", DEBUG_FILTER_MODES[0])
+        self._debug_filter_cursor = len(self._debug_filter_buf)
+        self._debug_filter_edit_index = edit_index
+        self._debug_filter_entry_sel = 0
+        self._debug_filter_error = ""
+        self._debug_filter_entry_open = True
+
+    def _handle_debug_filter_key(self, key) -> bool:
+        """Handle the filter-list popup (not the regex text editor)."""
+        count = len(self._debug_filter_patterns)
+        export_row = count + 1   # 0=create, 1..N=filters, N+1=export
+        if key in (27, ord('q'), ord('Q')):
+            self._debug_filter_popup_open = False
+        elif key in (curses.KEY_UP, ord('k')):
+            self._debug_filter_sel = max(0, self._debug_filter_sel - 1)
+        elif key in (curses.KEY_DOWN, ord('j')):
+            self._debug_filter_sel = min(export_row, self._debug_filter_sel + 1)
+        elif key in (curses.KEY_DC, ord('d'), ord('D')) and 1 <= self._debug_filter_sel <= count:
+            del self._debug_filter_patterns[self._debug_filter_sel - 1]
+            self._debug_filter_sel = min(self._debug_filter_sel, len(self._debug_filter_patterns) + 1)
+            self._log_scroll = 0
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
+            if self._debug_filter_sel == 0:
+                self._open_debug_filter_entry(None)
+            elif self._debug_filter_sel == export_row:
+                self._write_filtered_debug_view()
+            elif 1 <= self._debug_filter_sel <= count:
+                # Select an existing filter to reopen it for editing.
+                self._open_debug_filter_entry(self._debug_filter_sel - 1)
+        return True
+
+    def _handle_debug_filter_entry_key(self, key) -> bool:
+        """Handle the CREATE/EDIT DEBUG FILTER sub-popup: a regex text field
+        plus a per-filter Mode multi-select (Left/Right to switch)."""
+        cur = self._debug_filter_cursor
+        if key == 27:
+            self._debug_filter_entry_open = False
+        elif key in (curses.KEY_UP, curses.KEY_DOWN):
+            self._debug_filter_entry_sel = 1 - self._debug_filter_entry_sel
+        elif key in (curses.KEY_BACKSPACE, 127, 8) and self._debug_filter_entry_sel == 0:
+            if cur > 0:
+                self._debug_filter_buf = self._debug_filter_buf[:cur - 1] + self._debug_filter_buf[cur:]
+                self._debug_filter_cursor = cur - 1
+        elif key == curses.KEY_DC and self._debug_filter_entry_sel == 0 and cur < len(self._debug_filter_buf):
+            self._debug_filter_buf = self._debug_filter_buf[:cur] + self._debug_filter_buf[cur + 1:]
+        elif key == curses.KEY_LEFT:
+            if self._debug_filter_entry_sel == 1:
+                idx = DEBUG_FILTER_MODES.index(self._debug_filter_mode)
+                self._debug_filter_mode = DEBUG_FILTER_MODES[(idx - 1) % len(DEBUG_FILTER_MODES)]
+            elif cur > 0:
+                self._debug_filter_cursor = cur - 1
+        elif key == curses.KEY_RIGHT:
+            if self._debug_filter_entry_sel == 1:
+                idx = DEBUG_FILTER_MODES.index(self._debug_filter_mode)
+                self._debug_filter_mode = DEBUG_FILTER_MODES[(idx + 1) % len(DEBUG_FILTER_MODES)]
+            elif cur < len(self._debug_filter_buf):
+                self._debug_filter_cursor = cur + 1
+        elif key == curses.KEY_HOME and self._debug_filter_entry_sel == 0:
+            self._debug_filter_cursor = 0
+        elif key == curses.KEY_END and self._debug_filter_entry_sel == 0:
+            self._debug_filter_cursor = len(self._debug_filter_buf)
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
+            expression = self._debug_filter_buf.strip()
+            try:
+                _re.compile(expression)
+            except _re.error as exc:
+                self._debug_filter_error = f"Invalid regex: {exc}"
+            else:
+                if expression:
+                    entry = {"pattern": expression, "mode": self._debug_filter_mode}
+                    if self._debug_filter_edit_index is not None:
+                        self._debug_filter_patterns[self._debug_filter_edit_index] = entry
+                    else:
+                        self._debug_filter_patterns.append(entry)
+                    self._log_scroll = 0
+                self._debug_filter_entry_open = False
+        elif 32 <= key < 127 and self._debug_filter_entry_sel == 0:
+            self._debug_filter_buf = self._debug_filter_buf[:cur] + chr(key) + self._debug_filter_buf[cur:]
+            self._debug_filter_cursor = cur + 1
+            self._debug_filter_error = ""
+        return True
+
+    def draw_debug_filter_popup(self) -> None:
+        h, w = self.stdscr.getmaxyx()
+        box_w = min(max(58, min(96, w - 4)), w - 4)
+        box_h = min(max(10, len(self._debug_filter_patterns) + 8), h - 4)
+        by1, bx1 = max(0, (h - box_h) // 2), max(0, (w - box_w) // 2)
+        by2, bx2 = by1 + box_h, bx1 + box_w
+        for y in range(by1, by2 + 1):
+            self.safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1), theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_normal"))
+        self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_CHROME)
+        self.safe_addstr(self.stdscr, by1, bx1 + 2, " DEBUG LOG FILTERS ", theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_title"))
+        self.safe_addstr(self.stdscr, by1 + 1, bx1 + 2, "Show matching debug lines only; regular log lines are unaffected.", theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text"))
+        create_attr = theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_selected") if self._debug_filter_sel == 0 else theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text")
+        self.safe_addstr(self.stdscr, by1 + 2, bx1 + 2, "> Create new filter" if self._debug_filter_sel == 0 else "  Create new filter", create_attr)
+        max_rows = max(0, box_h - 7)
+        for index, entry in enumerate(self._debug_filter_patterns[:max_rows]):
+            attr = theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_selected") if self._debug_filter_sel == index + 1 else theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text")
+            prefix = ">" if self._debug_filter_sel == index + 1 else " "
+            tag = DEBUG_FILTER_MODE_TAGS.get(entry.get("mode", "filter_highlight"), "F+H")
+            self.safe_addstr(self.stdscr, by1 + 3 + index, bx1 + 2, f"{prefix} [{tag}] {entry['pattern']}"[:box_w - 4], attr)
+        export_y = by1 + 3 + min(len(self._debug_filter_patterns), max_rows)
+        export_attr = theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_selected") if self._debug_filter_sel == len(self._debug_filter_patterns) + 1 else theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text")
+        self.safe_addstr(self.stdscr, export_y, bx1 + 2, "Write filtered view to file", export_attr)
+        if self._debug_filter_error:
+            self.safe_addstr(self.stdscr, by2 - 1, bx1 + 2, self._debug_filter_error[:box_w - 4], theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_error"))
+        self.safe_addstr(self.stdscr, by2, bx1 + 2, "Enter: select/edit  Up/Down: select  D/Del: remove  Esc: close"[:box_w - 4], theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_legend"))
+
+    def draw_debug_filter_entry_popup(self) -> None:
+        h, w = self.stdscr.getmaxyx()
+        box_w, box_h = min(70, w - 4), min(9, h - 4)
+        by1, bx1 = (h - box_h) // 2, (w - box_w) // 2
+        by2, bx2 = by1 + box_h, bx1 + box_w
+        for y in range(by1, by2 + 1):
+            self.safe_addstr(self.stdscr, y, bx1, " " * (box_w + 1), theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_normal"))
+        self.draw_box(self.stdscr, by1, bx1, by2, bx2, self.C_CHROME)
+        editing = self._debug_filter_edit_index is not None
+        title = " EDIT DEBUG FILTER " if editing else " CREATE DEBUG FILTER "
+        self.safe_addstr(self.stdscr, by1, bx1 + 2, title, theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_title"))
+        self.safe_addstr(self.stdscr, by1 + 1, bx1 + 2, "Regex expression:", theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text"))
+        text_attr = (theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_selected")
+                     if self._debug_filter_entry_sel == 0
+                     else theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text"))
+        if self._debug_filter_entry_sel == 0:
+            display = self._debug_filter_buf[:self._debug_filter_cursor] + "_" + self._debug_filter_buf[self._debug_filter_cursor:]
+        else:
+            display = self._debug_filter_buf
+        self.safe_addstr(self.stdscr, by1 + 3, bx1 + 2, display[:box_w - 4], text_attr)
+
+        # Per-filter Mode multi-select: Left/Right arrows cycle through the
+        # three modes. This setting is saved with this filter only.
+        mode_attr = (theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_selected")
+                     if self._debug_filter_entry_sel == 1
+                     else theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_text"))
+        mode_label = DEBUG_FILTER_MODE_LABELS[self._debug_filter_mode]
+        mode_line = f"Mode: < {mode_label} >"
+        self.safe_addstr(self.stdscr, by1 + 5, bx1 + 2, mode_line[:box_w - 4], mode_attr)
+
+        if self._debug_filter_error:
+            self.safe_addstr(self.stdscr, by1 + 6, bx1 + 2, self._debug_filter_error[:box_w - 4], theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_error"))
+        legend = "Enter: save  Up/Down: field  Left/Right: mode  Esc: cancel"
+        self.safe_addstr(self.stdscr, by2, bx1 + 2, legend[:box_w - 4], theme.attr(self, "main_jjdlpdashboard_draw_debug_filter_popup_legend"))
+
     def refresh_screen(self):
         self.stdscr.erase()
         h, w = self.stdscr.getmaxyx()
@@ -6071,19 +6741,22 @@ class JJDlpDashboard:
         content_y1 = 10
         content_y2 = h - 2
 
-        # System panel sidebar (right column, always visible)
-        sidebar_w  = 28
-        sidebar_x1 = w - sidebar_w - 1
-        sidebar_x2 = w - 2
-        _t0 = time.time()
-        self.draw_system_panel(content_y1, sidebar_x1, content_y2, sidebar_x2)
-        _t_system_panel = time.time() - _t0
-
-        # Content area is to the left of the sidebar
-        content_x2 = sidebar_x1 - 1
-
         # Get the name of the currently selected tab
         current_tab_name = self.TABS[self.selected_tab]
+
+        # The Log tab uses the whole available width so its text can be
+        # selected and copied cleanly. Other tabs retain the system sidebar.
+        if current_tab_name == "Log":
+            content_x2 = w - 2
+            _t_system_panel = 0.0
+        else:
+            sidebar_w  = 28
+            sidebar_x1 = w - sidebar_w - 1
+            sidebar_x2 = w - 2
+            _t0 = time.time()
+            self.draw_system_panel(content_y1, sidebar_x1, content_y2, sidebar_x2)
+            _t_system_panel = time.time() - _t0
+            content_x2 = sidebar_x1 - 1
 
         _t0 = time.time()
         if current_tab_name == "Dashboard":
@@ -6110,6 +6783,12 @@ class JJDlpDashboard:
 
         if self._mgmt_mode:
             self.draw_mgmt_overlay()
+
+        if self._debug_filter_popup_open:
+            self.draw_debug_filter_popup()
+
+        if self._debug_filter_entry_open:
+            self.draw_debug_filter_entry_popup()
 
         # Sort popup — drawn on top of everything else.
         if self.sort_manager.popup_open:
@@ -6170,6 +6849,11 @@ class JJDlpDashboard:
         # Exit-confirmation popup intercepts all keys while open.
         if self._exit_confirm_open:
             return self._handle_exit_confirm_key(key)
+
+        if self._debug_filter_popup_open:
+            if self._debug_filter_entry_open:
+                return self._handle_debug_filter_entry_key(key)
+            return self._handle_debug_filter_key(key)
 
         # Changelog popup intercepts all keys while open.
         if self._changelog_popup_open:
@@ -6292,6 +6976,7 @@ class JJDlpDashboard:
                 sel = self.sites[self.selected_site_idx]
                 sel.show_debug_log = not sel.show_debug_log
                 self._log_scroll = 0
+                self._log_frozen_lines = None
             elif current_tab_name == "Stdout" and self.sites:
                 # "Show All" only means anything on the All Streamers view —
                 # a specific streamer never has checker JSON to show.
@@ -6306,6 +6991,9 @@ class JJDlpDashboard:
                     self._stderr_scroll = 0
             else:
                 self._start_mgmt("add")
+        elif key in (ord('f'), ord('F')):
+            if current_tab_name == "Log":
+                self._open_debug_filter_popup()
         elif key in (ord('r'), ord('R')):
             self._start_mgmt("remove")
         elif key in (ord('d'), ord('D')):
@@ -7260,6 +7948,16 @@ def main() -> None:
         perform_update()
         sys.exit(0)
 
+    # ── Refuse to start a second instance ─────────────────────────────────────
+    if not acquire_single_instance_lock():
+        print(
+            f"\njj-dlp v{__version__}  ·  Another instance of jj-dlp appears to be running.\n"
+            f"\n"
+            f"If this is in error, delete 'jj-dlp.instance.lock' (located in the jj_dlp folder) and try again."
+        )
+        input("\nPress Enter to close...")
+        sys.exit(1)
+
     # ── Config discovery / selection ──────────────────────────────────────────
     if args.config is not None:
         config_paths = []
@@ -7438,7 +8136,8 @@ def main() -> None:
 
     for site in sites:
         # Monitor thread (liveness check loop)
-        mt = threading.Thread(target=monitor_site, args=(site,), daemon=True)
+        mt = threading.Thread(target=monitor_site, args=(site,), daemon=True,
+                              name=f"monitor:{site.label}")
         mt.start()
         site.monitor_thread = mt
 
@@ -7446,7 +8145,7 @@ def main() -> None:
         cfg_i = load_config(site.config_path)
         wt = threading.Thread(target=config_watcher,
                               args=(site, cfg_i.get("config_check_interval", 3)),
-                              daemon=True)
+                              daemon=True, name=f"watcher:{site.label}")
         wt.start()
         site.watcher_thread = wt
 

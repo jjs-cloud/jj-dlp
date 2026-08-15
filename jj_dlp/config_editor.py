@@ -3,6 +3,7 @@ import shutil
 import curses
 import hashlib
 import threading
+import configparser
 from datetime import datetime
 from typing import NamedTuple, Optional
 
@@ -43,66 +44,70 @@ class _KeyDef(NamedTuple):
     scope:    str   # "global" | "site"
     default:  str
     preserve: bool
-    comment:  str
+    type:     str = "str"   # "str" | "bool" | "int" | "list" — used to coerce global.conf values
+                             # into runtime types by load_global_config() below. Only meaningful
+                             # for scope=="global"; site keys are parsed elsewhere.
+    comment:  str = ""
 
 
 CONFIG_KEYS: tuple[_KeyDef, ...] = (
     # ── Global keys (global.conf) ─────────────────────────────────────────────
-    _KeyDef("DISK_DRIVES",           "global", "",      True,  "Comma-separated list of drives or paths to show disk info in the system panel. (e.g. C:\\, D:\\, E:\\  or  /home,/mnt/data)."),
-    _KeyDef("DEBUG_LOGS",            "global", "false", True,  "Enable debug logging to a file (true/false)."),
-    _KeyDef("DEBUG_LOG_PATH",        "global", "",      True,  "Path for the debug log file. Can be a relative or absolute path (e.g. logs/debug.log)"),
-    _KeyDef("CHECK_FOR_UPDATES",     "global", "true",  True,  "Whether to check for app updates at startup and periodically (true/false)."),
-    _KeyDef("UPDATE_INTERVAL",       "global", "30",    True,  "Number of minutes between app update checks."),
-    _KeyDef("ASK_FOR_BROWSER",       "global", "true",  False,  "Show the browser chooser on startup (true/false)."),
-    _KeyDef("ASK_FOR_CONFIG",        "global", "true",  True,  "Show the config file chooser on startup (true/false)."),
-    _KeyDef("UPDATE_BRANCH",         "global", "main",  True,  "Which branch of jj-dlp to update to. (main, testing, or experimental)."),
-    _KeyDef("MAX_CONCURRENT_REC",    "global", "0",     True,  'The maximum number of simultaneous recordings allowed to run.  Use the STREAMER SETTINGS panel in the Config tab to adjust the priority of each streamer. (0=no limit)'),
-    _KeyDef("LQ_DOWNLOADER",         "global", "false", True,  "When any recording reaches the ffmpeg error threshold (FF_ERR_THRESH) lower the video quality of the lowest priority streamer, freeing up bandwidth for the remaining streamers."),
-    _KeyDef("FF_ERR_THRESH",         "global", "200",   True,  'Restart the download if we see this many ffmpeg errors ("timestamp discontinuity", "Packet corrupt") default: 200'),
-    _KeyDef("SUBFOLDERS",            "global", "false", True,  "Save recordings into a subfolder named after the streamer inside OUTPUT_DIR (true/false)."),
-    _KeyDef("GRAPH_SCALE",           "global", "300",   True,  "The number of seconds each bar in the graph represents. (default = 600)."),
-    _KeyDef("DESTINATIONS",          "global", "",      True,  "A list of destination paths where you might want to move your files.  Used in the File Manager tab. (e.g. C:\\My Recordings  OR /home/greg/twitch)"),
-    _KeyDef("NTFY_TOPIC",            "global", "",      True,  "The topic name to use for ntfy.sh notifications. (example: jj-dlp-fj48dh734fk) Refer to docs/ntfy-setup.md for a detailed setup guide. (blank = disabled)"),
-    _KeyDef("NOTIFY_CONFIRM_FILE",   "global", "true",  True,  "Confirm the recording has actually started before sending a live notification.  Note: When enabled, the notifications will be delayed by a few seconds until the file has been confirmed."),
-    _KeyDef("NOTIFY_NO_CONFIRM_FILE", "global", "true", True,  "If the recording file cannot be confirmed (does not exist or no file growth) within one STALL_TIMEOUT, send a warning notification that the file could not be confirmed (true/false)."),
-    _KeyDef("SITE_SORT",             "global", "added_first", True, "The order to display streamers on each site panel.   This can also be adjusted by pressing the S key on the Dashboard tab."),
-    _KeyDef("COMPACT_VIEW",          "global", "auto",  True,  "When streamers overflow the panel, compact view shows them in 2 columns without progress bars. (auto/true/false)"),
-    _KeyDef("WEB_UI",                "global", "false", True,  "Enable the Web UI, viewable from any browser on your local network by navigating to http://your-ip-address:8765 or from the same machine at http://127.0.0.1:8765. Requires WEB_UI_USER and WEB_UI_PASS to also be set. Note: Use this tool on your local network only.  Access over the internet is not supported yet. (true/false)"),
-    _KeyDef("WEB_UI_PORT",           "global", "8765",  True,  "Port for the web dashboard. Default: 8765"),
-    _KeyDef("WEB_UI_USER",           "global", "",      True,  "Username required to log into the web dashboard (HTTP Basic Auth). Required if WEB_UI is enabled."),
-    _KeyDef("WEB_UI_PASS",           "global", "",      True,  "Password required to log into the web dashboard (HTTP Basic Auth). Required if WEB_UI is enabled. Choose something not easily guessed — anyone on your WiFi could otherwise try to log in."),
-    _KeyDef("RGB_MODE",              "global", "true",  True,  "Pin the terminal's 8 base colors to exact RGB values (the Windows Terminal Campbell palette) so the app looks the same on every Linux terminal (may require restart) (true/false)."),
+    _KeyDef("DISK_DRIVES",           "global", "",      True, type="list",  comment="Comma-separated list of drives or paths to show disk info in the system panel. (e.g. C:\\, D:\\, E:\\  or  /home,/mnt/data)."),
+    _KeyDef("DEBUG_LOGS",            "global", "false", True, type="bool",  comment="Enable debug logging to a file (true/false)."),
+    _KeyDef("DEBUG_LOG_PATH",        "global", "",      True,  comment="Path for the debug log file. Can be a relative or absolute path (e.g. logs/debug.log)"),
+    _KeyDef("CHECK_FOR_UPDATES",     "global", "true",  True, type="bool",  comment="Whether to check for app updates at startup and periodically (true/false)."),
+    _KeyDef("UPDATE_INTERVAL",       "global", "30",    True, type="int",  comment="Number of minutes between app update checks."),
+    _KeyDef("ASK_FOR_BROWSER",       "global", "true",  False, type="bool",  comment="Show the browser chooser on startup (true/false)."),
+    _KeyDef("ASK_FOR_CONFIG",        "global", "true",  True, type="bool",  comment="Show the config file chooser on startup (true/false)."),
+    _KeyDef("UPDATE_BRANCH",         "global", "main",  True,  comment="Which branch of jj-dlp to update to. (main, testing, or experimental)."),
+    _KeyDef("MAX_CONCURRENT_REC",    "global", "0",     True, type="int",  comment='The maximum number of simultaneous recordings allowed to run.  Use the STREAMER SETTINGS panel in the Config tab to adjust the priority of each streamer. (0=no limit)'),
+    _KeyDef("LQ_DOWNLOADER",         "global", "false", True, type="bool",  comment="When any recording reaches the ffmpeg error threshold (FF_ERR_THRESH) lower the video quality of the lowest priority streamer, freeing up bandwidth for the remaining streamers."),
+    _KeyDef("FF_ERR_THRESH",         "global", "200",   True, type="int",  comment='Restart the download if we see this many ffmpeg errors ("timestamp discontinuity", "Packet corrupt") default: 200'),
+    _KeyDef("SUBFOLDERS",            "global", "false", True, type="bool",  comment="Save recordings into a subfolder named after the streamer inside OUTPUT_DIR (true/false)."),
+    _KeyDef("GRAPH_SCALE",           "global", "300",   True, type="int",  comment="The number of seconds each bar in the graph represents. (default = 600)."),
+    _KeyDef("DESTINATIONS",          "global", "",      True, type="list",  comment="A list of destination paths where you might want to move your files.  Used in the File Manager tab. (e.g. C:\\My Recordings  OR /home/greg/twitch)"),
+    _KeyDef("NTFY_TOPIC",            "global", "",      True,  comment="The topic name to use for ntfy.sh notifications. (example: jj-dlp-fj48dh734fk) Refer to docs/ntfy-setup.md for a detailed setup guide. (blank = disabled)"),
+    _KeyDef("NOTIFY_CONFIRM_FILE",   "global", "true",  True, type="bool",  comment="Confirm the recording has actually started before sending a live notification.  Note: When enabled, the notifications will be delayed by a few seconds until the file has been confirmed."),
+    _KeyDef("NOTIFY_NO_CONFIRM_FILE", "global", "true", True, type="bool",  comment="If the recording file cannot be confirmed (does not exist or no file growth) within one STALL_TIMEOUT, send a warning notification that the file could not be confirmed (true/false)."),
+    _KeyDef("SITE_SORT",             "global", "added_first", True, comment="The order to display streamers on each site panel.   This can also be adjusted by pressing the S key on the Dashboard tab."),
+    _KeyDef("COMPACT_VIEW",          "global", "auto",  True,  comment="When streamers overflow the panel, compact view shows them in 2 columns without progress bars. (auto/true/false)"),
+    _KeyDef("WEB_UI",                "global", "false", True, type="bool",  comment="Enable the Web UI, viewable from any browser on your local network by navigating to http://your-ip-address:8765 or from the same machine at http://127.0.0.1:8765. Requires WEB_UI_USER and WEB_UI_PASS to also be set. Note: Use this tool on your local network only.  Access over the internet is not supported yet. (true/false)"),
+    _KeyDef("WEB_UI_PORT",           "global", "8765",  True, type="int",  comment="Port for the web dashboard. Default: 8765"),
+    _KeyDef("WEB_UI_USER",           "global", "",      True,  comment="Username required to log into the web dashboard (HTTP Basic Auth). Required if WEB_UI is enabled."),
+    _KeyDef("WEB_UI_PASS",           "global", "",      True,  comment="Password required to log into the web dashboard (HTTP Basic Auth). Required if WEB_UI is enabled. Choose something not easily guessed — anyone on your WiFi could otherwise try to log in."),
+    _KeyDef("RGB_MODE",              "global", "true",  True, type="bool",  comment="Pin the terminal's 8 base colors to exact RGB values (the Windows Terminal Campbell palette) so the app looks the same on every Linux terminal (may require restart) (true/false)."),
 
     # ── Site keys (per-site .conf) ────────────────────────────────────────────
-    _KeyDef("SITE_LABEL",            "site",   "",      True,  "The name of this site."),
-    _KeyDef("SITE_ORDER",            "site",   "999",   True,  "The position on the dashboard to display this site's panel (e.g. 0 for top-left, 1 for top-right, 2 for bottom-left, 3 for bottom-right, etc.)"),
-    _KeyDef("CHECK_INTERVAL",        "site",   "60",    False, "How often to check if streamers are live (in seconds).  (Default: 60) (note: keep this <= STALL_TIMEOUT to avoid false write-failure alerts)"),
-    _KeyDef("OUTPUT_DIR",            "site",   "recordings", True, 'Folder where recordings will be saved.  Can be an absolute path or relative path.  example: "C:\\recordings" or "recordings"'),
-    _KeyDef("OUTPUT_TMPL",           "site",   "%(title)s [%(id)s].%(ext)s", False, "Template for naming the video files. (Reference: https://github.com/yt-dlp/yt-dlp#output-templates)"),
-    _KeyDef("COOLDOWN_AFTER_RECORDING", "site", "60",   False, "Seconds to wait after a recording ends before checking again."),
-    _KeyDef("SPLIT_AFTER",           "site",   "0",    True,  "When recording a stream, split the video file(s) every X minutes. (0 = no split)"),
-    _KeyDef("STALL_CHECK_INTERVAL",  "site",   "30",   True, "How often to check if the recording has stalled (in seconds).  Disable by setting this to a large number. (Default: 30)"),
-    _KeyDef("STALL_TIMEOUT",         "site",   "120",  False, "Time to wait before considering a recording stalled (in seconds). (Default: 120) (note: also used with NOTIFY_NO_CONFIRM_FILE) (note: keep this >= CHECK_INTERVAL to avoid false write-failure alerts)"),
-    _KeyDef("CONFIG_CHECK_INTERVAL", "site",   "3",    False, "How often to check for changes to the configuration file (in seconds). (Default: 3)"),
-    _KeyDef("SITE_TMPL",             "site",   "",     False, "URL where the live stream can be accessed. {username} will be replaced with the streamer's username."),
-    _KeyDef("PANEL_RESIZE",          "site",   "true", True,  "When true, site panels will expand vertically as needed to display all streamers."),
-    _KeyDef("LOGGING",               "site",   "false", True, "Log stdout and stderr to a per-streamer log file."),
-    _KeyDef("LOG_PATH",              "site",   "",     False,  "Folder to save per-streamer log files. Defaults to \"logs\"."),
-    _KeyDef("SPLIT_LOGS",            "site",   "false", True, "When LOGGING = true, create 2 separate log files per streamer.  One for stdout (yt-dlp) and one for stderr (ffmpeg)."),
-    _KeyDef("POPUP_NOTIFICATIONS",   "site",   "true", True,  "Show a popup notification when a streamer goes live."),
-    _KeyDef("NTFY_NOTIFICATIONS",    "site",   "true", True,  "Push a notification to your phone via ntfy.sh when a recording starts. This requires NTFY_TOPIC to be set in the GLOBAL SETTINGS panel. (true/false)"),
-    _KeyDef("AD_ALERTS",             "site",   "True", True,  "Show an alert in the system panel when ads are detected in a recording (true/false)."),
-    _KeyDef("POPUP_TIMEOUT",         "site",   "15",   True,  "Seconds to show the popup notification when a streamer goes live."),
-    _KeyDef("POPUP_COOLDOWN",        "site",   "30",   True,  "Minutes to wait before showing another popup notification for the same streamer."),
-    _KeyDef("YT_DLP_PATH_WINDOWS",   "site",   "",     False, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
-    _KeyDef("YT_DLP_PATH_MAC",       "site",   "",     False, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
-    _KeyDef("YT_DLP_PATH_LINUX",     "site",   "",     False, 'Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
-    _KeyDef("PROGRESS_BAR_MAX_HOURS","site",   "10",    True,  "Duration of the progress bar in the site panel of the dashboard. (in hours)"),
-    _KeyDef("PROGRESS_BAR_WIDTH",    "site",   "58",   True,  "Width of the progress bar in the site panel of the dashboard. (in characters)"),
-    _KeyDef("DOWNLOADER_COOKIES",    "site",   "true", False, "Whether to write the --cookies-from-browser flag to this config file's [Downloader] section when a browser is selected at startup."),
-    _KeyDef("CHECKER_COOKIES",       "site",   "false", False, "Whether to write the --cookies-from-browser flag to this config file's [Checker] section when a browser is selected at startup."),
-    _KeyDef("LAST_LIVE_HIGHLIGHT",   "site",   "0",    True,  'Highlight the "Last Live" timestamp when the streamer was last live within X days.'),
-    _KeyDef("UPGRADE_QUALITY",       "site",   "true", True, "Restart the recording when a higher quality is available. (true/false)."),
+    _KeyDef("SITE_LABEL",            "site",   "",      True,  comment="The name of this site."),
+    _KeyDef("SITE_ORDER",            "site",   "999",   True,  comment="The position on the dashboard to display this site's panel (e.g. 0 for top-left, 1 for top-right, 2 for bottom-left, 3 for bottom-right, etc.)"),
+    _KeyDef("CHECK_INTERVAL",        "site",   "60",    False, comment="How often to check if streamers are live (in seconds).  (Default: 60) (note: keep this <= STALL_TIMEOUT to avoid false write-failure alerts)"),
+    _KeyDef("OUTPUT_DIR",            "site",   "recordings", True, comment='Folder where recordings will be saved.  Can be an absolute path or relative path.  example: "C:\\recordings" or "recordings"'),
+    _KeyDef("OUTPUT_TMPL",           "site",   "%(title)s [%(id)s].%(ext)s", False, comment="Template for naming the video files. (Reference: https://github.com/yt-dlp/yt-dlp#output-templates)"),
+    _KeyDef("COOLDOWN_AFTER_RECORDING", "site", "60",   False, comment="Seconds to wait after a recording ends before checking again."),
+    _KeyDef("SPLIT_AFTER",           "site",   "0",    True,  comment="When recording a stream, split the video file(s) every X minutes. (0 = no split)"),
+    _KeyDef("AUTO_SUFFIX",           "site",   "true", True,  comment="When a recording restarts for any reason while the streamer is still on the same live stream, name the new file and the original file with a _partN suffix. (Default: true)"),
+    _KeyDef("STALL_CHECK_INTERVAL",  "site",   "30",   True, comment="How often to check if the recording has stalled (in seconds).  Disable by setting this to a large number. (Default: 30)"),
+    _KeyDef("STALL_TIMEOUT",         "site",   "120",  False, comment="Time to wait before considering a recording stalled (in seconds). (Default: 120) (note: also used with NOTIFY_NO_CONFIRM_FILE) (note: keep this >= CHECK_INTERVAL to avoid false write-failure alerts)"),
+    _KeyDef("CONFIG_CHECK_INTERVAL", "site",   "3",    False, comment="How often to check for changes to the configuration file (in seconds). (Default: 3)"),
+    _KeyDef("SITE_TMPL",             "site",   "",     False, comment="URL where the live stream can be accessed. {username} will be replaced with the streamer's username."),
+    _KeyDef("PANEL_RESIZE",          "site",   "true", True,  comment="When true, site panels will expand vertically as needed to display all streamers."),
+    _KeyDef("LOGGING",               "site",   "false", True, comment="Log stdout and stderr to a per-streamer log file."),
+    _KeyDef("LOG_PATH",              "site",   "",     False,  comment="Folder to save per-streamer log files. Defaults to \"logs\"."),
+    _KeyDef("SPLIT_LOGS",            "site",   "false", True, comment="When LOGGING = true, create 2 separate log files per streamer.  One for stdout (yt-dlp) and one for stderr (ffmpeg)."),
+    _KeyDef("POPUP_NOTIFICATIONS",   "site",   "true", True,  comment="Show a popup notification when a streamer goes live."),
+    _KeyDef("NTFY_NOTIFICATIONS",    "site",   "true", True,  comment="Push a notification to your phone via ntfy.sh when a recording starts. This requires NTFY_TOPIC to be set in the GLOBAL SETTINGS panel. (true/false)"),
+    _KeyDef("AD_ALERTS",             "site",   "True", True,  comment="Show an alert in the system panel when ads are detected in a recording (true/false)."),
+    _KeyDef("POPUP_TIMEOUT",         "site",   "15",   True,  comment="Seconds to show the popup notification when a streamer goes live."),
+    _KeyDef("POPUP_COOLDOWN",        "site",   "30",   True,  comment="Minutes to wait before showing another popup notification for the same streamer."),
+    _KeyDef("YT_DLP_PATH_WINDOWS",   "site",   "",     False, comment='Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
+    _KeyDef("YT_DLP_PATH_MAC",       "site",   "",     False, comment='Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
+    _KeyDef("YT_DLP_PATH_LINUX",     "site",   "",     False, comment='Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
+    _KeyDef("PROGRESS_BAR_MAX_HOURS","site",   "10",    True,  comment="Duration of the progress bar in the site panel of the dashboard. (in hours)"),
+    _KeyDef("PROGRESS_BAR_WIDTH",    "site",   "58",   True,  comment="Width of the progress bar in the site panel of the dashboard. (in characters)"),
+    _KeyDef("DOWNLOADER_COOKIES",    "site",   "true", False, comment="Whether to write the --cookies-from-browser flag to this config file's [Downloader] section when a browser is selected at startup."),
+    _KeyDef("CHECKER_COOKIES",       "site",   "false", False, comment="Whether to write the --cookies-from-browser flag to this config file's [Checker] section when a browser is selected at startup."),
+    _KeyDef("LAST_LIVE_HIGHLIGHT",   "site",   "0",    True,  comment='Highlight the "Last Live" timestamp when the streamer was last live within X days.'),
+    _KeyDef("UPGRADE_QUALITY",       "site",   "true", True, comment="Restart the recording when a higher quality is available. (true/false)."),
 )
 
 # ── Derived helpers (consumed by this module and importable by others) ─────────
@@ -124,6 +129,64 @@ PRESERVED_KEYS: list[str] = [k.name for k in CONFIG_KEYS if k.preserve]
 
 # Lookup: key name -> preserve flag (used to flag "managed" keys in the edit popup)
 _KEY_PRESERVE: dict[str, bool] = {k.name: k.preserve for k in CONFIG_KEYS}
+
+
+def _coerce_global_value(kdef: "_KeyDef", raw: str) -> object:
+    """Coerce a raw global.conf string into the runtime type declared by kdef.type."""
+    raw = (raw or "").strip().strip('"\'')
+    if kdef.type == "bool":
+        low = raw.lower()
+        if low in ("true", "1", "yes"):
+            return True
+        if low in ("false", "0", "no"):
+            return False
+        return kdef.default.strip().lower() in ("true", "1", "yes")
+    if kdef.type == "int":
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return int(kdef.default)
+        # Allow 0 explicitly (e.g. MAX_CONCURRENT_REC = 0 means "unlimited").
+        # Only fall back to the default when negative or unparseable.
+        if value < 0:
+            return int(kdef.default)
+        return value
+    if kdef.type == "list":
+        return [item.strip() for item in raw.split(",") if item.strip()]
+    # "str"
+    return raw if raw else kdef.default
+
+
+def load_global_config(path: str) -> dict:
+    """Read global.conf at `path` and return a fully-typed dict of every global-scope key.
+
+    CONFIG_KEYS above is the single source of truth for global config: each key's
+    default value and runtime type live there. Adding a new global key only requires
+    adding one _KeyDef entry — no other file (and no other function) needs to change.
+
+    Returned dict keys are the lower-cased key names, e.g. DISK_DRIVES -> "disk_drives".
+    """
+    parser = configparser.ConfigParser(allow_no_value=True, interpolation=None, delimiters=('=',))
+    try:
+        parser.read(path, encoding="utf-8")
+    except Exception:
+        pass
+
+    general = parser["General"] if parser.has_section("General") else {}
+
+    cfg: dict = {}
+    for kdef in CONFIG_KEYS:
+        if kdef.scope != "global":
+            continue
+        cfg[kdef.name.lower()] = _coerce_global_value(kdef, general.get(kdef.name, ""))
+
+    # A couple of keys need a touch of normalization beyond their basic type.
+    cfg["update_branch"] = cfg["update_branch"].lower()
+    if not cfg["compact_view"]:
+        cfg["compact_view"] = "auto"
+    cfg["graph_scale"] = max(1, cfg["graph_scale"])
+
+    return cfg
 
 
 def _managed_key_note(key: str) -> str:
@@ -317,12 +380,17 @@ class PriorityEditor:
 
             has_intro_delay_override = bool(e.get("intro_delay_enabled", False))
 
+            # Auto-Suffix: tri-state "auto_suffix_mode" ("on" | "off");
+            # "inherit" is represented by the key being absent.
+            has_auto_suffix_override = e.get("auto_suffix_mode") in ("on", "off")
+
             saved_map[key] = {
                 "bypass":       e.get("bypass", False),
                 "priority":     i,
                 "has_override": (schedule_enabled or has_split_override
                                   or has_notif_override or has_lq_override
-                                  or has_intro_delay_override),
+                                  or has_intro_delay_override
+                                  or has_auto_suffix_override),
             }
 
         # Build enriched list with saved priority / bypass values.
@@ -412,7 +480,8 @@ class PriorityEditor:
                 for extra_key in ("schedule", "lq_enabled",
                                   "split_mode", "split_after", "split_enabled",
                                   "notifications_enabled",
-                                  "intro_delay_enabled", "intro_delay_minutes", "intro_delay_split"):
+                                  "intro_delay_enabled", "intro_delay_minutes", "intro_delay_split",
+                                  "auto_suffix_mode"):
                     if extra_key in ex:
                         entry_dict[extra_key] = ex[extra_key]
                 entries_data.append(entry_dict)
@@ -612,13 +681,14 @@ class StreamerSettingsPopup:
         self.entry     = entry
         self.config_id = config_id
 
-        self.options = ["Schedule", "Quality", "Split", "Intro Delay", "Notifications"]
+        self.options = ["Schedule", "Quality", "Split", "Intro Delay", "Notifications", "Auto-Suffix"]
         self._sel: int = 0
         self._schedule_popup: "Optional[ScheduleSettingsPopup]" = None
         self._quality_popup: "Optional[QualitySettingsPopup]" = None
         self._split_popup: "Optional[SplitSettingsPopup]" = None
         self._intro_delay_popup: "Optional[IntroDelaySettingsPopup]" = None
         self._notifications_popup: "Optional[NotificationSettingsPopup]" = None
+        self._auto_suffix_popup: "Optional[AutoSuffixSettingsPopup]" = None
 
     def handle_key(self, key) -> bool:
         if self._schedule_popup is not None:
@@ -653,6 +723,13 @@ class StreamerSettingsPopup:
             should_close = self._notifications_popup.handle_key(key)
             if should_close:
                 self._notifications_popup = None
+                return True
+            return False
+
+        if self._auto_suffix_popup is not None:
+            should_close = self._auto_suffix_popup.handle_key(key)
+            if should_close:
+                self._auto_suffix_popup = None
                 return True
             return False
 
@@ -693,6 +770,12 @@ class StreamerSettingsPopup:
                     self.entry,
                     self.config_id,
                 )
+            elif self.options[self._sel] == "Auto-Suffix":
+                self._auto_suffix_popup = AutoSuffixSettingsPopup(
+                    self.dashboard,
+                    self.entry,
+                    self.config_id,
+                )
         return False
 
     def draw(self, stdscr) -> None:
@@ -714,6 +797,10 @@ class StreamerSettingsPopup:
 
         if self._notifications_popup is not None:
             self._notifications_popup.draw(stdscr)
+            return
+
+        if self._auto_suffix_popup is not None:
+            self._auto_suffix_popup.draw(stdscr)
             return
 
         db = self.dashboard
@@ -971,6 +1058,139 @@ class NotificationSettingsPopup:
         db.safe_addstr(stdscr, by1 + 4, bx1 + 13, eff_str, theme.attr(db, "config_editor_notificationsettings_draw_warn"))
 
         db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_notificationsettings_draw_invhead"))
+
+
+class AutoSuffixSettingsPopup:
+    """Per-streamer override for AUTO_SUFFIX.
+
+    Tri-state: "inherit" (default — use the site's AUTO_SUFFIX value),
+    "on", or "off". Only "on"/"off" are ever written to global.json;
+    "inherit" is represented by the *absence* of the "auto_suffix_mode"
+    key, which is exactly what main.py's _resolve_auto_suffix() checks
+    for (mirrors _resolve_split_after()'s tri-state handling).
+    """
+
+    _STATES = ("inherit", "on", "off")
+
+    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
+        self.dashboard = dashboard
+        self.entry     = entry
+        self.config_id = config_id
+        self.state: str = "inherit"   # "inherit" | "on" | "off"
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            from .main import _global_json_lock, _load_global_json
+            with _global_json_lock:
+                gdata = _load_global_json()
+            entries = (gdata.get("priorities", {})
+                           .get(self.config_id, {})
+                           .get("entries", []))
+            for e in entries:
+                if (e.get("streamer") == self.entry.streamer
+                        and e.get("site") == self.entry.site):
+                    raw = e.get("auto_suffix_mode", None)
+                    if raw not in ("on", "off"):
+                        self.state = "inherit"
+                    else:
+                        self.state = raw
+                    break
+        except Exception:
+            pass
+
+    def _save(self) -> None:
+        try:
+            from .main import _global_json_lock, _load_global_json, _save_global_json
+            with _global_json_lock:
+                gdata   = _load_global_json()
+                entries = (gdata.get("priorities", {})
+                               .get(self.config_id, {})
+                               .get("entries", []))
+                target = None
+                for e in entries:
+                    if (e.get("streamer") == self.entry.streamer
+                            and e.get("site") == self.entry.site):
+                        target = e
+                        break
+                if self.state == "inherit":
+                    # Nothing to override — remove any prior explicit value
+                    # rather than writing one, so this streamer stops
+                    # showing up as having an Auto-Suffix override.
+                    if target is not None:
+                        target.pop("auto_suffix_mode", None)
+                else:
+                    if target is None:
+                        target = {
+                            "streamer":   self.entry.streamer,
+                            "site":       self.entry.site,
+                            "config_sha": self.entry.config_sha,
+                            "priority":   len(entries),
+                            "bypass":     self.entry.bypass,
+                        }
+                        entries.append(target)
+                    target["auto_suffix_mode"] = self.state
+
+                gdata.setdefault("priorities", {}).setdefault(
+                    self.config_id, {"config_files": [], "entries": []}
+                )["entries"] = entries
+                _save_global_json(gdata)
+        except Exception:
+            pass
+
+    def _site_default(self) -> bool:
+        cfg = _get_site_default_cfg(self.dashboard, self.entry)
+        return bool(cfg.get("auto_suffix", True))
+
+    def handle_key(self, key) -> bool:
+        if key == 27:
+            return True
+        elif key == ord(' '):
+            idx = self._STATES.index(self.state)
+            self.state = self._STATES[(idx + 1) % len(self._STATES)]
+        elif key == curses.KEY_LEFT:
+            idx = self._STATES.index(self.state)
+            self.state = self._STATES[(idx - 1) % len(self._STATES)]
+        elif key == curses.KEY_RIGHT:
+            idx = self._STATES.index(self.state)
+            self.state = self._STATES[(idx + 1) % len(self._STATES)]
+        elif key in (10, 13, curses.KEY_ENTER, 459):
+            self._save()
+            return True
+        return False
+
+    def draw(self, stdscr) -> None:
+        db = self.dashboard
+        h, w = stdscr.getmaxyx()
+
+        box_w = min(46, w - 6)
+        box_h = 7
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_autosuffixsettingspo_draw_normal_1"))
+
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
+        title = f" {self.entry.streamer.upper()} SETTINGS "
+        db.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(db, "config_editor_autosuffixsettingspo_draw_system"))
+
+        state_label = {"inherit": "< Inherit >", "on": "< On >", "off": "< Off >"}[self.state]
+        db.safe_addstr(stdscr, by1 + 2, bx1 + 2, "> Auto-Suffix: ", theme.attr(db, "config_editor_autosuffixsettingspo_draw_hilight_1"))
+        db.safe_addstr(stdscr, by1 + 2, bx1 + 17, state_label, theme.attr(db, "config_editor_autosuffixsettingspo_draw_hilight_2"))
+
+        site_default = self._site_default()
+        if self.state == "inherit":
+            effective = site_default
+        else:
+            effective = (self.state == "on")
+        eff_str = "ON" if effective else "OFF"
+        db.safe_addstr(stdscr, by1 + 4, bx1 + 2, "Effective: ", theme.attr(db, "config_editor_autosuffixsettingspo_draw_normal_2"))
+        db.safe_addstr(stdscr, by1 + 4, bx1 + 13, eff_str, theme.attr(db, "config_editor_autosuffixsettingspo_draw_warn"))
+
+        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_autosuffixsettingspo_draw_invhead"))
 
 
 class SplitSettingsPopup:
