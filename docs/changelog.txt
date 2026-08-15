@@ -1,3 +1,5 @@
+v1.27.0
+
 - updated the OUTPUT_TMPL for tiktok-live to fix issues with special characters in the filename 
 - fixed an issue when under high disk/cpu load (innacurate file size)
 - when the stream is in portrait mode, the resolution is now correctly displayed on the site panel. (min of height/width instead of always the height)
@@ -7,6 +9,7 @@
 - words now wrap to the next line instead of getting cut mid-word. (changelog, log tab, stdout tab, stderr tab)
 - decresed verbosity of SPLIT_AFTER log lines
 - on the twitch site panel only, the last_live counter for each streamer will now be backfilled (if needed) via twitch's public GQL api
+- added and instance-lock to prevent more than one instance of jj-dlp from being opened at the same time from the same root folder (json collisions)
 
 ====================
 ====================

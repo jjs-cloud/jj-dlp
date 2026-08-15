@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.26.32"
+__version__ = "1.27.0"
 
 import subprocess
 import textwrap
@@ -7951,13 +7951,11 @@ def main() -> None:
     # ── Refuse to start a second instance ─────────────────────────────────────
     if not acquire_single_instance_lock():
         print(
-            f"\njj-dlp v{__version__}  ·  Another instance of jj-dlp already appears to be running.\n"
-            f"Running two instances at once can corrupt global.json (priorities, bypass "
-            f"settings, etc.), so this launch is refusing to start.\n"
-            f"If you're sure no other instance is running (e.g. after a crash on a "
-            f"different machine that didn't get a chance to exit cleanly), delete "
-            f"jj-dlp.instance.lock next to global.json and try again."
+            f"\njj-dlp v{__version__}  ·  Another instance of jj-dlp appears to be running.\n"
+            f"\n"
+            f"If this is in error, delete 'jj-dlp.instance.lock' (located in the jj_dlp folder) and try again."
         )
+        input("\nPress Enter to close...")
         sys.exit(1)
 
     # ── Config discovery / selection ──────────────────────────────────────────
