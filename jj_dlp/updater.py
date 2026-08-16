@@ -17,7 +17,7 @@ _API_BASE   = "https://api.github.com/repos/jjs-cloud/jj-dlp"
 # ── Updater version ───────────────────────────────────────────────────────────
 # Incremented independently of the main jj-dlp version so we can tell which
 # updater logic is actually running during an update.
-UPDATER_VERSION = "2.3.1"
+UPDATER_VERSION = "2.3.2"
 
 # ── Lazy package imports ──────────────────────────────────────────────────────
 # Relative imports are deferred to call time so this file is also safe to
@@ -434,8 +434,17 @@ def _load_config_keys(source_dir=None):
                 _mod = importlib.util.module_from_spec(_spec)
                 _spec.loader.exec_module(_mod)
                 return _mod.CONFIG_KEYS
-            except Exception:
-                pass  # fall through to the installed-package lookup below
+            except Exception as e:
+                # NOTE: this fallback silently pulls the stale, currently-installed
+                # CONFIG_KEYS, which means comment/default changes lag by one
+                # update cycle. Surface it loudly instead of swallowing it.
+                _msg = f"[UPDATER] _load_config_keys: failed to load fresh config_editor.py from {_candidate}: {e!r} -- falling back to stale installed CONFIG_KEYS"
+                print(f"\nWARNING: {_msg}\n")
+                try:
+                    _logger().dbg(_msg)
+                except Exception:
+                    pass
+                # fall through to the installed-package lookup below
 
     # Resolve CONFIG_KEYS whether called as a package or as __main__.
     try:
