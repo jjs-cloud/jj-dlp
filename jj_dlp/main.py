@@ -5793,8 +5793,11 @@ class JJDlpDashboard:
                         ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_10")
                     else:
                         ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_8")
+                    # Clamp to the panel's inner boundary so this never draws
+                    # into/through the right border on narrow terminals.
+                    _avail = max(0, (x2 - 1) - col)
                     self.safe_addstr(self.stdscr, row_y, col,
-                                last_live_str[:last_live_w],
+                                last_live_str[:min(last_live_w, _avail)],
                                 ll_attr)
 
         # ── Countdown ──
