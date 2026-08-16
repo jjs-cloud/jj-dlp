@@ -734,7 +734,7 @@ class FileManagerTab:
     def move_selection_page(self, direction):
         """Move the selection by a page (PageUp/PageDown), rather than jumping
         straight to the first/last row."""
-        page = max(1, self._last_visible)
+        page = max(1, self._last_visible - 1)
         delta = -page if direction == "up" else page
         self.move_selection(delta)
         file_indices = [i for i, r in enumerate(self._rows) if r[0] == "file"]
