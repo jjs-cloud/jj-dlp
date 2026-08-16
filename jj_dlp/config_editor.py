@@ -2826,9 +2826,7 @@ class GlobalConfigEditor:
         for kdef in CONFIG_KEYS:
             if kdef.scope != "global":
                 continue
-            lines.append(f"# {kdef.comment}\n")
             lines.append(f"{kdef.name} = {kdef.default}\n")
-            lines.append("\n")
         try:
             with open(self.conf_path, "w", encoding="utf-8") as f:
                 f.writelines(lines)
@@ -2839,27 +2837,21 @@ class GlobalConfigEditor:
         """Build self.items from self.lines — only [General] keys that are global."""
         self.items = []
         in_general = False
-        pending_comment = ""
         for i, line in enumerate(self.lines):
             s = line.strip()
             if not s:
-                pending_comment = ""
                 continue
             if s.startswith("#") or s.startswith(";"):
-                fragment = s.lstrip("#;").strip()
-                pending_comment = (pending_comment + " " + fragment).strip() if pending_comment else fragment
                 continue
             if s.startswith("[") and s.endswith("]"):
                 in_general = s[1:-1] == "General"
-                pending_comment = ""
                 continue
             if in_general and "=" in s:
                 k, v = s.split("=", 1)
                 k = k.strip()
                 if k.upper() in _GLOBAL_KEYS:
-                    comment = pending_comment or self.GLOBAL_KEYS_COMMENTS.get(k.upper(), "")
+                    comment = self.GLOBAL_KEYS_COMMENTS.get(k.upper(), "")
                     self.items.append(ConfigItem(i, False, k.upper(), v.strip(), True, line, comment))
-            pending_comment = ""
 
         # If any expected keys are missing (file was hand-edited), append them
         existing_keys = {item.key for item in self.items}
@@ -3590,19 +3582,14 @@ class ConfigEditor:
 
         self.items = []
         current_section = None
-        pending_comment = ""
         for i, line in enumerate(self.lines):
             s = line.strip()
             if not s:
-                pending_comment = ""
                 continue
             if s.startswith("#") or s.startswith(";"):
-                fragment = s.lstrip("#;").strip()
-                pending_comment = (pending_comment + " " + fragment).strip() if pending_comment else fragment
                 continue
             if s.startswith("[") and s.endswith("]"):
                 current_section = s[1:-1]
-                pending_comment = ""
                 if current_section == "General":
                     self.items.append(ConfigItem(i, True, current_section, "", False, line, ""))
             else:
@@ -3612,13 +3599,13 @@ class ConfigEditor:
                         k_stripped = k.strip()
                         # Skip keys that belong in global.conf
                         if k_stripped.upper() in _GLOBAL_KEYS:
-                            pending_comment = ""
                             continue
-                        self.items.append(ConfigItem(i, False, k_stripped, v.strip(), True, line, pending_comment))
+                        comment = _KEY_COMMENTS.get(k_stripped.upper(), "")
+                        self.items.append(ConfigItem(i, False, k_stripped, v.strip(), True, line, comment))
                     else:
                         if s.upper() not in _GLOBAL_KEYS:
-                            self.items.append(ConfigItem(i, False, s, "", False, line, pending_comment))
-                    pending_comment = ""
+                            comment = _KEY_COMMENTS.get(s.upper(), "")
+                            self.items.append(ConfigItem(i, False, s, "", False, line, comment))
 
         if self.items:
             self.selected_idx = min(self.selected_idx, len(self.items) - 1)

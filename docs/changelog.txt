@@ -4,6 +4,7 @@
     streamer-site:  "output_dir > {streamer} > {site_label} > recording.mp4"
     site-streamer:  "output_dir > {site_label} > {streamer} > recording.mp4"
     off:            "output_dir > recording.mp4"
+- removed comments from config files. config key descriptions now live exclusively in the Config tab of jj-dlp
 
 ====================
 ====================

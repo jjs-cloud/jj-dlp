@@ -18,7 +18,7 @@ _API_BASE   = "https://api.github.com/repos/jjs-cloud/jj-dlp"
 # ── Updater version ───────────────────────────────────────────────────────────
 # Incremented independently of the main jj-dlp version so we can tell which
 # updater logic is actually running during an update.
-UPDATER_VERSION = "2.3.6"
+UPDATER_VERSION = "2.4.0"
 
 # ── Lazy package imports ──────────────────────────────────────────────────────
 # Relative imports are deferred to call time so this file is also safe to
@@ -52,6 +52,37 @@ def _load_global_json() -> dict:
 def _save_global_json(data: dict) -> None:
     from .main import _save_global_json as _f
     _f(data)
+
+def _load_config_keys(source_dir=None):
+    """Return the CONFIG_KEYS tuple.
+
+    Merge logic that needs CONFIG_KEYS (currently just preserved-key lookup)
+    runs inside the stage2 subprocess, which always executes this very file
+    (updater.py) directly out of the freshly-extracted source_dir as
+    __main__. In that context, `__file__` already points at the fresh copy
+    on disk, so the plain absolute-import fallback below resolves
+    `jj_dlp.config_editor` against the fresh package automatically — no
+    synthetic sys.modules package or spec_from_file_location trick is needed
+    to dodge stale, already-imported CONFIG_KEYS.
+
+    `source_dir` is kept as a parameter for call-site compatibility but is
+    no longer used directly; it's implied by where this file lives when
+    running as __main__.
+    """
+    try:
+        from .config_editor import CONFIG_KEYS as _ck
+        return _ck
+    except ImportError:
+        try:
+            _pkg_dir = os.path.dirname(os.path.abspath(__file__))
+            _proj_root = os.path.dirname(_pkg_dir)
+            if _proj_root not in sys.path:
+                sys.path.insert(0, _proj_root)
+            from jj_dlp.config_editor import CONFIG_KEYS as _ck
+            return _ck
+        except Exception:
+            return None
+
 
 def _get_preserved_keys(source_dir=None) -> list:
     """Return the list of preserved key names, derived from CONFIG_KEYS.
@@ -312,91 +343,6 @@ def inject_preserved_keys(new_text, old_config_path, source_dir=None):
     return new_text
 
 
-def _load_config_keys(source_dir=None):
-    """Return the CONFIG_KEYS tuple.
-
-    All merge/comment logic that needs CONFIG_KEYS now runs inside the
-    stage2 subprocess, which always executes this very file (updater.py)
-    directly out of the freshly-extracted source_dir as __main__. In that
-    context, `__file__` already points at the fresh copy on disk, so the
-    plain absolute-import fallback below resolves `jj_dlp.config_editor`
-    against the fresh package automatically — no synthetic sys.modules
-    package or spec_from_file_location trick is needed to dodge stale,
-    already-imported CONFIG_KEYS.
-
-    `source_dir` is kept as a parameter for call-site compatibility but is
-    no longer used directly; it's implied by where this file lives when
-    running as __main__.
-    """
-    try:
-        from .config_editor import CONFIG_KEYS as _ck
-        return _ck
-    except ImportError:
-        try:
-            _pkg_dir = os.path.dirname(os.path.abspath(__file__))
-            _proj_root = os.path.dirname(_pkg_dir)
-            if _proj_root not in sys.path:
-                sys.path.insert(0, _proj_root)
-            from jj_dlp.config_editor import CONFIG_KEYS as _ck
-            return _ck
-        except Exception:
-            return None
-
-
-def update_config_comments(text, source_dir=None):
-    """Replace or insert the canonical comment line immediately above each
-    CONFIG_KEYS entry found in the [General] section.
-
-    Rules:
-    - Only touches lines inside [General]; other sections are left unchanged.
-    - If the line immediately preceding a key assignment starts with '#', it is
-      replaced with the comment from CONFIG_KEYS.
-    - If there is no preceding comment line, one is inserted.
-    - Multi-line comment blocks are not collapsed; only the single line
-      immediately above the key is considered.
-    - Keys not present in CONFIG_KEYS are left untouched.
-
-    `source_dir` should be the freshly-extracted update directory, when
-    available, so the comment text reflects the version being installed
-    rather than the version currently running (see _load_config_keys).
-    """
-    _ck = _load_config_keys(source_dir)
-    if not _ck:
-        return text
-
-    comment_map = {kdef.name.upper(): kdef.comment for kdef in _ck}
-
-    lines = text.splitlines(keepends=True)
-    in_general = False
-    result = []
-
-    for line in lines:
-        stripped = line.strip()
-
-        # Track section changes.
-        if stripped.startswith('[') and stripped.endswith(']'):
-            in_general = (stripped[1:-1].lower() == 'general')
-            result.append(line)
-            continue
-
-        # Only process key assignments inside [General].
-        if in_general and '=' in stripped and not stripped.startswith('#'):
-            key_part = stripped.split('=', 1)[0].strip().upper()
-            if key_part in comment_map:
-                new_comment = f"# {comment_map[key_part]}\n"
-                # Replace the immediately preceding comment, or insert one.
-                if result and result[-1].strip().startswith('#'):
-                    result[-1] = new_comment
-                else:
-                    result.append(new_comment)
-                result.append(line)
-                continue
-
-        result.append(line)
-
-    return ''.join(result)
-
-
 def replace_section(text, sec_name, new_content):
     lines = text.splitlines()
     out = []
@@ -615,7 +561,6 @@ if __name__ == "__main__":
                         if _pat.search(_new_txt):
                             _new_txt = _pat.sub(lambda m, v=_oval: f"{m.group(1)} {v}", _new_txt)
 
-                _new_txt = update_config_comments(_new_txt, _source_dir)
                 _new_txt = replace_section(_new_txt, "Streamers", _streamers)
                 _new_txt = replace_section(_new_txt, "Block", _blocked)
                 create_diff(_old_txt, _new_txt, _ucfg, _diff_dir)
