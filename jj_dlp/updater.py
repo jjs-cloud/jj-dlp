@@ -17,7 +17,7 @@ _API_BASE   = "https://api.github.com/repos/jjs-cloud/jj-dlp"
 # ── Updater version ───────────────────────────────────────────────────────────
 # Incremented independently of the main jj-dlp version so we can tell which
 # updater logic is actually running during an update.
-UPDATER_VERSION = "2.3.3"
+UPDATER_VERSION = "2.3.1"
 
 # ── Lazy package imports ──────────────────────────────────────────────────────
 # Relative imports are deferred to call time so this file is also safe to
@@ -468,9 +468,11 @@ def _load_config_keys(source_dir=None):
                     pass
                 # fall through to the installed-package lookup below
             finally:
-                # Don't leave the synthetic modules cached across calls/runs.
-                sys.modules.pop(_mod_name, None)
-                sys.modules.pop(_pkg_name, None)
+                # Don't leave the synthetic package (or any submodules it pulled
+                # in via relative imports, e.g. theme/logger) cached across
+                # calls/runs.
+                for _k in [k for k in sys.modules if k == _pkg_name or k.startswith(_pkg_name + ".")]:
+                    sys.modules.pop(_k, None)
 
     # Resolve CONFIG_KEYS whether called as a package or as __main__.
     try:
