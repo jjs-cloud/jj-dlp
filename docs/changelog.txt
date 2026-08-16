@@ -1,3 +1,13 @@
+- added additional options to the SUBFOLDERS global setting.  Here are the new options:
+    streamer-only:  "output_dir > {streamer} > recording.mp4"
+    site-only:      "output_dir > {site_label} > recording.mp4"
+    streamer-site:  "output_dir > {streamer} > {site_label} > recording.mp4"
+    site-streamer:  "output_dir > {site_label} > {streamer} > recording.mp4"
+    off:            "output_dir > recording.mp4"
+
+====================
+====================
+
 v1.27.0
 
 - updated the OUTPUT_TMPL for tiktok-live to fix issues with special characters in the filename 

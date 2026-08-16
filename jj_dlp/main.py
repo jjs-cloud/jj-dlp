@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.27.1"
+__version__ = "1.27.2"
 
 import subprocess
 import textwrap
@@ -2923,11 +2923,19 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
     channel_url = cfg["site_tmpl"].format(username=streamer)
     output_dir  = cfg["output_dir"]
 
-    # If SUBFOLDERS is enabled in global.conf, nest recordings under a
-    # per-streamer subdirectory (e.g. recordings/streamer_name/).
+    # Nest recordings under a subfolder per SUBFOLDERS mode in global.conf.
     _global_cfg_rs = load_global_config()
-    if _global_cfg_rs.get("subfolders", False):
+    _subfolders_mode = _global_cfg_rs.get("subfolders", "off")
+    _site_label = cfg.get("site_label", "")
+    if _subfolders_mode == "streamer-only":
         output_dir = os.path.join(output_dir, streamer)
+    elif _subfolders_mode == "site-only":
+        output_dir = os.path.join(output_dir, _site_label)
+    elif _subfolders_mode == "streamer-site":
+        output_dir = os.path.join(output_dir, streamer, _site_label)
+    elif _subfolders_mode == "site-streamer":
+        output_dir = os.path.join(output_dir, _site_label, streamer)
+    # "off" (or any unrecognized value) leaves output_dir unchanged.
 
     os.makedirs(output_dir, exist_ok=True)
 

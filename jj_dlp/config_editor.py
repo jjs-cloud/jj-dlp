@@ -63,7 +63,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("MAX_CONCURRENT_REC",    "global", "0",     True, type="int",  comment='The maximum number of simultaneous recordings allowed to run.  Use the STREAMER SETTINGS panel in the Config tab to adjust the priority of each streamer. (0=no limit)'),
     _KeyDef("LQ_DOWNLOADER",         "global", "false", True, type="bool",  comment="When any recording reaches the ffmpeg error threshold (FF_ERR_THRESH) lower the video quality of the lowest priority streamer, freeing up bandwidth for the remaining streamers."),
     _KeyDef("FF_ERR_THRESH",         "global", "200",   True, type="int",  comment='Restart the download if we see this many ffmpeg errors ("timestamp discontinuity", "Packet corrupt") default: 200'),
-    _KeyDef("SUBFOLDERS",            "global", "false", True, type="bool",  comment="Save recordings into a subfolder named after the streamer inside OUTPUT_DIR (true/false)."),
+    _KeyDef("SUBFOLDERS",            "global", "off",   True, type="str",   comment="Save recordings in a subfolder(s) inside OUTPUT_DIR. Options: streamer-only, site-only, streamer-site, site-streamer, off"),
     _KeyDef("GRAPH_SCALE",           "global", "300",   True, type="int",  comment="The number of seconds each bar in the graph represents. (default = 600)."),
     _KeyDef("DESTINATIONS",          "global", "",      True, type="list",  comment="A list of destination paths where you might want to move your files.  Used in the File Manager tab. (e.g. C:\\My Recordings  OR /home/greg/twitch)"),
     _KeyDef("NTFY_TOPIC",            "global", "",      True,  comment="The topic name to use for ntfy.sh notifications. (example: jj-dlp-fj48dh734fk) Refer to docs/ntfy-setup.md for a detailed setup guide. (blank = disabled)"),
@@ -131,6 +131,20 @@ PRESERVED_KEYS: list[str] = [k.name for k in CONFIG_KEYS if k.preserve]
 _KEY_PRESERVE: dict[str, bool] = {k.name: k.preserve for k in CONFIG_KEYS}
 
 
+# Valid SUBFOLDERS modes (new-style values only; true/false are legacy aliases).
+SUBFOLDERS_MODES: tuple[str, ...] = ("streamer-only", "site-only", "streamer-site", "site-streamer", "off")
+
+
+def _coerce_subfolders_value(raw: str) -> str:
+    """Coerce a raw SUBFOLDERS string, mapping legacy true/false to the new modes."""
+    val = (raw or "").strip().strip('"\'').lower()
+    if val in ("true", "1", "yes"):
+        return "streamer-only"
+    if val in ("false", "0", "no", ""):
+        return "off"
+    return val if val in SUBFOLDERS_MODES else "off"
+
+
 def _coerce_global_value(kdef: "_KeyDef", raw: str) -> object:
     """Coerce a raw global.conf string into the runtime type declared by kdef.type."""
     raw = (raw or "").strip().strip('"\'')
@@ -182,6 +196,7 @@ def load_global_config(path: str) -> dict:
 
     # A couple of keys need a touch of normalization beyond their basic type.
     cfg["update_branch"] = cfg["update_branch"].lower()
+    cfg["subfolders"] = _coerce_subfolders_value(general.get("SUBFOLDERS", ""))
     if not cfg["compact_view"]:
         cfg["compact_view"] = "auto"
     cfg["graph_scale"] = max(1, cfg["graph_scale"])
@@ -2341,7 +2356,7 @@ def _validate_value(key: str, value: str) -> tuple[bool, str]:
     """Validate config values based on their expected types."""
     bool_keys = {"DEBUG_LOGS", "CHECK_FOR_UPDATES", "ASK_FOR_BROWSER", "ASK_FOR_CONFIG",
                  "PANEL_RESIZE", "LOGGING", "SPLIT_LOGS", "POPUP_NOTIFICATIONS",
-                 "DOWNLOADER_COOKIES", "CHECKER_COOKIES", "LQ_DOWNLOADER", "SUBFOLDERS",
+                 "DOWNLOADER_COOKIES", "CHECKER_COOKIES", "LQ_DOWNLOADER",
                  "UPGRADE_QUALITY", "WEB_UI"}
     int_keys = {"UPDATE_INTERVAL", "SITE_ORDER", "CHECK_INTERVAL", "COOLDOWN_AFTER_RECORDING",
                 "SPLIT_AFTER", "STALL_CHECK_INTERVAL", "STALL_TIMEOUT", "CONFIG_CHECK_INTERVAL",
@@ -2367,6 +2382,11 @@ def _validate_value(key: str, value: str) -> tuple[bool, str]:
     if key == "SITE_SORT":
         if value.lower() not in _SORT_KEYS:
             return False, f"Must be one of: {', '.join(_SORT_KEYS)}"
+    if key == "SUBFOLDERS":
+        # true/false are still readable from the file (see _coerce_subfolders_value)
+        # but aren't offered as valid input here.
+        if value.lower() not in SUBFOLDERS_MODES:
+            return False, f"Must be one of: {', '.join(SUBFOLDERS_MODES)}"
     if key == "WEB_UI_PORT":
         try:
             port = int(value)
