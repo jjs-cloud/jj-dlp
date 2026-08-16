@@ -18,15 +18,14 @@ _API_BASE   = "https://api.github.com/repos/jjs-cloud/jj-dlp"
 # ── Updater version ───────────────────────────────────────────────────────────
 # Incremented independently of the main jj-dlp version so we can tell which
 # updater logic is actually running during an update.
-UPDATER_VERSION = "2.3.4"
+UPDATER_VERSION = "2.3.5"
 
 # ── Lazy package imports ──────────────────────────────────────────────────────
 # Relative imports are deferred to call time so this file is also safe to
-# execute as a standalone script (the old stage-2 subprocess path).  When run
+# execute as a standalone script (the --stage2 subprocess path, now the
+# canonical merge/install mechanism — see the __main__ block below). When run
 # as a script __name__ == "__main__" and relative imports would crash at parse
 # time if they were at module scope.
-
-# All compatibility code (stage-2, lazy imports) is set to be removed in version 3.0.0
 
 class _NullLogger:
     """No-op stand-in for the real logger module, used when this file is
@@ -556,8 +555,8 @@ if __name__ == "__main__":
         #    falling back to the installed package if unavailable ───────────
         _PKEYS = _get_preserved_keys(_source_dir)
 
-        _sdbg(f"stage2-compat starting: source={_source_dir} base={_base_dir} temp={_temp_dir}")
-        print("Running stage 2 of update (compat mode)...")
+        _sdbg(f"stage2 starting: source={_source_dir} base={_base_dir} temp={_temp_dir} branch={_branch}")
+        print("Installing update...")
 
         try:
             _diff_dir = os.path.join(_base_dir, "diff")
