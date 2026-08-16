@@ -286,6 +286,105 @@ def _get_site_default_cfg(dashboard, entry: "PriorityEntry") -> dict:
     return {}
 
 
+# ── Per-streamer setting override keys, grouped by which popup owns them ────
+# Used by the 'R' (Reset) hotkey on each settings popup: a sub-popup passes
+# only the keys it owns, while StreamerSettingsPopup (the top-level menu)
+# passes the full union to reset everything for that streamer at once.
+_ALL_STREAMER_SETTING_KEYS: "tuple[str, ...]" = (
+    "schedule",
+    "lq_enabled",
+    "split_mode", "split_after", "split_enabled",
+    "notifications_enabled",
+    "intro_delay_enabled", "intro_delay_minutes", "intro_delay_split",
+    "auto_suffix_mode",
+    "output_dir_mode", "output_dir_custom_enabled", "output_dir_custom_path",
+)
+
+
+def _reset_streamer_setting_keys(dashboard, config_id: str, entry: "PriorityEntry",
+                                  keys: "tuple[str, ...]") -> None:
+    """Remove *keys* from entry's record in global.json, reverting those
+    settings back to inherited / site-default behavior."""
+    try:
+        from .main import _global_json_lock, _load_global_json, _save_global_json
+        with _global_json_lock:
+            gdata   = _load_global_json()
+            entries = (gdata.get("priorities", {})
+                           .get(config_id, {})
+                           .get("entries", []))
+            for e in entries:
+                if e.get("streamer") == entry.streamer and e.get("site") == entry.site:
+                    for k in keys:
+                        e.pop(k, None)
+                    break
+            gdata.setdefault("priorities", {}).setdefault(
+                config_id, {"config_files": [], "entries": []}
+            )["entries"] = entries
+            _save_global_json(gdata)
+    except Exception:
+        pass
+
+    # Invalidate the sort manager's priority cache so the "*" has_override
+    # marker in the PRIORITY panel refreshes immediately.
+    try:
+        sort_mgr = getattr(dashboard, "sort_manager", None)
+        if sort_mgr is not None:
+            sort_mgr._prio_cache_ts = 0.0
+    except Exception:
+        pass
+
+
+class ConfirmResetPopup:
+    """Small Yes/No confirmation dialog, shown on top of a settings popup
+    when the user presses 'R' (Reset). Drawn centered over whatever popup
+    created it; the owning popup is responsible for calling handle_key()/
+    draw() while this is active and for acting on the "yes"/"no" result.
+    """
+
+    def __init__(self, dashboard, message: str):
+        self.dashboard = dashboard
+        self.lines = self._wrap(message, 44)
+
+    @staticmethod
+    def _wrap(message: str, width: int) -> "list[str]":
+        import textwrap
+        return textwrap.wrap(message, width) or [message]
+
+    def handle_key(self, key):
+        """Returns 'yes', 'no', or None (no decision yet)."""
+        if key in (ord('y'), ord('Y')):
+            return "yes"
+        if key in (27, ord('n'), ord('N')):
+            return "no"
+        return None
+
+    def draw(self, stdscr) -> None:
+        db = self.dashboard
+        h, w = stdscr.getmaxyx()
+
+        content_w = max(len(l) for l in self.lines)
+        box_w = min(content_w + 6, w - 4)
+        box_h = len(self.lines) + 4
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_confirmresetpopup_draw_normal"))
+
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_WARN)
+        title = " CONFIRM RESET "
+        db.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(db, "config_editor_confirmresetpopup_draw_warn_1"))
+
+        row = by1 + 2
+        for line in self.lines:
+            db.safe_addstr(stdscr, row, bx1 + 3, line[:box_w - 6], theme.attr(db, "config_editor_confirmresetpopup_draw_normal_2"))
+            row += 1
+
+        db.safe_addstr(stdscr, by2, bx1 + 2, " Y:Yes  N/Esc:No "[:box_w - 4], theme.attr(db, "config_editor_confirmresetpopup_draw_invhead"))
+
+
 class PriorityEditor:
     """Manages the PRIORITY panel: display, reordering, bypass toggle, persistence."""
 
@@ -706,8 +805,21 @@ class StreamerSettingsPopup:
         self._notifications_popup: "Optional[NotificationSettingsPopup]" = None
         self._auto_suffix_popup: "Optional[AutoSuffixSettingsPopup]" = None
         self._output_dir_popup: "Optional[OutputDirectorySettingsPopup]" = None
+        self._confirm_reset: "Optional[ConfirmResetPopup]" = None
+
+    def _reset_all(self) -> None:
+        _reset_streamer_setting_keys(self.dashboard, self.config_id, self.entry, _ALL_STREAMER_SETTING_KEYS)
 
     def handle_key(self, key) -> bool:
+        if self._confirm_reset is not None:
+            result = self._confirm_reset.handle_key(key)
+            if result == "yes":
+                self._reset_all()
+                self._confirm_reset = None
+            elif result == "no":
+                self._confirm_reset = None
+            return False
+
         if self._schedule_popup is not None:
             should_close = self._schedule_popup.handle_key(key)
             if should_close:
@@ -759,6 +871,11 @@ class StreamerSettingsPopup:
 
         if key == 27:  # Esc
             return True
+        elif key in (ord('r'), ord('R')):
+            self._confirm_reset = ConfirmResetPopup(
+                self.dashboard,
+                f"Are you sure you want to reset all settings for {self.entry.streamer}?",
+            )
         elif key == curses.KEY_UP:
             self._sel = max(0, self._sel - 1)
         elif key == curses.KEY_DOWN:
@@ -862,7 +979,10 @@ class StreamerSettingsPopup:
             db.safe_addstr(stdscr, row, bx1 + 2, prefix + opt, attr)
             row += 2
             
-        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Select  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_streamersettingspopu_draw_invhead"))
+        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Select  R:Reset  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_streamersettingspopu_draw_invhead"))
+
+        if self._confirm_reset is not None:
+            self._confirm_reset.draw(stdscr)
 
 
 class QualitySettingsPopup:
@@ -871,6 +991,7 @@ class QualitySettingsPopup:
         self.entry     = entry
         self.config_id = config_id
         self.lq_enabled = False
+        self._confirm_reset: "Optional[ConfirmResetPopup]" = None
         self._load()
 
     def _load(self) -> None:
@@ -888,6 +1009,10 @@ class QualitySettingsPopup:
                     break
         except Exception:
             pass
+
+    def _reset(self) -> None:
+        _reset_streamer_setting_keys(self.dashboard, self.config_id, self.entry, ("lq_enabled",))
+        self._load()
 
     def _save(self) -> None:
         try:
@@ -922,8 +1047,22 @@ class QualitySettingsPopup:
             pass
 
     def handle_key(self, key) -> bool:
+        if self._confirm_reset is not None:
+            result = self._confirm_reset.handle_key(key)
+            if result == "yes":
+                self._reset()
+                self._confirm_reset = None
+            elif result == "no":
+                self._confirm_reset = None
+            return False
+
         if key == 27:
             return True
+        elif key in (ord('r'), ord('R')):
+            self._confirm_reset = ConfirmResetPopup(
+                self.dashboard,
+                f"Are you sure you want to reset the Quality settings for {self.entry.streamer}?",
+            )
         elif key == ord(' '):
             self.lq_enabled = not self.lq_enabled
         elif key in (10, 13, curses.KEY_ENTER, 459):
@@ -953,7 +1092,10 @@ class QualitySettingsPopup:
         db.safe_addstr(stdscr, by1 + 2, bx1 + 2, "> Low Quality Enabled: ", theme.attr(db, "config_editor_qualitysettingspopup_draw_hilight_1"))
         db.safe_addstr(stdscr, by1 + 2, bx1 + 25, val_str, theme.attr(db, "config_editor_qualitysettingspopup_draw_hilight_2"))
             
-        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space:Toggle  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_qualitysettingspopup_draw_invhead"))
+        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space:Toggle  R:Reset  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_qualitysettingspopup_draw_invhead"))
+
+        if self._confirm_reset is not None:
+            self._confirm_reset.draw(stdscr)
 
 
 class NotificationSettingsPopup:
@@ -978,6 +1120,11 @@ class NotificationSettingsPopup:
         self.entry     = entry
         self.config_id = config_id
         self.state: str = "inherit"   # "inherit" | "on" | "off"
+        self._confirm_reset: "Optional[ConfirmResetPopup]" = None
+        self._load()
+
+    def _reset(self) -> None:
+        _reset_streamer_setting_keys(self.dashboard, self.config_id, self.entry, ("notifications_enabled",))
         self._load()
 
     def _load(self) -> None:
@@ -1044,8 +1191,22 @@ class NotificationSettingsPopup:
         return bool(cfg.get("ntfy_notifications", True))
 
     def handle_key(self, key) -> bool:
+        if self._confirm_reset is not None:
+            result = self._confirm_reset.handle_key(key)
+            if result == "yes":
+                self._reset()
+                self._confirm_reset = None
+            elif result == "no":
+                self._confirm_reset = None
+            return False
+
         if key == 27:
             return True
+        elif key in (ord('r'), ord('R')):
+            self._confirm_reset = ConfirmResetPopup(
+                self.dashboard,
+                f"Are you sure you want to reset the Notifications settings for {self.entry.streamer}?",
+            )
         elif key == ord(' '):
             idx = self._STATES.index(self.state)
             self.state = self._STATES[(idx + 1) % len(self._STATES)]
@@ -1091,7 +1252,10 @@ class NotificationSettingsPopup:
         db.safe_addstr(stdscr, by1 + 4, bx1 + 2, "Effective: ", theme.attr(db, "config_editor_notificationsettings_draw_normal_2"))
         db.safe_addstr(stdscr, by1 + 4, bx1 + 13, eff_str, theme.attr(db, "config_editor_notificationsettings_draw_warn"))
 
-        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_notificationsettings_draw_invhead"))
+        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space/\u2190\u2192:Cycle  R:Reset  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_notificationsettings_draw_invhead"))
+
+        if self._confirm_reset is not None:
+            self._confirm_reset.draw(stdscr)
 
 
 class AutoSuffixSettingsPopup:
@@ -1111,6 +1275,11 @@ class AutoSuffixSettingsPopup:
         self.entry     = entry
         self.config_id = config_id
         self.state: str = "inherit"   # "inherit" | "on" | "off"
+        self._confirm_reset: "Optional[ConfirmResetPopup]" = None
+        self._load()
+
+    def _reset(self) -> None:
+        _reset_streamer_setting_keys(self.dashboard, self.config_id, self.entry, ("auto_suffix_mode",))
         self._load()
 
     def _load(self) -> None:
@@ -1177,8 +1346,22 @@ class AutoSuffixSettingsPopup:
         return bool(cfg.get("auto_suffix", True))
 
     def handle_key(self, key) -> bool:
+        if self._confirm_reset is not None:
+            result = self._confirm_reset.handle_key(key)
+            if result == "yes":
+                self._reset()
+                self._confirm_reset = None
+            elif result == "no":
+                self._confirm_reset = None
+            return False
+
         if key == 27:
             return True
+        elif key in (ord('r'), ord('R')):
+            self._confirm_reset = ConfirmResetPopup(
+                self.dashboard,
+                f"Are you sure you want to reset the Auto-Suffix settings for {self.entry.streamer}?",
+            )
         elif key == ord(' '):
             idx = self._STATES.index(self.state)
             self.state = self._STATES[(idx + 1) % len(self._STATES)]
@@ -1224,7 +1407,10 @@ class AutoSuffixSettingsPopup:
         db.safe_addstr(stdscr, by1 + 4, bx1 + 2, "Effective: ", theme.attr(db, "config_editor_autosuffixsettingspo_draw_normal_2"))
         db.safe_addstr(stdscr, by1 + 4, bx1 + 13, eff_str, theme.attr(db, "config_editor_autosuffixsettingspo_draw_warn"))
 
-        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_autosuffixsettingspo_draw_invhead"))
+        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space/\u2190\u2192:Cycle  R:Reset  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_autosuffixsettingspo_draw_invhead"))
+
+        if self._confirm_reset is not None:
+            self._confirm_reset.draw(stdscr)
 
 
 class OutputDirectorySettingsPopup:
@@ -1264,6 +1450,7 @@ class OutputDirectorySettingsPopup:
         self._sel:          int = 0
         self._path_cursor:  int = 0
         self._error:        str = ""
+        self._confirm_reset: "Optional[ConfirmResetPopup]" = None
 
         self._load()
 
@@ -1391,6 +1578,15 @@ class OutputDirectorySettingsPopup:
 
     def handle_key(self, key) -> bool:
         """Handle one keypress. Returns True when the popup should close."""
+        if self._confirm_reset is not None:
+            result = self._confirm_reset.handle_key(key)
+            if result == "yes":
+                self._reset()
+                self._confirm_reset = None
+            elif result == "no":
+                self._confirm_reset = None
+            return False
+
         fields = self._get_fields()
         self._sel = min(self._sel, len(fields) - 1)
         _, field_key = fields[self._sel]
@@ -1435,6 +1631,11 @@ class OutputDirectorySettingsPopup:
         # ── Normal navigation (mode row / checkbox row) ─────────────────────
         if key == 27:
             return True
+        elif key in (ord('r'), ord('R')):
+            self._confirm_reset = ConfirmResetPopup(
+                self.dashboard,
+                f"Are you sure you want to reset the Subfolders settings for {self.entry.streamer}?",
+            )
         elif key == curses.KEY_UP:
             self._sel = max(0, self._sel - 1)
             self._error = ""
@@ -1465,6 +1666,14 @@ class OutputDirectorySettingsPopup:
         if self.custom_enabled and not self.custom_path.strip():
             return False, "Enter a custom output directory, or uncheck it"
         return True, ""
+
+    def _reset(self) -> None:
+        _reset_streamer_setting_keys(
+            self.dashboard, self.config_id, self.entry,
+            ("output_dir_mode", "output_dir_custom_enabled", "output_dir_custom_path"),
+        )
+        self._sel = 0
+        self._load()
 
     # ── Drawing ────────────────────────────────────────────────────────────────
 
@@ -1535,8 +1744,11 @@ class OutputDirectorySettingsPopup:
             db.safe_addstr(stdscr, by2 - 1, bx1 + 2, self._error[:box_w - 4],
                            theme.attr(db, "config_editor_outputdirectorysett_draw_warn_3"))
 
-        footer = " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "
+        footer = " Enter:Save  Space/\u2190\u2192:Cycle  R:Reset  Esc:Cancel "
         db.safe_addstr(stdscr, by2, bx1 + 2, footer[:box_w - 4], theme.attr(db, "config_editor_outputdirectorysett_draw_invhead"))
+
+        if self._confirm_reset is not None:
+            self._confirm_reset.draw(stdscr)
 
 
 class SplitSettingsPopup:
@@ -1577,7 +1789,16 @@ class SplitSettingsPopup:
         self._editing:  bool = False  # text-field edit sub-mode
         self._edit_buf: str  = ""
         self._error:    str  = ""
+        self._confirm_reset: "Optional[ConfirmResetPopup]" = None
 
+        self._load()
+
+    def _reset(self) -> None:
+        _reset_streamer_setting_keys(
+            self.dashboard, self.config_id, self.entry,
+            ("split_mode", "split_after", "split_enabled"),
+        )
+        self._sel = 0
         self._load()
 
     # ── Persistence ────────────────────────────────────────────────────────────
@@ -1686,6 +1907,15 @@ class SplitSettingsPopup:
 
     def handle_key(self, key) -> bool:
         """Handle one keypress. Returns True when the popup should close."""
+        if self._confirm_reset is not None:
+            result = self._confirm_reset.handle_key(key)
+            if result == "yes":
+                self._reset()
+                self._confirm_reset = None
+            elif result == "no":
+                self._confirm_reset = None
+            return False
+
         fields = self._get_fields()
         _, _, field_key = fields[self._sel]
 
@@ -1720,6 +1950,12 @@ class SplitSettingsPopup:
         # ── Normal navigation ─────────────────────────────────────────────────
         if key == 27:                                   # Esc → close without saving
             return True
+
+        elif key in (ord('r'), ord('R')):
+            self._confirm_reset = ConfirmResetPopup(
+                self.dashboard,
+                f"Are you sure you want to reset the Split settings for {self.entry.streamer}?",
+            )
 
         elif key == curses.KEY_UP:
             self._sel   = max(0, self._sel - 1)
@@ -1809,8 +2045,11 @@ class SplitSettingsPopup:
             db.safe_addstr(stdscr, by2 - 1, bx1 + 2, self._error[:box_w - 4],
                            theme.attr(db, "config_editor_splitsettingspopup_draw_warn_3"))
 
-        footer = " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "
+        footer = " Enter:Save  Space/\u2190\u2192:Cycle  R:Reset  Esc:Cancel "
         db.safe_addstr(stdscr, by2, bx1 + 2, footer[:box_w - 4], theme.attr(db, "config_editor_splitsettingspopup_draw_invhead"))
+
+        if self._confirm_reset is not None:
+            self._confirm_reset.draw(stdscr)
 
 
 class IntroDelaySettingsPopup:
@@ -1838,7 +2077,16 @@ class IntroDelaySettingsPopup:
         self._editing:  bool = False  # text-field edit sub-mode (minutes)
         self._edit_buf: str  = ""
         self._error:    str  = ""
+        self._confirm_reset: "Optional[ConfirmResetPopup]" = None
 
+        self._load()
+
+    def _reset(self) -> None:
+        _reset_streamer_setting_keys(
+            self.dashboard, self.config_id, self.entry,
+            (self._FIELD_ENABLED, self._FIELD_MINUTES, self._FIELD_SPLIT),
+        )
+        self._sel = 0
         self._load()
 
     # ── Persistence ────────────────────────────────────────────────────────────
@@ -1936,6 +2184,15 @@ class IntroDelaySettingsPopup:
 
     def handle_key(self, key) -> bool:
         """Handle one keypress. Returns True when the popup should close."""
+        if self._confirm_reset is not None:
+            result = self._confirm_reset.handle_key(key)
+            if result == "yes":
+                self._reset()
+                self._confirm_reset = None
+            elif result == "no":
+                self._confirm_reset = None
+            return False
+
         fields = self._get_fields()
         _, _, field_key = fields[self._sel]
 
@@ -1970,6 +2227,12 @@ class IntroDelaySettingsPopup:
         # ── Normal navigation ─────────────────────────────────────────────────
         if key == 27:                                   # Esc → close without saving
             return True
+
+        elif key in (ord('r'), ord('R')):
+            self._confirm_reset = ConfirmResetPopup(
+                self.dashboard,
+                f"Are you sure you want to reset the Intro Delay settings for {self.entry.streamer}?",
+            )
 
         elif key == curses.KEY_UP:
             self._sel   = max(0, self._sel - 1)
@@ -2059,8 +2322,11 @@ class IntroDelaySettingsPopup:
             db.safe_addstr(stdscr, by2 - 1, bx1 + 2, self._error[:box_w - 4],
                            theme.attr(db, "config_editor_introdelaysettingspo_draw_warn_3"))
 
-        footer = " Enter:Save  Space:Toggle/Edit  Esc:Cancel "
+        footer = " Enter:Save  Space:Toggle/Edit  R:Reset  Esc:Cancel "
         db.safe_addstr(stdscr, by2, bx1 + 2, footer[:box_w - 4], theme.attr(db, "config_editor_introdelaysettingspo_draw_invhead"))
+
+        if self._confirm_reset is not None:
+            self._confirm_reset.draw(stdscr)
 
 
 class ScheduleSettingsPopup:
@@ -2104,6 +2370,7 @@ class ScheduleSettingsPopup:
         self._edit_buf:   str  = ""
         self._day_cursor: int  = 0      # sub-cursor within the Days row
         self._error:      str  = ""
+        self._confirm_reset: "Optional[ConfirmResetPopup]" = None
 
         self._load()
 
@@ -2227,6 +2494,12 @@ class ScheduleSettingsPopup:
 
     # ── Validation ─────────────────────────────────────────────────────────────
 
+    def _reset(self) -> None:
+        _reset_streamer_setting_keys(self.dashboard, self.config_id, self.entry, ("schedule",))
+        self._sel = 0
+        self._day_cursor = 0
+        self._load()
+
     def _validate(self) -> "tuple[bool, str]":
         if not self.schedule_enabled:
             return True, ""
@@ -2252,6 +2525,15 @@ class ScheduleSettingsPopup:
 
     def handle_key(self, key) -> bool:
         """Handle one keypress.  Returns True when the popup should close."""
+        if self._confirm_reset is not None:
+            result = self._confirm_reset.handle_key(key)
+            if result == "yes":
+                self._reset()
+                self._confirm_reset = None
+            elif result == "no":
+                self._confirm_reset = None
+            return False
+
         fields = self._get_fields()
         n      = len(fields)
         _, _, field_key = fields[self._sel] if fields else ("", "", "")
@@ -2289,7 +2571,13 @@ class ScheduleSettingsPopup:
         if key == 27:                                   # Esc → close without saving
             return True
 
-        if key == curses.KEY_UP:
+        if key in (ord('r'), ord('R')):
+            self._confirm_reset = ConfirmResetPopup(
+                self.dashboard,
+                f"Are you sure you want to reset the Schedule settings for {self.entry.streamer}?",
+            )
+
+        elif key == curses.KEY_UP:
             self._sel   = max(0, self._sel - 1)
             self._error = ""
 
@@ -2424,9 +2712,12 @@ class ScheduleSettingsPopup:
             if self._editing:
                 hint = " Enter:Commit  Esc:Cancel edit "
             else:
-                hint = " Enter:Save  Esc:Cancel  Space:Toggle/Edit  \u2190\u2192:Mode/Days "
+                hint = " Enter:Save  Esc:Cancel  Space:Toggle/Edit  \u2190\u2192:Mode/Days  R:Reset "
             db.safe_addstr(stdscr, by2, bx1 + 2, hint[:box_w - 4],
                            theme.attr(db, "config_editor_schedulesettingspopu_draw_invhead"))
+
+        if self._confirm_reset is not None:
+            self._confirm_reset.draw(stdscr)
 
 
 def apply_sort_to_streamers(

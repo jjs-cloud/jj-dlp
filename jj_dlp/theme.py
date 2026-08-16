@@ -644,6 +644,10 @@ SITE_REGISTRY = {
     'main_jjdlpdashboard_curses_choose_browse_pairnum3_3': {'file': 'main.py', 'label': 'Browser Picker Splash — \'Do Not Show Again\' (Checked)', 'default_role': 'WARN', 'default_bold': True},
     'main_jjdlpdashboard_curses_choose_browse_pairnum3_4': {'file': 'main.py', 'label': 'Browser Picker Splash — \'Do Not Show Again\' (Unchecked)', 'default_role': 'WARN', 'default_bold': False},
     'main_jjdlpdashboard_curses_choose_browse_pairnum5_2': {'file': 'main.py', 'label': 'Browser Picker Splash — Footer', 'default_role': 'INVHEAD', 'default_bold': True},
+    'config_editor_confirmresetpopup_draw_normal': {'file': 'config_editor.py', 'label': 'Confirm Reset Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_confirmresetpopup_draw_warn_1': {'file': 'config_editor.py', 'label': 'Confirm Reset Popup — Title', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_confirmresetpopup_draw_normal_2': {'file': 'config_editor.py', 'label': 'Confirm Reset Popup — Message Text', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_confirmresetpopup_draw_invhead': {'file': 'config_editor.py', 'label': 'Confirm Reset Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
 }
 
 
