@@ -3250,7 +3250,7 @@ class GlobalConfigEditor:
         # path isn't truncated (min 66, capped to the terminal width).
         longest_path = max((len(p) for p in eff_paths_probe), default=0)
         needed_w = 21 + longest_path + 2  # + right-hand padding before border
-        box_w   = min(max(66, needed_w), w - 4)
+        box_w   = min(max(90, needed_w), w - 4)
         inner_w = box_w - 4
         comment = self.editing_item.comment if self.editing_item else ""
         comment_lines = _wrap_text(comment, inner_w) if comment else []
