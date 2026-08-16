@@ -2797,6 +2797,17 @@ class GlobalConfigEditor:
         self._destinations_buf:    str  = ""
         self._destinations_scroll: int  = 0
 
+        # ── Subfolders popup state ──────────────────────────────────────────────
+        # Activated instead of the plain text popup when SUBFOLDERS is selected.
+        # Mirrors OutputDirectorySettingsPopup's mode selector, minus the
+        # per-streamer "Custom Output Directory" toggle/path (there's no
+        # single site/streamer to attach a custom path to at the global
+        # level) and minus the "Effective setting:" line (redundant here —
+        # the selector IS the setting). The "Effective path:" preview uses
+        # placeholders for the site and streamer since neither is known yet.
+        self.subfolders_mode:  bool = False
+        self._subfolders_value: str = "off"   # working copy of the mode
+
     @staticmethod
     def _find_global_conf() -> str:
         """Return the path to global.conf inside the configs/ directory."""
@@ -3140,6 +3151,107 @@ class GlobalConfigEditor:
                        " Enter: Add path (blank Enter: Done)  Esc: Done ",
                        theme.attr(db, "config_editor_globalconfigeditor_draw_destinations_po_invhead"))
 
+    # ── Subfolders popup (SUBFOLDERS key) ─────────────────────────────────────
+    # Mirrors StreamerSettingsPopup > Output Directory (OutputDirectorySettingsPopup):
+    # same "< mode >" selector, but with the "Custom Output Directory" toggle
+    # and "Effective setting:" line omitted, and the "Effective path:" preview
+    # built from placeholders since there's no concrete site/streamer here.
+
+    def _open_subfolders_popup(self) -> None:
+        """Switch to the mode-selector editor for the SUBFOLDERS key."""
+        self._subfolders_value = _coerce_subfolders_value(self.editing_item.value)
+        self.subfolders_mode = True
+
+    def _subfolders_effective_path(self) -> str:
+        base       = "<OUTPUT_DIR>"
+        streamer   = "<streamer>"
+        site_label = "<site>"
+        mode = self._subfolders_value
+        if mode == "streamer-only":
+            path = f"{base}/{streamer}"
+        elif mode == "site-only":
+            path = f"{base}/{site_label}"
+        elif mode == "streamer-site":
+            path = f"{base}/{streamer}/{site_label}"
+        elif mode == "site-streamer":
+            path = f"{base}/{site_label}/{streamer}"
+        else:
+            path = base  # "off" (or unrecognized)
+        return f"{path}/example.mp4"
+
+    def _handle_subfolders_key(self, key) -> bool:
+        """Handle keypresses while the SUBFOLDERS popup is open."""
+        if key == 27:  # Esc -> discard
+            self.subfolders_mode = False
+            self.editing_item    = None
+            return True
+        elif key in (ord(' '), curses.KEY_LEFT, curses.KEY_RIGHT):
+            idx  = SUBFOLDERS_MODES.index(self._subfolders_value)
+            step = -1 if key == curses.KEY_LEFT else 1
+            self._subfolders_value = SUBFOLDERS_MODES[(idx + step) % len(SUBFOLDERS_MODES)]
+            return True
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
+            self._save_subfolders()
+            self.subfolders_mode = False
+            self.editing_item    = None
+            return True
+        return True   # consume all other keys so they don't leak to the list
+
+    def _save_subfolders(self) -> None:
+        """Persist the selected mode back to global.conf."""
+        if self.editing_item and 0 <= self.editing_item.line_idx < len(self.lines):
+            self.lines[self.editing_item.line_idx] = f"{self.editing_item.key} = {self._subfolders_value}\n"
+        self.save()
+
+    def _draw_subfolders_popup(self, stdscr) -> None:
+        """Draw the SUBFOLDERS mode-selector popup."""
+        db   = self.dashboard
+        h, w = stdscr.getmaxyx()
+
+        box_w   = min(66, w - 4)
+        inner_w = box_w - 4
+        comment = self.editing_item.comment if self.editing_item else ""
+        comment_lines = _wrap_text(comment, inner_w) if comment else []
+        comment_h = len(comment_lines) + (1 if comment_lines else 0)
+
+        # 2 borders + 1 title gap + selector row + blank + effective-path row
+        # + blank + legend + comment rows (if any) + 1 blank separator after comment
+        box_h = 8 + comment_h
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_globalconfigeditor_draw_subfolders_popu_normal_1"))
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
+        db.safe_addstr(stdscr, by1, bx1 + 2, " SUBFOLDERS ",
+                       theme.attr(db, "config_editor_globalconfigeditor_draw_subfolders_popu_system"))
+
+        row = by1 + 1
+        if comment_lines:
+            for cl in comment_lines:
+                db.safe_addstr(stdscr, row, bx1 + 2, cl, theme.attr(db, "config_editor_globalconfigeditor_draw_subfolders_popu_dim_1"))
+                row += 1
+            row += 1  # blank separator
+        else:
+            row += 1
+
+        db.safe_addstr(stdscr, row, bx1 + 2, "> Subfolders: ",
+                       theme.attr(db, "config_editor_globalconfigeditor_draw_subfolders_popu_hilight_1"))
+        db.safe_addstr(stdscr, row, bx1 + 16, f"< {self._subfolders_value} >",
+                       theme.attr(db, "config_editor_globalconfigeditor_draw_subfolders_popu_hilight_2"))
+        row += 2
+
+        db.safe_addstr(stdscr, row, bx1 + 2, "Effective path: ",
+                       theme.attr(db, "config_editor_globalconfigeditor_draw_subfolders_popu_normal_3"))
+        eff_path = self._subfolders_effective_path()
+        db.safe_addstr(stdscr, row, bx1 + 21, eff_path[:box_w - 15],
+                       theme.attr(db, "config_editor_globalconfigeditor_draw_subfolders_popu_warn_2"))
+
+        footer = " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "
+        db.safe_addstr(stdscr, by2, bx1 + 2, footer[:box_w - 4], theme.attr(db, "config_editor_globalconfigeditor_draw_subfolders_popu_invhead"))
+
     def _draw_msg_filters_popup(self, stdscr) -> None:
         """Draw the per-message toggle popup for a single tag."""
         db   = self.dashboard
@@ -3358,6 +3470,8 @@ class GlobalConfigEditor:
             return self._handle_debug_tags_key(key)
         if self.destinations_mode:
             return self._handle_destinations_key(key)
+        if self.subfolders_mode:
+            return self._handle_subfolders_key(key)
 
         if self.popup_mode:
             _dbg(f"[CONFIG] GlobalConfigEditor.handle_key() popup key={key} popup_buf={self.popup_buf!r} editing_item={self.editing_item.key if self.editing_item else None}")
@@ -3414,6 +3528,8 @@ class GlobalConfigEditor:
                     self._open_debug_tags_popup()
                 elif self.editing_item.key == "DESTINATIONS":
                     self._open_destinations_popup()
+                elif self.editing_item.key == "SUBFOLDERS":
+                    self._open_subfolders_popup()
                 else:
                     self.popup_buf = self.editing_item.value
                     self.popup_mode = True
@@ -3472,7 +3588,7 @@ class GlobalConfigEditor:
 
         if self.popup_mode and self.editing_item:
             self.draw_popup(stdscr)
-        elif self.debug_tags_mode or self.msg_filters_mode or self.destinations_mode:
+        elif self.debug_tags_mode or self.msg_filters_mode or self.destinations_mode or self.subfolders_mode:
             self.draw_popup(stdscr)
 
     def draw_popup(self, stdscr):
@@ -3482,6 +3598,8 @@ class GlobalConfigEditor:
             self._draw_debug_tags_popup(stdscr)
         elif self.destinations_mode:
             self._draw_destinations_popup(stdscr)
+        elif self.subfolders_mode:
+            self._draw_subfolders_popup(stdscr)
         else:
             self._draw_popup(stdscr)
 
@@ -3785,6 +3903,7 @@ class ConfigEditor:
             or self.global_editor.debug_tags_mode
             or self.global_editor.msg_filters_mode
             or self.global_editor.destinations_mode
+            or self.global_editor.subfolders_mode
         ):
             self.global_editor.draw_popup(stdscr)
         elif self._focus == "site" and self.popup_mode and self.editing_item:
@@ -3847,7 +3966,7 @@ class ConfigEditor:
         # (only when no popup is open in any sub-editor)
         any_popup = (self.global_editor.popup_mode or self.global_editor.debug_tags_mode
                      or self.global_editor.msg_filters_mode or self.global_editor.destinations_mode
-                     or self.popup_mode)
+                     or self.global_editor.subfolders_mode or self.popup_mode)
         if key == ord('\t') and not any_popup:
             _cycle = ["site", "global", "priority"]
             self._focus = _cycle[(_cycle.index(self._focus) + 1) % len(_cycle)]
@@ -3870,7 +3989,8 @@ class ConfigEditor:
             if (key == 27 and not self.global_editor.popup_mode
                     and not self.global_editor.debug_tags_mode
                     and not self.global_editor.msg_filters_mode
-                    and not self.global_editor.destinations_mode):
+                    and not self.global_editor.destinations_mode
+                    and not self.global_editor.subfolders_mode):
                 self.dashboard.selected_tab = 0
                 return True
             return self.global_editor.handle_key(key)
