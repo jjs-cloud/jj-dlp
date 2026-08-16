@@ -18,7 +18,7 @@ _API_BASE   = "https://api.github.com/repos/jjs-cloud/jj-dlp"
 # ── Updater version ───────────────────────────────────────────────────────────
 # Incremented independently of the main jj-dlp version so we can tell which
 # updater logic is actually running during an update.
-UPDATER_VERSION = "2.4.0"
+UPDATER_VERSION = "2.4.1"
 
 # ── Lazy package imports ──────────────────────────────────────────────────────
 # Relative imports are deferred to call time so this file is also safe to
@@ -273,10 +273,20 @@ def perform_update():
             raise UpdateError(f"Downloaded update is missing updater.py at {stage2_script}")
 
         stage2_cmd = [sys.executable, stage2_script, "--stage2", source_dir, base_dir, temp_dir, branch]
-        _logger().dbg(f"[UPDATER] perform_update: delegating to stage2 subprocess: {stage2_cmd}")
+        # global.json lives at base_dir/jj_dlp/global.json (see main.py's
+        # _global_json_path()). Without this, stage2's _json_path() falls
+        # through to dirname(__file__), which — since stage2 runs the copy
+        # of updater.py sitting in the TEMP extraction dir — resolves to a
+        # global.json inside temp_dir, not the real install. That file gets
+        # deleted with temp_dir moments later, so current_sha never actually
+        # advances in the real install, and update_available stays stuck on
+        # a spurious True forever. Point stage2 at the real location instead.
+        stage2_env = dict(os.environ)
+        stage2_env["JJ_DLP_GLOBAL_DIR"] = os.path.join(base_dir, "jj_dlp")
+        _logger().dbg(f"[UPDATER] perform_update: delegating to stage2 subprocess: {stage2_cmd} (JJ_DLP_GLOBAL_DIR={stage2_env['JJ_DLP_GLOBAL_DIR']})")
         print("Installing update (handing off to freshly downloaded updater)...")
 
-        result = subprocess.run(stage2_cmd)
+        result = subprocess.run(stage2_cmd, env=stage2_env)
         _logger().dbg(f"[UPDATER] perform_update: stage2 subprocess exited with code {result.returncode}")
         if result.returncode != 0:
             raise UpdateError(f"stage2 update process exited with code {result.returncode}")
