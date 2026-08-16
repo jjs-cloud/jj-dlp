@@ -1,10 +1,5 @@
-- added additional options to the SUBFOLDERS global setting.  Here are the new options:
-    streamer-only:  "output_dir > {streamer} > recording.mp4"
-    site-only:      "output_dir > {site_label} > recording.mp4"
-    streamer-site:  "output_dir > {streamer} > {site_label} > recording.mp4"
-    site-streamer:  "output_dir > {site_label} > {streamer} > recording.mp4"
-    off:            "output_dir > recording.mp4"
-- added the same 
+- added additional options to the SUBFOLDERS setting in GLOBAL SETTINGS, and also per-streamer in STREAMER SETTINGS
+- minor ui fixes (config tab panel borders, block tab key in streamer settings, site lables in config tab)
 ====================
 ====================
 

@@ -3163,22 +3163,57 @@ class GlobalConfigEditor:
         self._subfolders_value = _coerce_subfolders_value(self.editing_item.value)
         self.subfolders_mode = True
 
-    def _subfolders_effective_path(self) -> str:
-        base       = "<OUTPUT_DIR>"
+    def _subfolders_effective_paths(self) -> list[str]:
+        """Build the list of "Effective path:" preview lines.
+
+        If every site shares the same OUTPUT_DIR, a single line is returned
+        using that shared path in place of the <OUTPUT_DIR> placeholder. If
+        sites differ, one line per distinct OUTPUT_DIR is returned (each
+        still using the <site>/<streamer> placeholders, since those aren't
+        fixed per-site).
+        """
         streamer   = "<streamer>"
         site_label = "<site>"
         mode = self._subfolders_value
-        if mode == "streamer-only":
-            path = f"{base}/{streamer}"
-        elif mode == "site-only":
-            path = f"{base}/{site_label}"
-        elif mode == "streamer-site":
-            path = f"{base}/{streamer}/{site_label}"
-        elif mode == "site-streamer":
-            path = f"{base}/{site_label}/{streamer}"
-        else:
-            path = base  # "off" (or unrecognized)
-        return f"{path}/example.mp4"
+
+        def _build(base: str) -> str:
+            # Match the separator style already used by `base` so we don't
+            # mix "\" (Windows OUTPUT_DIR) with "/" (placeholder joins).
+            sep = "\\" if "\\" in base and "/" not in base else "/"
+            base = base.rstrip("\\/")
+            if mode == "streamer-only":
+                parts = [streamer]
+            elif mode == "site-only":
+                parts = [site_label]
+            elif mode == "streamer-site":
+                parts = [streamer, site_label]
+            elif mode == "site-streamer":
+                parts = [site_label, streamer]
+            else:
+                parts = []  # "off" (or unrecognized)
+            parts.append("example.mp4")
+            return sep.join([base, *parts])
+
+        # Gather each site's configured OUTPUT_DIR (in site order), deduping
+        # while preserving order.
+        out_dirs: list[str] = []
+        for site in getattr(self.dashboard, "sites", []) or []:
+            try:
+                od = site.get_cached_config().get("output_dir")
+            except Exception:
+                od = None
+            if od and od not in out_dirs:
+                out_dirs.append(od)
+
+        if len(out_dirs) <= 1:
+            base = out_dirs[0] if out_dirs else "<OUTPUT_DIR>"
+            return [_build(base)]
+
+        return [_build(od) for od in out_dirs]
+
+    def _subfolders_effective_path(self) -> str:
+        """Back-compat single-line accessor (first preview line)."""
+        return self._subfolders_effective_paths()[0]
 
     def _handle_subfolders_key(self, key) -> bool:
         """Handle keypresses while the SUBFOLDERS popup is open."""
@@ -3209,15 +3244,23 @@ class GlobalConfigEditor:
         db   = self.dashboard
         h, w = stdscr.getmaxyx()
 
-        box_w   = min(66, w - 4)
+        eff_paths_probe = self._subfolders_effective_paths()
+        # "Effective path: " label starts at bx1+2 and is 17 chars; the path
+        # itself is drawn starting at bx1+21. Widen the box so the longest
+        # path isn't truncated (min 66, capped to the terminal width).
+        longest_path = max((len(p) for p in eff_paths_probe), default=0)
+        needed_w = 21 + longest_path + 2  # + right-hand padding before border
+        box_w   = min(max(66, needed_w), w - 4)
         inner_w = box_w - 4
         comment = self.editing_item.comment if self.editing_item else ""
         comment_lines = _wrap_text(comment, inner_w) if comment else []
         comment_h = len(comment_lines) + (1 if comment_lines else 0)
 
-        # 2 borders + 1 title gap + selector row + blank + effective-path row
+        eff_paths = eff_paths_probe
+
+        # 2 borders + 1 title gap + selector row + blank + effective-path row(s)
         # + blank + legend + comment rows (if any) + 1 blank separator after comment
-        box_h = 8 + comment_h
+        box_h = 8 + comment_h + (len(eff_paths) - 1)
         by1 = (h - box_h) // 2
         bx1 = (w - box_w) // 2
         by2 = by1 + box_h
@@ -3244,11 +3287,12 @@ class GlobalConfigEditor:
                        theme.attr(db, "config_editor_globalconfigeditor_draw_subfolders_popu_hilight_2"))
         row += 2
 
-        db.safe_addstr(stdscr, row, bx1 + 2, "Effective path: ",
-                       theme.attr(db, "config_editor_globalconfigeditor_draw_subfolders_popu_normal_3"))
-        eff_path = self._subfolders_effective_path()
-        db.safe_addstr(stdscr, row, bx1 + 21, eff_path[:box_w - 15],
-                       theme.attr(db, "config_editor_globalconfigeditor_draw_subfolders_popu_warn_2"))
+        for eff_path in eff_paths:
+            db.safe_addstr(stdscr, row, bx1 + 2, "Effective path: ",
+                           theme.attr(db, "config_editor_globalconfigeditor_draw_subfolders_popu_normal_3"))
+            db.safe_addstr(stdscr, row, bx1 + 21, eff_path[:box_w - 22],
+                           theme.attr(db, "config_editor_globalconfigeditor_draw_subfolders_popu_warn_2"))
+            row += 1
 
         footer = " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "
         db.safe_addstr(stdscr, by2, bx1 + 2, footer[:box_w - 4], theme.attr(db, "config_editor_globalconfigeditor_draw_subfolders_popu_invhead"))
