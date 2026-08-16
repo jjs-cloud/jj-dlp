@@ -17,7 +17,7 @@ _API_BASE   = "https://api.github.com/repos/jjs-cloud/jj-dlp"
 # ── Updater version ───────────────────────────────────────────────────────────
 # Incremented independently of the main jj-dlp version so we can tell which
 # updater logic is actually running during an update.
-UPDATER_VERSION = "2.3.2"
+UPDATER_VERSION = "2.3.3"
 
 # ── Lazy package imports ──────────────────────────────────────────────────────
 # Relative imports are deferred to call time so this file is also safe to
@@ -426,12 +426,34 @@ def _load_config_keys(source_dir=None):
     update cycle. Always try the on-disk source_dir copy first.
     """
     if source_dir:
-        _candidate = os.path.join(source_dir, "jj_dlp", "config_editor.py")
+        _pkg_dir = os.path.join(source_dir, "jj_dlp")
+        _candidate = os.path.join(_pkg_dir, "config_editor.py")
         if os.path.isfile(_candidate):
+            # config_editor.py uses package-relative imports (`from . import theme`,
+            # `from .logger import dbg`). Loading it via a bare
+            # spec_from_file_location gives it no parent package, so those
+            # relative imports raise ImportError and we'd silently fall back to
+            # the stale installed CONFIG_KEYS (see note below).
+            #
+            # Fix: register a lightweight synthetic package in sys.modules whose
+            # __path__ points at the freshly-extracted source_dir/jj_dlp, then
+            # load config_editor.py as a submodule of it. This lets its relative
+            # imports resolve against the *fresh* theme.py/logger.py on disk,
+            # without touching sys.path or the real, already-imported jj_dlp
+            # package (avoiding any cache collision with the running app).
+            _pkg_name = "_jj_dlp_update_pkg"
+            _mod_name = f"{_pkg_name}.config_editor"
             try:
                 import importlib.util
-                _spec = importlib.util.spec_from_file_location("_jj_dlp_update_config_editor", _candidate)
+                import types
+
+                _pkg_mod = types.ModuleType(_pkg_name)
+                _pkg_mod.__path__ = [_pkg_dir]
+                sys.modules[_pkg_name] = _pkg_mod
+
+                _spec = importlib.util.spec_from_file_location(_mod_name, _candidate)
                 _mod = importlib.util.module_from_spec(_spec)
+                sys.modules[_mod_name] = _mod
                 _spec.loader.exec_module(_mod)
                 return _mod.CONFIG_KEYS
             except Exception as e:
@@ -445,6 +467,10 @@ def _load_config_keys(source_dir=None):
                 except Exception:
                     pass
                 # fall through to the installed-package lookup below
+            finally:
+                # Don't leave the synthetic modules cached across calls/runs.
+                sys.modules.pop(_mod_name, None)
+                sys.modules.pop(_pkg_name, None)
 
     # Resolve CONFIG_KEYS whether called as a package or as __main__.
     try:
