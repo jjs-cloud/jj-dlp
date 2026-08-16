@@ -3818,7 +3818,10 @@ class ConfigEditor:
                     theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_dim_1"))
         tab_x += 8
         for i, site in enumerate(self.sites):
-            lbl = os.path.basename(site.config_path)
+            try:
+                lbl = site.get_cached_config().get("site_label", os.path.basename(site.config_path))
+            except Exception:
+                lbl = os.path.basename(site.config_path)
             label = f" {lbl} "
             attr = (theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_hilight_1")
                     if i == self.selected_site_idx
