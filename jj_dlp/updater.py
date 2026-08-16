@@ -18,7 +18,7 @@ _API_BASE   = "https://api.github.com/repos/jjs-cloud/jj-dlp"
 # ── Updater version ───────────────────────────────────────────────────────────
 # Incremented independently of the main jj-dlp version so we can tell which
 # updater logic is actually running during an update.
-UPDATER_VERSION = "2.3.5"
+UPDATER_VERSION = "2.3.6"
 
 # ── Lazy package imports ──────────────────────────────────────────────────────
 # Relative imports are deferred to call time so this file is also safe to
@@ -555,7 +555,8 @@ if __name__ == "__main__":
         #    falling back to the installed package if unavailable ───────────
         _PKEYS = _get_preserved_keys(_source_dir)
 
-        _sdbg(f"stage2 starting: source={_source_dir} base={_base_dir} temp={_temp_dir} branch={_branch}")
+        _sdbg(f"stage2 starting: version={UPDATER_VERSION} source={_source_dir} base={_base_dir} temp={_temp_dir} branch={_branch}")
+        print(f"\n--- jj-dlp Updater Stage 2 (v{UPDATER_VERSION}) ---")
         print("Installing update...")
 
         try:
