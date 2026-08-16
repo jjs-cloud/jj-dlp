@@ -1365,14 +1365,16 @@ class OutputDirectorySettingsPopup:
         site_label = self.entry.site
         eff_mode   = self._effective_mode()
         if eff_mode == "streamer-only":
-            return os.path.join(base, streamer)
+            path = os.path.join(base, streamer)
         elif eff_mode == "site-only":
-            return os.path.join(base, site_label)
+            path = os.path.join(base, site_label)
         elif eff_mode == "streamer-site":
-            return os.path.join(base, streamer, site_label)
+            path = os.path.join(base, streamer, site_label)
         elif eff_mode == "site-streamer":
-            return os.path.join(base, site_label, streamer)
-        return base  # "off" (or unrecognized)
+            path = os.path.join(base, site_label, streamer)
+        else:
+            path = base  # "off" (or unrecognized)
+        return os.path.join(path, "example.mp4")
 
     # ── Field list ─────────────────────────────────────────────────────────────
 
@@ -1471,7 +1473,7 @@ class OutputDirectorySettingsPopup:
         h, w   = stdscr.getmaxyx()
         fields = self._get_fields()
 
-        box_w = min(76, w - 6)
+        box_w = min(96, w - 6)
         box_h = len(fields) * 2 + 6   # + 2 effective lines + footer
         by1 = (h - box_h) // 2
         bx1 = (w - box_w) // 2
