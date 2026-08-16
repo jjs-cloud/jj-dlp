@@ -3972,7 +3972,8 @@ class ConfigEditor:
         # (only when no popup is open in any sub-editor)
         any_popup = (self.global_editor.popup_mode or self.global_editor.debug_tags_mode
                      or self.global_editor.msg_filters_mode or self.global_editor.destinations_mode
-                     or self.global_editor.subfolders_mode or self.popup_mode)
+                     or self.global_editor.subfolders_mode or self.popup_mode
+                     or self.priority_editor._settings_popup is not None)
         if key == ord('\t') and not any_popup:
             _cycle = ["site", "global", "priority"]
             self._focus = _cycle[(_cycle.index(self._focus) + 1) % len(_cycle)]
