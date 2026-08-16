@@ -612,7 +612,8 @@ class PriorityEditor:
                 self._scroll_offset = max(0, self._selected_idx - visible_rows + 1)
 
         # Box border
-        db.draw_box(stdscr, y1, x1, y2, x2, db.C_SYSTEM)
+        border_pair = db.C_HILIGHT if is_active else db.C_CHROME
+        db.draw_box(stdscr, y1, x1, y2, x2, border_pair)
         title = " STREAMER SETTINGS "
         
         db.safe_addstr(stdscr, y1, x1 + 2, title,
@@ -3547,7 +3548,8 @@ class GlobalConfigEditor:
         elif self.selected_idx >= self.scroll_offset + visible_rows:
             self.scroll_offset = self.selected_idx - visible_rows + 1
 
-        self.dashboard.draw_box(stdscr, y1, x1, y2, x2, db.C_SYSTEM)
+        border_pair = db.C_HILIGHT if is_active else db.C_CHROME
+        self.dashboard.draw_box(stdscr, y1, x1, y2, x2, border_pair)
         title = " GLOBAL SETTINGS "
             
         self.dashboard.safe_addstr(stdscr, y1, x1 + 2, title, theme.attr(db, "config_editor_globalconfigeditor_draw_live_1"))
@@ -3833,7 +3835,8 @@ class ConfigEditor:
 
         # ── Draw SITE SETTINGS box (left column) ──────────────────────────────
         site_box_y1 = content_y1 + 1
-        self.dashboard.draw_box(stdscr, site_box_y1, site_x1, y2, site_x2, self.dashboard.C_CHROME)
+        site_border_pair = self.dashboard.C_HILIGHT if self._focus == "site" else self.dashboard.C_CHROME
+        self.dashboard.draw_box(stdscr, site_box_y1, site_x1, y2, site_x2, site_border_pair)
         if self._focus == "site":
             mode_str = " [  ] "
             self.dashboard.safe_addstr(stdscr, site_box_y1, site_x2 - len(mode_str) - 1, mode_str,
