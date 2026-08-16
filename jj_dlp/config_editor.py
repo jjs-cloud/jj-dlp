@@ -696,7 +696,7 @@ class StreamerSettingsPopup:
         self.entry     = entry
         self.config_id = config_id
 
-        self.options = ["Schedule", "Quality", "Split", "Intro Delay", "Notifications", "Auto-Suffix", "Output Directory"]
+        self.options = ["Schedule", "Quality", "Split", "Intro Delay", "Notifications", "Auto-Suffix", "Subfolders"]
         self._sel: int = 0
         self._schedule_popup: "Optional[ScheduleSettingsPopup]" = None
         self._quality_popup: "Optional[QualitySettingsPopup]" = None
@@ -799,7 +799,7 @@ class StreamerSettingsPopup:
                     self.entry,
                     self.config_id,
                 )
-            elif self.options[self._sel] == "Output Directory":
+            elif self.options[self._sel] == "Subfolders":
                 self._output_dir_popup = OutputDirectorySettingsPopup(
                     self.dashboard,
                     self.entry,
@@ -1377,7 +1377,7 @@ class OutputDirectorySettingsPopup:
 
     def _get_fields(self) -> "list[tuple[str,str]]":
         fields = [
-            ("Output Directory", self._FIELD_MODE),
+            ("Subfolders", self._FIELD_MODE),
             ("Custom Output Directory", self._FIELD_TOGGLE),
         ]
         if self.custom_enabled:
@@ -3152,7 +3152,7 @@ class GlobalConfigEditor:
                        theme.attr(db, "config_editor_globalconfigeditor_draw_destinations_po_invhead"))
 
     # ── Subfolders popup (SUBFOLDERS key) ─────────────────────────────────────
-    # Mirrors StreamerSettingsPopup > Output Directory (OutputDirectorySettingsPopup):
+    # Mirrors StreamerSettingsPopup > Subfolders (OutputDirectorySettingsPopup):
     # same "< mode >" selector, but with the "Custom Output Directory" toggle
     # and "Effective setting:" line omitted, and the "Effective path:" preview
     # built from placeholders since there's no concrete site/streamer here.
