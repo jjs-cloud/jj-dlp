@@ -10,6 +10,7 @@ import re
 import json
 import traceback
 import datetime
+import subprocess
 
 _REPO_BASE = "https://github.com/jjs-cloud/jj-dlp"
 _API_BASE   = "https://api.github.com/repos/jjs-cloud/jj-dlp"
@@ -17,7 +18,7 @@ _API_BASE   = "https://api.github.com/repos/jjs-cloud/jj-dlp"
 # ── Updater version ───────────────────────────────────────────────────────────
 # Incremented independently of the main jj-dlp version so we can tell which
 # updater logic is actually running during an update.
-UPDATER_VERSION = "2.3.1"
+UPDATER_VERSION = "2.3.4"
 
 # ── Lazy package imports ──────────────────────────────────────────────────────
 # Relative imports are deferred to call time so this file is also safe to
@@ -27,9 +28,23 @@ UPDATER_VERSION = "2.3.1"
 
 # All compatibility code (stage-2, lazy imports) is set to be removed in version 3.0.0
 
+class _NullLogger:
+    """No-op stand-in for the real logger module, used when this file is
+    executing standalone as __main__ (e.g. inside a --stage2 subprocess),
+    where `from . import logger` has no parent package to resolve against.
+    Lets shared helpers like _fetch_latest_sha() call _logger().dbg(...)
+    safely regardless of which context invoked them, instead of needing a
+    bespoke duplicate of every such helper for the standalone case."""
+    def dbg(self, *args, **kwargs):
+        pass
+
+
 def _logger():
-    from . import logger as _l
-    return _l
+    try:
+        from . import logger as _l
+        return _l
+    except ImportError:
+        return _NullLogger()
 
 def _load_global_json() -> dict:
     from .main import _load_global_json as _f
@@ -216,146 +231,30 @@ def perform_update():
     _logger().dbg(f"[UPDATER] perform_update: source_dir resolved to {source_dir}")
 
     try:
-        # ── Step 3: Merge configs ─────────────────────────────────────────────
-        actual_diff_dir = os.path.join(base_dir, "diff")
-        if os.path.exists(actual_diff_dir):
-            shutil.rmtree(actual_diff_dir, ignore_errors=True)
-        os.makedirs(actual_diff_dir, exist_ok=True)
-        _logger().dbg(f"[UPDATER] perform_update: diff dir cleared and recreated at {actual_diff_dir}")
-        print(f"Diffs will be saved to: {actual_diff_dir}")
+        # ── Step 3: Delegate merge + install to a fresh subprocess ────────────
+        # The download/extract above always uses whatever code is currently
+        # running (this in-memory copy of updater.py), which may be stale.
+        # From here on, everything that touches the user's configs and files
+        # is handed off to the freshly-extracted updater.py, run as a new
+        # subprocess (--stage2), so that any fix shipped in *this* update
+        # takes effect on this very cycle instead of lagging by one.
+        stage2_script = os.path.join(source_dir, "jj_dlp", "updater.py")
+        if not os.path.isfile(stage2_script):
+            raise UpdateError(f"Downloaded update is missing updater.py at {stage2_script}")
 
-        # Collect user config files (root + configs/)
-        config_files = []
-        configs_dir = os.path.join(base_dir, "configs")
-        root_configs = [
-            f for f in os.listdir(base_dir)
-            if f.endswith(".conf") and os.path.isfile(os.path.join(base_dir, f))
-        ] if os.path.exists(base_dir) else []
-        sub_configs = [
-            f for f in os.listdir(configs_dir)
-            if f.endswith(".conf") and os.path.isfile(os.path.join(configs_dir, f))
-        ] if os.path.exists(configs_dir) else []
+        stage2_cmd = [sys.executable, stage2_script, "--stage2", source_dir, base_dir, temp_dir, branch]
+        _logger().dbg(f"[UPDATER] perform_update: delegating to stage2 subprocess: {stage2_cmd}")
+        print("Installing update (handing off to freshly downloaded updater)...")
 
-        all_config_names: set = set()
-        duplicates: set = set()
-        for f in root_configs:
-            all_config_names.add(f)
-            config_files.append(os.path.join(base_dir, f))
-        for f in sub_configs:
-            if f in all_config_names:
-                duplicates.add(f)
-            else:
-                all_config_names.add(f)
-            config_files.append(os.path.join(configs_dir, f))
+        result = subprocess.run(stage2_cmd)
+        _logger().dbg(f"[UPDATER] perform_update: stage2 subprocess exited with code {result.returncode}")
+        if result.returncode != 0:
+            raise UpdateError(f"stage2 update process exited with code {result.returncode}")
 
-        if duplicates:
-            print(f"\nWARNING: Found duplicate config files in root and configs/ directory: {', '.join(duplicates)}")
-            print("The updater may overwrite or merge them unpredictably. Please consolidate them later.\n")
-            _logger().dbg(f"[UPDATER] perform_update: duplicate configs found: {duplicates}")
-
-        _logger().dbg(f"[UPDATER] perform_update: found {len(config_files)} user config file(s) to merge")
-
-        # Collect new configs from source_dir
-        new_configs = []
-        src_configs_dir = os.path.join(source_dir, "configs")
-        if os.path.exists(src_configs_dir):
-            new_configs.extend([
-                os.path.join(src_configs_dir, f)
-                for f in os.listdir(src_configs_dir) if f.endswith(".conf")
-            ])
-        if os.path.exists(os.path.join(source_dir, "jj-dlp.conf")):
-            new_configs.append(os.path.join(source_dir, "jj-dlp.conf"))
-
-        new_config_map = {os.path.basename(p): p for p in new_configs}
-        _logger().dbg(f"[UPDATER] perform_update: new_config_map keys={list(new_config_map.keys())}")
-
-        for user_cfg in config_files:
-            fname = os.path.basename(user_cfg)
-            if fname not in new_config_map:
-                _logger().dbg(f"[UPDATER] perform_update: no matching new config for {fname}, skipping merge")
-                continue
-            new_cfg_path = new_config_map[fname]
-            _logger().dbg(f"[UPDATER] perform_update: merging config {user_cfg} -> {new_cfg_path}")
-
-            with open(user_cfg, 'r', encoding='utf-8') as f:
-                old_content = f.read()
-            with open(new_cfg_path, 'r', encoding='utf-8') as f:
-                new_content = f.read()
-
-            streamers = get_old_config_section(user_cfg, "Streamers")
-            blocked   = get_old_config_section(user_cfg, "Block")
-            _logger().dbg(f"[UPDATER] perform_update: preserved sections for {fname}: streamers={bool(streamers)} block={bool(blocked)}")
-
-            merged_content = inject_preserved_keys(new_content, user_cfg, source_dir)
-            merged_content = update_config_comments(merged_content, source_dir)
-            merged_content = replace_section(merged_content, "Streamers", streamers)
-            merged_content = replace_section(merged_content, "Block", blocked)
-
-            create_diff(old_content, merged_content, user_cfg, actual_diff_dir)
-
-            with open(new_cfg_path, 'w', encoding='utf-8') as f:
-                f.write(merged_content)
-            _logger().dbg(f"[UPDATER] perform_update: merged config written to {new_cfg_path}")
-
-        # ── Step 4: Copy files source_dir → base_dir ─────────────────────────
-        print("Installing new files...")
-        _logger().dbg(f"[UPDATER] perform_update: copying files {source_dir} -> {base_dir}")
-
-        def copy_and_diff(src, dst):
-            if os.path.isdir(src):
-                if os.path.basename(src) == "__pycache__":
-                    return
-                os.makedirs(dst, exist_ok=True)
-                for item in os.listdir(src):
-                    copy_and_diff(os.path.join(src, item), os.path.join(dst, item))
-            else:
-                if os.path.basename(dst).endswith(".pyc"):
-                    return
-                if os.path.basename(dst) == "global.json":
-                    _logger().dbg(f"[UPDATER] perform_update: skipping global.json at {dst}")
-                    return
-                if os.path.exists(dst):
-                    if not _is_binary(dst) and not dst.endswith(".conf"):
-                        with open(dst, 'r', encoding='utf-8', errors='ignore') as f:
-                            old_content = f.read()
-                        with open(src, 'r', encoding='utf-8', errors='ignore') as f:
-                            new_content = f.read()
-                        if old_content != new_content:
-                            create_diff(old_content, new_content, dst, actual_diff_dir)
-                    if os.path.basename(dst) == "updater.py":
-                        _logger().dbg(f"[UPDATER] perform_update: updater.py changed, copying {src} -> {dst}")
-                else:
-                    if os.path.basename(dst) == "updater.py":
-                        _logger().dbg(f"[UPDATER] perform_update: installing new updater.py {src} -> {dst}")
-                try:
-                    shutil.copy2(src, dst)
-                except OSError as e:
-                    import errno
-                    if getattr(e, 'errno', None) == errno.ETXTBSY:
-                        print(f"\nERROR: The file '{dst}' is currently in use (Text file busy).")
-                        print("Please ensure that jj-dlp, yt-dlp, and ffmpeg are fully closed and not running in the background.")
-                        print("You may need to manually kill any stuck 'yt-dlp' or 'ffmpeg' processes and try again.\n")
-                        raise UpdateError(f"The file '{dst}' is currently in use (Text file busy).")
-                    raise
-
-        copy_and_diff(source_dir, base_dir)
-        _logger().dbg("[UPDATER] perform_update: all files copied from source to base")
-
-        # ── Step 5: Mark update completed in global.json ──────────────────────
-        # Re-fetch the latest SHA now that the install is done.  If additional
-        # commits landed on the branch between when we started the download and
-        # now, this ensures current_sha always matches whatever HEAD is at this
-        # moment, preventing a spurious "Update Available" on the next launch.
-        post_install_sha = _fetch_latest_sha(branch)
-        _logger().dbg(f"[UPDATER] perform_update: post-install SHA fetch: {post_install_sha}")
-        mark_update_completed(installed_sha=post_install_sha)
-        _logger().dbg("[UPDATER] perform_update: marked update completed")
-
-        print("\n" + "="*60)
-        print("✅ Update completed successfully!")
-        print(f"   Diff files are available in the 'diff' directory.")
-        print("="*60)
-        print("\nℹ️  Please restart jj-dlp for the new version to take effect.")
+        _logger().dbg("[UPDATER] perform_update: stage2 completed successfully")
+        # stage2 owns its own success/failure messaging, config-merge diffing,
+        # marking global.json complete, and its own "Press Enter to exit"
+        # prompt (inherited stdio), so nothing further is needed here.
 
     except UpdateError as e:
         _logger().dbg(f"[UPDATER] perform_update: clean abort: {e}")
@@ -364,10 +263,12 @@ def perform_update():
         print(f"Error during update: {e}")
         traceback.print_exc()
     finally:
+        # stage2 cleans up temp_dir itself on the normal path; this is a
+        # defensive no-op in that case and a real cleanup if stage2 never
+        # got to run (e.g. missing updater.py, failed subprocess spawn).
         print(f"Cleaning up temporary directory: {temp_dir}")
         shutil.rmtree(temp_dir, ignore_errors=True)
-        _logger().dbg(f"[UPDATER] perform_update: temp_dir cleaned up")
-        input("Press any key to exit...")
+        _logger().dbg(f"[UPDATER] perform_update: temp_dir cleanup pass complete")
 
 
 def get_old_config_section(config_path, section_name):
@@ -413,68 +314,21 @@ def inject_preserved_keys(new_text, old_config_path, source_dir=None):
 
 
 def _load_config_keys(source_dir=None):
-    """Return the CONFIG_KEYS tuple, preferring the freshly downloaded copy in
-    `source_dir` (the just-extracted update) over the currently-installed,
-    already-imported package.
+    """Return the CONFIG_KEYS tuple.
 
-    This matters because during an update, this code runs *before* the new
-    files are copied over the old installation (see Step 3 vs Step 4 in
-    perform_update). Falling back to `from .config_editor import CONFIG_KEYS`
-    would silently pull the stale, currently-running module — since Python
-    caches imports, even the correct file path wouldn't help without a fresh
-    load — which is what caused comment/default changes to lag by one extra
-    update cycle. Always try the on-disk source_dir copy first.
+    All merge/comment logic that needs CONFIG_KEYS now runs inside the
+    stage2 subprocess, which always executes this very file (updater.py)
+    directly out of the freshly-extracted source_dir as __main__. In that
+    context, `__file__` already points at the fresh copy on disk, so the
+    plain absolute-import fallback below resolves `jj_dlp.config_editor`
+    against the fresh package automatically — no synthetic sys.modules
+    package or spec_from_file_location trick is needed to dodge stale,
+    already-imported CONFIG_KEYS.
+
+    `source_dir` is kept as a parameter for call-site compatibility but is
+    no longer used directly; it's implied by where this file lives when
+    running as __main__.
     """
-    if source_dir:
-        _pkg_dir = os.path.join(source_dir, "jj_dlp")
-        _candidate = os.path.join(_pkg_dir, "config_editor.py")
-        if os.path.isfile(_candidate):
-            # config_editor.py uses package-relative imports (`from . import theme`,
-            # `from .logger import dbg`). Loading it via a bare
-            # spec_from_file_location gives it no parent package, so those
-            # relative imports raise ImportError and we'd silently fall back to
-            # the stale installed CONFIG_KEYS (see note below).
-            #
-            # Fix: register a lightweight synthetic package in sys.modules whose
-            # __path__ points at the freshly-extracted source_dir/jj_dlp, then
-            # load config_editor.py as a submodule of it. This lets its relative
-            # imports resolve against the *fresh* theme.py/logger.py on disk,
-            # without touching sys.path or the real, already-imported jj_dlp
-            # package (avoiding any cache collision with the running app).
-            _pkg_name = "_jj_dlp_update_pkg"
-            _mod_name = f"{_pkg_name}.config_editor"
-            try:
-                import importlib.util
-                import types
-
-                _pkg_mod = types.ModuleType(_pkg_name)
-                _pkg_mod.__path__ = [_pkg_dir]
-                sys.modules[_pkg_name] = _pkg_mod
-
-                _spec = importlib.util.spec_from_file_location(_mod_name, _candidate)
-                _mod = importlib.util.module_from_spec(_spec)
-                sys.modules[_mod_name] = _mod
-                _spec.loader.exec_module(_mod)
-                return _mod.CONFIG_KEYS
-            except Exception as e:
-                # NOTE: this fallback silently pulls the stale, currently-installed
-                # CONFIG_KEYS, which means comment/default changes lag by one
-                # update cycle. Surface it loudly instead of swallowing it.
-                _msg = f"[UPDATER] _load_config_keys: failed to load fresh config_editor.py from {_candidate}: {e!r} -- falling back to stale installed CONFIG_KEYS"
-                print(f"\nWARNING: {_msg}\n")
-                try:
-                    _logger().dbg(_msg)
-                except Exception:
-                    pass
-                # fall through to the installed-package lookup below
-            finally:
-                # Don't leave the synthetic package (or any submodules it pulled
-                # in via relative imports, e.g. theme/logger) cached across
-                # calls/runs.
-                for _k in [k for k in sys.modules if k == _pkg_name or k.startswith(_pkg_name + ".")]:
-                    sys.modules.pop(_k, None)
-
-    # Resolve CONFIG_KEYS whether called as a package or as __main__.
     try:
         from .config_editor import CONFIG_KEYS as _ck
         return _ck
@@ -601,27 +455,41 @@ def create_diff(old_content, new_content, file_path, diff_dir):
             f.writelines(diff)
 
 
-# ── Standalone stage-2 entry point (transitional compatibility shim) ──────────
+# ── Standalone stage-2 entry point (the canonical merge/install path) ─────────
 #
-# The OLD installed updater.py (pre-v2) downloads this file and runs it as:
+# updater.py always downloads and extracts itself, then spawns a fresh
+# subprocess running THIS file, straight out of the just-extracted
+# source_dir, as:
 #
-#   python /tmp/.../jj_dlp/updater.py --stage2 <source_dir> <base_dir> <temp_dir>
+#   python <source_dir>/jj_dlp/updater.py --stage2 <source_dir> <base_dir> <temp_dir> [branch]
 #
-# Because it is executed as a plain script (not a package), relative imports
-# fail.  This block catches that invocation and performs the copy/install work
-# using only stdlib + the helper functions defined above (which are already in
-# module scope by the time __main__ runs).
+# Doing the merge/copy/install work in a fresh subprocess (rather than
+# in-process, using whatever updater.py happened to already be imported)
+# means a fix shipped in updater.py takes effect the same cycle it's
+# downloaded, instead of lagging by one cycle.
 #
-# Once this version is installed, the old subprocess launch code is gone and
-# this block will never be reached again.  It is dead code from v3 onward.
+# Two callers land here:
+#   - v3+ perform_update(), which always delegates here (see perform_update).
+#   - legacy pre-v3 installed updater.py, whose in-process perform_update()
+#     still calls this same convention directly (the original compat path).
+# Both invoke it identically, so there's nothing legacy-specific left to
+# maintain here.
+#
+# Because this file is executed as a plain script (not as a package member),
+# relative imports at module scope aren't in play here; this block performs
+# the copy/install work using only stdlib + the helper functions defined
+# above (already in module scope by the time __main__ runs). CONFIG_KEYS
+# lookups via _load_config_keys() DO resolve correctly against the fresh
+# on-disk package, since __file__ here already points into source_dir.
 #
 if __name__ == "__main__":
     import errno as _errno
 
-    if len(sys.argv) == 5 and sys.argv[1] == "--stage2":
+    if len(sys.argv) in (5, 6) and sys.argv[1] == "--stage2":
         _source_dir = sys.argv[2]
         _base_dir   = sys.argv[3]
         _temp_dir   = sys.argv[4]
+        _branch     = sys.argv[5] if len(sys.argv) == 6 else None
 
         # ── Minimal standalone logger: write to the same debug.log the old
         #    stage-2 would have used (JJ_DLP_DEBUG_LOG_DIR env var, or next
@@ -663,13 +531,25 @@ if __name__ == "__main__":
                 pass
 
         def _mark_done() -> None:
+            # Parity with mark_update_completed()/perform_update(): re-fetch
+            # the branch HEAD SHA now, post-install, so that additional
+            # commits landing on the branch mid-update don't leave
+            # current_sha stale and cause a spurious "Update Available" on
+            # the next launch. Falls back to whatever latest_sha was already
+            # recorded if the branch is unknown or the re-fetch fails.
+            _post_sha = None
+            if _branch:
+                _post_sha = _fetch_latest_sha(_branch)
+                _sdbg(f"mark_done: post-install SHA fetch for branch={_branch}: {_post_sha}")
+
             _gd = _load_json()
             _ui = _gd.setdefault("update_info", {})
-            _ls = _ui.get("latest_sha")
+            _ls = _post_sha or _ui.get("latest_sha")
             if _ls:
                 _ui["current_sha"] = _ls
+                _ui["latest_sha"] = _ls
             _ui["update_available"] = False
-            _sdbg(f"mark_done: current_sha={_ui.get('current_sha')} update_available=False")
+            _sdbg(f"mark_done: current_sha={_ui.get('current_sha')} latest_sha={_ui.get('latest_sha')} update_available=False")
             _save_json(_gd)
 
         # ── PRESERVED_KEYS: read from the freshly downloaded config_editor,
