@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.27.5"
+__version__ = "1.27.6"
 
 import subprocess
 import textwrap
@@ -5686,8 +5686,11 @@ class JJDlpDashboard:
                         ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_5")
                     else:
                         ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_4")
+                    # Clamp to the panel's inner boundary so this never draws
+                    # into/through the right border on narrow terminals.
+                    _avail = max(0, (x2 - 1) - col)
                     self.safe_addstr(self.stdscr, row_y, col,
-                                last_live_str[:last_live_w_compact],
+                                last_live_str[:min(last_live_w_compact, _avail)],
                                 ll_attr)
         else:
             # Normal: 1 column with progress bar, duration, last_live
