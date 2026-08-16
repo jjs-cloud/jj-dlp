@@ -63,7 +63,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("MAX_CONCURRENT_REC",    "global", "0",     True, type="int",  comment='The maximum number of simultaneous recordings allowed to run.  Use the STREAMER SETTINGS panel in the Config tab to adjust the priority of each streamer. (0=no limit)'),
     _KeyDef("LQ_DOWNLOADER",         "global", "false", True, type="bool",  comment="When any recording reaches the ffmpeg error threshold (FF_ERR_THRESH) lower the video quality of the lowest priority streamer, freeing up bandwidth for the remaining streamers."),
     _KeyDef("FF_ERR_THRESH",         "global", "200",   True, type="int",  comment='Restart the download if we see this many ffmpeg errors ("timestamp discontinuity", "Packet corrupt") default: 200'),
-    _KeyDef("SUBFOLDERS",            "global", "off",   True, type="str",   comment="Save recordings in a subfolder(s) inside OUTPUT_DIR. Options: streamer-only, site-only, streamer-site, site-streamer, off"),
+    _KeyDef("SUBFOLDERS",            "global", "off",   True, type="str",   comment="Save recordings in a subfolder(s) inside OUTPUT_DIR. Options: streamer-only, site-only, streamer-site, site-streamer, off."),
     _KeyDef("GRAPH_SCALE",           "global", "300",   True, type="int",  comment="The number of seconds each bar in the graph represents. (default = 600)."),
     _KeyDef("DESTINATIONS",          "global", "",      True, type="list",  comment="A list of destination paths where you might want to move your files.  Used in the File Manager tab. (e.g. C:\\My Recordings  OR /home/greg/twitch)"),
     _KeyDef("NTFY_TOPIC",            "global", "",      True,  comment="The topic name to use for ntfy.sh notifications. (example: jj-dlp-fj48dh734fk) Refer to docs/ntfy-setup.md for a detailed setup guide. (blank = disabled)"),
@@ -696,7 +696,7 @@ class StreamerSettingsPopup:
         self.entry     = entry
         self.config_id = config_id
 
-        self.options = ["Schedule", "Quality", "Split", "Intro Delay", "Notifications", "Auto-Suffix"]
+        self.options = ["Schedule", "Quality", "Split", "Intro Delay", "Notifications", "Auto-Suffix", "Output Directory"]
         self._sel: int = 0
         self._schedule_popup: "Optional[ScheduleSettingsPopup]" = None
         self._quality_popup: "Optional[QualitySettingsPopup]" = None
@@ -704,6 +704,7 @@ class StreamerSettingsPopup:
         self._intro_delay_popup: "Optional[IntroDelaySettingsPopup]" = None
         self._notifications_popup: "Optional[NotificationSettingsPopup]" = None
         self._auto_suffix_popup: "Optional[AutoSuffixSettingsPopup]" = None
+        self._output_dir_popup: "Optional[OutputDirectorySettingsPopup]" = None
 
     def handle_key(self, key) -> bool:
         if self._schedule_popup is not None:
@@ -745,6 +746,13 @@ class StreamerSettingsPopup:
             should_close = self._auto_suffix_popup.handle_key(key)
             if should_close:
                 self._auto_suffix_popup = None
+                return True
+            return False
+
+        if self._output_dir_popup is not None:
+            should_close = self._output_dir_popup.handle_key(key)
+            if should_close:
+                self._output_dir_popup = None
                 return True
             return False
 
@@ -791,6 +799,12 @@ class StreamerSettingsPopup:
                     self.entry,
                     self.config_id,
                 )
+            elif self.options[self._sel] == "Output Directory":
+                self._output_dir_popup = OutputDirectorySettingsPopup(
+                    self.dashboard,
+                    self.entry,
+                    self.config_id,
+                )
         return False
 
     def draw(self, stdscr) -> None:
@@ -816,6 +830,10 @@ class StreamerSettingsPopup:
 
         if self._auto_suffix_popup is not None:
             self._auto_suffix_popup.draw(stdscr)
+            return
+
+        if self._output_dir_popup is not None:
+            self._output_dir_popup.draw(stdscr)
             return
 
         db = self.dashboard
@@ -1206,6 +1224,316 @@ class AutoSuffixSettingsPopup:
         db.safe_addstr(stdscr, by1 + 4, bx1 + 13, eff_str, theme.attr(db, "config_editor_autosuffixsettingspo_draw_warn"))
 
         db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_autosuffixsettingspo_draw_invhead"))
+
+
+class OutputDirectorySettingsPopup:
+    """Per-streamer override for OUTPUT_DIR / SUBFOLDERS.
+
+    Two independent settings, stored in the same priorities[...][entries]
+    record used by the other per-streamer popups:
+
+      - "output_dir_mode" — subfolder-nesting override. "inherit"
+        (default, key absent) uses the global SUBFOLDERS mode; any of
+        SUBFOLDERS_MODES ("streamer-only", "site-only", "streamer-site",
+        "site-streamer", "off") forces that mode for this streamer
+        regardless of the global setting. Mirrors _resolve_auto_suffix()'s
+        tri-state handling in main.py (see _resolve_output_dir()).
+
+      - "output_dir_custom_enabled" / "output_dir_custom_path" — an
+        optional per-streamer override of the site's OUTPUT_DIR itself.
+        When disabled (default), the streamer records into the owning
+        site's configured OUTPUT_DIR, same as if no entry existed.
+    """
+
+    _MODE_STATES = ("inherit",) + SUBFOLDERS_MODES  # ("inherit","streamer-only",...,"off")
+
+    _FIELD_MODE   = "mode"
+    _FIELD_TOGGLE = "custom_toggle"
+    _FIELD_PATH   = "custom_path"
+
+    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
+        self.dashboard = dashboard
+        self.entry     = entry
+        self.config_id = config_id
+
+        self.mode:           str  = "inherit"
+        self.custom_enabled: bool = False
+        self.custom_path:    str  = ""
+
+        self._sel:          int = 0
+        self._path_cursor:  int = 0
+        self._error:        str = ""
+
+        self._load()
+
+    # ── Persistence ────────────────────────────────────────────────────────────
+
+    def _load(self) -> None:
+        try:
+            from .main import _global_json_lock, _load_global_json
+            with _global_json_lock:
+                gdata = _load_global_json()
+            entries = (gdata.get("priorities", {})
+                           .get(self.config_id, {})
+                           .get("entries", []))
+            for e in entries:
+                if (e.get("streamer") == self.entry.streamer
+                        and e.get("site") == self.entry.site):
+                    raw = e.get("output_dir_mode")
+                    self.mode = raw if raw in SUBFOLDERS_MODES else "inherit"
+                    self.custom_enabled = bool(e.get("output_dir_custom_enabled", False))
+                    self.custom_path = str(e.get("output_dir_custom_path", "") or "")
+                    break
+        except Exception:
+            pass
+        if not self.custom_path:
+            self.custom_path = str(self._site_default_output_dir())
+        self._path_cursor = len(self.custom_path)
+
+    def _save(self) -> None:
+        try:
+            from .main import _global_json_lock, _load_global_json, _save_global_json
+            with _global_json_lock:
+                gdata   = _load_global_json()
+                entries = (gdata.get("priorities", {})
+                               .get(self.config_id, {})
+                               .get("entries", []))
+                target = None
+                for e in entries:
+                    if (e.get("streamer") == self.entry.streamer
+                            and e.get("site") == self.entry.site):
+                        target = e
+                        break
+                no_override = (self.mode == "inherit" and not self.custom_enabled)
+                if no_override:
+                    # Nothing to override — clear any prior explicit values
+                    # rather than writing them.
+                    if target is not None:
+                        target.pop("output_dir_mode", None)
+                        target.pop("output_dir_custom_enabled", None)
+                        target.pop("output_dir_custom_path", None)
+                else:
+                    if target is None:
+                        target = {
+                            "streamer":   self.entry.streamer,
+                            "site":       self.entry.site,
+                            "config_sha": self.entry.config_sha,
+                            "priority":   len(entries),
+                            "bypass":     self.entry.bypass,
+                        }
+                        entries.append(target)
+                    if self.mode == "inherit":
+                        target.pop("output_dir_mode", None)
+                    else:
+                        target["output_dir_mode"] = self.mode
+                    target["output_dir_custom_enabled"] = self.custom_enabled
+                    target["output_dir_custom_path"] = self.custom_path.strip() if self.custom_enabled else ""
+
+                gdata.setdefault("priorities", {}).setdefault(
+                    self.config_id, {"config_files": [], "entries": []}
+                )["entries"] = entries
+                _save_global_json(gdata)
+        except Exception:
+            pass
+
+    # ── Effective-value helpers ────────────────────────────────────────────────
+
+    def _site_default_output_dir(self) -> str:
+        cfg = _get_site_default_cfg(self.dashboard, self.entry)
+        return cfg.get("output_dir", "") or ""
+
+    def _global_subfolders_mode(self) -> str:
+        try:
+            from .main import load_global_config
+            return load_global_config().get("subfolders", "off")
+        except Exception:
+            return "off"
+
+    def _effective_mode(self) -> str:
+        return self._global_subfolders_mode() if self.mode == "inherit" else self.mode
+
+    def _effective_path(self) -> str:
+        base = self.custom_path.strip() if (self.custom_enabled and self.custom_path.strip()) \
+            else self._site_default_output_dir()
+        if not base:
+            return ""
+        if not os.path.isabs(base):
+            base = os.path.abspath(base)
+
+        streamer   = self.entry.streamer
+        site_label = self.entry.site
+        eff_mode   = self._effective_mode()
+        if eff_mode == "streamer-only":
+            return os.path.join(base, streamer)
+        elif eff_mode == "site-only":
+            return os.path.join(base, site_label)
+        elif eff_mode == "streamer-site":
+            return os.path.join(base, streamer, site_label)
+        elif eff_mode == "site-streamer":
+            return os.path.join(base, site_label, streamer)
+        return base  # "off" (or unrecognized)
+
+    # ── Field list ─────────────────────────────────────────────────────────────
+
+    def _get_fields(self) -> "list[tuple[str,str]]":
+        fields = [
+            ("Output Directory", self._FIELD_MODE),
+            ("Custom Output Directory", self._FIELD_TOGGLE),
+        ]
+        if self.custom_enabled:
+            fields.append(("Path", self._FIELD_PATH))
+        return fields
+
+    # ── Key handling ───────────────────────────────────────────────────────────
+
+    def handle_key(self, key) -> bool:
+        """Handle one keypress. Returns True when the popup should close."""
+        fields = self._get_fields()
+        self._sel = min(self._sel, len(fields) - 1)
+        _, field_key = fields[self._sel]
+
+        # ── Custom path field: always in free-text edit mode when selected ──
+        if field_key == self._FIELD_PATH:
+            cur = self._path_cursor
+            if key == 27:  # Esc -> cancel whole popup
+                return True
+            elif key == curses.KEY_UP:
+                self._sel = max(0, self._sel - 1)
+                self._error = ""
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                if cur > 0:
+                    self.custom_path = self.custom_path[:cur - 1] + self.custom_path[cur:]
+                    self._path_cursor = cur - 1
+                self._error = ""
+            elif key in (curses.KEY_DC,):
+                if cur < len(self.custom_path):
+                    self.custom_path = self.custom_path[:cur] + self.custom_path[cur + 1:]
+                self._error = ""
+            elif key == curses.KEY_LEFT:
+                self._path_cursor = max(0, cur - 1)
+            elif key == curses.KEY_RIGHT:
+                self._path_cursor = min(len(self.custom_path), cur + 1)
+            elif key == curses.KEY_HOME:
+                self._path_cursor = 0
+            elif key == curses.KEY_END:
+                self._path_cursor = len(self.custom_path)
+            elif key in (10, 13, curses.KEY_ENTER, 459):
+                valid, err = self._validate()
+                if valid:
+                    self._save()
+                    return True
+                self._error = err
+            elif 32 <= key < 127:
+                self.custom_path = self.custom_path[:cur] + chr(key) + self.custom_path[cur:]
+                self._path_cursor = cur + 1
+                self._error = ""
+            return False
+
+        # ── Normal navigation (mode row / checkbox row) ─────────────────────
+        if key == 27:
+            return True
+        elif key == curses.KEY_UP:
+            self._sel = max(0, self._sel - 1)
+            self._error = ""
+        elif key == curses.KEY_DOWN:
+            self._sel = min(len(fields) - 1, self._sel + 1)
+            self._error = ""
+        elif field_key == self._FIELD_MODE and key in (ord(' '), curses.KEY_LEFT, curses.KEY_RIGHT):
+            idx = self._MODE_STATES.index(self.mode)
+            step = -1 if key == curses.KEY_LEFT else 1
+            self.mode = self._MODE_STATES[(idx + step) % len(self._MODE_STATES)]
+            self._error = ""
+        elif field_key == self._FIELD_TOGGLE and key == ord(' '):
+            self.custom_enabled = not self.custom_enabled
+            if self.custom_enabled and not self.custom_path.strip():
+                self.custom_path = self._site_default_output_dir()
+                self._path_cursor = len(self.custom_path)
+            self._sel = min(self._sel, len(self._get_fields()) - 1)
+            self._error = ""
+        elif key in (10, 13, curses.KEY_ENTER, 459):
+            valid, err = self._validate()
+            if valid:
+                self._save()
+                return True
+            self._error = err
+        return False
+
+    def _validate(self) -> "tuple[bool, str]":
+        if self.custom_enabled and not self.custom_path.strip():
+            return False, "Enter a custom output directory, or uncheck it"
+        return True, ""
+
+    # ── Drawing ────────────────────────────────────────────────────────────────
+
+    def draw(self, stdscr) -> None:
+        db     = self.dashboard
+        h, w   = stdscr.getmaxyx()
+        fields = self._get_fields()
+
+        box_w = min(76, w - 6)
+        box_h = len(fields) * 2 + 6   # + 2 effective lines + footer
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_outputdirectorysett_draw_normal_1"))
+
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
+        title = f" {self.entry.streamer.upper()} SETTINGS "
+        db.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(db, "config_editor_outputdirectorysett_draw_system"))
+
+        row = by1 + 2
+        for i, (label, field_key) in enumerate(fields):
+            is_sel     = (i == self._sel)
+            prefix     = "> " if is_sel else "  "
+            label_attr = (theme.attr(db, "config_editor_outputdirectorysett_draw_hilight_1")
+                          if is_sel else theme.attr(db, "config_editor_outputdirectorysett_draw_warn_1"))
+            val_attr   = (theme.attr(db, "config_editor_outputdirectorysett_draw_hilight_2")
+                          if is_sel else theme.attr(db, "config_editor_outputdirectorysett_draw_normal_2"))
+
+            full_label = f"{prefix}{label}: "
+            db.safe_addstr(stdscr, row, bx1 + 2, full_label, label_attr)
+            val_x   = bx1 + 2 + len(full_label)
+            max_len = max(1, bx2 - val_x - 1)
+
+            if field_key == self._FIELD_MODE:
+                shown = f"< {self.mode} >" if self.mode != "inherit" else "< Inherit >"
+            elif field_key == self._FIELD_TOGGLE:
+                shown = "[x]" if self.custom_enabled else "[ ]"
+            else:  # _FIELD_PATH — show with an insertion-point cursor, like the
+                   # File Manager MOVE popup's "Filename:" field.
+                buf = self.custom_path
+                cur = self._path_cursor
+                shown = buf[:cur] + "_" + buf[cur:]
+                if len(shown) > max_len:
+                    # Keep the cursor visible by scrolling the window.
+                    start = max(0, cur - max_len + 1)
+                    shown = shown[start:start + max_len]
+
+            db.safe_addstr(stdscr, row, val_x, shown[:max_len], val_attr)
+            row += 2
+
+        # ── Effective subfolder mode ─────────────────────────────────────────
+        db.safe_addstr(stdscr, row, bx1 + 2, "Effective setting: ", theme.attr(db, "config_editor_outputdirectorysett_draw_normal_3"))
+        db.safe_addstr(stdscr, row, bx1 + 21, self._effective_mode()[:box_w - 15],
+                       theme.attr(db, "config_editor_outputdirectorysett_draw_warn_2"))
+        row += 1
+
+        # ── Effective full recording path ────────────────────────────────────
+        eff_path = self._effective_path()
+        db.safe_addstr(stdscr, row, bx1 + 2, "Effective path: ", theme.attr(db, "config_editor_outputdirectorysett_draw_normal_3"))
+        db.safe_addstr(stdscr, row, bx1 + 21, eff_path[:box_w - 15],
+                       theme.attr(db, "config_editor_outputdirectorysett_draw_warn_2"))
+        row += 1
+
+        if self._error:
+            db.safe_addstr(stdscr, by2 - 1, bx1 + 2, self._error[:box_w - 4],
+                           theme.attr(db, "config_editor_outputdirectorysett_draw_warn_3"))
+
+        footer = " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "
+        db.safe_addstr(stdscr, by2, bx1 + 2, footer[:box_w - 4], theme.attr(db, "config_editor_outputdirectorysett_draw_invhead"))
 
 
 class SplitSettingsPopup:

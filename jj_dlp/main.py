@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.27.2"
+__version__ = "1.27.3"
 
 import subprocess
 import textwrap
@@ -2897,6 +2897,49 @@ def _resolve_auto_suffix(cfg: dict, entry_info: dict) -> dict:
     return overridden
 
 
+def _resolve_output_dir(cfg: dict, entry_info: dict) -> dict:
+    """Return a cfg dict to use for a single streamer, applying that
+    streamer's per-streamer Output Directory override (set via the Output
+    Directory settings popup) on top of the site's OUTPUT_DIR / global
+    SUBFOLDERS config values.
+
+    entry_info is the priorities[...][entries] dict-like info for the
+    streamer. Two independent overrides, both optional:
+
+      - "output_dir_mode" — "inherit" (or key absent) leaves the global
+        SUBFOLDERS mode untouched; any of ("streamer-only", "site-only",
+        "streamer-site", "site-streamer", "off") forces that nesting mode
+        for this streamer via cfg["subfolders_mode_override"], which
+        record_stream() prefers over the global SUBFOLDERS setting when
+        present.
+      - "output_dir_custom_enabled" (bool) + "output_dir_custom_path" —
+        when enabled and non-empty, replaces cfg["output_dir"] for this
+        streamer only, before the subfolder nesting is applied.
+
+    The override never affects other streamers sharing the same site
+    config, since a copy of cfg is only made when there's something to
+    override (mirrors _resolve_split_after() / _resolve_auto_suffix()).
+    """
+    if not entry_info:
+        return cfg
+    mode = entry_info.get("output_dir_mode")
+    custom_enabled = bool(entry_info.get("output_dir_custom_enabled", False))
+    custom_path = str(entry_info.get("output_dir_custom_path", "") or "").strip()
+
+    if mode not in ("streamer-only", "site-only", "streamer-site", "site-streamer", "off") \
+            and not (custom_enabled and custom_path):
+        return cfg
+
+    overridden = dict(cfg)
+    if mode in ("streamer-only", "site-only", "streamer-site", "site-streamer", "off"):
+        overridden["subfolders_mode_override"] = mode
+    if custom_enabled and custom_path:
+        if not os.path.isabs(custom_path):
+            custom_path = os.path.abspath(custom_path)
+        overridden["output_dir"] = custom_path
+    return overridden
+
+
 def _resolve_intro_delay(cfg: dict, entry_info: dict) -> dict:
     """Return a cfg dict to use for a single streamer, applying that
     streamer's per-streamer Intro Delay override (set via the SETTINGS
@@ -2923,9 +2966,11 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
     channel_url = cfg["site_tmpl"].format(username=streamer)
     output_dir  = cfg["output_dir"]
 
-    # Nest recordings under a subfolder per SUBFOLDERS mode in global.conf.
+    # Nest recordings under a subfolder per SUBFOLDERS mode in global.conf,
+    # unless this streamer has a per-streamer Output Directory override
+    # (set via the Output Directory settings popup / _resolve_output_dir()).
     _global_cfg_rs = load_global_config()
-    _subfolders_mode = _global_cfg_rs.get("subfolders", "off")
+    _subfolders_mode = cfg.get("subfolders_mode_override") or _global_cfg_rs.get("subfolders", "off")
     _site_label = cfg.get("site_label", "")
     if _subfolders_mode == "streamer-only":
         output_dir = os.path.join(output_dir, streamer)
@@ -4161,6 +4206,9 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
             "intro_delay_minutes": e.get("intro_delay_minutes", 0),
             "intro_delay_split": e.get("intro_delay_split", False),
             "auto_suffix_mode": e.get("auto_suffix_mode"),  # None = inherit
+            "output_dir_mode": e.get("output_dir_mode"),    # None = inherit
+            "output_dir_custom_enabled": e.get("output_dir_custom_enabled", False),
+            "output_dir_custom_path": e.get("output_dir_custom_path", ""),
         }
 
     site_label = cfg.get("site_label", os.path.basename(site.config_path))
@@ -4181,6 +4229,7 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
             streamer_cfg = _resolve_split_after(cfg, streamer_info)
             streamer_cfg = _resolve_auto_suffix(streamer_cfg, streamer_info)
             streamer_cfg = _resolve_intro_delay(streamer_cfg, streamer_info)
+            streamer_cfg = _resolve_output_dir(streamer_cfg, streamer_info)
             eviction_warning = ""
 
             # Concurrency enforcement
