@@ -753,6 +753,16 @@ class FileManagerTab:
         else:
             self._at_top = False
 
+    def move_selection_edge(self, edge):
+        """Move the selection straight to the first/last row (Home/End)."""
+        file_indices = [i for i, r in enumerate(self._rows) if r[0] == "file"]
+        if not file_indices:
+            self._selected_path = None
+            return
+        target = file_indices[0] if edge == "home" else file_indices[-1]
+        self._selected_path = self._rows[target][1]
+        self._at_top = (edge == "home")
+
     # ── Key handling ─────────────────────────────────────────────────────────
 
     def handle_key(self, key) -> bool:
@@ -789,6 +799,12 @@ class FileManagerTab:
         if key in (curses.KEY_DOWN,):
             self.move_selection(1)
             self._at_top = False
+            return True
+        if key in (curses.KEY_HOME,):
+            self.move_selection_edge("home")
+            return True
+        if key in (curses.KEY_END,):
+            self.move_selection_edge("end")
             return True
         if key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
             if self._selected_path:
