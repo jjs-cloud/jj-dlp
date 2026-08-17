@@ -1,3 +1,5 @@
+v1.27.9
+
 - added additional options to the SUBFOLDERS setting in GLOBAL SETTINGS, and also per-streamer in STREAMER SETTINGS
 - minor ui fixes (config tab panel borders, block tab key in streamer settings, site labels in config tab, clamp text to site panel border)
 - page up/down now jumps by page, and home/end now jumps to the top/bottom on the File Manager tab
