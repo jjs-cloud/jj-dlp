@@ -4,6 +4,7 @@
 - you can now press R to reset all settings for a streamer in the STREAMER SETTINGS panel
 - file manager now sorts numbers in the natural order
 - the log tab now defaults to the "all" view which shows all logs from all sites
+- streamers who are disabled can now be removed without first re-enabling them
 
 ====================
 ====================

@@ -6451,6 +6451,12 @@ class JJDlpDashboard:
             blocked = sorted(site.dash_blocked)
         return [s for s in blocked if s in all_s]
 
+    def _mgmt_removable_streamers(self, site) -> list:
+        """Return every streamer in [Streamers], enabled or disabled (for the REMOVE popup)."""
+        with site.dash_lock:
+            all_s = list(site.dash_all_streamers)
+        return all_s
+
     def draw_mgmt_overlay(self):
         if not self._mgmt_mode:
             return
@@ -6480,7 +6486,15 @@ class JJDlpDashboard:
 
         if action in ("disable", "remove"):
             # ── List-picker mode: arrow up/down to select a streamer ──────────
-            enabled = self._mgmt_enabled_streamers(site)
+            # REMOVE should list every streamer (enabled or disabled); DISABLE
+            # only makes sense for streamers that aren't already disabled.
+            if action == "remove":
+                enabled = self._mgmt_removable_streamers(site)
+                with site.dash_lock:
+                    blocked_set = set(site.dash_blocked)
+            else:
+                enabled = self._mgmt_enabled_streamers(site)
+                blocked_set = set()
 
             # Result message (shown after an action completes)
             if self._mgmt_result:
@@ -6489,8 +6503,9 @@ class JJDlpDashboard:
                             theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_live_1"))
 
             if not enabled:
+                empty_msg = "No streamers." if action == "remove" else "No enabled streamers."
                 self.safe_addstr(self.stdscr, by1 + 3, bx1 + 2,
-                            "No enabled streamers.",
+                            empty_msg,
                             theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_dim_2"))
                 self.safe_addstr(self.stdscr, by2, bx1 + 2,
                             " Esc: Go back ",
@@ -6518,8 +6533,9 @@ class JJDlpDashboard:
                 prefix = "> " if is_sel else "  "
                 attr   = (theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_hilight_1")
                           if is_sel else theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_normal_2"))
+                suffix = " (disabled)" if s in blocked_set else ""
                 self.safe_addstr(self.stdscr, row_y, bx1 + 2,
-                            (prefix + s)[:box_w - 4], attr)
+                            (prefix + s + suffix)[:box_w - 4], attr)
 
             self.safe_addstr(self.stdscr, by2, bx1 + 2,
                         " \u2191\u2193: select  Enter: confirm  Esc: Go back ",
@@ -7162,7 +7178,9 @@ class JJDlpDashboard:
 
         if action in ("disable", "remove"):
             # ── List-picker mode ───────────────────────────────────────────────
-            enabled = self._mgmt_enabled_streamers(site)
+            list_fn = (self._mgmt_removable_streamers if action == "remove"
+                       else self._mgmt_enabled_streamers)
+            enabled = list_fn(site)
             if key == 27:  # Escape
                 self._mgmt_mode   = None
                 self._mgmt_buf    = ""
@@ -7181,7 +7199,7 @@ class JJDlpDashboard:
                     site.trigger_event.set()
                     self._mgmt_result = result
                     # Keep selection clamped to the (now shorter) list
-                    new_enabled = self._mgmt_enabled_streamers(site)
+                    new_enabled = list_fn(site)
                     self._mgmt_sel = min(self._mgmt_sel, max(0, len(new_enabled) - 1))
                 else:
                     self._mgmt_mode   = None
