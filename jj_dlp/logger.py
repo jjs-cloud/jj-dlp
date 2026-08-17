@@ -160,6 +160,9 @@ def configure(dashboard_log_fn=None, dashboard_dbg_fn=None) -> None:
 #   SIMULATE_QUALITY_UPGRADE — simulation: injected quality-upgrade event
 #   SIMULATE_STALL — simulation: injected stall/freeze
 #   SIMULATE_WRITE_FAILURE — simulation: injected write-failure blocker
+#   JOBOBJECT — Windows Job Object setup and inheritance diagnostics
+#   CTRLHANDLER — Windows console control-handler diagnostics
+#   SIGHANDLER — POSIX signal-handler diagnostics
 #
 DBG_TAGS: list[str] = [
     "DRAIN",
@@ -195,6 +198,9 @@ DBG_TAGS: list[str] = [
     "SIMULATE_QUALITY_UPGRADE",
     "SIMULATE_STALL",
     "SIMULATE_WRITE_FAILURE",
+    "JOBOBJECT",
+    "CTRLHANDLER",
+    "SIGHANDLER",
 ]
 
 import json

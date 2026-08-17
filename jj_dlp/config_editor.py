@@ -63,7 +63,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("MAX_CONCURRENT_REC",    "global", "0",     True, type="int",  comment='The maximum number of simultaneous recordings allowed to run.  Use the STREAMER SETTINGS panel in the Config tab to adjust the priority of each streamer. (0=no limit)'),
     _KeyDef("LQ_DOWNLOADER",         "global", "false", True, type="bool",  comment="When any recording reaches the ffmpeg error threshold (FF_ERR_THRESH) lower the video quality of the lowest priority streamer, freeing up bandwidth for the remaining streamers."),
     _KeyDef("FF_ERR_THRESH",         "global", "200",   True, type="int",  comment='Restart the download if we see this many ffmpeg errors ("timestamp discontinuity", "Packet corrupt") default: 200'),
-    _KeyDef("SUBFOLDERS",            "global", "false", True, type="bool",  comment="Save recordings into a subfolder named after the streamer inside OUTPUT_DIR (true/false)."),
+    _KeyDef("SUBFOLDERS",            "global", "off",   True, type="str",   comment="Save recordings in a subfolder(s) inside OUTPUT_DIR. Options: streamer-only, site-only, streamer-site, site-streamer, off."),
     _KeyDef("GRAPH_SCALE",           "global", "300",   True, type="int",  comment="The number of seconds each bar in the graph represents. (default = 600)."),
     _KeyDef("DESTINATIONS",          "global", "",      True, type="list",  comment="A list of destination paths where you might want to move your files.  Used in the File Manager tab. (e.g. C:\\My Recordings  OR /home/greg/twitch)"),
     _KeyDef("NTFY_TOPIC",            "global", "",      True,  comment="The topic name to use for ntfy.sh notifications. (example: jj-dlp-fj48dh734fk) Refer to docs/ntfy-setup.md for a detailed setup guide. (blank = disabled)"),
@@ -131,6 +131,20 @@ PRESERVED_KEYS: list[str] = [k.name for k in CONFIG_KEYS if k.preserve]
 _KEY_PRESERVE: dict[str, bool] = {k.name: k.preserve for k in CONFIG_KEYS}
 
 
+# Valid SUBFOLDERS modes (new-style values only; true/false are legacy aliases).
+SUBFOLDERS_MODES: tuple[str, ...] = ("streamer-only", "site-only", "streamer-site", "site-streamer", "off")
+
+
+def _coerce_subfolders_value(raw: str) -> str:
+    """Coerce a raw SUBFOLDERS string, mapping legacy true/false to the new modes."""
+    val = (raw or "").strip().strip('"\'').lower()
+    if val in ("true", "1", "yes"):
+        return "streamer-only"
+    if val in ("false", "0", "no", ""):
+        return "off"
+    return val if val in SUBFOLDERS_MODES else "off"
+
+
 def _coerce_global_value(kdef: "_KeyDef", raw: str) -> object:
     """Coerce a raw global.conf string into the runtime type declared by kdef.type."""
     raw = (raw or "").strip().strip('"\'')
@@ -182,6 +196,7 @@ def load_global_config(path: str) -> dict:
 
     # A couple of keys need a touch of normalization beyond their basic type.
     cfg["update_branch"] = cfg["update_branch"].lower()
+    cfg["subfolders"] = _coerce_subfolders_value(general.get("SUBFOLDERS", ""))
     if not cfg["compact_view"]:
         cfg["compact_view"] = "auto"
     cfg["graph_scale"] = max(1, cfg["graph_scale"])
@@ -269,6 +284,118 @@ def _get_site_default_cfg(dashboard, entry: "PriorityEntry") -> dict:
     except Exception:
         pass
     return {}
+
+
+# ── Per-streamer setting override keys, grouped by which popup owns them ────
+# Used by the 'R' (Reset) hotkey on each settings popup: a sub-popup passes
+# only the keys it owns, while StreamerSettingsPopup (the top-level menu)
+# passes the full union to reset everything for that streamer at once.
+_ALL_STREAMER_SETTING_KEYS: "tuple[str, ...]" = (
+    "schedule",
+    "lq_enabled",
+    "split_mode", "split_after", "split_enabled",
+    "notifications_enabled",
+    "intro_delay_enabled", "intro_delay_minutes", "intro_delay_split",
+    "auto_suffix_mode",
+    "output_dir_mode", "output_dir_custom_enabled", "output_dir_custom_path",
+)
+
+
+def _reset_streamer_setting_keys(dashboard, config_id: str, entry: "PriorityEntry",
+                                  keys: "tuple[str, ...]") -> None:
+    """Remove *keys* from entry's record in global.json, reverting those
+    settings back to inherited / site-default behavior."""
+    try:
+        from .main import _global_json_lock, _load_global_json, _save_global_json
+        with _global_json_lock:
+            gdata   = _load_global_json()
+            entries = (gdata.get("priorities", {})
+                           .get(config_id, {})
+                           .get("entries", []))
+            for e in entries:
+                if e.get("streamer") == entry.streamer and e.get("site") == entry.site:
+                    for k in keys:
+                        e.pop(k, None)
+                    break
+            gdata.setdefault("priorities", {}).setdefault(
+                config_id, {"config_files": [], "entries": []}
+            )["entries"] = entries
+            _save_global_json(gdata)
+    except Exception:
+        pass
+
+    # Invalidate the sort manager's priority cache so the "*" has_override
+    # marker in the SORT/site-list views refreshes immediately.
+    try:
+        sort_mgr = getattr(dashboard, "sort_manager", None)
+        if sort_mgr is not None:
+            sort_mgr._prio_cache_ts = 0.0
+    except Exception:
+        pass
+
+    # Also force the PRIORITY panel itself to reload from disk right now,
+    # rather than waiting for the settings popup stack to fully close.
+    # This makes the "*" marker beside the streamer's name disappear the
+    # moment the reset is confirmed, instead of only after pressing Esc
+    # back out to the streamer list.
+    try:
+        config_editor = getattr(dashboard, "config_editor", None)
+        priority_editor = getattr(config_editor, "priority_editor", None)
+        if priority_editor is not None:
+            priority_editor.force_reload()
+    except Exception:
+        pass
+
+
+class ConfirmResetPopup:
+    """Small Yes/No confirmation dialog, shown on top of a settings popup
+    when the user presses 'R' (Reset). Drawn centered over whatever popup
+    created it; the owning popup is responsible for calling handle_key()/
+    draw() while this is active and for acting on the "yes"/"no" result.
+    """
+
+    def __init__(self, dashboard, message: str):
+        self.dashboard = dashboard
+        self.lines = self._wrap(message, 44)
+
+    @staticmethod
+    def _wrap(message: str, width: int) -> "list[str]":
+        import textwrap
+        return textwrap.wrap(message, width) or [message]
+
+    def handle_key(self, key):
+        """Returns 'yes', 'no', or None (no decision yet)."""
+        if key in (ord('y'), ord('Y')):
+            return "yes"
+        if key in (27, ord('n'), ord('N')):
+            return "no"
+        return None
+
+    def draw(self, stdscr) -> None:
+        db = self.dashboard
+        h, w = stdscr.getmaxyx()
+
+        content_w = max(len(l) for l in self.lines)
+        box_w = min(content_w + 6, w - 4)
+        box_h = len(self.lines) + 4
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_confirmresetpopup_draw_normal"))
+
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_WARN)
+        title = " CONFIRM RESET "
+        db.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(db, "config_editor_confirmresetpopup_draw_warn_1"))
+
+        row = by1 + 2
+        for line in self.lines:
+            db.safe_addstr(stdscr, row, bx1 + 3, line[:box_w - 6], theme.attr(db, "config_editor_confirmresetpopup_draw_normal_2"))
+            row += 1
+
+        db.safe_addstr(stdscr, by2, bx1 + 2, " Y:Yes  N/Esc:No "[:box_w - 4], theme.attr(db, "config_editor_confirmresetpopup_draw_invhead"))
 
 
 class PriorityEditor:
@@ -384,13 +511,22 @@ class PriorityEditor:
             # "inherit" is represented by the key being absent.
             has_auto_suffix_override = e.get("auto_suffix_mode") in ("on", "off")
 
+            # Subfolders (OutputDirectorySettingsPopup): tri-state
+            # "output_dir_mode" ("inherit" or absent = no override) plus an
+            # independent custom OUTPUT_DIR override toggle.
+            has_output_dir_override = (
+                e.get("output_dir_mode") is not None
+                and e.get("output_dir_mode") != "inherit"
+            ) or bool(e.get("output_dir_custom_enabled", False))
+
             saved_map[key] = {
                 "bypass":       e.get("bypass", False),
                 "priority":     i,
                 "has_override": (schedule_enabled or has_split_override
                                   or has_notif_override or has_lq_override
                                   or has_intro_delay_override
-                                  or has_auto_suffix_override),
+                                  or has_auto_suffix_override
+                                  or has_output_dir_override),
             }
 
         # Build enriched list with saved priority / bypass values.
@@ -597,7 +733,8 @@ class PriorityEditor:
                 self._scroll_offset = max(0, self._selected_idx - visible_rows + 1)
 
         # Box border
-        db.draw_box(stdscr, y1, x1, y2, x2, db.C_SYSTEM)
+        border_pair = db.C_HILIGHT if is_active else db.C_CHROME
+        db.draw_box(stdscr, y1, x1, y2, x2, border_pair)
         title = " STREAMER SETTINGS "
         
         db.safe_addstr(stdscr, y1, x1 + 2, title,
@@ -681,7 +818,7 @@ class StreamerSettingsPopup:
         self.entry     = entry
         self.config_id = config_id
 
-        self.options = ["Schedule", "Quality", "Split", "Intro Delay", "Notifications", "Auto-Suffix"]
+        self.options = ["Schedule", "Quality", "Split", "Intro Delay", "Notifications", "Auto-Suffix", "Subfolders"]
         self._sel: int = 0
         self._schedule_popup: "Optional[ScheduleSettingsPopup]" = None
         self._quality_popup: "Optional[QualitySettingsPopup]" = None
@@ -689,8 +826,22 @@ class StreamerSettingsPopup:
         self._intro_delay_popup: "Optional[IntroDelaySettingsPopup]" = None
         self._notifications_popup: "Optional[NotificationSettingsPopup]" = None
         self._auto_suffix_popup: "Optional[AutoSuffixSettingsPopup]" = None
+        self._output_dir_popup: "Optional[OutputDirectorySettingsPopup]" = None
+        self._confirm_reset: "Optional[ConfirmResetPopup]" = None
+
+    def _reset_all(self) -> None:
+        _reset_streamer_setting_keys(self.dashboard, self.config_id, self.entry, _ALL_STREAMER_SETTING_KEYS)
 
     def handle_key(self, key) -> bool:
+        if self._confirm_reset is not None:
+            result = self._confirm_reset.handle_key(key)
+            if result == "yes":
+                self._reset_all()
+                self._confirm_reset = None
+            elif result == "no":
+                self._confirm_reset = None
+            return False
+
         if self._schedule_popup is not None:
             should_close = self._schedule_popup.handle_key(key)
             if should_close:
@@ -733,8 +884,20 @@ class StreamerSettingsPopup:
                 return True
             return False
 
+        if self._output_dir_popup is not None:
+            should_close = self._output_dir_popup.handle_key(key)
+            if should_close:
+                self._output_dir_popup = None
+                return True
+            return False
+
         if key == 27:  # Esc
             return True
+        elif key in (ord('r'), ord('R')):
+            self._confirm_reset = ConfirmResetPopup(
+                self.dashboard,
+                f"Are you sure you want to reset all settings for {self.entry.streamer}?",
+            )
         elif key == curses.KEY_UP:
             self._sel = max(0, self._sel - 1)
         elif key == curses.KEY_DOWN:
@@ -776,6 +939,12 @@ class StreamerSettingsPopup:
                     self.entry,
                     self.config_id,
                 )
+            elif self.options[self._sel] == "Subfolders":
+                self._output_dir_popup = OutputDirectorySettingsPopup(
+                    self.dashboard,
+                    self.entry,
+                    self.config_id,
+                )
         return False
 
     def draw(self, stdscr) -> None:
@@ -803,6 +972,10 @@ class StreamerSettingsPopup:
             self._auto_suffix_popup.draw(stdscr)
             return
 
+        if self._output_dir_popup is not None:
+            self._output_dir_popup.draw(stdscr)
+            return
+
         db = self.dashboard
         h, w = stdscr.getmaxyx()
         
@@ -828,7 +1001,10 @@ class StreamerSettingsPopup:
             db.safe_addstr(stdscr, row, bx1 + 2, prefix + opt, attr)
             row += 2
             
-        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Select  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_streamersettingspopu_draw_invhead"))
+        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Select  R:Reset  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_streamersettingspopu_draw_invhead"))
+
+        if self._confirm_reset is not None:
+            self._confirm_reset.draw(stdscr)
 
 
 class QualitySettingsPopup:
@@ -837,6 +1013,7 @@ class QualitySettingsPopup:
         self.entry     = entry
         self.config_id = config_id
         self.lq_enabled = False
+        self._confirm_reset: "Optional[ConfirmResetPopup]" = None
         self._load()
 
     def _load(self) -> None:
@@ -854,6 +1031,10 @@ class QualitySettingsPopup:
                     break
         except Exception:
             pass
+
+    def _reset(self) -> None:
+        _reset_streamer_setting_keys(self.dashboard, self.config_id, self.entry, ("lq_enabled",))
+        self._load()
 
     def _save(self) -> None:
         try:
@@ -888,8 +1069,22 @@ class QualitySettingsPopup:
             pass
 
     def handle_key(self, key) -> bool:
+        if self._confirm_reset is not None:
+            result = self._confirm_reset.handle_key(key)
+            if result == "yes":
+                self._reset()
+                self._confirm_reset = None
+            elif result == "no":
+                self._confirm_reset = None
+            return False
+
         if key == 27:
             return True
+        elif key in (ord('r'), ord('R')):
+            self._confirm_reset = ConfirmResetPopup(
+                self.dashboard,
+                f"Are you sure you want to reset the Quality settings for {self.entry.streamer}?",
+            )
         elif key == ord(' '):
             self.lq_enabled = not self.lq_enabled
         elif key in (10, 13, curses.KEY_ENTER, 459):
@@ -919,7 +1114,10 @@ class QualitySettingsPopup:
         db.safe_addstr(stdscr, by1 + 2, bx1 + 2, "> Low Quality Enabled: ", theme.attr(db, "config_editor_qualitysettingspopup_draw_hilight_1"))
         db.safe_addstr(stdscr, by1 + 2, bx1 + 25, val_str, theme.attr(db, "config_editor_qualitysettingspopup_draw_hilight_2"))
             
-        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space:Toggle  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_qualitysettingspopup_draw_invhead"))
+        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space:Toggle  R:Reset  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_qualitysettingspopup_draw_invhead"))
+
+        if self._confirm_reset is not None:
+            self._confirm_reset.draw(stdscr)
 
 
 class NotificationSettingsPopup:
@@ -944,6 +1142,11 @@ class NotificationSettingsPopup:
         self.entry     = entry
         self.config_id = config_id
         self.state: str = "inherit"   # "inherit" | "on" | "off"
+        self._confirm_reset: "Optional[ConfirmResetPopup]" = None
+        self._load()
+
+    def _reset(self) -> None:
+        _reset_streamer_setting_keys(self.dashboard, self.config_id, self.entry, ("notifications_enabled",))
         self._load()
 
     def _load(self) -> None:
@@ -1010,8 +1213,22 @@ class NotificationSettingsPopup:
         return bool(cfg.get("ntfy_notifications", True))
 
     def handle_key(self, key) -> bool:
+        if self._confirm_reset is not None:
+            result = self._confirm_reset.handle_key(key)
+            if result == "yes":
+                self._reset()
+                self._confirm_reset = None
+            elif result == "no":
+                self._confirm_reset = None
+            return False
+
         if key == 27:
             return True
+        elif key in (ord('r'), ord('R')):
+            self._confirm_reset = ConfirmResetPopup(
+                self.dashboard,
+                f"Are you sure you want to reset the Notifications settings for {self.entry.streamer}?",
+            )
         elif key == ord(' '):
             idx = self._STATES.index(self.state)
             self.state = self._STATES[(idx + 1) % len(self._STATES)]
@@ -1057,7 +1274,10 @@ class NotificationSettingsPopup:
         db.safe_addstr(stdscr, by1 + 4, bx1 + 2, "Effective: ", theme.attr(db, "config_editor_notificationsettings_draw_normal_2"))
         db.safe_addstr(stdscr, by1 + 4, bx1 + 13, eff_str, theme.attr(db, "config_editor_notificationsettings_draw_warn"))
 
-        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_notificationsettings_draw_invhead"))
+        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space/\u2190\u2192:Cycle  R:Reset  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_notificationsettings_draw_invhead"))
+
+        if self._confirm_reset is not None:
+            self._confirm_reset.draw(stdscr)
 
 
 class AutoSuffixSettingsPopup:
@@ -1077,6 +1297,11 @@ class AutoSuffixSettingsPopup:
         self.entry     = entry
         self.config_id = config_id
         self.state: str = "inherit"   # "inherit" | "on" | "off"
+        self._confirm_reset: "Optional[ConfirmResetPopup]" = None
+        self._load()
+
+    def _reset(self) -> None:
+        _reset_streamer_setting_keys(self.dashboard, self.config_id, self.entry, ("auto_suffix_mode",))
         self._load()
 
     def _load(self) -> None:
@@ -1143,8 +1368,22 @@ class AutoSuffixSettingsPopup:
         return bool(cfg.get("auto_suffix", True))
 
     def handle_key(self, key) -> bool:
+        if self._confirm_reset is not None:
+            result = self._confirm_reset.handle_key(key)
+            if result == "yes":
+                self._reset()
+                self._confirm_reset = None
+            elif result == "no":
+                self._confirm_reset = None
+            return False
+
         if key == 27:
             return True
+        elif key in (ord('r'), ord('R')):
+            self._confirm_reset = ConfirmResetPopup(
+                self.dashboard,
+                f"Are you sure you want to reset the Auto-Suffix settings for {self.entry.streamer}?",
+            )
         elif key == ord(' '):
             idx = self._STATES.index(self.state)
             self.state = self._STATES[(idx + 1) % len(self._STATES)]
@@ -1190,7 +1429,348 @@ class AutoSuffixSettingsPopup:
         db.safe_addstr(stdscr, by1 + 4, bx1 + 2, "Effective: ", theme.attr(db, "config_editor_autosuffixsettingspo_draw_normal_2"))
         db.safe_addstr(stdscr, by1 + 4, bx1 + 13, eff_str, theme.attr(db, "config_editor_autosuffixsettingspo_draw_warn"))
 
-        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_autosuffixsettingspo_draw_invhead"))
+        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space/\u2190\u2192:Cycle  R:Reset  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_autosuffixsettingspo_draw_invhead"))
+
+        if self._confirm_reset is not None:
+            self._confirm_reset.draw(stdscr)
+
+
+class OutputDirectorySettingsPopup:
+    """Per-streamer override for OUTPUT_DIR / SUBFOLDERS.
+
+    Two independent settings, stored in the same priorities[...][entries]
+    record used by the other per-streamer popups:
+
+      - "output_dir_mode" — subfolder-nesting override. "inherit"
+        (default, key absent) uses the global SUBFOLDERS mode; any of
+        SUBFOLDERS_MODES ("streamer-only", "site-only", "streamer-site",
+        "site-streamer", "off") forces that mode for this streamer
+        regardless of the global setting. Mirrors _resolve_auto_suffix()'s
+        tri-state handling in main.py (see _resolve_output_dir()).
+
+      - "output_dir_custom_enabled" / "output_dir_custom_path" — an
+        optional per-streamer override of the site's OUTPUT_DIR itself.
+        When disabled (default), the streamer records into the owning
+        site's configured OUTPUT_DIR, same as if no entry existed.
+    """
+
+    _MODE_STATES = ("inherit",) + SUBFOLDERS_MODES  # ("inherit","streamer-only",...,"off")
+
+    _FIELD_MODE   = "mode"
+    _FIELD_TOGGLE = "custom_toggle"
+    _FIELD_PATH   = "custom_path"
+
+    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
+        self.dashboard = dashboard
+        self.entry     = entry
+        self.config_id = config_id
+
+        self.mode:           str  = "inherit"
+        self.custom_enabled: bool = False
+        self.custom_path:    str  = ""
+
+        self._sel:          int = 0
+        self._path_cursor:  int = 0
+        self._error:        str = ""
+        self._confirm_reset: "Optional[ConfirmResetPopup]" = None
+
+        self._load()
+
+    # ── Persistence ────────────────────────────────────────────────────────────
+
+    def _load(self) -> None:
+        try:
+            from .main import _global_json_lock, _load_global_json
+            with _global_json_lock:
+                gdata = _load_global_json()
+            entries = (gdata.get("priorities", {})
+                           .get(self.config_id, {})
+                           .get("entries", []))
+            for e in entries:
+                if (e.get("streamer") == self.entry.streamer
+                        and e.get("site") == self.entry.site):
+                    raw = e.get("output_dir_mode")
+                    self.mode = raw if raw in SUBFOLDERS_MODES else "inherit"
+                    self.custom_enabled = bool(e.get("output_dir_custom_enabled", False))
+                    self.custom_path = str(e.get("output_dir_custom_path", "") or "")
+                    break
+        except Exception:
+            pass
+        if not self.custom_path:
+            self.custom_path = str(self._site_default_output_dir())
+        self._path_cursor = len(self.custom_path)
+
+    def _save(self) -> None:
+        try:
+            from .main import _global_json_lock, _load_global_json, _save_global_json
+            with _global_json_lock:
+                gdata   = _load_global_json()
+                entries = (gdata.get("priorities", {})
+                               .get(self.config_id, {})
+                               .get("entries", []))
+                target = None
+                for e in entries:
+                    if (e.get("streamer") == self.entry.streamer
+                            and e.get("site") == self.entry.site):
+                        target = e
+                        break
+                no_override = (self.mode == "inherit" and not self.custom_enabled)
+                if no_override:
+                    # Nothing to override — clear any prior explicit values
+                    # rather than writing them.
+                    if target is not None:
+                        target.pop("output_dir_mode", None)
+                        target.pop("output_dir_custom_enabled", None)
+                        target.pop("output_dir_custom_path", None)
+                else:
+                    if target is None:
+                        target = {
+                            "streamer":   self.entry.streamer,
+                            "site":       self.entry.site,
+                            "config_sha": self.entry.config_sha,
+                            "priority":   len(entries),
+                            "bypass":     self.entry.bypass,
+                        }
+                        entries.append(target)
+                    if self.mode == "inherit":
+                        target.pop("output_dir_mode", None)
+                    else:
+                        target["output_dir_mode"] = self.mode
+                    target["output_dir_custom_enabled"] = self.custom_enabled
+                    target["output_dir_custom_path"] = self.custom_path.strip() if self.custom_enabled else ""
+
+                gdata.setdefault("priorities", {}).setdefault(
+                    self.config_id, {"config_files": [], "entries": []}
+                )["entries"] = entries
+                _save_global_json(gdata)
+        except Exception:
+            pass
+
+    # ── Effective-value helpers ────────────────────────────────────────────────
+
+    def _site_default_output_dir(self) -> str:
+        cfg = _get_site_default_cfg(self.dashboard, self.entry)
+        return cfg.get("output_dir", "") or ""
+
+    def _global_subfolders_mode(self) -> str:
+        try:
+            from .main import load_global_config
+            return load_global_config().get("subfolders", "off")
+        except Exception:
+            return "off"
+
+    def _effective_mode(self) -> str:
+        return self._global_subfolders_mode() if self.mode == "inherit" else self.mode
+
+    def _effective_path(self) -> str:
+        base = self.custom_path.strip() if (self.custom_enabled and self.custom_path.strip()) \
+            else self._site_default_output_dir()
+        if not base:
+            return ""
+        if not os.path.isabs(base):
+            base = os.path.abspath(base)
+
+        streamer   = self.entry.streamer
+        site_label = self.entry.site
+        eff_mode   = self._effective_mode()
+        if eff_mode == "streamer-only":
+            path = os.path.join(base, streamer)
+        elif eff_mode == "site-only":
+            path = os.path.join(base, site_label)
+        elif eff_mode == "streamer-site":
+            path = os.path.join(base, streamer, site_label)
+        elif eff_mode == "site-streamer":
+            path = os.path.join(base, site_label, streamer)
+        else:
+            path = base  # "off" (or unrecognized)
+        return os.path.join(path, "example.mp4")
+
+    # ── Field list ─────────────────────────────────────────────────────────────
+
+    def _get_fields(self) -> "list[tuple[str,str]]":
+        fields = [
+            ("Subfolders", self._FIELD_MODE),
+            ("Custom Output Directory", self._FIELD_TOGGLE),
+        ]
+        if self.custom_enabled:
+            fields.append(("Path", self._FIELD_PATH))
+        return fields
+
+    # ── Key handling ───────────────────────────────────────────────────────────
+
+    def handle_key(self, key) -> bool:
+        """Handle one keypress. Returns True when the popup should close."""
+        if self._confirm_reset is not None:
+            result = self._confirm_reset.handle_key(key)
+            if result == "yes":
+                self._reset()
+                self._confirm_reset = None
+            elif result == "no":
+                self._confirm_reset = None
+            return False
+
+        fields = self._get_fields()
+        self._sel = min(self._sel, len(fields) - 1)
+        _, field_key = fields[self._sel]
+
+        # ── Custom path field: always in free-text edit mode when selected ──
+        if field_key == self._FIELD_PATH:
+            cur = self._path_cursor
+            if key == 27:  # Esc -> cancel whole popup
+                return True
+            elif key == curses.KEY_UP:
+                self._sel = max(0, self._sel - 1)
+                self._error = ""
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                if cur > 0:
+                    self.custom_path = self.custom_path[:cur - 1] + self.custom_path[cur:]
+                    self._path_cursor = cur - 1
+                self._error = ""
+            elif key in (curses.KEY_DC,):
+                if cur < len(self.custom_path):
+                    self.custom_path = self.custom_path[:cur] + self.custom_path[cur + 1:]
+                self._error = ""
+            elif key == curses.KEY_LEFT:
+                self._path_cursor = max(0, cur - 1)
+            elif key == curses.KEY_RIGHT:
+                self._path_cursor = min(len(self.custom_path), cur + 1)
+            elif key == curses.KEY_HOME:
+                self._path_cursor = 0
+            elif key == curses.KEY_END:
+                self._path_cursor = len(self.custom_path)
+            elif key in (10, 13, curses.KEY_ENTER, 459):
+                valid, err = self._validate()
+                if valid:
+                    self._save()
+                    return True
+                self._error = err
+            elif 32 <= key < 127:
+                self.custom_path = self.custom_path[:cur] + chr(key) + self.custom_path[cur:]
+                self._path_cursor = cur + 1
+                self._error = ""
+            return False
+
+        # ── Normal navigation (mode row / checkbox row) ─────────────────────
+        if key == 27:
+            return True
+        elif key in (ord('r'), ord('R')):
+            self._confirm_reset = ConfirmResetPopup(
+                self.dashboard,
+                f"Are you sure you want to reset the Subfolders settings for {self.entry.streamer}?",
+            )
+        elif key == curses.KEY_UP:
+            self._sel = max(0, self._sel - 1)
+            self._error = ""
+        elif key == curses.KEY_DOWN:
+            self._sel = min(len(fields) - 1, self._sel + 1)
+            self._error = ""
+        elif field_key == self._FIELD_MODE and key in (ord(' '), curses.KEY_LEFT, curses.KEY_RIGHT):
+            idx = self._MODE_STATES.index(self.mode)
+            step = -1 if key == curses.KEY_LEFT else 1
+            self.mode = self._MODE_STATES[(idx + step) % len(self._MODE_STATES)]
+            self._error = ""
+        elif field_key == self._FIELD_TOGGLE and key == ord(' '):
+            self.custom_enabled = not self.custom_enabled
+            if self.custom_enabled and not self.custom_path.strip():
+                self.custom_path = self._site_default_output_dir()
+                self._path_cursor = len(self.custom_path)
+            self._sel = min(self._sel, len(self._get_fields()) - 1)
+            self._error = ""
+        elif key in (10, 13, curses.KEY_ENTER, 459):
+            valid, err = self._validate()
+            if valid:
+                self._save()
+                return True
+            self._error = err
+        return False
+
+    def _validate(self) -> "tuple[bool, str]":
+        if self.custom_enabled and not self.custom_path.strip():
+            return False, "Enter a custom output directory, or uncheck it"
+        return True, ""
+
+    def _reset(self) -> None:
+        _reset_streamer_setting_keys(
+            self.dashboard, self.config_id, self.entry,
+            ("output_dir_mode", "output_dir_custom_enabled", "output_dir_custom_path"),
+        )
+        self._sel = 0
+        self._load()
+
+    # ── Drawing ────────────────────────────────────────────────────────────────
+
+    def draw(self, stdscr) -> None:
+        db     = self.dashboard
+        h, w   = stdscr.getmaxyx()
+        fields = self._get_fields()
+
+        box_w = min(96, w - 6)
+        box_h = len(fields) * 2 + 6   # + 2 effective lines + footer
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_outputdirectorysett_draw_normal_1"))
+
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
+        title = f" {self.entry.streamer.upper()} SETTINGS "
+        db.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(db, "config_editor_outputdirectorysett_draw_system"))
+
+        row = by1 + 2
+        for i, (label, field_key) in enumerate(fields):
+            is_sel     = (i == self._sel)
+            prefix     = "> " if is_sel else "  "
+            label_attr = (theme.attr(db, "config_editor_outputdirectorysett_draw_hilight_1")
+                          if is_sel else theme.attr(db, "config_editor_outputdirectorysett_draw_warn_1"))
+            val_attr   = (theme.attr(db, "config_editor_outputdirectorysett_draw_hilight_2")
+                          if is_sel else theme.attr(db, "config_editor_outputdirectorysett_draw_normal_2"))
+
+            full_label = f"{prefix}{label}: "
+            db.safe_addstr(stdscr, row, bx1 + 2, full_label, label_attr)
+            val_x   = bx1 + 2 + len(full_label)
+            max_len = max(1, bx2 - val_x - 1)
+
+            if field_key == self._FIELD_MODE:
+                shown = f"< {self.mode} >" if self.mode != "inherit" else "< Inherit >"
+            elif field_key == self._FIELD_TOGGLE:
+                shown = "[x]" if self.custom_enabled else "[ ]"
+            else:  # _FIELD_PATH — show with an insertion-point cursor, like the
+                   # File Manager MOVE popup's "Filename:" field.
+                buf = self.custom_path
+                cur = self._path_cursor
+                shown = buf[:cur] + "_" + buf[cur:]
+                if len(shown) > max_len:
+                    # Keep the cursor visible by scrolling the window.
+                    start = max(0, cur - max_len + 1)
+                    shown = shown[start:start + max_len]
+
+            db.safe_addstr(stdscr, row, val_x, shown[:max_len], val_attr)
+            row += 2
+
+        # ── Effective subfolder mode ─────────────────────────────────────────
+        db.safe_addstr(stdscr, row, bx1 + 2, "Effective setting: ", theme.attr(db, "config_editor_outputdirectorysett_draw_normal_3"))
+        db.safe_addstr(stdscr, row, bx1 + 21, self._effective_mode()[:box_w - 15],
+                       theme.attr(db, "config_editor_outputdirectorysett_draw_warn_2"))
+        row += 1
+
+        # ── Effective full recording path ────────────────────────────────────
+        eff_path = self._effective_path()
+        db.safe_addstr(stdscr, row, bx1 + 2, "Effective path: ", theme.attr(db, "config_editor_outputdirectorysett_draw_normal_3"))
+        db.safe_addstr(stdscr, row, bx1 + 21, eff_path[:box_w - 15],
+                       theme.attr(db, "config_editor_outputdirectorysett_draw_warn_2"))
+        row += 1
+
+        if self._error:
+            db.safe_addstr(stdscr, by2 - 1, bx1 + 2, self._error[:box_w - 4],
+                           theme.attr(db, "config_editor_outputdirectorysett_draw_warn_3"))
+
+        footer = " Enter:Save  Space/\u2190\u2192:Cycle  R:Reset  Esc:Cancel "
+        db.safe_addstr(stdscr, by2, bx1 + 2, footer[:box_w - 4], theme.attr(db, "config_editor_outputdirectorysett_draw_invhead"))
+
+        if self._confirm_reset is not None:
+            self._confirm_reset.draw(stdscr)
 
 
 class SplitSettingsPopup:
@@ -1231,7 +1811,16 @@ class SplitSettingsPopup:
         self._editing:  bool = False  # text-field edit sub-mode
         self._edit_buf: str  = ""
         self._error:    str  = ""
+        self._confirm_reset: "Optional[ConfirmResetPopup]" = None
 
+        self._load()
+
+    def _reset(self) -> None:
+        _reset_streamer_setting_keys(
+            self.dashboard, self.config_id, self.entry,
+            ("split_mode", "split_after", "split_enabled"),
+        )
+        self._sel = 0
         self._load()
 
     # ── Persistence ────────────────────────────────────────────────────────────
@@ -1340,6 +1929,15 @@ class SplitSettingsPopup:
 
     def handle_key(self, key) -> bool:
         """Handle one keypress. Returns True when the popup should close."""
+        if self._confirm_reset is not None:
+            result = self._confirm_reset.handle_key(key)
+            if result == "yes":
+                self._reset()
+                self._confirm_reset = None
+            elif result == "no":
+                self._confirm_reset = None
+            return False
+
         fields = self._get_fields()
         _, _, field_key = fields[self._sel]
 
@@ -1374,6 +1972,12 @@ class SplitSettingsPopup:
         # ── Normal navigation ─────────────────────────────────────────────────
         if key == 27:                                   # Esc → close without saving
             return True
+
+        elif key in (ord('r'), ord('R')):
+            self._confirm_reset = ConfirmResetPopup(
+                self.dashboard,
+                f"Are you sure you want to reset the Split settings for {self.entry.streamer}?",
+            )
 
         elif key == curses.KEY_UP:
             self._sel   = max(0, self._sel - 1)
@@ -1463,8 +2067,11 @@ class SplitSettingsPopup:
             db.safe_addstr(stdscr, by2 - 1, bx1 + 2, self._error[:box_w - 4],
                            theme.attr(db, "config_editor_splitsettingspopup_draw_warn_3"))
 
-        footer = " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "
+        footer = " Enter:Save  Space/\u2190\u2192:Cycle  R:Reset  Esc:Cancel "
         db.safe_addstr(stdscr, by2, bx1 + 2, footer[:box_w - 4], theme.attr(db, "config_editor_splitsettingspopup_draw_invhead"))
+
+        if self._confirm_reset is not None:
+            self._confirm_reset.draw(stdscr)
 
 
 class IntroDelaySettingsPopup:
@@ -1492,7 +2099,16 @@ class IntroDelaySettingsPopup:
         self._editing:  bool = False  # text-field edit sub-mode (minutes)
         self._edit_buf: str  = ""
         self._error:    str  = ""
+        self._confirm_reset: "Optional[ConfirmResetPopup]" = None
 
+        self._load()
+
+    def _reset(self) -> None:
+        _reset_streamer_setting_keys(
+            self.dashboard, self.config_id, self.entry,
+            (self._FIELD_ENABLED, self._FIELD_MINUTES, self._FIELD_SPLIT),
+        )
+        self._sel = 0
         self._load()
 
     # ── Persistence ────────────────────────────────────────────────────────────
@@ -1590,6 +2206,15 @@ class IntroDelaySettingsPopup:
 
     def handle_key(self, key) -> bool:
         """Handle one keypress. Returns True when the popup should close."""
+        if self._confirm_reset is not None:
+            result = self._confirm_reset.handle_key(key)
+            if result == "yes":
+                self._reset()
+                self._confirm_reset = None
+            elif result == "no":
+                self._confirm_reset = None
+            return False
+
         fields = self._get_fields()
         _, _, field_key = fields[self._sel]
 
@@ -1624,6 +2249,12 @@ class IntroDelaySettingsPopup:
         # ── Normal navigation ─────────────────────────────────────────────────
         if key == 27:                                   # Esc → close without saving
             return True
+
+        elif key in (ord('r'), ord('R')):
+            self._confirm_reset = ConfirmResetPopup(
+                self.dashboard,
+                f"Are you sure you want to reset the Intro Delay settings for {self.entry.streamer}?",
+            )
 
         elif key == curses.KEY_UP:
             self._sel   = max(0, self._sel - 1)
@@ -1713,8 +2344,11 @@ class IntroDelaySettingsPopup:
             db.safe_addstr(stdscr, by2 - 1, bx1 + 2, self._error[:box_w - 4],
                            theme.attr(db, "config_editor_introdelaysettingspo_draw_warn_3"))
 
-        footer = " Enter:Save  Space:Toggle/Edit  Esc:Cancel "
+        footer = " Enter:Save  Space:Toggle/Edit  R:Reset  Esc:Cancel "
         db.safe_addstr(stdscr, by2, bx1 + 2, footer[:box_w - 4], theme.attr(db, "config_editor_introdelaysettingspo_draw_invhead"))
+
+        if self._confirm_reset is not None:
+            self._confirm_reset.draw(stdscr)
 
 
 class ScheduleSettingsPopup:
@@ -1758,6 +2392,7 @@ class ScheduleSettingsPopup:
         self._edit_buf:   str  = ""
         self._day_cursor: int  = 0      # sub-cursor within the Days row
         self._error:      str  = ""
+        self._confirm_reset: "Optional[ConfirmResetPopup]" = None
 
         self._load()
 
@@ -1881,6 +2516,12 @@ class ScheduleSettingsPopup:
 
     # ── Validation ─────────────────────────────────────────────────────────────
 
+    def _reset(self) -> None:
+        _reset_streamer_setting_keys(self.dashboard, self.config_id, self.entry, ("schedule",))
+        self._sel = 0
+        self._day_cursor = 0
+        self._load()
+
     def _validate(self) -> "tuple[bool, str]":
         if not self.schedule_enabled:
             return True, ""
@@ -1906,6 +2547,15 @@ class ScheduleSettingsPopup:
 
     def handle_key(self, key) -> bool:
         """Handle one keypress.  Returns True when the popup should close."""
+        if self._confirm_reset is not None:
+            result = self._confirm_reset.handle_key(key)
+            if result == "yes":
+                self._reset()
+                self._confirm_reset = None
+            elif result == "no":
+                self._confirm_reset = None
+            return False
+
         fields = self._get_fields()
         n      = len(fields)
         _, _, field_key = fields[self._sel] if fields else ("", "", "")
@@ -1943,7 +2593,13 @@ class ScheduleSettingsPopup:
         if key == 27:                                   # Esc → close without saving
             return True
 
-        if key == curses.KEY_UP:
+        if key in (ord('r'), ord('R')):
+            self._confirm_reset = ConfirmResetPopup(
+                self.dashboard,
+                f"Are you sure you want to reset the Schedule settings for {self.entry.streamer}?",
+            )
+
+        elif key == curses.KEY_UP:
             self._sel   = max(0, self._sel - 1)
             self._error = ""
 
@@ -2078,9 +2734,12 @@ class ScheduleSettingsPopup:
             if self._editing:
                 hint = " Enter:Commit  Esc:Cancel edit "
             else:
-                hint = " Enter:Save  Esc:Cancel  Space:Toggle/Edit  \u2190\u2192:Mode/Days "
+                hint = " Enter:Save  Esc:Cancel  Space:Toggle/Edit  \u2190\u2192:Mode/Days  R:Reset "
             db.safe_addstr(stdscr, by2, bx1 + 2, hint[:box_w - 4],
                            theme.attr(db, "config_editor_schedulesettingspopu_draw_invhead"))
+
+        if self._confirm_reset is not None:
+            self._confirm_reset.draw(stdscr)
 
 
 def apply_sort_to_streamers(
@@ -2341,7 +3000,7 @@ def _validate_value(key: str, value: str) -> tuple[bool, str]:
     """Validate config values based on their expected types."""
     bool_keys = {"DEBUG_LOGS", "CHECK_FOR_UPDATES", "ASK_FOR_BROWSER", "ASK_FOR_CONFIG",
                  "PANEL_RESIZE", "LOGGING", "SPLIT_LOGS", "POPUP_NOTIFICATIONS",
-                 "DOWNLOADER_COOKIES", "CHECKER_COOKIES", "LQ_DOWNLOADER", "SUBFOLDERS",
+                 "DOWNLOADER_COOKIES", "CHECKER_COOKIES", "LQ_DOWNLOADER",
                  "UPGRADE_QUALITY", "WEB_UI"}
     int_keys = {"UPDATE_INTERVAL", "SITE_ORDER", "CHECK_INTERVAL", "COOLDOWN_AFTER_RECORDING",
                 "SPLIT_AFTER", "STALL_CHECK_INTERVAL", "STALL_TIMEOUT", "CONFIG_CHECK_INTERVAL",
@@ -2367,6 +3026,11 @@ def _validate_value(key: str, value: str) -> tuple[bool, str]:
     if key == "SITE_SORT":
         if value.lower() not in _SORT_KEYS:
             return False, f"Must be one of: {', '.join(_SORT_KEYS)}"
+    if key == "SUBFOLDERS":
+        # true/false are still readable from the file (see _coerce_subfolders_value)
+        # but aren't offered as valid input here.
+        if value.lower() not in SUBFOLDERS_MODES:
+            return False, f"Must be one of: {', '.join(SUBFOLDERS_MODES)}"
     if key == "WEB_UI_PORT":
         try:
             port = int(value)
@@ -2449,6 +3113,17 @@ class GlobalConfigEditor:
         self._destinations_buf:    str  = ""
         self._destinations_scroll: int  = 0
 
+        # ── Subfolders popup state ──────────────────────────────────────────────
+        # Activated instead of the plain text popup when SUBFOLDERS is selected.
+        # Mirrors OutputDirectorySettingsPopup's mode selector, minus the
+        # per-streamer "Custom Output Directory" toggle/path (there's no
+        # single site/streamer to attach a custom path to at the global
+        # level) and minus the "Effective setting:" line (redundant here —
+        # the selector IS the setting). The "Effective path:" preview uses
+        # placeholders for the site and streamer since neither is known yet.
+        self.subfolders_mode:  bool = False
+        self._subfolders_value: str = "off"   # working copy of the mode
+
     @staticmethod
     def _find_global_conf() -> str:
         """Return the path to global.conf inside the configs/ directory."""
@@ -2478,9 +3153,7 @@ class GlobalConfigEditor:
         for kdef in CONFIG_KEYS:
             if kdef.scope != "global":
                 continue
-            lines.append(f"# {kdef.comment}\n")
             lines.append(f"{kdef.name} = {kdef.default}\n")
-            lines.append("\n")
         try:
             with open(self.conf_path, "w", encoding="utf-8") as f:
                 f.writelines(lines)
@@ -2491,27 +3164,21 @@ class GlobalConfigEditor:
         """Build self.items from self.lines — only [General] keys that are global."""
         self.items = []
         in_general = False
-        pending_comment = ""
         for i, line in enumerate(self.lines):
             s = line.strip()
             if not s:
-                pending_comment = ""
                 continue
             if s.startswith("#") or s.startswith(";"):
-                fragment = s.lstrip("#;").strip()
-                pending_comment = (pending_comment + " " + fragment).strip() if pending_comment else fragment
                 continue
             if s.startswith("[") and s.endswith("]"):
                 in_general = s[1:-1] == "General"
-                pending_comment = ""
                 continue
             if in_general and "=" in s:
                 k, v = s.split("=", 1)
                 k = k.strip()
                 if k.upper() in _GLOBAL_KEYS:
-                    comment = pending_comment or self.GLOBAL_KEYS_COMMENTS.get(k.upper(), "")
+                    comment = self.GLOBAL_KEYS_COMMENTS.get(k.upper(), "")
                     self.items.append(ConfigItem(i, False, k.upper(), v.strip(), True, line, comment))
-            pending_comment = ""
 
         # If any expected keys are missing (file was hand-edited), append them
         existing_keys = {item.key for item in self.items}
@@ -2800,6 +3467,151 @@ class GlobalConfigEditor:
                        " Enter: Add path (blank Enter: Done)  Esc: Done ",
                        theme.attr(db, "config_editor_globalconfigeditor_draw_destinations_po_invhead"))
 
+    # ── Subfolders popup (SUBFOLDERS key) ─────────────────────────────────────
+    # Mirrors StreamerSettingsPopup > Subfolders (OutputDirectorySettingsPopup):
+    # same "< mode >" selector, but with the "Custom Output Directory" toggle
+    # and "Effective setting:" line omitted, and the "Effective path:" preview
+    # built from placeholders since there's no concrete site/streamer here.
+
+    def _open_subfolders_popup(self) -> None:
+        """Switch to the mode-selector editor for the SUBFOLDERS key."""
+        self._subfolders_value = _coerce_subfolders_value(self.editing_item.value)
+        self.subfolders_mode = True
+
+    def _subfolders_effective_paths(self) -> list[str]:
+        """Build the list of "Effective path:" preview lines.
+
+        If every site shares the same OUTPUT_DIR, a single line is returned
+        using that shared path in place of the <OUTPUT_DIR> placeholder. If
+        sites differ, one line per distinct OUTPUT_DIR is returned (each
+        still using the <site>/<streamer> placeholders, since those aren't
+        fixed per-site).
+        """
+        streamer   = "<streamer>"
+        site_label = "<site>"
+        mode = self._subfolders_value
+
+        def _build(base: str) -> str:
+            # Match the separator style already used by `base` so we don't
+            # mix "\" (Windows OUTPUT_DIR) with "/" (placeholder joins).
+            sep = "\\" if "\\" in base and "/" not in base else "/"
+            base = base.rstrip("\\/")
+            if mode == "streamer-only":
+                parts = [streamer]
+            elif mode == "site-only":
+                parts = [site_label]
+            elif mode == "streamer-site":
+                parts = [streamer, site_label]
+            elif mode == "site-streamer":
+                parts = [site_label, streamer]
+            else:
+                parts = []  # "off" (or unrecognized)
+            parts.append("example.mp4")
+            return sep.join([base, *parts])
+
+        # Gather each site's configured OUTPUT_DIR (in site order), deduping
+        # while preserving order.
+        out_dirs: list[str] = []
+        for site in getattr(self.dashboard, "sites", []) or []:
+            try:
+                od = site.get_cached_config().get("output_dir")
+            except Exception:
+                od = None
+            if od and od not in out_dirs:
+                out_dirs.append(od)
+
+        if len(out_dirs) <= 1:
+            base = out_dirs[0] if out_dirs else "<OUTPUT_DIR>"
+            return [_build(base)]
+
+        return [_build(od) for od in out_dirs]
+
+    def _subfolders_effective_path(self) -> str:
+        """Back-compat single-line accessor (first preview line)."""
+        return self._subfolders_effective_paths()[0]
+
+    def _handle_subfolders_key(self, key) -> bool:
+        """Handle keypresses while the SUBFOLDERS popup is open."""
+        if key == 27:  # Esc -> discard
+            self.subfolders_mode = False
+            self.editing_item    = None
+            return True
+        elif key in (ord(' '), curses.KEY_LEFT, curses.KEY_RIGHT):
+            idx  = SUBFOLDERS_MODES.index(self._subfolders_value)
+            step = -1 if key == curses.KEY_LEFT else 1
+            self._subfolders_value = SUBFOLDERS_MODES[(idx + step) % len(SUBFOLDERS_MODES)]
+            return True
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
+            self._save_subfolders()
+            self.subfolders_mode = False
+            self.editing_item    = None
+            return True
+        return True   # consume all other keys so they don't leak to the list
+
+    def _save_subfolders(self) -> None:
+        """Persist the selected mode back to global.conf."""
+        if self.editing_item and 0 <= self.editing_item.line_idx < len(self.lines):
+            self.lines[self.editing_item.line_idx] = f"{self.editing_item.key} = {self._subfolders_value}\n"
+        self.save()
+
+    def _draw_subfolders_popup(self, stdscr) -> None:
+        """Draw the SUBFOLDERS mode-selector popup."""
+        db   = self.dashboard
+        h, w = stdscr.getmaxyx()
+
+        eff_paths_probe = self._subfolders_effective_paths()
+        # "Effective path: " label starts at bx1+2 and is 17 chars; the path
+        # itself is drawn starting at bx1+21. Widen the box so the longest
+        # path isn't truncated (min 66, capped to the terminal width).
+        longest_path = max((len(p) for p in eff_paths_probe), default=0)
+        needed_w = 21 + longest_path + 2  # + right-hand padding before border
+        box_w   = min(max(90, needed_w), w - 4)
+        inner_w = box_w - 4
+        comment = self.editing_item.comment if self.editing_item else ""
+        comment_lines = _wrap_text(comment, inner_w) if comment else []
+        comment_h = len(comment_lines) + (1 if comment_lines else 0)
+
+        eff_paths = eff_paths_probe
+
+        # 2 borders + 1 title gap + selector row + blank + effective-path row(s)
+        # + blank + legend + comment rows (if any) + 1 blank separator after comment
+        box_h = 8 + comment_h + (len(eff_paths) - 1)
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_globalconfigeditor_draw_subfolders_popu_normal_1"))
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
+        db.safe_addstr(stdscr, by1, bx1 + 2, " SUBFOLDERS ",
+                       theme.attr(db, "config_editor_globalconfigeditor_draw_subfolders_popu_system"))
+
+        row = by1 + 1
+        if comment_lines:
+            for cl in comment_lines:
+                db.safe_addstr(stdscr, row, bx1 + 2, cl, theme.attr(db, "config_editor_globalconfigeditor_draw_subfolders_popu_dim_1"))
+                row += 1
+            row += 1  # blank separator
+        else:
+            row += 1
+
+        db.safe_addstr(stdscr, row, bx1 + 2, "> Subfolders: ",
+                       theme.attr(db, "config_editor_globalconfigeditor_draw_subfolders_popu_hilight_1"))
+        db.safe_addstr(stdscr, row, bx1 + 16, f"< {self._subfolders_value} >",
+                       theme.attr(db, "config_editor_globalconfigeditor_draw_subfolders_popu_hilight_2"))
+        row += 2
+
+        for eff_path in eff_paths:
+            db.safe_addstr(stdscr, row, bx1 + 2, "Effective path: ",
+                           theme.attr(db, "config_editor_globalconfigeditor_draw_subfolders_popu_normal_3"))
+            db.safe_addstr(stdscr, row, bx1 + 21, eff_path[:box_w - 22],
+                           theme.attr(db, "config_editor_globalconfigeditor_draw_subfolders_popu_warn_2"))
+            row += 1
+
+        footer = " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "
+        db.safe_addstr(stdscr, by2, bx1 + 2, footer[:box_w - 4], theme.attr(db, "config_editor_globalconfigeditor_draw_subfolders_popu_invhead"))
+
     def _draw_msg_filters_popup(self, stdscr) -> None:
         """Draw the per-message toggle popup for a single tag."""
         db   = self.dashboard
@@ -3018,6 +3830,8 @@ class GlobalConfigEditor:
             return self._handle_debug_tags_key(key)
         if self.destinations_mode:
             return self._handle_destinations_key(key)
+        if self.subfolders_mode:
+            return self._handle_subfolders_key(key)
 
         if self.popup_mode:
             _dbg(f"[CONFIG] GlobalConfigEditor.handle_key() popup key={key} popup_buf={self.popup_buf!r} editing_item={self.editing_item.key if self.editing_item else None}")
@@ -3074,6 +3888,8 @@ class GlobalConfigEditor:
                     self._open_debug_tags_popup()
                 elif self.editing_item.key == "DESTINATIONS":
                     self._open_destinations_popup()
+                elif self.editing_item.key == "SUBFOLDERS":
+                    self._open_subfolders_popup()
                 else:
                     self.popup_buf = self.editing_item.value
                     self.popup_mode = True
@@ -3091,7 +3907,8 @@ class GlobalConfigEditor:
         elif self.selected_idx >= self.scroll_offset + visible_rows:
             self.scroll_offset = self.selected_idx - visible_rows + 1
 
-        self.dashboard.draw_box(stdscr, y1, x1, y2, x2, db.C_SYSTEM)
+        border_pair = db.C_HILIGHT if is_active else db.C_CHROME
+        self.dashboard.draw_box(stdscr, y1, x1, y2, x2, border_pair)
         title = " GLOBAL SETTINGS "
             
         self.dashboard.safe_addstr(stdscr, y1, x1 + 2, title, theme.attr(db, "config_editor_globalconfigeditor_draw_live_1"))
@@ -3132,7 +3949,7 @@ class GlobalConfigEditor:
 
         if self.popup_mode and self.editing_item:
             self.draw_popup(stdscr)
-        elif self.debug_tags_mode or self.msg_filters_mode or self.destinations_mode:
+        elif self.debug_tags_mode or self.msg_filters_mode or self.destinations_mode or self.subfolders_mode:
             self.draw_popup(stdscr)
 
     def draw_popup(self, stdscr):
@@ -3142,6 +3959,8 @@ class GlobalConfigEditor:
             self._draw_debug_tags_popup(stdscr)
         elif self.destinations_mode:
             self._draw_destinations_popup(stdscr)
+        elif self.subfolders_mode:
+            self._draw_subfolders_popup(stdscr)
         else:
             self._draw_popup(stdscr)
 
@@ -3242,19 +4061,14 @@ class ConfigEditor:
 
         self.items = []
         current_section = None
-        pending_comment = ""
         for i, line in enumerate(self.lines):
             s = line.strip()
             if not s:
-                pending_comment = ""
                 continue
             if s.startswith("#") or s.startswith(";"):
-                fragment = s.lstrip("#;").strip()
-                pending_comment = (pending_comment + " " + fragment).strip() if pending_comment else fragment
                 continue
             if s.startswith("[") and s.endswith("]"):
                 current_section = s[1:-1]
-                pending_comment = ""
                 if current_section == "General":
                     self.items.append(ConfigItem(i, True, current_section, "", False, line, ""))
             else:
@@ -3264,13 +4078,13 @@ class ConfigEditor:
                         k_stripped = k.strip()
                         # Skip keys that belong in global.conf
                         if k_stripped.upper() in _GLOBAL_KEYS:
-                            pending_comment = ""
                             continue
-                        self.items.append(ConfigItem(i, False, k_stripped, v.strip(), True, line, pending_comment))
+                        comment = _KEY_COMMENTS.get(k_stripped.upper(), "")
+                        self.items.append(ConfigItem(i, False, k_stripped, v.strip(), True, line, comment))
                     else:
                         if s.upper() not in _GLOBAL_KEYS:
-                            self.items.append(ConfigItem(i, False, s, "", False, line, pending_comment))
-                    pending_comment = ""
+                            comment = _KEY_COMMENTS.get(s.upper(), "")
+                            self.items.append(ConfigItem(i, False, s, "", False, line, comment))
 
         if self.items:
             self.selected_idx = min(self.selected_idx, len(self.items) - 1)
@@ -3365,7 +4179,10 @@ class ConfigEditor:
                     theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_dim_1"))
         tab_x += 8
         for i, site in enumerate(self.sites):
-            lbl = os.path.basename(site.config_path)
+            try:
+                lbl = site.get_cached_config().get("site_label", os.path.basename(site.config_path))
+            except Exception:
+                lbl = os.path.basename(site.config_path)
             label = f" {lbl} "
             attr = (theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_hilight_1")
                     if i == self.selected_site_idx
@@ -3377,7 +4194,8 @@ class ConfigEditor:
 
         # ── Draw SITE SETTINGS box (left column) ──────────────────────────────
         site_box_y1 = content_y1 + 1
-        self.dashboard.draw_box(stdscr, site_box_y1, site_x1, y2, site_x2, self.dashboard.C_CHROME)
+        site_border_pair = self.dashboard.C_HILIGHT if self._focus == "site" else self.dashboard.C_CHROME
+        self.dashboard.draw_box(stdscr, site_box_y1, site_x1, y2, site_x2, site_border_pair)
         if self._focus == "site":
             mode_str = " [  ] "
             self.dashboard.safe_addstr(stdscr, site_box_y1, site_x2 - len(mode_str) - 1, mode_str,
@@ -3450,6 +4268,7 @@ class ConfigEditor:
             or self.global_editor.debug_tags_mode
             or self.global_editor.msg_filters_mode
             or self.global_editor.destinations_mode
+            or self.global_editor.subfolders_mode
         ):
             self.global_editor.draw_popup(stdscr)
         elif self._focus == "site" and self.popup_mode and self.editing_item:
@@ -3512,7 +4331,8 @@ class ConfigEditor:
         # (only when no popup is open in any sub-editor)
         any_popup = (self.global_editor.popup_mode or self.global_editor.debug_tags_mode
                      or self.global_editor.msg_filters_mode or self.global_editor.destinations_mode
-                     or self.popup_mode)
+                     or self.global_editor.subfolders_mode or self.popup_mode
+                     or self.priority_editor._settings_popup is not None)
         if key == ord('\t') and not any_popup:
             _cycle = ["site", "global", "priority"]
             self._focus = _cycle[(_cycle.index(self._focus) + 1) % len(_cycle)]
@@ -3535,7 +4355,8 @@ class ConfigEditor:
             if (key == 27 and not self.global_editor.popup_mode
                     and not self.global_editor.debug_tags_mode
                     and not self.global_editor.msg_filters_mode
-                    and not self.global_editor.destinations_mode):
+                    and not self.global_editor.destinations_mode
+                    and not self.global_editor.subfolders_mode):
                 self.dashboard.selected_tab = 0
                 return True
             return self.global_editor.handle_key(key)

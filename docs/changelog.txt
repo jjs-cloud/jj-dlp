@@ -1,3 +1,17 @@
+v1.27.9
+
+- added additional options in GLOBAL SETTINGS > SUBFOLDERS, and also in STREAMER SETTINGS > SUBFOLDERS
+- minor ui fixes (config tab panel borders, block tab key in streamer settings, site labels in config tab, clamp text to site panel border)
+- page up/down now jumps by page, and home/end now jumps to the top/bottom on the File Manager tab
+- you can now press R to reset all settings for a streamer in the STREAMER SETTINGS panel
+- file manager now sorts numbers in the natural order
+- the log tab now defaults to the "all" view which shows all logs from all sites
+- streamers who are disabled can now be removed without first re-enabling them
+- you can now close jj-dlp with the x button, and it will correctly kill all yt-dlp/ffmpeg processes
+
+====================
+====================
+
 v1.27.0
 
 - updated the OUTPUT_TMPL for tiktok-live to fix issues with special characters in the filename 

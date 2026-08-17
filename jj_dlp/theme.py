@@ -212,7 +212,7 @@ _SCHEME_BACKGROUND = {
 
 # Default base scheme index. Used as the fallback whenever
 # theme.json doesn't specify a base_scheme_idx.
-DEFAULT_SCHEME_IDX = 6
+DEFAULT_SCHEME_IDX = 0
 
 # Scheme index pushed to all users once. Change this to a new scheme
 # index to push that theme whenever it differs from the recorded
@@ -318,6 +318,31 @@ SITE_REGISTRY = {
     'config_editor_globalconfigeditor_draw_destinations_po_warn': {'file': 'config_editor.py', 'label': 'Destinations Popup — \'New path:\' Label', 'default_role': 'WARN', 'default_bold': True},
     'config_editor_globalconfigeditor_draw_destinations_po_normal_3': {'file': 'config_editor.py', 'label': 'Destinations Popup — New-Path Entry Buffer', 'default_role': 'NORMAL', 'default_bold': True},
     'config_editor_globalconfigeditor_draw_destinations_po_invhead': {'file': 'config_editor.py', 'label': 'Destinations Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_subfolders_popu_normal_1': {'file': 'config_editor.py', 'label': 'Subfolders Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_subfolders_popu_system': {'file': 'config_editor.py', 'label': 'Subfolders Popup — Title', 'default_role': 'SYSTEM', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_subfolders_popu_dim_1': {'file': 'config_editor.py', 'label': 'Subfolders Popup — Comment Text', 'default_role': 'DIM', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_subfolders_popu_hilight_1': {'file': 'config_editor.py', 'label': 'Subfolders Popup — Subfolders Label', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_subfolders_popu_hilight_2': {'file': 'config_editor.py', 'label': 'Subfolders Popup — Mode Badge', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_subfolders_popu_normal_3': {'file': 'config_editor.py', 'label': 'Subfolders Popup — Effective Path Label', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_globalconfigeditor_draw_subfolders_popu_warn_2': {'file': 'config_editor.py', 'label': 'Subfolders Popup — Effective Path Value', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_globalconfigeditor_draw_subfolders_popu_invhead': {'file': 'config_editor.py', 'label': 'Subfolders Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
+    'config_editor_autosuffixsettingspo_draw_normal_1': {'file': 'config_editor.py', 'label': 'Auto-Suffix Settings Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_autosuffixsettingspo_draw_system': {'file': 'config_editor.py', 'label': 'Auto-Suffix Settings Popup — Title', 'default_role': 'SYSTEM', 'default_bold': True},
+    'config_editor_autosuffixsettingspo_draw_hilight_1': {'file': 'config_editor.py', 'label': 'Auto-Suffix Settings Popup — Auto-Suffix Label', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_autosuffixsettingspo_draw_hilight_2': {'file': 'config_editor.py', 'label': 'Auto-Suffix Settings Popup — State Badge (Inherit/On/Off)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_autosuffixsettingspo_draw_normal_2': {'file': 'config_editor.py', 'label': 'Auto-Suffix Settings Popup — Effective Label', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_autosuffixsettingspo_draw_warn': {'file': 'config_editor.py', 'label': 'Auto-Suffix Settings Popup — Effective Value', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_autosuffixsettingspo_draw_invhead': {'file': 'config_editor.py', 'label': 'Auto-Suffix Settings Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
+    'config_editor_outputdirectorysett_draw_normal_1': {'file': 'config_editor.py', 'label': 'Output Directory Settings Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_outputdirectorysett_draw_system': {'file': 'config_editor.py', 'label': 'Output Directory Settings Popup — Title', 'default_role': 'SYSTEM', 'default_bold': True},
+    'config_editor_outputdirectorysett_draw_hilight_1': {'file': 'config_editor.py', 'label': 'Output Directory Settings Popup — Field Label (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_outputdirectorysett_draw_warn_1': {'file': 'config_editor.py', 'label': 'Output Directory Settings Popup — Field Label (Unselected)', 'default_role': 'WARN', 'default_bold': False},
+    'config_editor_outputdirectorysett_draw_hilight_2': {'file': 'config_editor.py', 'label': 'Output Directory Settings Popup — Field Value (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
+    'config_editor_outputdirectorysett_draw_normal_2': {'file': 'config_editor.py', 'label': 'Output Directory Settings Popup — Field Value (Unselected)', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_outputdirectorysett_draw_normal_3': {'file': 'config_editor.py', 'label': 'Output Directory Settings Popup — Effective Label', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_outputdirectorysett_draw_warn_2': {'file': 'config_editor.py', 'label': 'Output Directory Settings Popup — Effective Value', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_outputdirectorysett_draw_warn_3': {'file': 'config_editor.py', 'label': 'Output Directory Settings Popup — Error Message', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_outputdirectorysett_draw_invhead': {'file': 'config_editor.py', 'label': 'Output Directory Settings Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
     'config_editor_globalconfigeditor_draw_msg_filters_pop_normal_1': {'file': 'config_editor.py', 'label': 'Message Filters Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
     'config_editor_globalconfigeditor_draw_msg_filters_pop_system': {'file': 'config_editor.py', 'label': 'Message Filters Popup — Title', 'default_role': 'SYSTEM', 'default_bold': True},
     'config_editor_globalconfigeditor_draw_msg_filters_pop_hilight_1': {'file': 'config_editor.py', 'label': 'Message Filters Popup — \'Tag Enabled\' Row (Selected)', 'default_role': 'HILIGHT', 'default_bold': True},
@@ -619,6 +644,10 @@ SITE_REGISTRY = {
     'main_jjdlpdashboard_curses_choose_browse_pairnum3_3': {'file': 'main.py', 'label': 'Browser Picker Splash — \'Do Not Show Again\' (Checked)', 'default_role': 'WARN', 'default_bold': True},
     'main_jjdlpdashboard_curses_choose_browse_pairnum3_4': {'file': 'main.py', 'label': 'Browser Picker Splash — \'Do Not Show Again\' (Unchecked)', 'default_role': 'WARN', 'default_bold': False},
     'main_jjdlpdashboard_curses_choose_browse_pairnum5_2': {'file': 'main.py', 'label': 'Browser Picker Splash — Footer', 'default_role': 'INVHEAD', 'default_bold': True},
+    'config_editor_confirmresetpopup_draw_normal': {'file': 'config_editor.py', 'label': 'Confirm Reset Popup — Background Fill', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_confirmresetpopup_draw_warn_1': {'file': 'config_editor.py', 'label': 'Confirm Reset Popup — Title', 'default_role': 'WARN', 'default_bold': True},
+    'config_editor_confirmresetpopup_draw_normal_2': {'file': 'config_editor.py', 'label': 'Confirm Reset Popup — Message Text', 'default_role': 'NORMAL', 'default_bold': False},
+    'config_editor_confirmresetpopup_draw_invhead': {'file': 'config_editor.py', 'label': 'Confirm Reset Popup — Legend Line', 'default_role': 'INVHEAD', 'default_bold': False},
 }
 
 
@@ -657,6 +686,8 @@ def load_theme():
         data.setdefault('site_overrides', {})
         return data
     except FileNotFoundError:
+        default['theme_pushed'] = THEME_PUSH
+        save_theme(default)
         return default
     except Exception:
         # Torn/corrupt write — don't crash startup, just fall back to defaults.

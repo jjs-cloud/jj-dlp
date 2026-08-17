@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.27.0"
+__version__ = "1.27.9"
 
 import subprocess
 import textwrap
@@ -74,6 +74,205 @@ _SCRIPT_START_TIME: float = time.time()
 # ── Global structures for concurrency control ────────────────────────────────
 _global_sites: List["SiteState"] = []
 _recording_start_lock = threading.Lock()
+
+# ── Windows Job Object handle (kills all child yt-dlp/ffmpeg procs automatically
+#    if this process dies for any reason — X button, taskkill, crash, etc.) ────
+_win_job_handle = None
+_win_ctrl_handler_ref = None
+
+
+def _emergency_kill_all() -> None:
+    """Kill every yt-dlp/ffmpeg process across every loaded site.
+
+    This is the last-resort cleanup path invoked from OS-level close/kill
+    signals (X button, console close, SIGHUP/SIGTERM) where the normal
+    dashboard quit sequence never gets a chance to run. Safe to call more
+    than once and safe to call with zero sites loaded.
+    """
+    for _s in list(_global_sites):
+        try:
+            _s.kill_all_procs()
+        except Exception:
+            pass
+
+
+def _install_windows_job_object() -> None:
+    """Put this process into a Windows Job Object with
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE so that *every* process spawned by
+    jj-dlp (yt-dlp, ffmpeg, the PyInstaller bootloaders) is force-killed by
+    Windows itself the instant this process dies — regardless of how it
+    dies (X button on the console, taskkill /F, a crash, Task Manager "End
+    task"). This is a hard OS-level guarantee and doesn't depend on any
+    Python cleanup code running first.
+
+    Child processes are automatically members of this job because Windows
+    job membership is inherited by default (we don't pass
+    CREATE_BREAKAWAY_FROM_JOB anywhere), so no per-Popen changes are needed
+    beyond this one-time setup at startup.
+    """
+    global _win_job_handle
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+
+        JobObjectExtendedLimitInformation = 9
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+
+        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_uint64),
+                ("WriteOperationCount", ctypes.c_uint64),
+                ("OtherOperationCount", ctypes.c_uint64),
+                ("ReadTransferCount", ctypes.c_uint64),
+                ("WriteTransferCount", ctypes.c_uint64),
+                ("OtherTransferCount", ctypes.c_uint64),
+            ]
+
+        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoInfo", IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            dbg(f"[JOBOBJECT] CreateJobObjectW failed, err={ctypes.get_last_error()}")
+            return
+
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        ok = kernel32.SetInformationJobObject(
+            job, JobObjectExtendedLimitInformation,
+            ctypes.byref(info), ctypes.sizeof(info)
+        )
+        if not ok:
+            dbg(f"[JOBOBJECT] SetInformationJobObject failed, err={ctypes.get_last_error()}")
+            kernel32.CloseHandle(job)
+            return
+
+        current_process = kernel32.GetCurrentProcess()
+        ok = kernel32.AssignProcessToJobObject(job, current_process)
+        if not ok:
+            # Common cause: already running inside another job that doesn't
+            # allow nesting on older Windows versions. Not fatal — we just
+            # lose the OS-level guarantee and fall back to the console
+            # ctrl handler / signal handlers below.
+            dbg(f"[JOBOBJECT] AssignProcessToJobObject failed, err={ctypes.get_last_error()}")
+            kernel32.CloseHandle(job)
+            return
+
+        _win_job_handle = job
+        dbg("[JOBOBJECT] Process assigned to job with KILL_ON_JOB_CLOSE — "
+            "yt-dlp/ffmpeg children will be killed automatically if jj-dlp exits/dies.")
+    except Exception as e:
+        dbg(f"[JOBOBJECT] setup failed: {e}")
+
+
+def _install_windows_console_ctrl_handler() -> None:
+    """Catch CTRL_CLOSE_EVENT / CTRL_LOGOFF_EVENT / CTRL_SHUTDOWN_EVENT (the
+    console X button, logging off, or system shutdown) and run our normal
+    process cleanup before the ~5s Windows grace period expires. This is a
+    fast, clean-shutdown path; the Job Object above is the guaranteed
+    fallback if this handler doesn't get to run (e.g. taskkill /F) or
+    doesn't finish in time.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        CTRL_CLOSE_EVENT = 2
+        CTRL_LOGOFF_EVENT = 5
+        CTRL_SHUTDOWN_EVENT = 6
+
+        HANDLER_ROUTINE = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)
+
+        def _console_ctrl_handler(ctrl_type):
+            if ctrl_type in (CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT):
+                dbg(f"[CTRLHANDLER] console ctrl_type={ctrl_type} received — killing all procs")
+                _emergency_kill_all()
+                # Returning False lets the OS's default action (terminate)
+                # proceed after our cleanup runs.
+                return 0
+            return 0
+
+        # Keep a reference alive on the module so it isn't garbage collected
+        # (ctypes callback objects must outlive the registration).
+        global _win_ctrl_handler_ref
+        _win_ctrl_handler_ref = HANDLER_ROUTINE(_console_ctrl_handler)
+        ok = ctypes.windll.kernel32.SetConsoleCtrlHandler(_win_ctrl_handler_ref, True)
+        if not ok:
+            dbg(f"[CTRLHANDLER] SetConsoleCtrlHandler failed, err={ctypes.get_last_error()}")
+        else:
+            dbg("[CTRLHANDLER] console ctrl handler installed")
+    except Exception as e:
+        dbg(f"[CTRLHANDLER] setup failed: {e}")
+
+
+def _install_posix_signal_handlers() -> None:
+    """On Linux/macOS, closing the terminal window (the 'X button' there)
+    sends SIGHUP to the foreground process group; a normal 'kill' sends
+    SIGTERM. yt-dlp/ffmpeg children are started with start_new_session=True
+    (their own process group/session, needed so killpg() can reliably reach
+    both the PyInstaller bootloader and the real worker) — which also means
+    they do NOT automatically receive that SIGHUP/SIGTERM. Catch it here and
+    kill them explicitly before jj-dlp exits.
+    """
+    if sys.platform == "win32":
+        return
+    import signal as _signal
+
+    def _handler(signum, _frame):
+        dbg(f"[SIGHANDLER] received signal={signum} — killing all procs before exit")
+        _emergency_kill_all()
+        # Restore default behavior and re-raise so the process still exits
+        # the way it normally would for this signal.
+        _signal.signal(signum, _signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    # Deliberately NOT touching SIGINT here: Ctrl-C is already handled
+    # cleanly via KeyboardInterrupt elsewhere in main()/run(), and that path
+    # already reaches the dashboard's normal quit/kill_all_procs logic. We
+    # only need to catch the signals that bypass that normal path entirely
+    # — SIGHUP (terminal window closed) and SIGTERM (killed from outside).
+    for _sig in (_signal.SIGHUP, _signal.SIGTERM):
+        try:
+            _signal.signal(_sig, _handler)
+        except Exception as e:
+            dbg(f"[SIGHANDLER] failed to install handler for {_sig}: {e}")
+
+
+def _install_shutdown_safety_net() -> None:
+    """Install every layer of orphan-process protection. Call once, as early
+    as possible in main(). Cheap and safe to call even if some layers fail
+    (e.g. Job Object nesting denied) — the remaining layers still apply.
+    """
+    _install_windows_job_object()
+    _install_windows_console_ctrl_handler()
+    _install_posix_signal_handlers()
+    import atexit
+    atexit.register(_emergency_kill_all)
 
 
 def _install_thread_excepthook() -> None:
@@ -2897,6 +3096,49 @@ def _resolve_auto_suffix(cfg: dict, entry_info: dict) -> dict:
     return overridden
 
 
+def _resolve_output_dir(cfg: dict, entry_info: dict) -> dict:
+    """Return a cfg dict to use for a single streamer, applying that
+    streamer's per-streamer Output Directory override (set via the Output
+    Directory settings popup) on top of the site's OUTPUT_DIR / global
+    SUBFOLDERS config values.
+
+    entry_info is the priorities[...][entries] dict-like info for the
+    streamer. Two independent overrides, both optional:
+
+      - "output_dir_mode" — "inherit" (or key absent) leaves the global
+        SUBFOLDERS mode untouched; any of ("streamer-only", "site-only",
+        "streamer-site", "site-streamer", "off") forces that nesting mode
+        for this streamer via cfg["subfolders_mode_override"], which
+        record_stream() prefers over the global SUBFOLDERS setting when
+        present.
+      - "output_dir_custom_enabled" (bool) + "output_dir_custom_path" —
+        when enabled and non-empty, replaces cfg["output_dir"] for this
+        streamer only, before the subfolder nesting is applied.
+
+    The override never affects other streamers sharing the same site
+    config, since a copy of cfg is only made when there's something to
+    override (mirrors _resolve_split_after() / _resolve_auto_suffix()).
+    """
+    if not entry_info:
+        return cfg
+    mode = entry_info.get("output_dir_mode")
+    custom_enabled = bool(entry_info.get("output_dir_custom_enabled", False))
+    custom_path = str(entry_info.get("output_dir_custom_path", "") or "").strip()
+
+    if mode not in ("streamer-only", "site-only", "streamer-site", "site-streamer", "off") \
+            and not (custom_enabled and custom_path):
+        return cfg
+
+    overridden = dict(cfg)
+    if mode in ("streamer-only", "site-only", "streamer-site", "site-streamer", "off"):
+        overridden["subfolders_mode_override"] = mode
+    if custom_enabled and custom_path:
+        if not os.path.isabs(custom_path):
+            custom_path = os.path.abspath(custom_path)
+        overridden["output_dir"] = custom_path
+    return overridden
+
+
 def _resolve_intro_delay(cfg: dict, entry_info: dict) -> dict:
     """Return a cfg dict to use for a single streamer, applying that
     streamer's per-streamer Intro Delay override (set via the SETTINGS
@@ -2923,11 +3165,21 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
     channel_url = cfg["site_tmpl"].format(username=streamer)
     output_dir  = cfg["output_dir"]
 
-    # If SUBFOLDERS is enabled in global.conf, nest recordings under a
-    # per-streamer subdirectory (e.g. recordings/streamer_name/).
+    # Nest recordings under a subfolder per SUBFOLDERS mode in global.conf,
+    # unless this streamer has a per-streamer Output Directory override
+    # (set via the Output Directory settings popup / _resolve_output_dir()).
     _global_cfg_rs = load_global_config()
-    if _global_cfg_rs.get("subfolders", False):
+    _subfolders_mode = cfg.get("subfolders_mode_override") or _global_cfg_rs.get("subfolders", "off")
+    _site_label = cfg.get("site_label", "")
+    if _subfolders_mode == "streamer-only":
         output_dir = os.path.join(output_dir, streamer)
+    elif _subfolders_mode == "site-only":
+        output_dir = os.path.join(output_dir, _site_label)
+    elif _subfolders_mode == "streamer-site":
+        output_dir = os.path.join(output_dir, streamer, _site_label)
+    elif _subfolders_mode == "site-streamer":
+        output_dir = os.path.join(output_dir, _site_label, streamer)
+    # "off" (or any unrecognized value) leaves output_dir unchanged.
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -4153,6 +4405,9 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
             "intro_delay_minutes": e.get("intro_delay_minutes", 0),
             "intro_delay_split": e.get("intro_delay_split", False),
             "auto_suffix_mode": e.get("auto_suffix_mode"),  # None = inherit
+            "output_dir_mode": e.get("output_dir_mode"),    # None = inherit
+            "output_dir_custom_enabled": e.get("output_dir_custom_enabled", False),
+            "output_dir_custom_path": e.get("output_dir_custom_path", ""),
         }
 
     site_label = cfg.get("site_label", os.path.basename(site.config_path))
@@ -4173,6 +4428,7 @@ def start_recording_if_needed(live_now: List[str], cfg: dict, site: "SiteState",
             streamer_cfg = _resolve_split_after(cfg, streamer_info)
             streamer_cfg = _resolve_auto_suffix(streamer_cfg, streamer_info)
             streamer_cfg = _resolve_intro_delay(streamer_cfg, streamer_info)
+            streamer_cfg = _resolve_output_dir(streamer_cfg, streamer_info)
             eviction_warning = ""
 
             # Concurrency enforcement
@@ -4905,6 +5161,16 @@ class JJDlpDashboard:
 
         self.selected_tab = 0
         self.selected_site_idx = 0   # for log/config/eventsub tabs
+        # Log tab has its own independent site selector (separate from the
+        # Config/Stdout/Stderr ']'/'[' selector above): -1 = "All" (default),
+        # 0..N-1 = index into self.sites for a single site.
+        self._log_site_idx = -1
+        # Debug-log toggle used only while the Log tab's selector is on
+        # "All" — a single site's own show_debug_log flag isn't meaningful
+        # once logs from every site are being merged together, and the
+        # toggle/debug output are hidden entirely once a specific site is
+        # selected (see draw_log_tab).
+        self._log_all_show_debug = False
         self.tick         = 0
         # Streamer management mode: None, or ("add"/"remove"/"disable", site_idx)
         self._mgmt_mode   = None
@@ -5629,8 +5895,11 @@ class JJDlpDashboard:
                         ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_5")
                     else:
                         ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_4")
+                    # Clamp to the panel's inner boundary so this never draws
+                    # into/through the right border on narrow terminals.
+                    _avail = max(0, (x2 - 1) - col)
                     self.safe_addstr(self.stdscr, row_y, col,
-                                last_live_str[:last_live_w_compact],
+                                last_live_str[:min(last_live_w_compact, _avail)],
                                 ll_attr)
         else:
             # Normal: 1 column with progress bar, duration, last_live
@@ -5736,8 +6005,11 @@ class JJDlpDashboard:
                         ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_10")
                     else:
                         ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_8")
+                    # Clamp to the panel's inner boundary so this never draws
+                    # into/through the right border on narrow terminals.
+                    _avail = max(0, (x2 - 1) - col)
                     self.safe_addstr(self.stdscr, row_y, col,
-                                last_live_str[:last_live_w],
+                                last_live_str[:min(last_live_w, _avail)],
                                 ll_attr)
 
         # ── Countdown ──
@@ -5884,41 +6156,81 @@ class JJDlpDashboard:
 
     # ── Log tab ──────────────────────────────────────────────────────────────
     def draw_log_tab(self, y1, x1, y2, x2):
-        # Site selector across the top
-        sel_site = self.sites[self.selected_site_idx] if self.sites else None
+        # Site selector across the top — Log tab has its own independent
+        # selector (self._log_site_idx), with an "All" option in addition
+        # to each individual site. -1 == "All" (the default).
+        is_all_sites = (self._log_site_idx == -1)
+        sel_site = (None if is_all_sites or not self.sites
+                    else self.sites[self._log_site_idx])
         tab_x    = x1 + 1
         self.safe_addstr(self.stdscr, y1, x1, "  Site: ",
                     theme.attr(self, "main_jjdlpdashboard_draw_log_tab_dim_1"))
         tab_x += 8
+
+        all_label = " All "
+        all_attr  = (theme.attr(self, "main_jjdlpdashboard_draw_log_tab_hilight")
+                     if is_all_sites
+                     else theme.attr(self, "main_jjdlpdashboard_draw_log_tab_chrome"))
+        self.safe_addstr(self.stdscr, y1, tab_x, all_label, all_attr)
+        tab_x += len(all_label) + 1
+
         for i, site in enumerate(self.sites):
             lbl = site.get_cached_config().get("site_label",
                               os.path.basename(site.config_path))
             label = f" {lbl} "
             attr  = (theme.attr(self, "main_jjdlpdashboard_draw_log_tab_hilight")
-                     if i == self.selected_site_idx
+                     if (not is_all_sites and i == self._log_site_idx)
                      else theme.attr(self, "main_jjdlpdashboard_draw_log_tab_chrome"))
             self.safe_addstr(self.stdscr, y1, tab_x, label, attr)
             tab_x += len(label) + 1
 
-        show_debug = sel_site.show_debug_log if sel_site is not None else False
-        title = (" ACTIVITY LOG — Show Debug: ON  (Press A to toggle) (Press F to configure filters) "
-                 if show_debug
-                 else " ACTIVITY LOG — Show Debug: OFF (Press A to toggle) ")
+        # The debug-log toggle/output only applies while "All" is selected —
+        # once a single site is picked, the debug toggle line and any debug
+        # lines are hidden entirely.
+        show_debug = self._log_all_show_debug if is_all_sites else False
+        if is_all_sites:
+            title = (" ACTIVITY LOG — Show Debug: ON  (Press A to toggle) (Press F to configure filters) "
+                     if show_debug
+                     else " ACTIVITY LOG — Show Debug: OFF (Press A to toggle) ")
+        else:
+            title = " ACTIVITY LOG "
 
         # Keep the title, but leave the log itself unframed so terminal text
         # selection can target just the log lines without collecting box art.
         self.safe_addstr(self.stdscr, y1 + 1, x1, title,
                     theme.attr(self, "main_jjdlpdashboard_draw_log_tab_dim_2"))
 
-        if sel_site is None:
+        if not self.sites:
             return
 
         visible_rows = (y2 - y1) - 2
         line_width   = max(1, x2 - x1 + 1)
 
-        with sel_site.dash_lock:
-            raw_lines = list(sel_site.dash_log_lines)
-            raw_debug = list(sel_site.dash_debug_lines) if show_debug else []
+        if is_all_sites:
+            # Merge activity/debug lines from every site, tagged with the
+            # site's label so lines can still be told apart.
+            raw_lines: List[str] = []
+            raw_debug: List[str] = []
+            for site in self.sites:
+                lbl = site.get_cached_config().get(
+                    "site_label", os.path.basename(site.config_path))
+                with site.dash_lock:
+                    site_lines = list(site.dash_log_lines)
+                    site_debug = list(site.dash_debug_lines) if show_debug else []
+                raw_lines.extend(
+                    f"{line[:21]} [{lbl}]{line[21:]}" if line[:1] == "[" else line
+                    for line in site_lines
+                )
+                raw_debug.extend(
+                    f"{line[:21]} [{lbl}]{line[21:]}" if line[:1] == "[" else line
+                    for line in site_debug
+                )
+            raw_lines.sort(key=lambda ln: ln[:20] if ln[:1] == "[" else "")
+            raw_debug.sort(key=lambda ln: ln[:20] if ln[:1] == "[" else "")
+        else:
+            with sel_site.dash_lock:
+                raw_lines = list(sel_site.dash_log_lines)
+                raw_debug = []
 
         # Compile per-filter, keeping each filter's own mode alongside it.
         # "filter_only"/"filter_highlight" filters restrict which debug
@@ -6338,6 +6650,12 @@ class JJDlpDashboard:
             blocked = sorted(site.dash_blocked)
         return [s for s in blocked if s in all_s]
 
+    def _mgmt_removable_streamers(self, site) -> list:
+        """Return every streamer in [Streamers], enabled or disabled (for the REMOVE popup)."""
+        with site.dash_lock:
+            all_s = list(site.dash_all_streamers)
+        return all_s
+
     def draw_mgmt_overlay(self):
         if not self._mgmt_mode:
             return
@@ -6367,7 +6685,15 @@ class JJDlpDashboard:
 
         if action in ("disable", "remove"):
             # ── List-picker mode: arrow up/down to select a streamer ──────────
-            enabled = self._mgmt_enabled_streamers(site)
+            # REMOVE should list every streamer (enabled or disabled); DISABLE
+            # only makes sense for streamers that aren't already disabled.
+            if action == "remove":
+                enabled = self._mgmt_removable_streamers(site)
+                with site.dash_lock:
+                    blocked_set = set(site.dash_blocked)
+            else:
+                enabled = self._mgmt_enabled_streamers(site)
+                blocked_set = set()
 
             # Result message (shown after an action completes)
             if self._mgmt_result:
@@ -6376,8 +6702,9 @@ class JJDlpDashboard:
                             theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_live_1"))
 
             if not enabled:
+                empty_msg = "No streamers." if action == "remove" else "No enabled streamers."
                 self.safe_addstr(self.stdscr, by1 + 3, bx1 + 2,
-                            "No enabled streamers.",
+                            empty_msg,
                             theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_dim_2"))
                 self.safe_addstr(self.stdscr, by2, bx1 + 2,
                             " Esc: Go back ",
@@ -6405,8 +6732,9 @@ class JJDlpDashboard:
                 prefix = "> " if is_sel else "  "
                 attr   = (theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_hilight_1")
                           if is_sel else theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_normal_2"))
+                suffix = " (disabled)" if s in blocked_set else ""
                 self.safe_addstr(self.stdscr, row_y, bx1 + 2,
-                            (prefix + s)[:box_w - 4], attr)
+                            (prefix + s + suffix)[:box_w - 4], attr)
 
             self.safe_addstr(self.stdscr, by2, bx1 + 2,
                         " \u2191\u2193: select  Enter: confirm  Esc: Go back ",
@@ -6921,16 +7249,28 @@ class JJDlpDashboard:
             self.selected_tab = (self.selected_tab + 1) % len(self.TABS)
         elif key in (curses.KEY_LEFT, ord('h')):
             self.selected_tab = (self.selected_tab - 1) % len(self.TABS)
-        elif key in (ord(']'), curses.KEY_NPAGE):   # next site (log/config tabs)
+        elif key in (ord(']'), curses.KEY_NPAGE) and current_tab_name == "Log":
+            # Log tab's site selector is independent and includes "All":
+            # -1 ("All") .. len(sites)-1.
+            n = len(self.sites)
+            self._log_site_idx = (self._log_site_idx + 2) % (n + 1) - 1
+            self._log_scroll = 0
+            self._log_frozen_lines = None
+        elif key in (ord('['), curses.KEY_PPAGE) and current_tab_name == "Log":
+            n = len(self.sites)
+            self._log_site_idx = (self._log_site_idx % (n + 1)) - 1
+            self._log_scroll = 0
+            self._log_frozen_lines = None
+        elif key in (ord(']'), curses.KEY_NPAGE):   # next site (config/stdout/stderr tabs)
             self.selected_site_idx = (self.selected_site_idx + 1) % max(1, len(self.sites))
             # Reset scroll when switching sites
-            self._log_scroll = self._stdout_scroll = self._stderr_scroll = 0
+            self._stdout_scroll = self._stderr_scroll = 0
             self._streamer_panel_sel = self._streamer_panel_scroll = 0
             self.config_editor.notify_site_changed(self.selected_site_idx)
         elif key in (ord('['), curses.KEY_PPAGE):   # prev site
             self.selected_site_idx = (self.selected_site_idx - 1) % max(1, len(self.sites))
             # Reset scroll when switching sites
-            self._log_scroll = self._stdout_scroll = self._stderr_scroll = 0
+            self._stdout_scroll = self._stderr_scroll = 0
             self._streamer_panel_sel = self._streamer_panel_scroll = 0
             self.config_editor.notify_site_changed(self.selected_site_idx)
         elif key == ord('\t') and current_tab_name in ("Stdout", "Stderr"):
@@ -6973,10 +7313,13 @@ class JJDlpDashboard:
                 self._log_scroll = max(0, self._log_scroll - 1)
         elif key in (ord('a'), ord('A')):
             if current_tab_name == "Log" and self.sites:
-                sel = self.sites[self.selected_site_idx]
-                sel.show_debug_log = not sel.show_debug_log
-                self._log_scroll = 0
-                self._log_frozen_lines = None
+                # Debug toggle only applies while "All" is selected — when a
+                # specific site is selected, the toggle/debug output are
+                # hidden entirely (see draw_log_tab), so 'A' is a no-op then.
+                if self._log_site_idx == -1:
+                    self._log_all_show_debug = not self._log_all_show_debug
+                    self._log_scroll = 0
+                    self._log_frozen_lines = None
             elif current_tab_name == "Stdout" and self.sites:
                 # "Show All" only means anything on the All Streamers view —
                 # a specific streamer never has checker JSON to show.
@@ -7034,7 +7377,9 @@ class JJDlpDashboard:
 
         if action in ("disable", "remove"):
             # ── List-picker mode ───────────────────────────────────────────────
-            enabled = self._mgmt_enabled_streamers(site)
+            list_fn = (self._mgmt_removable_streamers if action == "remove"
+                       else self._mgmt_enabled_streamers)
+            enabled = list_fn(site)
             if key == 27:  # Escape
                 self._mgmt_mode   = None
                 self._mgmt_buf    = ""
@@ -7053,7 +7398,7 @@ class JJDlpDashboard:
                     site.trigger_event.set()
                     self._mgmt_result = result
                     # Keep selection clamped to the (now shorter) list
-                    new_enabled = self._mgmt_enabled_streamers(site)
+                    new_enabled = list_fn(site)
                     self._mgmt_sel = min(self._mgmt_sel, max(0, len(new_enabled) - 1))
                 else:
                     self._mgmt_mode   = None
@@ -7924,6 +8269,14 @@ def main() -> None:
     if not plain_ffmpeg_check():
         print(f"\njj-dlp v{__version__}  ·  Aborted during ffmpeg check.")
         sys.exit(1)
+
+    # Install orphan-process protection as early as possible, before any
+    # yt-dlp/ffmpeg process can be spawned. Ensures that no matter how
+    # jj-dlp's window/console gets closed (X button, taskkill, logoff,
+    # terminal closed, crash), child processes get cleaned up instead of
+    # being left running in the background. See _install_shutdown_safety_net
+    # for the breakdown of each layer.
+    _install_shutdown_safety_net()
 
     # Bundled executables in bin/ lose their execute bit when copied from the
     # GitHub zip.  Fix it on every launch (not just after an update) so the

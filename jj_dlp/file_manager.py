@@ -110,6 +110,16 @@ import curses
 from .deps import check_ffmpeg
 from . import theme
 
+
+def _natural_sort_key(name):
+    """Split a filename into text/number chunks for natural ordering.
+
+    e.g. "file10.mp4" -> ["file", 10, ".mp4"] so it sorts after
+    "file2.mp4" instead of before it (as a plain string compare would).
+    """
+    return [int(chunk) if chunk.isdigit() else chunk.lower()
+            for chunk in re.split(r'(\d+)', name)]
+
 try:
     from send2trash import send2trash as _send2trash
 except ImportError:
@@ -347,6 +357,7 @@ class FileManagerTab:
         self._selected_path = None
         self._scroll = 0
         self._at_top = False
+        self._last_visible = 1  # rows visible in the list viewport, updated on draw
         self._last_poll = 0.0
 
         self._status_msg = ""
@@ -656,7 +667,7 @@ class FileManagerTab:
         rec = self._records.get(path, {})
         key = self._sort_key
         if key in ("name_asc", "name_desc"):
-            return os.path.basename(path).lower()
+            return _natural_sort_key(os.path.basename(path))
         if key in ("status_writing", "status_idle"):
             return 0 if rec.get("status") == "WRITING" else 1
         if key in ("modified_new", "modified_old"):
@@ -665,7 +676,7 @@ class FileManagerTab:
             return rec.get("size", 0)
         if key in ("rate_desc", "rate_asc"):
             return rec.get("rate", 0.0)
-        return os.path.basename(path).lower()
+        return _natural_sort_key(os.path.basename(path))
 
     def _rebuild_rows(self, dirs):
         reverse = self._sort_key in _FM_SORT_REVERSE
@@ -730,18 +741,27 @@ class FileManagerTab:
             pos = max(0, min(len(file_indices) - 1, pos))
         self._selected_path = self._rows[file_indices[pos]][1]
 
-    def jump_to_list_edge(self, edge):
-        """Jump the selection to the first/last file row (PageUp/PageDown)."""
+    def move_selection_page(self, direction):
+        """Move the selection by a page (PageUp/PageDown), rather than jumping
+        straight to the first/last row."""
+        page = max(1, self._last_visible - 1)
+        delta = -page if direction == "up" else page
+        self.move_selection(delta)
+        file_indices = [i for i, r in enumerate(self._rows) if r[0] == "file"]
+        if file_indices and self._selected_path == self._rows[file_indices[0]][1]:
+            self._at_top = True
+        else:
+            self._at_top = False
+
+    def move_selection_edge(self, edge):
+        """Move the selection straight to the first/last row (Home/End)."""
         file_indices = [i for i, r in enumerate(self._rows) if r[0] == "file"]
         if not file_indices:
             self._selected_path = None
             return
-        if edge == "top":
-            self._selected_path = self._rows[file_indices[0]][1]
-            self._at_top = True
-        else:
-            self._selected_path = self._rows[file_indices[-1]][1]
-            self._at_top = False
+        target = file_indices[0] if edge == "home" else file_indices[-1]
+        self._selected_path = self._rows[target][1]
+        self._at_top = (edge == "home")
 
     # ── Key handling ─────────────────────────────────────────────────────────
 
@@ -765,10 +785,10 @@ class FileManagerTab:
             return self._handle_menu_popup_key(key)
 
         if key in (curses.KEY_PPAGE,):
-            self.jump_to_list_edge("top")
+            self.move_selection_page("up")
             return True
         if key in (curses.KEY_NPAGE,):
-            self.jump_to_list_edge("bottom")
+            self.move_selection_page("down")
             return True
         if key in (curses.KEY_UP,):
             self.move_selection(-1)
@@ -779,6 +799,12 @@ class FileManagerTab:
         if key in (curses.KEY_DOWN,):
             self.move_selection(1)
             self._at_top = False
+            return True
+        if key in (curses.KEY_HOME,):
+            self.move_selection_edge("home")
+            return True
+        if key in (curses.KEY_END,):
+            self.move_selection_edge("end")
             return True
         if key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
             if self._selected_path:
@@ -2392,6 +2418,7 @@ class FileManagerTab:
         list_y1 = header_y + 2           # leave row header_y+1 for status messages
         list_y2 = y2 - 1                 # leave the last row for status/help
         visible = max(1, list_y2 - list_y1)
+        self._last_visible = visible
 
         sel_row = None
         for i, r in enumerate(self._rows):
