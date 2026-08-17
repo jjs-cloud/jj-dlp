@@ -110,6 +110,16 @@ import curses
 from .deps import check_ffmpeg
 from . import theme
 
+
+def _natural_sort_key(name):
+    """Split a filename into text/number chunks for natural ordering.
+
+    e.g. "file10.mp4" -> ["file", 10, ".mp4"] so it sorts after
+    "file2.mp4" instead of before it (as a plain string compare would).
+    """
+    return [int(chunk) if chunk.isdigit() else chunk.lower()
+            for chunk in re.split(r'(\d+)', name)]
+
 try:
     from send2trash import send2trash as _send2trash
 except ImportError:
@@ -657,7 +667,7 @@ class FileManagerTab:
         rec = self._records.get(path, {})
         key = self._sort_key
         if key in ("name_asc", "name_desc"):
-            return os.path.basename(path).lower()
+            return _natural_sort_key(os.path.basename(path))
         if key in ("status_writing", "status_idle"):
             return 0 if rec.get("status") == "WRITING" else 1
         if key in ("modified_new", "modified_old"):
@@ -666,7 +676,7 @@ class FileManagerTab:
             return rec.get("size", 0)
         if key in ("rate_desc", "rate_asc"):
             return rec.get("rate", 0.0)
-        return os.path.basename(path).lower()
+        return _natural_sort_key(os.path.basename(path))
 
     def _rebuild_rows(self, dirs):
         reverse = self._sort_key in _FM_SORT_REVERSE
