@@ -6019,11 +6019,11 @@ class JJDlpDashboard:
                     site_lines = list(site.dash_log_lines)
                     site_debug = list(site.dash_debug_lines) if show_debug else []
                 raw_lines.extend(
-                    f"{line[:20]} [{lbl}]{line[20:]}" if line[:1] == "[" else line
+                    f"{line[:21]} [{lbl}]{line[21:]}" if line[:1] == "[" else line
                     for line in site_lines
                 )
                 raw_debug.extend(
-                    f"{line[:20]} [{lbl}]{line[20:]}" if line[:1] == "[" else line
+                    f"{line[:21]} [{lbl}]{line[21:]}" if line[:1] == "[" else line
                     for line in site_debug
                 )
             raw_lines.sort(key=lambda ln: ln[:20] if ln[:1] == "[" else "")
