@@ -5,6 +5,7 @@
 - file manager now sorts numbers in the natural order
 - the log tab now defaults to the "all" view which shows all logs from all sites
 - streamers who are disabled can now be removed without first re-enabling them
+- you can now close jj-dlp with the x button, and it will correctly kill all yt-dlp/ffmpeg processes
 
 ====================
 ====================
