@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.27.8"
+__version__ = "1.27.9"
 
 import subprocess
 import textwrap
@@ -74,6 +74,205 @@ _SCRIPT_START_TIME: float = time.time()
 # ── Global structures for concurrency control ────────────────────────────────
 _global_sites: List["SiteState"] = []
 _recording_start_lock = threading.Lock()
+
+# ── Windows Job Object handle (kills all child yt-dlp/ffmpeg procs automatically
+#    if this process dies for any reason — X button, taskkill, crash, etc.) ────
+_win_job_handle = None
+_win_ctrl_handler_ref = None
+
+
+def _emergency_kill_all() -> None:
+    """Kill every yt-dlp/ffmpeg process across every loaded site.
+
+    This is the last-resort cleanup path invoked from OS-level close/kill
+    signals (X button, console close, SIGHUP/SIGTERM) where the normal
+    dashboard quit sequence never gets a chance to run. Safe to call more
+    than once and safe to call with zero sites loaded.
+    """
+    for _s in list(_global_sites):
+        try:
+            _s.kill_all_procs()
+        except Exception:
+            pass
+
+
+def _install_windows_job_object() -> None:
+    """Put this process into a Windows Job Object with
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE so that *every* process spawned by
+    jj-dlp (yt-dlp, ffmpeg, the PyInstaller bootloaders) is force-killed by
+    Windows itself the instant this process dies — regardless of how it
+    dies (X button on the console, taskkill /F, a crash, Task Manager "End
+    task"). This is a hard OS-level guarantee and doesn't depend on any
+    Python cleanup code running first.
+
+    Child processes are automatically members of this job because Windows
+    job membership is inherited by default (we don't pass
+    CREATE_BREAKAWAY_FROM_JOB anywhere), so no per-Popen changes are needed
+    beyond this one-time setup at startup.
+    """
+    global _win_job_handle
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+
+        JobObjectExtendedLimitInformation = 9
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+
+        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_uint64),
+                ("WriteOperationCount", ctypes.c_uint64),
+                ("OtherOperationCount", ctypes.c_uint64),
+                ("ReadTransferCount", ctypes.c_uint64),
+                ("WriteTransferCount", ctypes.c_uint64),
+                ("OtherTransferCount", ctypes.c_uint64),
+            ]
+
+        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoInfo", IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            dbg(f"[JOBOBJECT] CreateJobObjectW failed, err={ctypes.get_last_error()}")
+            return
+
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        ok = kernel32.SetInformationJobObject(
+            job, JobObjectExtendedLimitInformation,
+            ctypes.byref(info), ctypes.sizeof(info)
+        )
+        if not ok:
+            dbg(f"[JOBOBJECT] SetInformationJobObject failed, err={ctypes.get_last_error()}")
+            kernel32.CloseHandle(job)
+            return
+
+        current_process = kernel32.GetCurrentProcess()
+        ok = kernel32.AssignProcessToJobObject(job, current_process)
+        if not ok:
+            # Common cause: already running inside another job that doesn't
+            # allow nesting on older Windows versions. Not fatal — we just
+            # lose the OS-level guarantee and fall back to the console
+            # ctrl handler / signal handlers below.
+            dbg(f"[JOBOBJECT] AssignProcessToJobObject failed, err={ctypes.get_last_error()}")
+            kernel32.CloseHandle(job)
+            return
+
+        _win_job_handle = job
+        dbg("[JOBOBJECT] Process assigned to job with KILL_ON_JOB_CLOSE — "
+            "yt-dlp/ffmpeg children will be killed automatically if jj-dlp exits/dies.")
+    except Exception as e:
+        dbg(f"[JOBOBJECT] setup failed: {e}")
+
+
+def _install_windows_console_ctrl_handler() -> None:
+    """Catch CTRL_CLOSE_EVENT / CTRL_LOGOFF_EVENT / CTRL_SHUTDOWN_EVENT (the
+    console X button, logging off, or system shutdown) and run our normal
+    process cleanup before the ~5s Windows grace period expires. This is a
+    fast, clean-shutdown path; the Job Object above is the guaranteed
+    fallback if this handler doesn't get to run (e.g. taskkill /F) or
+    doesn't finish in time.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        CTRL_CLOSE_EVENT = 2
+        CTRL_LOGOFF_EVENT = 5
+        CTRL_SHUTDOWN_EVENT = 6
+
+        HANDLER_ROUTINE = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)
+
+        def _console_ctrl_handler(ctrl_type):
+            if ctrl_type in (CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT):
+                dbg(f"[CTRLHANDLER] console ctrl_type={ctrl_type} received — killing all procs")
+                _emergency_kill_all()
+                # Returning False lets the OS's default action (terminate)
+                # proceed after our cleanup runs.
+                return 0
+            return 0
+
+        # Keep a reference alive on the module so it isn't garbage collected
+        # (ctypes callback objects must outlive the registration).
+        global _win_ctrl_handler_ref
+        _win_ctrl_handler_ref = HANDLER_ROUTINE(_console_ctrl_handler)
+        ok = ctypes.windll.kernel32.SetConsoleCtrlHandler(_win_ctrl_handler_ref, True)
+        if not ok:
+            dbg(f"[CTRLHANDLER] SetConsoleCtrlHandler failed, err={ctypes.get_last_error()}")
+        else:
+            dbg("[CTRLHANDLER] console ctrl handler installed")
+    except Exception as e:
+        dbg(f"[CTRLHANDLER] setup failed: {e}")
+
+
+def _install_posix_signal_handlers() -> None:
+    """On Linux/macOS, closing the terminal window (the 'X button' there)
+    sends SIGHUP to the foreground process group; a normal 'kill' sends
+    SIGTERM. yt-dlp/ffmpeg children are started with start_new_session=True
+    (their own process group/session, needed so killpg() can reliably reach
+    both the PyInstaller bootloader and the real worker) — which also means
+    they do NOT automatically receive that SIGHUP/SIGTERM. Catch it here and
+    kill them explicitly before jj-dlp exits.
+    """
+    if sys.platform == "win32":
+        return
+    import signal as _signal
+
+    def _handler(signum, _frame):
+        dbg(f"[SIGHANDLER] received signal={signum} — killing all procs before exit")
+        _emergency_kill_all()
+        # Restore default behavior and re-raise so the process still exits
+        # the way it normally would for this signal.
+        _signal.signal(signum, _signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    # Deliberately NOT touching SIGINT here: Ctrl-C is already handled
+    # cleanly via KeyboardInterrupt elsewhere in main()/run(), and that path
+    # already reaches the dashboard's normal quit/kill_all_procs logic. We
+    # only need to catch the signals that bypass that normal path entirely
+    # — SIGHUP (terminal window closed) and SIGTERM (killed from outside).
+    for _sig in (_signal.SIGHUP, _signal.SIGTERM):
+        try:
+            _signal.signal(_sig, _handler)
+        except Exception as e:
+            dbg(f"[SIGHANDLER] failed to install handler for {_sig}: {e}")
+
+
+def _install_shutdown_safety_net() -> None:
+    """Install every layer of orphan-process protection. Call once, as early
+    as possible in main(). Cheap and safe to call even if some layers fail
+    (e.g. Job Object nesting denied) — the remaining layers still apply.
+    """
+    _install_windows_job_object()
+    _install_windows_console_ctrl_handler()
+    _install_posix_signal_handlers()
+    import atexit
+    atexit.register(_emergency_kill_all)
 
 
 def _install_thread_excepthook() -> None:
@@ -8070,6 +8269,14 @@ def main() -> None:
     if not plain_ffmpeg_check():
         print(f"\njj-dlp v{__version__}  ·  Aborted during ffmpeg check.")
         sys.exit(1)
+
+    # Install orphan-process protection as early as possible, before any
+    # yt-dlp/ffmpeg process can be spawned. Ensures that no matter how
+    # jj-dlp's window/console gets closed (X button, taskkill, logoff,
+    # terminal closed, crash), child processes get cleaned up instead of
+    # being left running in the background. See _install_shutdown_safety_net
+    # for the breakdown of each layer.
+    _install_shutdown_safety_net()
 
     # Bundled executables in bin/ lose their execute bit when copied from the
     # GitHub zip.  Fix it on every launch (not just after an update) so the
