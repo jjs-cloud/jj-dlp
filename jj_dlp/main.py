@@ -4962,6 +4962,16 @@ class JJDlpDashboard:
 
         self.selected_tab = 0
         self.selected_site_idx = 0   # for log/config/eventsub tabs
+        # Log tab has its own independent site selector (separate from the
+        # Config/Stdout/Stderr ']'/'[' selector above): -1 = "All" (default),
+        # 0..N-1 = index into self.sites for a single site.
+        self._log_site_idx = -1
+        # Debug-log toggle used only while the Log tab's selector is on
+        # "All" — a single site's own show_debug_log flag isn't meaningful
+        # once logs from every site are being merged together, and the
+        # toggle/debug output are hidden entirely once a specific site is
+        # selected (see draw_log_tab).
+        self._log_all_show_debug = False
         self.tick         = 0
         # Streamer management mode: None, or ("add"/"remove"/"disable", site_idx)
         self._mgmt_mode   = None
@@ -5947,41 +5957,81 @@ class JJDlpDashboard:
 
     # ── Log tab ──────────────────────────────────────────────────────────────
     def draw_log_tab(self, y1, x1, y2, x2):
-        # Site selector across the top
-        sel_site = self.sites[self.selected_site_idx] if self.sites else None
+        # Site selector across the top — Log tab has its own independent
+        # selector (self._log_site_idx), with an "All" option in addition
+        # to each individual site. -1 == "All" (the default).
+        is_all_sites = (self._log_site_idx == -1)
+        sel_site = (None if is_all_sites or not self.sites
+                    else self.sites[self._log_site_idx])
         tab_x    = x1 + 1
         self.safe_addstr(self.stdscr, y1, x1, "  Site: ",
                     theme.attr(self, "main_jjdlpdashboard_draw_log_tab_dim_1"))
         tab_x += 8
+
+        all_label = " All "
+        all_attr  = (theme.attr(self, "main_jjdlpdashboard_draw_log_tab_hilight")
+                     if is_all_sites
+                     else theme.attr(self, "main_jjdlpdashboard_draw_log_tab_chrome"))
+        self.safe_addstr(self.stdscr, y1, tab_x, all_label, all_attr)
+        tab_x += len(all_label) + 1
+
         for i, site in enumerate(self.sites):
             lbl = site.get_cached_config().get("site_label",
                               os.path.basename(site.config_path))
             label = f" {lbl} "
             attr  = (theme.attr(self, "main_jjdlpdashboard_draw_log_tab_hilight")
-                     if i == self.selected_site_idx
+                     if (not is_all_sites and i == self._log_site_idx)
                      else theme.attr(self, "main_jjdlpdashboard_draw_log_tab_chrome"))
             self.safe_addstr(self.stdscr, y1, tab_x, label, attr)
             tab_x += len(label) + 1
 
-        show_debug = sel_site.show_debug_log if sel_site is not None else False
-        title = (" ACTIVITY LOG — Show Debug: ON  (Press A to toggle) (Press F to configure filters) "
-                 if show_debug
-                 else " ACTIVITY LOG — Show Debug: OFF (Press A to toggle) ")
+        # The debug-log toggle/output only applies while "All" is selected —
+        # once a single site is picked, the debug toggle line and any debug
+        # lines are hidden entirely.
+        show_debug = self._log_all_show_debug if is_all_sites else False
+        if is_all_sites:
+            title = (" ACTIVITY LOG — Show Debug: ON  (Press A to toggle) (Press F to configure filters) "
+                     if show_debug
+                     else " ACTIVITY LOG — Show Debug: OFF (Press A to toggle) ")
+        else:
+            title = " ACTIVITY LOG "
 
         # Keep the title, but leave the log itself unframed so terminal text
         # selection can target just the log lines without collecting box art.
         self.safe_addstr(self.stdscr, y1 + 1, x1, title,
                     theme.attr(self, "main_jjdlpdashboard_draw_log_tab_dim_2"))
 
-        if sel_site is None:
+        if not self.sites:
             return
 
         visible_rows = (y2 - y1) - 2
         line_width   = max(1, x2 - x1 + 1)
 
-        with sel_site.dash_lock:
-            raw_lines = list(sel_site.dash_log_lines)
-            raw_debug = list(sel_site.dash_debug_lines) if show_debug else []
+        if is_all_sites:
+            # Merge activity/debug lines from every site, tagged with the
+            # site's label so lines can still be told apart.
+            raw_lines: List[str] = []
+            raw_debug: List[str] = []
+            for site in self.sites:
+                lbl = site.get_cached_config().get(
+                    "site_label", os.path.basename(site.config_path))
+                with site.dash_lock:
+                    site_lines = list(site.dash_log_lines)
+                    site_debug = list(site.dash_debug_lines) if show_debug else []
+                raw_lines.extend(
+                    f"{line[:20]} [{lbl}]{line[20:]}" if line[:1] == "[" else line
+                    for line in site_lines
+                )
+                raw_debug.extend(
+                    f"{line[:20]} [{lbl}]{line[20:]}" if line[:1] == "[" else line
+                    for line in site_debug
+                )
+            raw_lines.sort(key=lambda ln: ln[:20] if ln[:1] == "[" else "")
+            raw_debug.sort(key=lambda ln: ln[:20] if ln[:1] == "[" else "")
+        else:
+            with sel_site.dash_lock:
+                raw_lines = list(sel_site.dash_log_lines)
+                raw_debug = []
 
         # Compile per-filter, keeping each filter's own mode alongside it.
         # "filter_only"/"filter_highlight" filters restrict which debug
@@ -6984,16 +7034,28 @@ class JJDlpDashboard:
             self.selected_tab = (self.selected_tab + 1) % len(self.TABS)
         elif key in (curses.KEY_LEFT, ord('h')):
             self.selected_tab = (self.selected_tab - 1) % len(self.TABS)
-        elif key in (ord(']'), curses.KEY_NPAGE):   # next site (log/config tabs)
+        elif key in (ord(']'), curses.KEY_NPAGE) and current_tab_name == "Log":
+            # Log tab's site selector is independent and includes "All":
+            # -1 ("All") .. len(sites)-1.
+            n = len(self.sites)
+            self._log_site_idx = (self._log_site_idx + 2) % (n + 1) - 1
+            self._log_scroll = 0
+            self._log_frozen_lines = None
+        elif key in (ord('['), curses.KEY_PPAGE) and current_tab_name == "Log":
+            n = len(self.sites)
+            self._log_site_idx = (self._log_site_idx % (n + 1)) - 1
+            self._log_scroll = 0
+            self._log_frozen_lines = None
+        elif key in (ord(']'), curses.KEY_NPAGE):   # next site (config/stdout/stderr tabs)
             self.selected_site_idx = (self.selected_site_idx + 1) % max(1, len(self.sites))
             # Reset scroll when switching sites
-            self._log_scroll = self._stdout_scroll = self._stderr_scroll = 0
+            self._stdout_scroll = self._stderr_scroll = 0
             self._streamer_panel_sel = self._streamer_panel_scroll = 0
             self.config_editor.notify_site_changed(self.selected_site_idx)
         elif key in (ord('['), curses.KEY_PPAGE):   # prev site
             self.selected_site_idx = (self.selected_site_idx - 1) % max(1, len(self.sites))
             # Reset scroll when switching sites
-            self._log_scroll = self._stdout_scroll = self._stderr_scroll = 0
+            self._stdout_scroll = self._stderr_scroll = 0
             self._streamer_panel_sel = self._streamer_panel_scroll = 0
             self.config_editor.notify_site_changed(self.selected_site_idx)
         elif key == ord('\t') and current_tab_name in ("Stdout", "Stderr"):
@@ -7036,10 +7098,13 @@ class JJDlpDashboard:
                 self._log_scroll = max(0, self._log_scroll - 1)
         elif key in (ord('a'), ord('A')):
             if current_tab_name == "Log" and self.sites:
-                sel = self.sites[self.selected_site_idx]
-                sel.show_debug_log = not sel.show_debug_log
-                self._log_scroll = 0
-                self._log_frozen_lines = None
+                # Debug toggle only applies while "All" is selected — when a
+                # specific site is selected, the toggle/debug output are
+                # hidden entirely (see draw_log_tab), so 'A' is a no-op then.
+                if self._log_site_idx == -1:
+                    self._log_all_show_debug = not self._log_all_show_debug
+                    self._log_scroll = 0
+                    self._log_frozen_lines = None
             elif current_tab_name == "Stdout" and self.sites:
                 # "Show All" only means anything on the All Streamers view —
                 # a specific streamer never has checker JSON to show.
