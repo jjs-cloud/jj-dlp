@@ -325,11 +325,24 @@ def _reset_streamer_setting_keys(dashboard, config_id: str, entry: "PriorityEntr
         pass
 
     # Invalidate the sort manager's priority cache so the "*" has_override
-    # marker in the PRIORITY panel refreshes immediately.
+    # marker in the SORT/site-list views refreshes immediately.
     try:
         sort_mgr = getattr(dashboard, "sort_manager", None)
         if sort_mgr is not None:
             sort_mgr._prio_cache_ts = 0.0
+    except Exception:
+        pass
+
+    # Also force the PRIORITY panel itself to reload from disk right now,
+    # rather than waiting for the settings popup stack to fully close.
+    # This makes the "*" marker beside the streamer's name disappear the
+    # moment the reset is confirmed, instead of only after pressing Esc
+    # back out to the streamer list.
+    try:
+        config_editor = getattr(dashboard, "config_editor", None)
+        priority_editor = getattr(config_editor, "priority_editor", None)
+        if priority_editor is not None:
+            priority_editor.force_reload()
     except Exception:
         pass
 
@@ -498,13 +511,22 @@ class PriorityEditor:
             # "inherit" is represented by the key being absent.
             has_auto_suffix_override = e.get("auto_suffix_mode") in ("on", "off")
 
+            # Subfolders (OutputDirectorySettingsPopup): tri-state
+            # "output_dir_mode" ("inherit" or absent = no override) plus an
+            # independent custom OUTPUT_DIR override toggle.
+            has_output_dir_override = (
+                e.get("output_dir_mode") is not None
+                and e.get("output_dir_mode") != "inherit"
+            ) or bool(e.get("output_dir_custom_enabled", False))
+
             saved_map[key] = {
                 "bypass":       e.get("bypass", False),
                 "priority":     i,
                 "has_override": (schedule_enabled or has_split_override
                                   or has_notif_override or has_lq_override
                                   or has_intro_delay_override
-                                  or has_auto_suffix_override),
+                                  or has_auto_suffix_override
+                                  or has_output_dir_override),
             }
 
         # Build enriched list with saved priority / bypass values.
