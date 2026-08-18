@@ -326,6 +326,17 @@ def permanent_delete(path):
         return False, str(exc)
 
 
+def permanent_delete_folder(path):
+    """Delete the (empty) folder *path* immediately, with no recycle bin
+    involved."""
+    abs_path = os.path.abspath(path)
+    try:
+        os.rmdir(abs_path)
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # The tab itself
 # ──────────────────────────────────────────────────────────────────────────
@@ -850,6 +861,13 @@ class FileManagerTab:
         file_indices = [i for i, r in enumerate(self._rows) if r[0] == "file"]
         cur_row_idx = next((i for i in file_indices if self._rows[i][1] == path), None)
 
+        # Remember the file's parent folder and the OUTPUT_DIR root it
+        # belongs to *before* deleting, so we can check afterward whether
+        # the (sub)folder it lived in is now empty.
+        rec = self._records.get(path, {})
+        parent_dir = os.path.dirname(os.path.abspath(path))
+        output_dir_root = rec.get("group_path")
+
         if self._delete_mode == DELETE_MODE_PERMANENT:
             ok, err = permanent_delete(path)
         else:
@@ -873,9 +891,68 @@ class FileManagerTab:
             else:
                 self._selected_path = None
 
+        folder_note = self._maybe_delete_empty_folder(parent_dir, output_dir_root)
+
         self._rebuild_rows(self._get_output_dirs())
         mode_lbl = "Trash" if self._delete_mode == DELETE_MODE_TRASH else "Permanent"
-        self._set_status(f"Deleted ({mode_lbl}): {os.path.basename(path)}")
+        self._set_status(f"Deleted ({mode_lbl}): {os.path.basename(path)}{folder_note}")
+
+    @staticmethod
+    def _delete_empty_enabled() -> bool:
+        """True when the global DELETE_EMPTY key is on."""
+        try:
+            from .main import load_global_config
+            return bool(load_global_config().get("delete_empty", False))
+        except Exception:
+            return False
+
+    def _maybe_delete_empty_folder(self, folder, output_dir_root):
+        """After deleting a file, remove *folder* (via the current Delete
+        mode) if it is now empty of files/folders - but never the
+        OUTPUT_DIR root itself, only subfolders within it.
+
+        Returns a short human-readable suffix describing what happened
+        (empty string if nothing was removed), for appending to the
+        delete status message.
+        """
+        if not self._delete_empty_enabled():
+            return ""
+
+        if not folder or not output_dir_root:
+            return ""
+
+        folder_abs = os.path.abspath(folder)
+        root_abs = os.path.abspath(output_dir_root)
+
+        # Never touch the OUTPUT_DIR itself.
+        if folder_abs == root_abs:
+            return ""
+
+        # Only ever remove folders that are actually nested inside the
+        # OUTPUT_DIR - never anything outside of it.
+        try:
+            if os.path.commonpath([folder_abs, root_abs]) != root_abs:
+                return ""
+        except ValueError:
+            # e.g. paths on different drives on Windows.
+            return ""
+
+        try:
+            if not os.path.isdir(folder_abs) or os.listdir(folder_abs):
+                return ""
+        except OSError:
+            return ""
+
+        if self._delete_mode == DELETE_MODE_PERMANENT:
+            ok, err = permanent_delete_folder(folder_abs)
+        else:
+            ok, err = move_to_trash(folder_abs)
+
+        if not ok:
+            return (f"; could not remove empty folder "
+                    f"{os.path.basename(folder_abs)}: {err}")
+
+        return f"; removed empty folder {os.path.basename(folder_abs)}"
 
     def _set_status(self, msg):
         self._status_msg = msg
