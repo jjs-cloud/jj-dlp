@@ -791,6 +791,36 @@ def _load_global_json() -> dict:
     return {}
 
 
+def _load_skip_disabled(config_path: str) -> Set[str]:
+    """Load the set of streamers currently 'skip disabled' (in [Block] only
+    for the remainder of the current live session, auto re-enabled the next
+    time the checker sees them go offline) for *config_path*.
+
+    Persisted in global.json under "skip_disabled" as
+    {config_path: [streamer, ...]} so it survives a process restart —
+    otherwise a restart mid-stream would leave the [Block] entry in place
+    forever with nothing left to know it should be auto-removed.
+    """
+    gdata = _load_global_json()
+    entries = gdata.get("skip_disabled", {}).get(config_path, [])
+    if not isinstance(entries, list):
+        return set()
+    return {str(s).strip().lower() for s in entries if str(s).strip()}
+
+
+def _save_skip_disabled(config_path: str, skip_disabled: Set[str]) -> None:
+    gdata = _load_global_json()
+    all_skip = gdata.get("skip_disabled", {})
+    if not isinstance(all_skip, dict):
+        all_skip = {}
+    if skip_disabled:
+        all_skip[config_path] = sorted(skip_disabled)
+    else:
+        all_skip.pop(config_path, None)
+    gdata["skip_disabled"] = all_skip
+    _save_global_json(gdata)
+
+
 def _backup_global_json_if_due(data: dict) -> None:
     """Back up global.json into backups/ if it's due, per "_last_backup_ts".
 
@@ -1152,6 +1182,17 @@ class SiteState:
         # recovers where a part sequence left off instead of resetting to
         # part 1. Consulted by mark_live() when creating a fresh LiveSession.
         self._segment_continuation_cache: Dict[str, dict] = _load_segment_continuation_cache(config_path)
+
+        # Streamers that were disabled via "Skip this stream" (S in the
+        # DISABLE popup) rather than a normal disable — they sit in [Block]
+        # like any other disabled streamer, but the checker loop
+        # auto-removes them from [Block] the next time it observes them
+        # offline, instead of staying disabled indefinitely. Persisted to
+        # global.json (see _load_skip_disabled) so a restart mid-stream
+        # doesn't strand the entry in [Block] with nothing left to know it
+        # was meant to be temporary. Guarded by dash_lock, alongside the
+        # rest of this dashboard/mgmt-popup state.
+        self.skip_disabled:       Set[str] = _load_skip_disabled(config_path)
 
         # Dashboard display state (written by monitor thread, read by renderer)
         self.dash_lock            = threading.Lock()
@@ -5021,11 +5062,36 @@ def monitor_site(site: "SiteState") -> None:
             # enable_anchor, notif_shown all reset together as a unit),
             # and mark_live() is a no-op if already tracked.
             live_set = set(live_now)
+            newly_offline = []
             for s in streamers:
                 if s not in live_set:
+                    if site.is_live(s):
+                        newly_offline.append(s)
                     site.mark_offline(s)
                 else:
                     site.mark_live(s)
+
+            # "Skip this stream" auto re-enable: any streamer that just
+            # went offline and was skip-disabled gets un-blocked, so the
+            # disable only lasted for the stream it was applied during.
+            # If the streamer was also removed from [Streamers] entirely
+            # in the meantime (rather than just left in [Block]), leave it
+            # alone — it's a real removal now, not a pending skip.
+            if newly_offline:
+                with site.dash_lock:
+                    to_unblock = [s for s in newly_offline if s in site.skip_disabled]
+                if to_unblock:
+                    still_in_streamers = set(load_config(site.config_path)["streamers"])
+                    remaining_skip = set(site.skip_disabled)
+                    for s in to_unblock:
+                        remaining_skip.discard(s)
+                        if s in still_in_streamers:
+                            _modify_config_streamer(site.config_path, s, "add")
+                            site.log_line(f"'{s}' went offline — auto re-enabled (skip-this-stream expired).")
+                    with site.dash_lock:
+                        site.skip_disabled = remaining_skip
+                    _save_skip_disabled(site.config_path, remaining_skip)
+                    site.invalidate_config_cache()
 
             if live_now:
                 start_recording_if_needed(live_now, cfg, site, resolution_map=live_info)
@@ -6562,7 +6628,10 @@ class JJDlpDashboard:
         if self._mgmt_mode:
             action, site_idx = self._mgmt_mode
             site_lbl = os.path.basename(self.sites[site_idx].config_path)
-            if action in ("disable", "remove"):
+            if action == "disable":
+                hints = (f"  [{action.upper()} streamer on {site_lbl}]  "
+                         f"\u2191\u2193: select  Enter: confirm  S: Skip this stream  Esc: Go back  ")
+            elif action == "remove":
                 hints = (f"  [{action.upper()} streamer on {site_lbl}]  "
                          f"\u2191\u2193: select  Enter: confirm  Esc: Go back  ")
             else:
@@ -6736,8 +6805,11 @@ class JJDlpDashboard:
                 self.safe_addstr(self.stdscr, row_y, bx1 + 2,
                             (prefix + s + suffix)[:box_w - 4], attr)
 
-            self.safe_addstr(self.stdscr, by2, bx1 + 2,
-                        " \u2191\u2193: select  Enter: confirm  Esc: Go back ",
+            if action == "disable":
+                legend = " \u2191\u2193: select  Enter: confirm  S: Skip this stream  Esc: Go back "
+            else:
+                legend = " \u2191\u2193: select  Enter: confirm  Esc: Go back "
+            self.safe_addstr(self.stdscr, by2, bx1 + 2, legend,
                         theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_invhead_2"))
 
         else:
@@ -6787,8 +6859,9 @@ class JJDlpDashboard:
                     prefix = "> " if is_sel else "  "
                     attr   = (theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_hilight_2")
                               if is_sel else theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_dim_3"))
+                    suffix = "  (skipping this stream)" if s in site.skip_disabled else ""
                     self.safe_addstr(self.stdscr, row_y, bx1 + 2,
-                                (prefix + s)[:box_w - 4], attr)
+                                (prefix + s + suffix)[:box_w - 4], attr)
             else:
                 self.safe_addstr(self.stdscr, list_top, bx1 + 2,
                             "No disabled streamers.",
@@ -7371,6 +7444,21 @@ class JJDlpDashboard:
         self._mgmt_sel    = -1 if action == "add" else 0
         self._mgmt_scroll = 0
 
+    def _clear_skip_disabled(self, site, username: str) -> None:
+        """Drop *username* from site.skip_disabled (and persist), if present.
+
+        Called whenever a streamer is manually re-enabled or removed, so a
+        stale skip_disabled entry can't later cause the checker to auto
+        un-block a streamer the user has since dealt with some other way.
+        """
+        username = username.strip().lower()
+        with site.dash_lock:
+            if username not in site.skip_disabled:
+                return
+            site.skip_disabled.discard(username)
+            skip_snapshot = set(site.skip_disabled)
+        _save_skip_disabled(site.config_path, skip_snapshot)
+
     def _handle_mgmt_key(self, key) -> bool:
         action, site_idx = self._mgmt_mode
         site = self.sites[site_idx]
@@ -7392,6 +7480,12 @@ class JJDlpDashboard:
                 if enabled:
                     username = enabled[self._mgmt_sel]
                     result   = _modify_config_streamer(site.config_path, username, action)
+                    if action == "remove":
+                        # Removed from [Streamers] entirely — no longer a
+                        # "skip this stream" situation even if it was one;
+                        # the checker's offline-triggered auto-unblock must
+                        # not resurrect it.
+                        self._clear_skip_disabled(site, username)
                     site.invalidate_config_cache()
                     self.config_editor.load_config(site.config_path)
                     self.config_editor.priority_editor.force_reload()
@@ -7404,6 +7498,27 @@ class JJDlpDashboard:
                     self._mgmt_mode   = None
                     self._mgmt_buf    = ""
                     self._mgmt_result = ""
+            elif action == "disable" and key in (ord('s'), ord('S')):
+                # "Skip this stream" — disable for the remainder of the
+                # current live session only. Only makes sense for a
+                # streamer that's actually live right now.
+                if enabled:
+                    username = enabled[self._mgmt_sel]
+                    if not site.is_live(username):
+                        self._mgmt_result = "Error: user is not currently live"
+                    else:
+                        result = _modify_config_streamer(site.config_path, username, "disable")
+                        with site.dash_lock:
+                            site.skip_disabled.add(username)
+                            skip_snapshot = set(site.skip_disabled)
+                        _save_skip_disabled(site.config_path, skip_snapshot)
+                        site.invalidate_config_cache()
+                        self.config_editor.load_config(site.config_path)
+                        self.config_editor.priority_editor.force_reload()
+                        site.trigger_event.set()
+                        self._mgmt_result = result
+                        new_enabled = list_fn(site)
+                        self._mgmt_sel = min(self._mgmt_sel, max(0, len(new_enabled) - 1))
         else:
             # ── ADD mode: select a disabled streamer OR type a new name ────────
             disabled = self._mgmt_disabled_streamers(site)
@@ -7428,8 +7543,10 @@ class JJDlpDashboard:
             elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
                 if self._mgmt_buf.strip():
                     # Text input takes priority when it has content
+                    username = self._mgmt_buf.strip().lower()
                     result = _modify_config_streamer(site.config_path,
                                                      self._mgmt_buf.strip(), "add")
+                    self._clear_skip_disabled(site, username)
                     site.invalidate_config_cache()
                     self.config_editor.load_config(site.config_path)
                     self.config_editor.priority_editor.force_reload()
@@ -7440,6 +7557,7 @@ class JJDlpDashboard:
                     # Re-enable the selected disabled streamer
                     username = disabled[self._mgmt_sel]
                     result   = _modify_config_streamer(site.config_path, username, "add")
+                    self._clear_skip_disabled(site, username)
                     site.invalidate_config_cache()
                     self.config_editor.load_config(site.config_path)
                     self.config_editor.priority_editor.force_reload()
