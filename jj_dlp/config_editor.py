@@ -76,6 +76,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("WEB_UI_USER",           "global", "",      True,  comment="Username required to log into the web dashboard (HTTP Basic Auth). Required if WEB_UI is enabled."),
     _KeyDef("WEB_UI_PASS",           "global", "",      True,  comment="Password required to log into the web dashboard (HTTP Basic Auth). Required if WEB_UI is enabled. Choose something not easily guessed — anyone on your WiFi could otherwise try to log in."),
     _KeyDef("RGB_MODE",              "global", "true",  True, type="bool",  comment="Pin the terminal's 8 base colors to exact RGB values (the Windows Terminal Campbell palette) so the app looks the same on every Linux terminal (may require restart) (true/false)."),
+    _KeyDef("DELETE_EMPTY",          "global", "true",  True, type="bool",  comment="When deleting a file from the file manager, delete the parent folder if it is empty.  This only applies to subfolders within the OUTPUT_DIR. (true/false)"),
 
     # ── Site keys (per-site .conf) ────────────────────────────────────────────
     _KeyDef("SITE_LABEL",            "site",   "",      True,  comment="The name of this site."),
