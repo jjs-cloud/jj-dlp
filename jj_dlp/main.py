@@ -5803,6 +5803,8 @@ class JJDlpDashboard:
             blocked      = set(site.dash_blocked)
             next_in      = site.dash_next_check_in
         live_since   = site.snapshot_live_since()
+        with site.dash_lock:
+            ad_alert_streamers = set(site.ad_alerts.keys())
         with site.lock:
             recording     = set(site.currently_recording)
             intro_delay_pending = set(site.intro_delay_pending)
@@ -6036,7 +6038,9 @@ class JJDlpDashboard:
                     bar_str     = (_live_bar_dashed(elapsed, bar_w, _bar_max_secs)
                                    if recording_res.get(s) is None
                                    else _live_bar(elapsed, bar_w, _bar_max_secs))
-                    bar_attr    = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_9")
+                    bar_attr    = (theme.attr(self, "main_jjdlpdashboard_split_after_rows_warn_2")
+                                   if s in ad_alert_streamers
+                                   else theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_9"))
                     dur_str     = _fmt_duration(elapsed)
                     if not (is_rec and recording_res.get(s) is not None):
                         last_live_str = ""  # currently live, no "last live"
@@ -8011,17 +8015,44 @@ class JJDlpDashboard:
         except Exception as _e:
             dbg(f"[GRAPH] _persist_graph_history failed: {_e!r}")
 
+    def _handle_possible_resize(self) -> None:
+        """Detect a terminal resize and force curses to fully repaint.
+        """
+        try:
+            curses.update_lines_cols()
+        except Exception:
+            pass
+        size = self.stdscr.getmaxyx()
+        if size != getattr(self, "_last_term_size", size):
+            self._last_term_size = size
+            try:
+                curses.resizeterm(*size)
+            except Exception:
+                pass
+            # touchwin() marks every cell as "changed" so the next
+            # refresh() is forced to resend the whole screen instead of
+            # diffing against curses' now-stale physical-screen cache.
+            self.stdscr.touchwin()
+        else:
+            self._last_term_size = size
+
     def run(self):
         curses.curs_set(0)
         self.stdscr.nodelay(True)
         self.stdscr.keypad(True)
         self.setup_colors()
 
+        # Track terminal size so we can detect resizes even on platforms
+        # (notably windows-curses / cmd.exe) where KEY_RESIZE isn't
+        # reliably delivered through getch(). See _handle_possible_resize().
+        self._last_term_size = self.stdscr.getmaxyx()
+
         _perf_frame_count = 0
         _perf_next_report = time.time() + 10.0  # report every 10 seconds
 
         while True:
             _t_frame_start = time.time()
+            self._handle_possible_resize()
             self._update_write_failure_alert()
             self.refresh_screen()
             _t_after_refresh = time.time()
@@ -8043,6 +8074,13 @@ class JJDlpDashboard:
                 key = self.stdscr.getch()
                 if key == -1:
                     break
+                if key == curses.KEY_RESIZE:
+                    # Some curses backends do deliver this. Handle it the
+                    # same way as our own polling-based detection and skip
+                    # passing it into handle_key() (it's not a real
+                    # keypress the app's key handling should act on).
+                    self._handle_possible_resize()
+                    continue
                 if not self.handle_key(key):
                     should_quit = True
                     break
