@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.27.9"
+__version__ = "1.27.10"
 
 import subprocess
 import textwrap
@@ -5062,36 +5062,35 @@ def monitor_site(site: "SiteState") -> None:
             # enable_anchor, notif_shown all reset together as a unit),
             # and mark_live() is a no-op if already tracked.
             live_set = set(live_now)
-            newly_offline = []
             for s in streamers:
                 if s not in live_set:
-                    if site.is_live(s):
-                        newly_offline.append(s)
                     site.mark_offline(s)
                 else:
                     site.mark_live(s)
 
-            # "Skip this stream" auto re-enable: any streamer that just
-            # went offline and was skip-disabled gets un-blocked, so the
+            # "Skip this stream" auto re-enable: any skip-disabled streamer
+            # that's currently reported offline gets un-blocked, so the
             # disable only lasted for the stream it was applied during.
+            #
+            # Deliberately NOT gated on having observed a live->offline
+            # transition in this process
             # If the streamer was also removed from [Streamers] entirely
             # in the meantime (rather than just left in [Block]), leave it
             # alone — it's a real removal now, not a pending skip.
-            if newly_offline:
+            with site.dash_lock:
+                to_unblock = [s for s in streamers if s not in live_set and s in site.skip_disabled]
+            if to_unblock:
+                still_in_streamers = set(load_config(site.config_path)["streamers"])
+                remaining_skip = set(site.skip_disabled)
+                for s in to_unblock:
+                    remaining_skip.discard(s)
+                    if s in still_in_streamers:
+                        _modify_config_streamer(site.config_path, s, "add")
+                        site.log_line(f"'{s}' went offline — auto re-enabled (skip-this-stream expired).")
                 with site.dash_lock:
-                    to_unblock = [s for s in newly_offline if s in site.skip_disabled]
-                if to_unblock:
-                    still_in_streamers = set(load_config(site.config_path)["streamers"])
-                    remaining_skip = set(site.skip_disabled)
-                    for s in to_unblock:
-                        remaining_skip.discard(s)
-                        if s in still_in_streamers:
-                            _modify_config_streamer(site.config_path, s, "add")
-                            site.log_line(f"'{s}' went offline — auto re-enabled (skip-this-stream expired).")
-                    with site.dash_lock:
-                        site.skip_disabled = remaining_skip
-                    _save_skip_disabled(site.config_path, remaining_skip)
-                    site.invalidate_config_cache()
+                    site.skip_disabled = remaining_skip
+                _save_skip_disabled(site.config_path, remaining_skip)
+                site.invalidate_config_cache()
 
             if live_now:
                 start_recording_if_needed(live_now, cfg, site, resolution_map=live_info)
