@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.27.9"
+__version__ = "1.27.10"
 
 import subprocess
 import textwrap
@@ -881,6 +881,24 @@ def _save_global_json(data: dict) -> None:
         except Exception:
             pass
 
+def _add_yt_dlp_pid(pid: int) -> None:
+    with _global_json_lock:
+        gdata = _load_global_json()
+        pids = gdata.get("yt_dlp_pids", [])
+        if pid not in pids:
+            pids.append(pid)
+            gdata["yt_dlp_pids"] = pids
+            _save_global_json(gdata)
+
+def _remove_yt_dlp_pid(pid: int) -> None:
+    with _global_json_lock:
+        gdata = _load_global_json()
+        pids = gdata.get("yt_dlp_pids", [])
+        if pid in pids:
+            pids.remove(pid)
+            gdata["yt_dlp_pids"] = pids
+            _save_global_json(gdata)
+
 
 def _load_last_live_cache(config_path: str) -> Dict[str, float]:
     """Return the last-live timestamps for the given site from global.json.
@@ -1286,11 +1304,20 @@ class SiteState:
         """Register an active yt-dlp subprocess so stop() can kill it."""
         with self._procs_lock:
             self._active_procs[streamer] = proc
+        try:
+            _add_yt_dlp_pid(proc.pid)
+        except Exception:
+            pass
 
     def unregister_proc(self, streamer: str) -> None:
         """Remove a subprocess from the registry (after it exits)."""
         with self._procs_lock:
-            self._active_procs.pop(streamer, None)
+            proc = self._active_procs.pop(streamer, None)
+            if proc:
+                try:
+                    _remove_yt_dlp_pid(proc.pid)
+                except Exception:
+                    pass
 
     def set_recording_output(self, streamer: str, path: str) -> None:
         """Publish the absolute path of the file *streamer*'s yt-dlp process
@@ -8415,6 +8442,53 @@ def _input_with_timeout(prompt: str, timeout_seconds: int = 10) -> Optional[str]
     return result[0].strip()[:1].lower() if result and result[0] is not None else None
 
 
+def _check_and_kill_zombie_yt_dlps() -> None:
+    with _global_json_lock:
+        gdata = _load_global_json()
+        pids = gdata.get("yt_dlp_pids", [])
+    
+    if not pids:
+        return
+
+    running_pids = []
+    for pid in pids:
+        try:
+            os.kill(pid, 0)
+            if sys.platform != "win32":
+                try:
+                    with open(f"/proc/{pid}/cmdline", "r", encoding="utf-8", errors="replace") as _f:
+                        cmd = _f.read()
+                    if "yt_dlp" in cmd or "yt-dlp" in cmd:
+                        running_pids.append(pid)
+                except Exception:
+                    # process might have died or no permission, assume running
+                    running_pids.append(pid)
+            else:
+                running_pids.append(pid)
+        except OSError:
+            pass
+
+    if running_pids:
+        ans = input(f"Warning: There are {len(running_pids)} child yt-dlp processes still running from a previous instance. Kill them now? [Y/n] ")
+        if ans.lower() in ("", "y", "yes"):
+            for pid in running_pids:
+                if sys.platform == "win32":
+                    subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True)
+                else:
+                    import signal
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except OSError:
+                        pass
+            
+            print("Waiting for processes to close gracefully...")
+            time.sleep(2)
+
+    with _global_json_lock:
+        gdata = _load_global_json()
+        gdata["yt_dlp_pids"] = []
+        _save_global_json(gdata)
+
 # ══════════════════════════════════════════════════════════════════════════════
 # main()
 # ══════════════════════════════════════════════════════════════════════════════
@@ -8429,6 +8503,8 @@ def main() -> None:
     if not plain_ffmpeg_check():
         print(f"\njj-dlp v{__version__}  ·  Aborted during ffmpeg check.")
         sys.exit(1)
+
+    _check_and_kill_zombie_yt_dlps()
 
     # Install orphan-process protection as early as possible, before any
     # yt-dlp/ffmpeg process can be spawned. Ensures that no matter how
