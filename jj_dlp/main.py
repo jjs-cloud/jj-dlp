@@ -8453,8 +8453,15 @@ def _check_and_kill_zombie_yt_dlps() -> None:
     running_pids = []
     for pid in pids:
         try:
-            os.kill(pid, 0)
-            if sys.platform != "win32":
+            if sys.platform == "win32":
+                try:
+                    out = subprocess.check_output(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"], text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                    if str(pid) in out:
+                        running_pids.append(pid)
+                except Exception:
+                    pass
+            else:
+                os.kill(pid, 0)
                 try:
                     with open(f"/proc/{pid}/cmdline", "r", encoding="utf-8", errors="replace") as _f:
                         cmd = _f.read()
@@ -8463,8 +8470,6 @@ def _check_and_kill_zombie_yt_dlps() -> None:
                 except Exception:
                     # process might have died or no permission, assume running
                     running_pids.append(pid)
-            else:
-                running_pids.append(pid)
         except OSError:
             pass
 
@@ -8473,16 +8478,17 @@ def _check_and_kill_zombie_yt_dlps() -> None:
         if ans.lower() in ("", "y", "yes"):
             for pid in running_pids:
                 if sys.platform == "win32":
-                    subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True)
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
                 else:
                     import signal
                     try:
-                        os.kill(pid, signal.SIGTERM)
+                        pgid = os.getpgid(pid)
+                        os.killpg(pgid, signal.SIGKILL)
                     except OSError:
-                        pass
-            
-            print("Waiting for processes to close gracefully...")
-            time.sleep(2)
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except OSError:
+                            pass
 
     with _global_json_lock:
         gdata = _load_global_json()
