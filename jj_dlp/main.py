@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.27.10"
+__version__ = "1.27.9"
 
 import subprocess
 import textwrap
@@ -6733,7 +6733,10 @@ class JJDlpDashboard:
         site_lbl = site.get_cached_config().get("site_label",
                                                 os.path.basename(site.config_path))
 
-        box_h, box_w = min(20, h - 4), min(60, w - 4)
+        # DISABLE gets a wider box than ADD/REMOVE to fit its longer legend
+        # (" ...  S: Skip this stream  Esc: Go back ").
+        max_box_w = 68 if action == "disable" else 60
+        box_h, box_w = min(20, h - 4), min(max_box_w, w - 4)
         by1 = (h - box_h) // 2
         bx1 = (w - box_w) // 2
         by2 = by1 + box_h
@@ -7507,6 +7510,8 @@ class JJDlpDashboard:
                         self._mgmt_result = "Error: user is not currently live"
                     else:
                         result = _modify_config_streamer(site.config_path, username, "disable")
+                        if result == f"Disabled '{username}'.":
+                            result = f"Skipped '{username}'."
                         with site.dash_lock:
                             site.skip_disabled.add(username)
                             skip_snapshot = set(site.skip_disabled)
