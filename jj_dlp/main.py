@@ -2837,6 +2837,12 @@ known_filename=None):
         size = os.path.getsize(filename) if filename else 0
         size = _simulation.maybe_freeze_stall_size(
             filename, size, last_growth_time, stall_timeout, streamer)
+        # last_growth_time is only passed non-None by the caller once
+        # growth_seen has flipped true (see the call site's comment), so it
+        # doubles as the "has this file shown real growth yet" signal the
+        # collapse simulation needs — no separate growth_seen param required.
+        size = _simulation.maybe_collapse_stall_size(
+            filename, size, last_growth_time is not None, streamer)
         stall_detected = False
         if last_growth_time is not None and stall_timeout is not None:
             time_now = time.time()

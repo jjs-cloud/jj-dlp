@@ -41,6 +41,23 @@ _SIMULATE_STALL_PERMANENT = False
 # Internal latch: once True, reported size is pinned at 0 for the rest of the process.
 _simulate_stall_permanent_lock = False
 
+# ── DEBUG: collapse simulation ──────────────────────────────────────────────
+# Flip to True to make a recording look like it got truncated/reopened mid-
+# write (the RESTART_ON_COLLAPSE scenario — e.g. yt-dlp reopening the output
+# file from byte 0 after a live-stream reconnect instead of resuming). Real
+# growth proceeds until the file has grown past _SIMULATE_COLLAPSE_MIN_BYTES,
+# then exactly once the reported size is knocked back down to a small value —
+# a single poll-to-poll DECREASE, not a freeze — so the very next stall check
+# in record_stream() sees `current_size < last_size` and (if RESTART_ON_COLLAPSE
+# is enabled in the site config) fires the collapse-restart path. Keyed by
+# filename, so a SPLIT_AFTER segment change gets its own one-shot collapse.
+# Watch for "[STALL] COLLAPSE DETECTED" / "... shrank from ... — restarting".
+# Flip back to False when done.
+_SIMULATE_COLLAPSE = False
+_SIMULATE_COLLAPSE_MIN_BYTES = 2_000_000   # let it grow a bit first so the drop is obvious
+_SIMULATE_COLLAPSE_DROP_TO = 65536         # fake "just reopened" size after the collapse
+_simulate_collapse_triggered: dict = {}    # filename -> already fired for this file
+
 # ── DEBUG: LQ-restart simulation ────────────────────────────────────────────
 # Flip to True to run the real LQ restart path (ffmpeg_error_event →
 # _maybe_trigger_lq → evict + record_stream(use_lq=True)) via injected errors.
@@ -130,6 +147,33 @@ def maybe_freeze_stall_size(filename, size, last_growth_time, stall_timeout, str
                 f"{_frozen} bytes for {filename!r}", site_name=streamer)
         if _frozen is not None:
             size = _frozen
+    return size
+
+
+def maybe_collapse_stall_size(filename, size, growth_seen, streamer) -> int:
+    """Apply a one-shot _SIMULATE_COLLAPSE truncation to a just-read file size.
+
+    See the _SIMULATE_COLLAPSE flag above. No-op (returns *size* unchanged)
+    unless armed. Unlike maybe_freeze_stall_size (which pins the size flat to
+    simulate a stall), this fires exactly once per filename: once real growth
+    has pushed the file past _SIMULATE_COLLAPSE_MIN_BYTES, the very next call
+    reports a much smaller size instead, so the caller observes a genuine
+    poll-to-poll decrease — the same shape as yt-dlp truncating/reopening the
+    output file after a reconnect.
+    """
+    if not _SIMULATE_COLLAPSE or not growth_seen:
+        return size
+
+    already_fired = _simulate_collapse_triggered.get(filename, False)
+    if already_fired:
+        return size
+
+    if size >= _SIMULATE_COLLAPSE_MIN_BYTES:
+        _simulate_collapse_triggered[filename] = True
+        dbg(f"[SIMULATE_COLLAPSE] triggering simulated collapse for {filename!r}: "
+            f"reporting size as {_SIMULATE_COLLAPSE_DROP_TO} bytes instead of "
+            f"real {size} bytes (one-shot)", site_name=streamer)
+        return _SIMULATE_COLLAPSE_DROP_TO
     return size
 
 
