@@ -4239,38 +4239,31 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         time.sleep(5)
                         break
 
-                    elif current_size < last_size and growth_seen and cfg.get(
-                            "RESTART_ON_COLLAPSE", True):
-                        # File size went BACKWARDS since the last poll. This is
-                        # not a stall (the file isn't idle — it's actively being
-                        # clobbered) 
+                    elif current_size < last_size and growth_seen:
+                        # File size went BACKWARDS since the last poll — the
+                        # file was truncated/reopened (e.g. yt-dlp reopening
+                        # the output file from byte 0 after a live-stream
+                        # reconnect instead of resuming/appending). 
                         dbg(f"[STALL] COLLAPSE DETECTED: size dropped "
                             f"{last_size} -> {current_size} "
                             f"(-{last_size - current_size} bytes) — file was "
-                            f"truncated/reset; restarting to limit data loss "
-                            f"(RESTART_ON_COLLAPSE={cfg.get('RESTART_ON_COLLAPSE', True)!r})",
+                            f"likely truncated/reopened on reconnect",
                             site_name=streamer)
                         site.log_line(
-                            f"Recording file for {streamer} shrank from "
-                            f"{last_size} to {current_size} bytes (likely "
-                            f"truncated on reconnect) — restarting"
+                            f"Warning: recording file for {streamer} shrank "
+                            f"from {last_size} to {current_size} bytes "
+                            f"(likely truncated on reconnect) — some footage "
+                            f"may have been lost"
                         )
-
-                        _refresh_restart_anchor_if_growing(
-                            site, streamer, growth_seen, reason="collapse_detected")
-
-                        kill_proc(proc)
-                        site.unregister_proc(streamer)
-                        site.clear_stall_since(streamer)
-                        site.clear_ad_alert(streamer)
-
-                        try:
-                            close_logs()
-                        except Exception:
-                            pass
-
-                        time.sleep(5)
-                        break
+                        # Re-sync the comparison baseline to this poll's size
+                        # so the next poll compares against reality. Leave
+                        # last_growth_time / stall_since untouched — a shrink
+                        # isn't a stall, so it shouldn't affect the genuine
+                        # stall timer; if the file also stops growing after
+                        # this, the existing NO GROWTH branch will catch that
+                        # on its own on a later poll.
+                        filename_error_warned = False
+                        last_size = current_size
 
                     elif current_size > last_size:
                         filename_error_warned = False

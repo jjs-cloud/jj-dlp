@@ -43,16 +43,17 @@ _simulate_stall_permanent_lock = False
 
 # ── DEBUG: collapse simulation ──────────────────────────────────────────────
 # Flip to True to make a recording look like it got truncated/reopened mid-
-# write (the RESTART_ON_COLLAPSE scenario — e.g. yt-dlp reopening the output
-# file from byte 0 after a live-stream reconnect instead of resuming). Real
-# growth proceeds until the file has grown past _SIMULATE_COLLAPSE_MIN_BYTES,
-# then exactly once the reported size is knocked back down to a small value —
-# a single poll-to-poll DECREASE, not a freeze — so the very next stall check
-# in record_stream() sees `current_size < last_size` and (if RESTART_ON_COLLAPSE
-# is enabled in the site config) fires the collapse-restart path. Keyed by
-# filename, so a SPLIT_AFTER segment change gets its own one-shot collapse.
-# Watch for "[STALL] COLLAPSE DETECTED" / "... shrank from ... — restarting".
-# Flip back to False when done.
+# write (e.g. yt-dlp reopening the output file from byte 0 after a live-
+# stream reconnect instead of resuming). Real growth proceeds until the file
+# has grown past _SIMULATE_COLLAPSE_MIN_BYTES, then exactly once the
+# reported size is knocked back down to a small value — a single
+# poll-to-poll DECREASE, not a freeze — so the very next stall check in
+# record_stream() sees `current_size < last_size` and logs the collapse
+# warning (no restart — by the time a shrink is observed the data is already
+# lost, so this only surfaces the problem). Keyed by filename, so a
+# SPLIT_AFTER segment change gets its own one-shot collapse. Watch for
+# "[STALL] COLLAPSE DETECTED" / "Warning: recording file for ... shrank
+# from ...". Flip back to False when done.
 _SIMULATE_COLLAPSE = False
 _SIMULATE_COLLAPSE_MIN_BYTES = 2_000_000   # let it grow a bit first so the drop is obvious
 _SIMULATE_COLLAPSE_DROP_TO = 65536         # fake "just reopened" size after the collapse
