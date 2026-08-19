@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.27.12"
+__version__ = "1.27.13"
 
 import subprocess
 import textwrap
@@ -3824,25 +3824,22 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     dbg(f"[PERF][record_stream/inner] get_cached_config took {_load_cfg_ms:.2f}ms streamer={streamer!r}")
 
                 if streamer in current_cfg["blocked"]:
+                    # NOTE: deliberately mirrors the stop_event/evicted branch
+                    # above — kill and return immediately, and let the shared
+                    # `finally` block below do currently_recording.discard(),
+                    # the AUTO_SUFFIX/SPLIT_AFTER set_segment_continuation()
+                    # write, and the single cooldown wait, in that order.
                     kill_proc(proc)
                     site.log_line(f"Recording STOPPED (blocked) -> {streamer}")
                     site.unregister_proc(streamer)
                     site.clear_ffmpeg_error_count(streamer)
                     site.clear_stall_since(streamer)
-                    site.clear_ad_alert(streamer)
 
                     try:
                         close_logs()
                     except Exception:
                         pass
 
-                    with site.lock:
-                        site.currently_recording.discard(streamer)
-
-                    # Interruptible: wake immediately on shutdown instead of
-                    # blocking the thread (and thus main()'s shutdown join)
-                    # for the full cooldown period.
-                    site._stop_event.wait(timeout=cfg["cooldown_after_recording"])
                     return
 
                 # ── LQ-restart simulation (DEBUG) ──────────────────────────
