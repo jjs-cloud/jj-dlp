@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.27.11"
+__version__ = "1.27.12"
 
 import subprocess
 import textwrap
@@ -4219,6 +4219,39 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         # give the next attempt's deadline a fresh window.
                         _refresh_restart_anchor_if_growing(
                             site, streamer, growth_seen, reason="stall_detected")
+
+                        kill_proc(proc)
+                        site.unregister_proc(streamer)
+                        site.clear_stall_since(streamer)
+                        site.clear_ad_alert(streamer)
+
+                        try:
+                            close_logs()
+                        except Exception:
+                            pass
+
+                        time.sleep(5)
+                        break
+
+                    elif current_size < last_size and growth_seen and cfg.get(
+                            "RESTART_ON_COLLAPSE", True):
+                        # File size went BACKWARDS since the last poll. This is
+                        # not a stall (the file isn't idle — it's actively being
+                        # clobbered) 
+                        dbg(f"[STALL] COLLAPSE DETECTED: size dropped "
+                            f"{last_size} -> {current_size} "
+                            f"(-{last_size - current_size} bytes) — file was "
+                            f"truncated/reset; restarting to limit data loss "
+                            f"(RESTART_ON_COLLAPSE={cfg.get('RESTART_ON_COLLAPSE', True)!r})",
+                            site_name=streamer)
+                        site.log_line(
+                            f"Recording file for {streamer} shrank from "
+                            f"{last_size} to {current_size} bytes (likely "
+                            f"truncated on reconnect) — restarting"
+                        )
+
+                        _refresh_restart_anchor_if_growing(
+                            site, streamer, growth_seen, reason="collapse_detected")
 
                         kill_proc(proc)
                         site.unregister_proc(streamer)
