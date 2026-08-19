@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.27.13"
+__version__ = "1.27.14"
 
 import subprocess
 import textwrap
@@ -44,6 +44,7 @@ from .browser_config import (
     _write_ask_for_browser_to_config,
 )
 from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS, _compute_config_id, SiteSortManager, SORT_OPTIONS, _SORT_LABELS
+from .config_editor import DOWNLOADER_FLAG_KEYS
 from .config_editor import load_global_config as _load_global_config_typed
 from .file_manager import FileManagerTab
 from . import graph as _graph
@@ -435,35 +436,72 @@ def _parse_twitch_section(parser: configparser.ConfigParser) -> dict:
     }
 
 
-def _parse_checker_and_downloader(parser: configparser.ConfigParser) -> tuple:
-    """Return (checker_cmd, downloader_cmd, lq_downloader_cmd) lists from
-    [Checker], [Downloader], and [LQ_Downloader]."""
-    checker_cmd = []
-    if parser.has_section("Checker"):
-        for key, val in parser.items("Checker"):
-            item = (val or key).strip()
-            if item:
-                checker_cmd.append(item)
+def _build_section_cmd(parser: configparser.ConfigParser, section: str) -> list:
+    """Build a yt-dlp argv list from the KEY = value pairs in *section*
+    (one of "Checker", "Downloader", "LQ_Downloader").
 
-    downloader_cmd = []
-    if parser.has_section("Downloader"):
-        for key, val in parser.items("Downloader"):
-            item = (val or key).strip()
-            if item:
+    The recognized keys, their CLI flags, defaults, and types all live in
+    config_editor.DOWNLOADER_FLAG_KEYS — the single source of truth.
+
+    - COOKIES_FROM_BROWSER = true adds --cookies-from-browser <browser>,
+      where <browser> comes from the file-global BROWSER key in [General].
+    - EXTRA_ARGS is a raw passthrough for any flag without a dedicated key
+      yet, split with shlex (posix=True) so quoted spans with embedded
+      spaces stay together as a single argv token.
+    - Every other key in DOWNLOADER_FLAG_KEYS maps 1:1 to its cli_flag.
+    """
+    cmd: list = []
+    if not parser.has_section(section):
+        return cmd
+
+    sect = parser[section]
+
+    for flag_def in DOWNLOADER_FLAG_KEYS:
+        key = flag_def.name
+
+        if key == "COOKIES_FROM_BROWSER":
+            if sect.getboolean(key, fallback=False):
+                general = parser["General"] if parser.has_section("General") else {}
+                browser = (general.get("BROWSER", "") or "").strip().lower()
+                if browser and browser != "disabled":
+                    cmd.extend([flag_def.cli_flag, browser])
+            continue
+
+        if key == "EXTRA_ARGS":
+            extra_raw = sect.get(key, "").strip()
+            if extra_raw:
+                cmd.extend(shlex.split(extra_raw, posix=True))
+            continue
+
+        if key not in sect:
+            continue
+
+        if flag_def.type == "bool":
+            if sect.getboolean(key, fallback=False):
+                cmd.append(flag_def.cli_flag)
+        else:
+            raw = sect.get(key, "").strip()
+            if raw:
                 # NOTE: posix=True (not sys.platform-dependent) is required here.
                 # Non-posix mode does NOT merge a quoted "a b c" into one token —
                 # it still splits on whitespace and leaves stray quote chars in
                 # the pieces, which breaks any value needing embedded spaces
-                # (e.g. --downloader-args ffmpeg:"-fps_mode passthrough ...").
+                # (e.g. DOWNLOADER_ARGS = ffmpeg:"-fps_mode passthrough ...").
                 # posix=True correctly groups quoted spans and strips the quotes.
-                downloader_cmd.extend(shlex.split(item, posix=True))
+                pieces = shlex.split(raw, posix=True) or [raw]
+                cmd.append(flag_def.cli_flag)
+                cmd.extend(pieces)
 
-    lq_downloader_cmd = []
-    if parser.has_section("LQ_Downloader"):
-        for key, val in parser.items("LQ_Downloader"):
-            item = (val or key).strip()
-            if item:
-                lq_downloader_cmd.extend(shlex.split(item, posix=True))
+    return cmd
+
+
+def _parse_checker_and_downloader(parser: configparser.ConfigParser) -> tuple:
+    """Return (checker_cmd, downloader_cmd, lq_downloader_cmd) argv lists
+    built from the KEY = value pairs in [Checker], [Downloader], and
+    [LQ_Downloader]."""
+    checker_cmd        = _build_section_cmd(parser, "Checker")
+    downloader_cmd      = _build_section_cmd(parser, "Downloader")
+    lq_downloader_cmd   = _build_section_cmd(parser, "LQ_Downloader")
 
     return checker_cmd, downloader_cmd, lq_downloader_cmd
 
@@ -569,11 +607,10 @@ def load_config(config_path: str) -> dict:
         print(f"ERROR: Config file not found at: {config_path}", file=sys.stderr)
         sys.exit(1)
 
-    # delimiters=('=',) — Downloader/Checker/LQ_Downloader lines are raw CLI-arg
-    # strings (e.g. "--downloader-args ffmpeg:...") stored as bare keys. The
-    # default ':' delimiter would misparse the colon in "ffmpeg:..." as a
-    # key/value split, silently truncating the argument. Restricting to '='
-    # avoids that while matching how every value in these configs is written.
+    # delimiters=('=',) — some Downloader/Checker/LQ_Downloader values contain
+    # a colon (e.g. DOWNLOADER_ARGS = ffmpeg:"-fps_mode passthrough ..."). The
+    # default ':' delimiter would misparse that colon as a second key/value
+    # split, silently truncating the value. Restricting to '=' avoids that.
     # strict=False: tolerate duplicate keys/sections in hand-edited config
     # files (e.g. the same streamer accidentally added twice) instead of
     # raising DuplicateOptionError/DuplicateSectionError. The last value for

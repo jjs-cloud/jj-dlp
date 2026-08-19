@@ -50,6 +50,31 @@ class _KeyDef(NamedTuple):
     comment:  str = ""
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# _DlpFlagDef — keys that live inside a per-site config's [Checker], [Downloader],
+# or [LQ_Downloader] section (not [General]) and get translated straight into a
+# yt-dlp CLI flag when the section's command is built (see main.py's
+# _build_section_cmd). The same vocabulary is valid in all three sections —
+# yt-dlp doesn't care which of the three is invoking it.
+#
+# cli_flag : the yt-dlp flag this key maps to. "" for keys with no 1:1 flag —
+#            COOKIES_FROM_BROWSER (needs the file-global BROWSER value too, so
+#            main.py special-cases it) and EXTRA_ARGS (a raw passthrough for
+#            any flag that hasn't earned a dedicated key yet).
+# default  : value written when the key is missing.
+# type     : "bool" → KEY = true/false, emits [cli_flag] only when true.
+#            anything else → KEY = <value>, emits [cli_flag, value] when non-empty.
+# comment  : help text shown in the edit popup.
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _DlpFlagDef(NamedTuple):
+    name:     str
+    cli_flag: str
+    default:  str
+    type:     str = "str"
+    comment:  str = ""
+
+
 CONFIG_KEYS: tuple[_KeyDef, ...] = (
     # ── Global keys (global.conf) ─────────────────────────────────────────────
     _KeyDef("DISK_DRIVES",           "global", "",      True, type="list",  comment="Comma-separated list of drives or paths to show disk info in the system panel. (e.g. C:\\, D:\\, E:\\  or  /home,/mnt/data)."),
@@ -107,9 +132,40 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("PROGRESS_BAR_WIDTH",    "site",   "58",   True,  comment="Width of the progress bar in the site panel of the dashboard. (in characters)"),
     _KeyDef("DOWNLOADER_COOKIES",    "site",   "true", False, comment="Whether to write the --cookies-from-browser flag to this config file's [Downloader] section when a browser is selected at startup."),
     _KeyDef("CHECKER_COOKIES",       "site",   "false", False, comment="Whether to write the --cookies-from-browser flag to this config file's [Checker] section when a browser is selected at startup."),
+    _KeyDef("BROWSER",               "site",   "firefox", False, comment="The browser to use for --cookies-from-browser. One value shared by [Downloader]/[Checker]/[LQ_Downloader] wherever their own COOKIES_FROM_BROWSER = true. Normally set via the browser chooser at startup, not hand-edited."),
     _KeyDef("LAST_LIVE_HIGHLIGHT",   "site",   "0",    True,  comment='Highlight the "Last Live" timestamp when the streamer was last live within X days.'),
     _KeyDef("UPGRADE_QUALITY",       "site",   "true", True, comment="Restart the recording when a higher quality is available. (true/false)."),
 )
+
+
+# ── [Checker]/[Downloader]/[LQ_Downloader] keys (per-site .conf) ───────────────
+DOWNLOADER_FLAG_KEYS: tuple[_DlpFlagDef, ...] = (
+    _DlpFlagDef("COOKIES_FROM_BROWSER", "--cookies-from-browser", "false", type="bool",
+                comment="Use cookies from the browser set in BROWSER (General section) when yt-dlp runs for this section. Set independently per [Checker]/[Downloader]/[LQ_Downloader]; normally toggled via the browser chooser at startup."),
+    _DlpFlagDef("DUMP_JSON",       "--dump-json",       "false", type="bool",
+                comment="Have yt-dlp dump the stream's metadata as JSON instead of downloading. Typically used in [Checker] to detect whether a streamer is live."),
+    _DlpFlagDef("NO_PART",         "--no-part",         "false", type="bool",
+                comment="Do not use .part files while downloading; write directly to the final filename."),
+    _DlpFlagDef("VERBOSE",         "--verbose",         "false", type="bool",
+                comment="Print verbose debugging information from yt-dlp."),
+    _DlpFlagDef("FIXUP",           "--fixup",           "",      type="str",
+                comment='How yt-dlp should fix up damaged output files after download (e.g. "never" to skip the fixup pass entirely).'),
+    _DlpFlagDef("RETRIES",         "--retries",         "",      type="int",
+                comment="Number of times yt-dlp retries on a download error."),
+    _DlpFlagDef("FORMAT",          "-f",                "",      type="str",
+                comment="yt-dlp format selector (e.g. 4, 720p60, best). Typically used in [LQ_Downloader] to force a lower-quality fallback format."),
+    _DlpFlagDef("DOWNLOADER_ARGS", "--downloader-args", "",      type="str",
+                comment='Extra arguments passed straight to the external downloader, e.g. ffmpeg:"-fps_mode passthrough -copyts -avoid_negative_ts make_zero".'),
+    _DlpFlagDef("EXTRA_ARGS",      "",                  "",      type="str",
+                comment="Raw passthrough for any yt-dlp flag that doesn't have a dedicated key above (e.g. --some-flag value). Split the same way a shell command line would be."),
+)
+
+# Default values keyed by name
+DOWNLOADER_FLAG_DEFAULTS: dict[str, str] = {k.name: k.default for k in DOWNLOADER_FLAG_KEYS}
+
+# Help comments keyed by name
+DOWNLOADER_FLAG_COMMENTS: dict[str, str] = {k.name: k.comment for k in DOWNLOADER_FLAG_KEYS}
+
 
 # ── Derived helpers (consumed by this module and importable by others) ─────────
 

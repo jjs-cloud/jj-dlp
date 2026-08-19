@@ -4,33 +4,13 @@ _SUPPORTED_BROWSERS = [
     "firefox", "opera", "safari", "disabled",
 ]
 
-def _read_browser_from_section(lines: list, section_name: str) -> str:
-    in_section = False
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.lower() == f"[{section_name.lower()}]":
-            in_section = True
-            continue
-        if in_section:
-            if stripped.startswith("["):          # entered a new section
-                break
-            if stripped.lower() == "--cookies-from-browser":
-                # The browser name should be on the very next non-blank line
-                for j in range(i + 1, len(lines)):
-                    candidate = lines[j].strip()
-                    if candidate == "":
-                        continue
-                    if candidate.startswith("[") or candidate.startswith("-"):
-                        break
-                    return candidate.lower()
-    return ""
 
 def _read_browser_from_config(config_path: str) -> str:
     """
-    Return the browser name currently set after --cookies-from-browser in the
-    [Downloader] or [Checker] section, or 'firefox' if not found.
-    We use raw text scanning because configparser treats each line as a
-    separate no-value key when the value sits on its own continuation line.
+    Return the BROWSER value from the [General] section of *config_path*,
+    or 'firefox' if not set. BROWSER is a single file-global value shared by
+    [Downloader] and [Checker] — whichever sections opt in do so via their
+    own COOKIES_FROM_BROWSER = true/false key.
     """
     try:
         with open(config_path, "r", encoding="utf-8") as f:
@@ -38,68 +18,69 @@ def _read_browser_from_config(config_path: str) -> str:
     except Exception:
         return "firefox"
 
-    browser = _read_browser_from_section(lines, "Downloader")
-    if browser:
-        return browser
-    
-    browser = _read_browser_from_section(lines, "Checker")
-    if browser:
-        return browser
+    in_general = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_general = stripped.lower() == "[general]"
+            continue
+        if in_general and "=" in stripped:
+            key, _, value = stripped.partition("=")
+            if key.strip().upper() == "BROWSER":
+                value = value.strip().lower()
+                if value:
+                    return value
 
     return "firefox"
 
 
-def _write_browser_to_section(lines: list, browser: str, section_name: str) -> None:
+def _write_key_to_section(lines: list, section_name: str, key_name: str, value: str) -> None:
+    """
+    Set `key_name = value` inside [section_name], updating it in place if the
+    key already exists (anywhere in the section) or inserting it as the
+    section's first line otherwise. Creates the section at the end of the
+    file if it doesn't exist yet. Mutates *lines* in place.
+    """
     in_section = False
-    cookies_idx   = None
-    browser_idx   = None
+    section_line_idx = None
+    key_line_idx = None
 
     for i, line in enumerate(lines):
         stripped = line.strip()
         if stripped.lower() == f"[{section_name.lower()}]":
             in_section = True
+            section_line_idx = i
             continue
         if in_section:
-            if stripped.startswith("["):
+            if stripped.startswith("["):          # entered a new section
                 break
-            if stripped.lower() == "--cookies-from-browser":
-                cookies_idx = i
-                for j in range(i + 1, len(lines)):
-                    candidate = lines[j].strip()
-                    if candidate == "":
-                        continue
-                    if candidate.startswith("[") or candidate.startswith("-"):
-                        break
-                    browser_idx = j
+            if "=" in stripped:
+                existing_key = stripped.split("=", 1)[0].strip()
+                if existing_key.lower() == key_name.lower():
+                    key_line_idx = i
                     break
-                break
 
-    if browser == "disabled":
-        to_remove = sorted(
-            [x for x in [cookies_idx, browser_idx] if x is not None],
-            reverse=True,
-        )
-        for idx in to_remove:
-            lines.pop(idx)
+    if key_line_idx is not None:
+        indent = lines[key_line_idx][: len(lines[key_line_idx]) - len(lines[key_line_idx].lstrip())]
+        lines[key_line_idx] = f"{indent}{key_name} = {value}\n"
+    elif section_line_idx is not None:
+        lines.insert(section_line_idx + 1, f"{key_name} = {value}\n")
     else:
-        if cookies_idx is not None and browser_idx is not None:
-            indent = lines[browser_idx][: len(lines[browser_idx]) - len(lines[browser_idx].lstrip())]
-            lines[browser_idx] = f"{indent}{browser}\n"
-        elif cookies_idx is not None:
-            lines.insert(cookies_idx + 1, f"{browser}\n")
-        else:
-            for i, line in enumerate(lines):
-                if line.strip().lower() == f"[{section_name.lower()}]":
-                    lines.insert(i + 1, f"{browser}\n")
-                    lines.insert(i + 1, "--cookies-from-browser\n")
-                    break
+        if lines and not lines[-1].endswith("\n"):
+            lines.append("\n")
+        lines.append(f"\n[{section_name}]\n")
+        lines.append(f"{key_name} = {value}\n")
+
 
 def _write_browser_to_config(config_path: str, browser: str, write_downloader: bool = True, write_checker: bool = False) -> None:
     """
-    Update the configured sections so that --cookies-from-browser is followed
-    by *browser* on the next line.  If browser == 'disabled', both the
-    --cookies-from-browser line and the browser-name line are removed.
-    Uses raw text manipulation to preserve the rest of the file exactly.
+    Record *browser* as the file-global BROWSER value in [General], and set
+    COOKIES_FROM_BROWSER = true/false in [Downloader] and/or [Checker]
+    according to write_downloader/write_checker. When browser == 'disabled',
+    COOKIES_FROM_BROWSER is set to false in the selected sections (BROWSER
+    itself is still recorded, so the picker can pre-select "disabled" again
+    next time). Uses raw text manipulation to preserve the rest of the file
+    exactly.
     """
     try:
         with open(config_path, "r", encoding="utf-8") as f:
@@ -107,11 +88,15 @@ def _write_browser_to_config(config_path: str, browser: str, write_downloader: b
     except Exception:
         return
 
+    enabled = "true" if browser != "disabled" else "false"
+
+    _write_key_to_section(lines, "General", "BROWSER", browser)
+
     if write_downloader:
-        _write_browser_to_section(lines, browser, "Downloader")
-    
+        _write_key_to_section(lines, "Downloader", "COOKIES_FROM_BROWSER", enabled)
+
     if write_checker:
-        _write_browser_to_section(lines, browser, "Checker")
+        _write_key_to_section(lines, "Checker", "COOKIES_FROM_BROWSER", enabled)
 
     try:
         with open(config_path, "w", encoding="utf-8") as f:

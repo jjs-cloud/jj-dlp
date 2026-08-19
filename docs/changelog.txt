@@ -3,6 +3,8 @@
 - fixed a bug that garbled the screen when resizing the terminal
 - if jj-dlp every crashes (rare) then it will detect the zombie yt-dlp processes on re-launch, and give you the option to kill them
 - when deleting a file in the File Manager tab, the parent folder (subfolder) will be deleted as well if it is empty
+- fixed an issue with disabling and then immediately enabling a streamer (redundant calls, wrong part_suffix)
+- added "--retries 0" to tiktok-live.conf so connection retries don't overwrite the recording file.  the tradeoff is more files get created for tiktok live recordings
 
 ====================
 ====================
