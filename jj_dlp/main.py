@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.27.17"
+__version__ = "1.27.18"
 
 import subprocess
 import textwrap
@@ -8577,10 +8577,18 @@ def main() -> None:
         matter how frequently a debug tag fires, it can only evict older debug
         lines — it can never push real activity lines (recording
         started/stopped, errors, etc.) out of the Log tab's history.
+
+        Untagged messages (no leading "[TAG]") are unexpected-exception guards
+        that should be impossible in normal operation; when they do fire, also
+        append them to dash_log_lines so they surface in the Log tab without
+        requiring the user to have the debug buffer visible.
         """
+        is_tagged = msg.startswith("[") and "]" in msg
         for s in sites:
             with s.dash_lock:
                 s.dash_debug_lines.append(msg)   # deque(maxlen=...) evicts automatically
+                if not is_tagged:
+                    s.dash_log_lines.append(msg)
 
     _logger.configure(_dash_log, _dash_dbg)
 
