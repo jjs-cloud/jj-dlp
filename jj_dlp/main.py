@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.27.17"
+__version__ = "1.27.16"
 
 import subprocess
 import textwrap
@@ -78,13 +78,7 @@ _win_ctrl_handler_ref = None
 
 def _emergency_kill_all() -> None:
     """Stop every loaded site and kill its yt-dlp/ffmpeg processes.
-
-    This is the last-resort cleanup path invoked from OS-level close/kill
-    signals (X button, console close, SIGHUP/SIGTERM) where the normal
-    dashboard quit sequence never gets a chance to run. Safe to call more
-    than once and safe to call with zero sites loaded.
-
-    Calls site.stop() so _stop_event is set *before* the kill."""
+    Last-resort cleanup for OS-level close/kill signals (X button, SIGHUP/SIGTERM)."""
     for _s in list(_global_sites):
         try:
             _s.stop()
@@ -109,19 +103,8 @@ def _emergency_kill_all() -> None:
 
 
 def _install_windows_job_object() -> None:
-    """Put this process into a Windows Job Object with
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE so that *every* process spawned by
-    jj-dlp (yt-dlp, ffmpeg, the PyInstaller bootloaders) is force-killed by
-    Windows itself the instant this process dies — regardless of how it
-    dies (X button on the console, taskkill /F, a crash, Task Manager "End
-    task"). This is a hard OS-level guarantee and doesn't depend on any
-    Python cleanup code running first.
-
-    Child processes are automatically members of this job because Windows
-    job membership is inherited by default (we don't pass
-    CREATE_BREAKAWAY_FROM_JOB anywhere), so no per-Popen changes are needed
-    beyond this one-time setup at startup.
-    """
+    """Assign this process to a Windows Job Object so all child yt-dlp/ffmpeg
+    processes are force-killed by the OS the instant this process dies."""
     global _win_job_handle
     if sys.platform != "win32":
         return
@@ -202,13 +185,8 @@ def _install_windows_job_object() -> None:
 
 
 def _install_windows_console_ctrl_handler() -> None:
-    """Catch CTRL_CLOSE_EVENT / CTRL_LOGOFF_EVENT / CTRL_SHUTDOWN_EVENT (the
-    console X button, logging off, or system shutdown) and run our normal
-    process cleanup before the ~5s Windows grace period expires. This is a
-    fast, clean-shutdown path; the Job Object above is the guaranteed
-    fallback if this handler doesn't get to run (e.g. taskkill /F) or
-    doesn't finish in time.
-    """
+    """Catch the Windows console close/logoff/shutdown events and run cleanup
+    before the ~5s grace period expires."""
     if sys.platform != "win32":
         return
     try:
@@ -243,14 +221,8 @@ def _install_windows_console_ctrl_handler() -> None:
 
 
 def _install_posix_signal_handlers() -> None:
-    """On Linux/macOS, closing the terminal window (the 'X button' there)
-    sends SIGHUP to the foreground process group; a normal 'kill' sends
-    SIGTERM. yt-dlp/ffmpeg children are started with start_new_session=True
-    (their own process group/session, needed so killpg() can reliably reach
-    both the PyInstaller bootloader and the real worker) — which also means
-    they do NOT automatically receive that SIGHUP/SIGTERM. Catch it here and
-    kill them explicitly before jj-dlp exits.
-    """
+    """Catch SIGHUP/SIGTERM on Linux/macOS and kill child processes explicitly,
+    since they run in their own session and don't get these signals automatically."""
     if sys.platform == "win32":
         return
     import signal as _signal
@@ -288,15 +260,8 @@ def _install_shutdown_safety_net() -> None:
 
 
 def _install_thread_excepthook() -> None:
-    """Route uncaught exceptions from *any* background thread to the Log tab.
-
-    A silently-dying thread — e.g. a site's monitor loop raising on one
-    iteration — used to leave the dashboard looking normal while the site
-    stopped doing anything ("Next check" frozen, no debug output). Install a
-    global excepthook so no background thread can crash invisibly again:
-    every unhandled exception is surfaced on the Log tab and written to the
-    debug/crash logs, with the full traceback preserved for diagnosis.
-    """
+    """Route uncaught exceptions from any background thread to the Log tab
+    instead of dying silently."""
     import traceback as _tb
 
     def _hook(args: "threading.ExceptHookArgs") -> None:
@@ -346,16 +311,7 @@ _install_thread_excepthook()
 
 
 def _get_config_id() -> str:
-    """Return a stable short ID for the current set of loaded config file paths.
-
-    Delegates to config_editor._compute_config_id so there is a single
-    implementation of this hashing logic.
-
-    Lock ordering note: callers that also acquire _recording_start_lock or
-    site.lock must do so *after* _get_config_id() returns; this function
-    reads _global_sites without a lock, which is safe because _global_sites
-    is written once at startup and is effectively read-only thereafter.
-    """
+    """Return a stable short ID for the current set of loaded config file paths."""
     return _compute_config_id([site.config_path for site in _global_sites])
 
 
@@ -373,13 +329,7 @@ def _safe_int(value, default):
 
 
 def _parse_general_section(general, config_path: str) -> dict:
-    """Read all site-scoped CONFIG_KEYS from the [General] section.
-
-    Returns a flat dict keyed by the lower-cased config key name.
-    Boolean and integer defaults are coerced automatically; string values are
-    stripped of surrounding whitespace and quotes.  ``output_dir`` is resolved
-    to an absolute path, and ``site_label`` defaults to the config filename.
-    """
+    """Read all site-scoped CONFIG_KEYS from the [General] section into a typed dict."""
     cfg_dict: dict = {}
     for kdef in CONFIG_KEYS:
         if kdef.scope != "site":
@@ -454,18 +404,7 @@ def _parse_twitch_section(parser: configparser.ConfigParser) -> dict:
 
 def _build_section_cmd(parser: configparser.ConfigParser, section: str) -> list:
     """Build a yt-dlp argv list from the KEY = value pairs in *section*
-    (one of "Checker", "Downloader", "LQ_Downloader").
-
-    The recognized keys, their CLI flags, defaults, and types all live in
-    config_editor.DOWNLOADER_FLAG_KEYS — the single source of truth.
-
-    - COOKIES_FROM_BROWSER = true adds --cookies-from-browser <browser>,
-      where <browser> comes from the file-global BROWSER key in [General].
-    - EXTRA_ARGS is a raw passthrough for any flag without a dedicated key
-      yet, split with shlex (posix=True) so quoted spans with embedded
-      spaces stay together as a single argv token.
-    - Every other key in DOWNLOADER_FLAG_KEYS maps 1:1 to its cli_flag.
-    """
+    (Checker, Downloader, or LQ_Downloader)."""
     cmd: list = []
     if not parser.has_section(section):
         return cmd
@@ -544,19 +483,8 @@ def _derive_username_idx(cfg_dict: dict) -> Optional[int]:
 
 
 def _resolve_yt_dlp_path(cfg_dict: dict) -> str:
-    """Determine the yt-dlp invocation string for the current platform.
-
-    Resolution order:
-    1. The platform-specific config key (YT_DLP_PATH_WINDOWS / _MAC / _LINUX).
-       Relative paths are anchored to the project root (the directory that
-       contains the jj_dlp/ package), not to CWD.
-    2. A bundled ``yt-dlp/yt_dlp`` module next to the project root.
-       When found, PYTHONPATH is updated so subprocesses can import it, and
-       ``python -m yt_dlp`` is used as the command.  On Windows, ``pythonw.exe``
-       is silently rewritten to ``python.exe`` so child processes have working
-       stdio handles.
-    3. The system ``yt-dlp`` binary as a last resort.
-    """
+    """Resolve the yt-dlp invocation for the current platform: configured
+    path, then bundled module, then system binary."""
     # 1. Pick the platform-specific raw path from config.
     platform_key_map = {
         "win32":  "yt_dlp_path_windows",
@@ -854,15 +782,8 @@ def _load_global_json() -> dict:
 
 
 def _load_skip_disabled(config_path: str) -> Set[str]:
-    """Load the set of streamers currently 'skip disabled' (in [Block] only
-    for the remainder of the current live session, auto re-enabled the next
-    time the checker sees them go offline) for *config_path*.
-
-    Persisted in global.json under "skip_disabled" as
-    {config_path: [streamer, ...]} so it survives a process restart —
-    otherwise a restart mid-stream would leave the [Block] entry in place
-    forever with nothing left to know it should be auto-removed.
-    """
+    """Load the set of 'skip disabled' streamers (temporarily blocked for
+    this live session only) for *config_path* from global.json."""
     gdata = _load_global_json()
     entries = gdata.get("skip_disabled", {}).get(config_path, [])
     if not isinstance(entries, list):
