@@ -6,6 +6,7 @@
 - fixed an issue with disabling and then immediately enabling a streamer (redundant calls, wrong part_suffix)
 - added "--retries 0" to tiktok-live.conf so connection retries don't overwrite the recording file.  the tradeoff is more files get created for tiktok live recordings
 - twitch and tiktok live now use "--COOKIES-FROM-BROWSER firefox" by default. Make sure you are logged into twitch and tiktok in firefox.
+- added AD_ALERTS_PATTERNS in SITE SETTINGS.  this was needed because the ffmpeg patterns used to detect ads for twitch change frequently.
 
 ====================
 ====================

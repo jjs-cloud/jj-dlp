@@ -1747,9 +1747,23 @@ def _merge_lines_by_timestamp(a: List[str], b: List[str]) -> List[str]:
 
 # ── Ad detection patterns (used by _drain_pipe when AD_ALERTS is enabled) ─────
 # Any match updates the per-streamer last-seen timestamp in site.ad_alerts.
-_AD_DISCONTINUITY_RE = _re.compile(r"#EXT-X-DISCONTINUITY(?!-SEQUENCE)", _re.IGNORECASE)
-_AD_SEGMENT_URL_RE   = _re.compile(r"(amazon|twitch-ad|/ad/|admanifest|/ads/)", _re.IGNORECASE)
-_AD_TWITCH_TAG_RE    = _re.compile(r'#EXT-X-TWITCH-AD|CLASS="twitch-stitched-ad"', _re.IGNORECASE)
+# Default mirrors the previous hardcoded three-regex behavior, combined via "|".
+_AD_ALERT_PATTERNS_DEFAULT = (
+    r'#EXT-X-DISCONTINUITY(?!-SEQUENCE)|(amazon|twitch-ad|/ad/|admanifest|/ads/|/segment/Cv8)|'
+    r'#EXT-X-TWITCH-AD|CLASS="twitch-stitched-ad"'
+)
+
+
+def _compile_ad_alert_pattern(cfg: dict) -> Optional["_re.Pattern"]:
+    """Compile the site's AD_ALERT_PATTERNS regex, or None if AD_ALERTS is off/invalid."""
+    if not cfg.get("ad_alerts", False):
+        return None
+    raw = cfg.get("ad_alert_patterns") or _AD_ALERT_PATTERNS_DEFAULT
+    try:
+        return _re.compile(raw, _re.IGNORECASE)
+    except _re.error as e:
+        dbg(f"[AD] invalid AD_ALERT_PATTERNS regex {raw!r}: {e} — ad alerts disabled")
+        return None
 
 # ── LQ (low-quality) downloader bandwidth-saving state ───────────────────────
 # Maps (streamer, site_label) → epoch when an LQ_Downloader recording was last
@@ -2428,7 +2442,7 @@ def open_log_streams(cfg: dict, streamer: str):
 def _drain_pipe(pipe, log_fp, pipe_type: str,
                 ffmpeg_error_counter=None, ffmpeg_error_event=None,
                 streamer: str = "", site: Optional[SiteState] = None,
-                ad_alerts_enabled: bool = False) -> None:
+                ad_alert_pattern=None) -> None:
     """Drain one pipe (stdout or stderr) from a yt-dlp subprocess."""
     dbg(f"[DRAIN] thread started pipe_type={pipe_type!r} streamer={streamer!r} pipe={pipe!r}")
     line_count = 0
@@ -2514,10 +2528,8 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
                                 ffmpeg_error_event.set()
                             break
 
-                if ad_alerts_enabled and site is not None and streamer:
-                    if (_AD_DISCONTINUITY_RE.search(line) or
-                            _AD_SEGMENT_URL_RE.search(line) or
-                            _AD_TWITCH_TAG_RE.search(line)):
+                if ad_alert_pattern is not None and site is not None and streamer:
+                    if ad_alert_pattern.search(line):
                         site.update_ad_alert(streamer)
                         dbg(f"[AD] signal detected streamer={streamer!r} "
                             f"pipe={pipe_type!r}: {line[:120]!r}",
@@ -3437,7 +3449,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         "ffmpeg_error_event": ffmpeg_error_event,
                         "streamer": streamer,
                         "site": site,
-                        "ad_alerts_enabled": cfg.get("ad_alerts", False),
+                        "ad_alert_pattern": _compile_ad_alert_pattern(cfg),
                     },
                     daemon=True
                 ).start()
@@ -3450,7 +3462,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         "ffmpeg_error_event": ffmpeg_error_event,
                         "streamer": streamer,
                         "site": site,
-                        "ad_alerts_enabled": cfg.get("ad_alerts", False),
+                        "ad_alert_pattern": _compile_ad_alert_pattern(cfg),
                     },
                     daemon=True
                 ).start()
@@ -3885,7 +3897,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                                 kwargs={
                                     "streamer": streamer,
                                     "site": site,
-                                    "ad_alerts_enabled": cfg.get("ad_alerts", False),
+                                    "ad_alert_pattern": _compile_ad_alert_pattern(cfg),
                                 },
                                 daemon=True
                             ).start()
@@ -3896,7 +3908,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                                 kwargs={
                                     "streamer": streamer,
                                     "site": site,
-                                    "ad_alerts_enabled": cfg.get("ad_alerts", False),
+                                    "ad_alert_pattern": _compile_ad_alert_pattern(cfg),
                                 },
                                 daemon=True
                             ).start()
