@@ -744,8 +744,8 @@ def start_web_server(
         if log_fn is not None:
             try:
                 log_fn(f"[WEBUI] {msg}")
-            except Exception:
-                pass
+            except Exception as e:
+                dbg(f"_announce: log_fn callback failed: {e}")
 
     if not global_cfg.get("web_ui", False):
         return None

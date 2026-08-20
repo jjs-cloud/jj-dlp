@@ -234,6 +234,7 @@ def open_file(path):
             subprocess.Popen(["xdg-open", abs_path])
         return True, None
     except Exception as exc:
+        dbg(f"open_file: {exc}")
         return False, str(exc)
 
 
@@ -249,6 +250,7 @@ def open_containing_folder(path):
             subprocess.Popen(["xdg-open", os.path.dirname(abs_path) or "."])
         return True, None
     except Exception as exc:
+        dbg(f"open_containing_folder: {exc}")
         return False, str(exc)
 
 
@@ -260,6 +262,7 @@ def move_to_trash(path):
             _send2trash(abs_path)
             return True, None
         except Exception as exc:
+            dbg(f"move_to_trash: {exc}")
             return False, str(exc)
     try:
         if IS_WINDOWS:
@@ -314,6 +317,7 @@ def move_to_trash(path):
                             "Install send2trash, or switch delete mode to "
                             "Permanent with T.")
     except Exception as exc:
+        dbg(f"move_to_trash: {exc}")
         return False, str(exc)
 
 
@@ -324,6 +328,7 @@ def permanent_delete(path):
         os.remove(abs_path)
         return True, None
     except Exception as exc:
+        dbg(f"permanent_delete: {exc}")
         return False, str(exc)
 
 
@@ -335,6 +340,7 @@ def permanent_delete_folder(path):
         os.rmdir(abs_path)
         return True, None
     except Exception as exc:
+        dbg(f"permanent_delete_folder: {exc}")
         return False, str(exc)
 
 
@@ -466,7 +472,8 @@ class FileManagerTab:
             if delete_mode not in (DELETE_MODE_TRASH, DELETE_MODE_PERMANENT):
                 delete_mode = DELETE_MODE_DEFAULT
             return sort_key, delete_mode
-        except Exception:
+        except Exception as e:
+            dbg(f"_load_settings: {e}")
             return FM_SORT_DEFAULT, DELETE_MODE_DEFAULT
 
     def _save_settings(self):
@@ -481,7 +488,8 @@ class FileManagerTab:
                 fm["delete_mode"] = self._delete_mode
                 data["file_manager"] = fm
                 _save_global_json(data)
-        except Exception:
+        except Exception as e:
+            dbg(f"_save_settings: {e}")
             pass
 
     # ── OUTPUT_DIR discovery ────────────────────────────────────────────────
@@ -493,7 +501,8 @@ class FileManagerTab:
         for site in self.dashboard.sites:
             try:
                 cfg = site.get_cached_config()
-            except Exception:
+            except Exception as e:
+                dbg(f"_get_output_dirs: {e}")
                 continue
             out_dir = cfg.get("output_dir")
             if not out_dir:
@@ -621,9 +630,11 @@ class FileManagerTab:
                 for p in site.recording_output_paths_snapshot():
                     try:
                         paths.add(os.path.normcase(os.path.abspath(p)))
-                    except Exception:
+                    except Exception as e:
+                        dbg(f"_active_recording_paths: {e}")
                         continue
-        except Exception:
+        except Exception as e:
+            dbg(f"_active_recording_paths: {e}")
             pass
         return paths
 
@@ -904,7 +915,8 @@ class FileManagerTab:
         try:
             from .main import load_global_config
             return bool(load_global_config().get("delete_empty", False))
-        except Exception:
+        except Exception as e:
+            dbg(f"_delete_empty_enabled: {e}")
             return False
 
     def _maybe_delete_empty_folder(self, folder, output_dir_root):
@@ -1208,7 +1220,8 @@ class FileManagerTab:
         try:
             from .main import load_global_config
             return list(load_global_config().get("destinations", []))
-        except Exception:
+        except Exception as e:
+            dbg(f"_get_destinations: {e}")
             return []
 
     def open_move_popup(self):
@@ -1271,7 +1284,8 @@ class FileManagerTab:
                     break
             ce._focus = "global"
             db.selected_tab = db.TABS.index("Config")
-        except Exception:
+        except Exception as e:
+            dbg(f"_open_configure_destination: {e}")
             pass
 
     def draw_move_popup(self, stdscr) -> None:
@@ -1485,6 +1499,7 @@ class FileManagerTab:
             _ok, msg = self._do_move(path, dest_root, filename, do_subfolder, do_fixup, final_path)
             self._set_status(msg)
         except Exception as exc:
+            dbg(f"_move_worker: {exc}")
             self._set_status(f"Move failed: {exc}")
         finally:
             with self._move_lock:
@@ -1522,6 +1537,7 @@ class FileManagerTab:
             try:
                 result = subprocess.run(cmd, **run_kwargs)
             except Exception as exc:
+                dbg(f"_do_move: {exc}")
                 return False, f"Move failed: could not run ffmpeg ({exc})"
 
             if (result.returncode != 0 or not os.path.isfile(final_path)
@@ -1593,6 +1609,7 @@ class FileManagerTab:
             _ok, msg = self._do_fixup(path, delete_original, convert_mp4)
             self._set_status(msg)
         except Exception as exc:
+            dbg(f"_fixup_worker: {exc}")
             self._set_status(f"Fixup failed: {exc}")
         finally:
             with self._fixup_lock:
@@ -1671,6 +1688,7 @@ class FileManagerTab:
         try:
             result = subprocess.run(cmd, **run_kwargs)
         except Exception as exc:
+            dbg(f"_do_fixup: {exc}")
             return False, f"Fixup failed: could not run ffmpeg ({exc})"
 
         if (result.returncode != 0 or not os.path.isfile(work_path)
@@ -1903,6 +1921,7 @@ class FileManagerTab:
             _ok, msg = self._do_trim(path, start, end, delete_original, convert_mp4)
             self._set_status(msg)
         except Exception as exc:
+            dbg(f"_trim_worker: {exc}")
             self._set_status(f"Trim failed: {exc}")
         finally:
             with self._trim_lock:
@@ -1938,6 +1957,7 @@ class FileManagerTab:
         try:
             result = subprocess.run(cmd, **run_kwargs)
         except Exception as exc:
+            dbg(f"_do_trim: {exc}")
             return False, f"Trim failed: could not run ffmpeg ({exc})"
 
         if (result.returncode != 0 or not os.path.isfile(work_path)
@@ -2026,7 +2046,8 @@ class FileManagerTab:
                     for streamer, out_path in site.recording_output_paths.items():
                         if os.path.normcase(os.path.abspath(out_path)) == key:
                             return site, streamer
-        except Exception:
+        except Exception as e:
+            dbg(f"_find_recording_owner: {e}")
             pass
         return None, None
 
@@ -2313,7 +2334,8 @@ class FileManagerTab:
         try:
             from .main import _resolve_ffprobe_path
             ffprobe_path = _resolve_ffprobe_path()
-        except Exception:
+        except Exception as e:
+            dbg(f"_probe_duration_seconds: {e}")
             ffprobe_path = None
         if not ffprobe_path:
             return None
@@ -2327,7 +2349,8 @@ class FileManagerTab:
                 **run_kwargs,
             )
             return float(result.stdout.strip())
-        except Exception:
+        except Exception as e:
+            dbg(f"_probe_duration_seconds: {e}")
             return None
 
     def _start_split(self, path, length_min, overlap_s, first_part, offset, outdir):
@@ -2376,7 +2399,8 @@ class FileManagerTab:
         if proc is not None:
             try:
                 proc.kill()  # don't wait for ffmpeg to finish
-            except Exception:
+            except Exception as e:
+                dbg(f"_stop_split: {e}")
                 pass
         self._set_status(f"Splitting job cancelled: {os.path.basename(path)}")
 
