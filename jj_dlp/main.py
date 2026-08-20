@@ -8583,7 +8583,11 @@ def main() -> None:
         append them to dash_log_lines so they surface in the Log tab without
         requiring the user to have the debug buffer visible.
         """
-        is_tagged = msg.startswith("[") and "]" in msg
+        # msg is always "[YYYY-MM-DD HH:MM:SS] <original>" (22-char timestamp
+        # prefix added by dbg() in logger.py).  A tagged message has another
+        # "[TAG]" immediately after that prefix; untagged messages don't.
+        after_ts = msg[22:] if len(msg) > 22 else ""
+        is_tagged = after_ts.startswith("[")
         for s in sites:
             with s.dash_lock:
                 s.dash_debug_lines.append(msg)   # deque(maxlen=...) evicts automatically
