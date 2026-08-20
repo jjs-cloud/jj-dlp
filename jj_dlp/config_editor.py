@@ -62,6 +62,8 @@ class _KeyDef(NamedTuple):
 #            main.py special-cases it) and EXTRA_ARGS (a raw passthrough for
 #            any flag that hasn't earned a dedicated key yet).
 # default  : value written when the key is missing.
+# preserve : True  → value is carried over from the user's file during an update
+#            False → value is reset to the value in the template config file during an update.
 # type     : "bool" → KEY = true/false, emits [cli_flag] only when true.
 #            anything else → KEY = <value>, emits [cli_flag, value] when non-empty.
 # comment  : help text shown in the edit popup.
@@ -71,90 +73,82 @@ class _DlpFlagDef(NamedTuple):
     name:     str
     cli_flag: str
     default:  str
+    preserve: bool = False
     type:     str = "str"
     comment:  str = ""
 
 
 CONFIG_KEYS: tuple[_KeyDef, ...] = (
     # ── Global keys (global.conf) ─────────────────────────────────────────────
-    _KeyDef("DISK_DRIVES",           "global", "",      True, type="list",  comment="Comma-separated list of drives or paths to show disk info in the system panel. (e.g. C:\\, D:\\, E:\\  or  /home,/mnt/data)."),
-    _KeyDef("DEBUG_LOGS",            "global", "false", True, type="bool",  comment="Enable debug logging to a file (true/false)."),
-    _KeyDef("DEBUG_LOG_PATH",        "global", "",      True,  comment="Path for the debug log file. Can be a relative or absolute path (e.g. logs/debug.log)"),
-    _KeyDef("CHECK_FOR_UPDATES",     "global", "true",  True, type="bool",  comment="Whether to check for app updates at startup and periodically (true/false)."),
-    _KeyDef("UPDATE_INTERVAL",       "global", "30",    True, type="int",  comment="Number of minutes between app update checks."),
-    _KeyDef("ASK_FOR_CONFIG",        "global", "true",  True, type="bool",  comment="Show the config file chooser on startup (true/false)."),
-    _KeyDef("UPDATE_BRANCH",         "global", "main",  True,  comment="Which branch of jj-dlp to update to. (main, testing, or experimental)."),
-    _KeyDef("MAX_CONCURRENT_REC",    "global", "0",     True, type="int",  comment='The maximum number of simultaneous recordings allowed to run.  Use the STREAMER SETTINGS panel in the Config tab to adjust the priority of each streamer. (0=no limit)'),
-    _KeyDef("LQ_DOWNLOADER",         "global", "false", True, type="bool",  comment="When any recording reaches the ffmpeg error threshold (FF_ERR_THRESH) lower the video quality of the lowest priority streamer, freeing up bandwidth for the remaining streamers."),
-    _KeyDef("FF_ERR_THRESH",         "global", "200",   True, type="int",  comment='Restart the download if we see this many ffmpeg errors ("timestamp discontinuity", "Packet corrupt") default: 200'),
-    _KeyDef("SUBFOLDERS",            "global", "off",   True, type="str",   comment="Save recordings in a subfolder(s) inside OUTPUT_DIR. Options: streamer-only, site-only, streamer-site, site-streamer, off."),
-    _KeyDef("GRAPH_SCALE",           "global", "300",   True, type="int",  comment="The number of seconds each bar in the graph represents. (default = 600)."),
-    _KeyDef("DESTINATIONS",          "global", "",      True, type="list",  comment="A list of destination paths where you might want to move your files.  Used in the File Manager tab. (e.g. C:\\My Recordings  OR /home/greg/twitch)"),
-    _KeyDef("NTFY_TOPIC",            "global", "",      True,  comment="The topic name to use for ntfy.sh notifications. (example: jj-dlp-fj48dh734fk) Refer to docs/ntfy-setup.md for a detailed setup guide. (blank = disabled)"),
-    _KeyDef("NOTIFY_CONFIRM_FILE",   "global", "true",  True, type="bool",  comment="Confirm the recording has actually started before sending a live notification.  Note: When enabled, the notifications will be delayed by a few seconds until the file has been confirmed."),
-    _KeyDef("NOTIFY_NO_CONFIRM_FILE", "global", "true", True, type="bool",  comment="If the recording file cannot be confirmed (does not exist or no file growth) within one STALL_TIMEOUT, send a warning notification that the file could not be confirmed (true/false)."),
-    _KeyDef("SITE_SORT",             "global", "added_first", True, comment="The order to display streamers on each site panel.   This can also be adjusted by pressing the S key on the Dashboard tab."),
-    _KeyDef("COMPACT_VIEW",          "global", "auto",  True,  comment="When streamers overflow the panel, compact view shows them in 2 columns without progress bars. (auto/true/false)"),
-    _KeyDef("WEB_UI",                "global", "false", True, type="bool",  comment="Enable the Web UI, viewable from any browser on your local network by navigating to http://your-ip-address:8765 or from the same machine at http://127.0.0.1:8765. Requires WEB_UI_USER and WEB_UI_PASS to also be set. Note: Use this tool on your local network only.  Access over the internet is not supported yet. (true/false)"),
-    _KeyDef("WEB_UI_PORT",           "global", "8765",  True, type="int",  comment="Port for the web dashboard. Default: 8765"),
-    _KeyDef("WEB_UI_USER",           "global", "",      True,  comment="Username required to log into the web dashboard (HTTP Basic Auth). Required if WEB_UI is enabled."),
-    _KeyDef("WEB_UI_PASS",           "global", "",      True,  comment="Password required to log into the web dashboard (HTTP Basic Auth). Required if WEB_UI is enabled. Choose something not easily guessed — anyone on your WiFi could otherwise try to log in."),
-    _KeyDef("RGB_MODE",              "global", "true",  True, type="bool",  comment="Pin the terminal's 8 base colors to exact RGB values (the Windows Terminal Campbell palette) so the app looks the same on every Linux terminal (may require restart) (true/false)."),
-    _KeyDef("DELETE_EMPTY",          "global", "true",  True, type="bool",  comment="When deleting a file from the file manager, delete the parent folder if it is empty.  This only applies to subfolders within the OUTPUT_DIR. (true/false)"),
+    _KeyDef("DISK_DRIVES",              scope="global",                    default="",                           preserve=True, type="list",  comment="Comma-separated list of drives or paths to show disk info in the system panel. (e.g. C:\\, D:\\, E:\\  or  /home,/mnt/data)."),
+    _KeyDef("DEBUG_LOGS",               scope="global",                    default="false",                      preserve=True, type="bool",  comment="Enable debug logging to a file (true/false)."),
+    _KeyDef("DEBUG_LOG_PATH",           scope="global",                    default="",                           preserve=True,               comment="Path for the debug log file. Can be a relative or absolute path (e.g. logs/debug.log)"),
+    _KeyDef("CHECK_FOR_UPDATES",        scope="global",                    default="true",                       preserve=True, type="bool",  comment="Whether to check for app updates at startup and periodically (true/false)."),
+    _KeyDef("UPDATE_INTERVAL",          scope="global",                    default="30",                         preserve=True, type="int",   comment="Number of minutes between app update checks."),
+    _KeyDef("ASK_FOR_CONFIG",           scope="global",                    default="true",                       preserve=True, type="bool",  comment="Show the config file chooser on startup (true/false)."),
+    _KeyDef("UPDATE_BRANCH",            scope="global",                    default="main",                       preserve=True,               comment="Which branch of jj-dlp to update to. (main, testing, or experimental)."),
+    _KeyDef("MAX_CONCURRENT_REC",       scope="global",                    default="0",                          preserve=True, type="int",   comment='The maximum number of simultaneous recordings allowed to run.  Use the STREAMER SETTINGS panel in the Config tab to adjust the priority of each streamer. (0=no limit)'),
+    _KeyDef("LQ_DOWNLOADER",            scope="global",                    default="false",                      preserve=True, type="bool",  comment="When any recording reaches the ffmpeg error threshold (FF_ERR_THRESH) lower the video quality of the lowest priority streamer, freeing up bandwidth for the remaining streamers."),
+    _KeyDef("FF_ERR_THRESH",            scope="global",                    default="200",                        preserve=True, type="int",   comment='Restart the download if we see this many ffmpeg errors ("timestamp discontinuity", "Packet corrupt") default: 200'),
+    _KeyDef("SUBFOLDERS",               scope="global",                    default="off",                        preserve=True, type="str",   comment="Save recordings in a subfolder(s) inside OUTPUT_DIR. Options: streamer-only, site-only, streamer-site, site-streamer, off."),
+    _KeyDef("GRAPH_SCALE",              scope="global",                    default="300",                        preserve=True, type="int",   comment="The number of seconds each bar in the graph represents. (default = 600)."),
+    _KeyDef("DESTINATIONS",             scope="global",                    default="",                           preserve=True, type="list",  comment="A list of destination paths where you might want to move your files.  Used in the File Manager tab. (e.g. C:\\My Recordings  OR /home/greg/twitch)"),
+    _KeyDef("NTFY_TOPIC",               scope="global",                    default="",                           preserve=True,               comment="The topic name to use for ntfy.sh notifications. (example: jj-dlp-fj48dh734fk) Refer to docs/ntfy-setup.md for a detailed setup guide. (blank = disabled)"),
+    _KeyDef("NOTIFY_CONFIRM_FILE",      scope="global",                    default="true",                       preserve=True, type="bool",  comment="Confirm the recording has actually started before sending a live notification.  Note: When enabled, the notifications will be delayed by a few seconds until the file has been confirmed."),
+    _KeyDef("NOTIFY_NO_CONFIRM_FILE",   scope="global",                    default="true",                       preserve=True, type="bool",  comment="If the recording file cannot be confirmed (does not exist or no file growth) within one STALL_TIMEOUT, send a warning notification that the file could not be confirmed (true/false)."),
+    _KeyDef("SITE_SORT",                scope="global",                    default="added_first",                preserve=True,               comment="The order to display streamers on each site panel.   This can also be adjusted by pressing the S key on the Dashboard tab."),
+    _KeyDef("COMPACT_VIEW",             scope="global",                    default="auto",                       preserve=True,               comment="When streamers overflow the panel, compact view shows them in 2 columns without progress bars. (auto/true/false)"),
+    _KeyDef("WEB_UI",                   scope="global",                    default="false",                      preserve=True, type="bool",  comment="Enable the Web UI, viewable from any browser on your local network by navigating to http://your-ip-address:8765 or from the same machine at http://127.0.0.1:8765. Requires WEB_UI_USER and WEB_UI_PASS to also be set. Note: Use this tool on your local network only.  Access over the internet is not supported yet. (true/false)"),
+    _KeyDef("WEB_UI_PORT",              scope="global",                    default="8765",                       preserve=True, type="int",   comment="Port for the web dashboard. Default: 8765"),
+    _KeyDef("WEB_UI_USER",              scope="global",                    default="",                           preserve=True,               comment="Username required to log into the web dashboard (HTTP Basic Auth). Required if WEB_UI is enabled."),
+    _KeyDef("WEB_UI_PASS",              scope="global",                    default="",                           preserve=True,               comment="Password required to log into the web dashboard (HTTP Basic Auth). Required if WEB_UI is enabled. Choose something not easily guessed — anyone on your WiFi could otherwise try to log in."),
+    _KeyDef("RGB_MODE",                 scope="global",                    default="true",                       preserve=True, type="bool",  comment="Pin the terminal's 8 base colors to exact RGB values (the Windows Terminal Campbell palette) so the app looks the same on every Linux terminal (may require restart) (true/false)."),
+    _KeyDef("DELETE_EMPTY",             scope="global",                    default="true",                       preserve=True, type="bool",  comment="When deleting a file from the file manager, delete the parent folder if it is empty.  This only applies to subfolders within the OUTPUT_DIR. (true/false)"),
 
     # ── Site keys (per-site .conf) ────────────────────────────────────────────
-    _KeyDef("SITE_LABEL",            "site",   "",      True,  comment="The name of this site."),
-    _KeyDef("SITE_ORDER",            "site",   "999",   True,  comment="The position on the dashboard to display this site's panel (e.g. 0 for top-left, 1 for top-right, 2 for bottom-left, 3 for bottom-right, etc.)"),
-    _KeyDef("CHECK_INTERVAL",        "site",   "60",    False, comment="How often to check if streamers are live (in seconds).  (Default: 60) (note: keep this <= STALL_TIMEOUT to avoid false write-failure alerts)"),
-    _KeyDef("OUTPUT_DIR",            "site",   "recordings", True, comment='Folder where recordings will be saved.  Can be an absolute path or relative path.  example: "C:\\recordings" or "recordings"'),
-    _KeyDef("OUTPUT_TMPL",           "site",   "%(title)s [%(id)s].%(ext)s", False, comment="Template for naming the video files. (Reference: https://github.com/yt-dlp/yt-dlp#output-templates)"),
-    _KeyDef("COOLDOWN_AFTER_RECORDING", "site", "60",   False, comment="Seconds to wait after a recording ends before checking again."),
-    _KeyDef("SPLIT_AFTER",           "site",   "0",    True,  comment="When recording a stream, split the video file(s) every X minutes. (0 = no split)"),
-    _KeyDef("AUTO_SUFFIX",           "site",   "true", True,  comment="When a recording restarts for any reason while the streamer is still on the same live stream, name the new file and the original file with a _partN suffix. (Default: true)"),
-    _KeyDef("STALL_CHECK_INTERVAL",  "site",   "30",   True, comment="How often to check if the recording has stalled (in seconds).  Disable by setting this to a large number. (Default: 30)"),
-    _KeyDef("STALL_TIMEOUT",         "site",   "120",  False, comment="Time to wait before considering a recording stalled (in seconds). (Default: 120) (note: also used with NOTIFY_NO_CONFIRM_FILE) (note: keep this >= CHECK_INTERVAL to avoid false write-failure alerts)"),
-    _KeyDef("CONFIG_CHECK_INTERVAL", "site",   "3",    False, comment="How often to check for changes to the configuration file (in seconds). (Default: 3)"),
-    _KeyDef("SITE_TMPL",             "site",   "",     False, comment="URL where the live stream can be accessed. {username} will be replaced with the streamer's username."),
-    _KeyDef("PANEL_RESIZE",          "site",   "true", True,  comment="When true, site panels will expand vertically as needed to display all streamers."),
-    _KeyDef("LOGGING",               "site",   "false", True, comment="Log stdout and stderr to a per-streamer log file."),
-    _KeyDef("LOG_PATH",              "site",   "",     False,  comment="Folder to save per-streamer log files. Defaults to \"logs\"."),
-    _KeyDef("SPLIT_LOGS",            "site",   "false", True, comment="When LOGGING = true, create 2 separate log files per streamer.  One for stdout (yt-dlp) and one for stderr (ffmpeg)."),
-    _KeyDef("POPUP_NOTIFICATIONS",   "site",   "true", True,  comment="Show a popup notification when a streamer goes live."),
-    _KeyDef("NTFY_NOTIFICATIONS",    "site",   "true", True,  comment="Push a notification to your phone via ntfy.sh when a recording starts. This requires NTFY_TOPIC to be set in the GLOBAL SETTINGS panel. (true/false)"),
-    _KeyDef("AD_ALERTS",             "site",   "True", True,  comment="Show an alert in the system panel when ads are detected in a recording (true/false)."),
-    _KeyDef("POPUP_TIMEOUT",         "site",   "15",   True,  comment="Seconds to show the popup notification when a streamer goes live."),
-    _KeyDef("POPUP_COOLDOWN",        "site",   "30",   True,  comment="Minutes to wait before showing another popup notification for the same streamer."),
-    _KeyDef("YT_DLP_PATH_WINDOWS",   "site",   "",     False, comment='Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
-    _KeyDef("YT_DLP_PATH_MAC",       "site",   "",     False, comment='Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
-    _KeyDef("YT_DLP_PATH_LINUX",     "site",   "",     False, comment='Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
-    _KeyDef("PROGRESS_BAR_MAX_HOURS","site",   "10",    True,  comment="Duration of the progress bar in the site panel of the dashboard. (in hours)"),
-    _KeyDef("PROGRESS_BAR_WIDTH",    "site",   "58",   True,  comment="Width of the progress bar in the site panel of the dashboard. (in characters)"),
-    _KeyDef("BROWSER",               "site",   "firefox", False, comment="The browser to use for --cookies-from-browser. One value shared by [Downloader]/[Checker]/[LQ_Downloader] wherever their own COOKIES_FROM_BROWSER = true."),
-    _KeyDef("LAST_LIVE_HIGHLIGHT",   "site",   "0",    True,  comment='Highlight the "Last Live" timestamp when the streamer was last live within X days.'),
-    _KeyDef("UPGRADE_QUALITY",       "site",   "true", True, comment="Restart the recording when a higher quality is available. (true/false)."),
+    _KeyDef("SITE_LABEL",               scope="site",                      default="",                           preserve=True,               comment="The name of this site."),
+    _KeyDef("SITE_ORDER",               scope="site",                      default="999",                        preserve=True,               comment="The position on the dashboard to display this site's panel (e.g. 0 for top-left, 1 for top-right, 2 for bottom-left, 3 for bottom-right, etc.)"),
+    _KeyDef("CHECK_INTERVAL",           scope="site",                      default="60",                         preserve=False,              comment="How often to check if streamers are live (in seconds).  (Default: 60) (note: keep this <= STALL_TIMEOUT to avoid false write-failure alerts)"),
+    _KeyDef("OUTPUT_DIR",               scope="site",                      default="recordings",                 preserve=True,               comment='Folder where recordings will be saved.  Can be an absolute path or relative path.  example: "C:\\recordings" or "recordings"'),
+    _KeyDef("OUTPUT_TMPL",              scope="site",                      default="%(title)s [%(id)s].%(ext)s", preserve=False,              comment="Template for naming the video files. (Reference: https://github.com/yt-dlp/yt-dlp#output-templates)"),
+    _KeyDef("COOLDOWN_AFTER_RECORDING", scope="site",                      default="60",                         preserve=False,              comment="Seconds to wait after a recording ends before checking again."),
+    _KeyDef("SPLIT_AFTER",              scope="site",                      default="0",                          preserve=True,               comment="When recording a stream, split the video file(s) every X minutes. (0 = no split)"),
+    _KeyDef("AUTO_SUFFIX",              scope="site",                      default="true",                       preserve=True,               comment="When a recording restarts for any reason while the streamer is still on the same live stream, name the new file and the original file with a _partN suffix. (Default: true)"),
+    _KeyDef("STALL_CHECK_INTERVAL",     scope="site",                      default="30",                         preserve=False,              comment="How often to check if the recording has stalled (in seconds).  Disable by setting this to a large number. (Default: 30)"),
+    _KeyDef("STALL_TIMEOUT",            scope="site",                      default="120",                        preserve=False,              comment="Time to wait before considering a recording stalled (in seconds). (Default: 120) (note: also used with NOTIFY_NO_CONFIRM_FILE) (note: keep this >= CHECK_INTERVAL to avoid false write-failure alerts)"),
+    _KeyDef("CONFIG_CHECK_INTERVAL",    scope="site",                      default="3",                          preserve=False,              comment="How often to check for changes to the configuration file (in seconds). (Default: 3)"),
+    _KeyDef("SITE_TMPL",                scope="site",                      default="",                           preserve=False,              comment="URL where the live stream can be accessed. {username} will be replaced with the streamer's username."),
+    _KeyDef("PANEL_RESIZE",             scope="site",                      default="true",                       preserve=True,               comment="When true, site panels will expand vertically as needed to display all streamers."),
+    _KeyDef("LOGGING",                  scope="site",                      default="false",                      preserve=True,               comment="Log stdout and stderr to a per-streamer log file."),
+    _KeyDef("LOG_PATH",                 scope="site",                      default="",                           preserve=True,               comment="Folder to save per-streamer log files. Defaults to \"logs\"."),
+    _KeyDef("SPLIT_LOGS",               scope="site",                      default="false",                      preserve=True,               comment="When LOGGING = true, create 2 separate log files per streamer.  One for stdout (yt-dlp) and one for stderr (ffmpeg)."),
+    _KeyDef("POPUP_NOTIFICATIONS",      scope="site",                      default="true",                       preserve=True,               comment="Show a popup notification when a streamer goes live."),
+    _KeyDef("NTFY_NOTIFICATIONS",       scope="site",                      default="true",                       preserve=True,               comment="Push a notification to your phone via ntfy.sh when a recording starts. This requires NTFY_TOPIC to be set in the GLOBAL SETTINGS panel. (true/false)"),
+    _KeyDef("AD_ALERTS",                scope="site",                      default="true",                       preserve=True,               comment="Show an alert in the system panel when ads are detected in a recording (true/false)."),
+    _KeyDef("POPUP_TIMEOUT",            scope="site",                      default="15",                         preserve=True,               comment="Seconds to show the popup notification when a streamer goes live."),
+    _KeyDef("POPUP_COOLDOWN",           scope="site",                      default="30",                         preserve=True,               comment="Minutes to wait before showing another popup notification for the same streamer."),
+    _KeyDef("YT_DLP_PATH_WINDOWS",      scope="site",                      default="",                           preserve=False,              comment='Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
+    _KeyDef("YT_DLP_PATH_MAC",          scope="site",                      default="",                           preserve=False,              comment='Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
+    _KeyDef("YT_DLP_PATH_LINUX",        scope="site",                      default="",                           preserve=False,              comment='Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
+    _KeyDef("PROGRESS_BAR_MAX_HOURS",   scope="site",                      default="10",                         preserve=True,               comment="Duration of the progress bar in the site panel of the dashboard. (in hours)"),
+    _KeyDef("PROGRESS_BAR_WIDTH",       scope="site",                      default="58",                         preserve=True,               comment="Width of the progress bar in the site panel of the dashboard. (in characters)"),
+    _KeyDef("BROWSER",                  scope="site",                      default="firefox",                    preserve=False,              comment="The browser to use for --cookies-from-browser."),
+    _KeyDef("LAST_LIVE_HIGHLIGHT",      scope="site",                      default="0",                          preserve=True,               comment='Highlight the "Last Live" timestamp when the streamer was last live within X days.'),
+    _KeyDef("UPGRADE_QUALITY",          scope="site",                      default="true",                       preserve=True,               comment="Restart the recording when a higher quality is available. (true/false)."),
 )
 
 
 # ── [Checker]/[Downloader]/[LQ_Downloader] keys (per-site .conf) ───────────────
 DOWNLOADER_FLAG_KEYS: tuple[_DlpFlagDef, ...] = (
-    _DlpFlagDef("COOKIES_FROM_BROWSER", "--cookies-from-browser", "true", type="bool",
-                comment="Use cookies from the browser set in BROWSER (General section)."),
-    _DlpFlagDef("DUMP_JSON",       "--dump-json",       "false", type="bool",
-                comment="Dump the stream's metadata as JSON instead of downloading."),
-    _DlpFlagDef("NO_PART",         "--no-part",         "false", type="bool",
-                comment="Do not use .part files while downloading; write directly to the final filename."),
-    _DlpFlagDef("VERBOSE",         "--verbose",         "false", type="bool",
-                comment="Enable verbose mode in yt-dlp."),
-    _DlpFlagDef("FIXUP",           "--fixup",           "",      type="str",
-                comment='Whether yt-dlp runs the "fixup" procedure on the downloaded file.'),
-    _DlpFlagDef("RETRIES",         "--retries",         "",      type="int",
-                comment="Number of times yt-dlp retries on a download error."),
-    _DlpFlagDef("FORMAT",          "-f",                "",      type="str",
-                comment="yt-dlp format selector (e.g. 4, 720p60, best)."),
-    _DlpFlagDef("DOWNLOADER_ARGS", "--downloader-args", "",      type="str",
-                comment='Extra arguments passed straight to the external downloader, e.g. ffmpeg:"-fps_mode passthrough -copyts -avoid_negative_ts make_zero".'),
-    _DlpFlagDef("EXTRA_ARGS",      "",                  "",      type="str",
-                comment="Raw passthrough for any yt-dlp flag that doesn't have a dedicated key above (e.g. --some-flag value). Split the same way a shell command line would be."),
+    _DlpFlagDef("COOKIES_FROM_BROWSER", cli_flag="--cookies-from-browser", default="true",                       preserve=False, type="bool", comment="Use cookies from the browser set in BROWSER (General section) when yt-dlp runs for this section. Set independently per [Checker]/[Downloader]/[LQ_Downloader]. Set to false to disable browser cookies for this section entirely."),
+    _DlpFlagDef("DUMP_JSON",            cli_flag="--dump-json",            default="false",                      preserve=False, type="bool", comment="Have yt-dlp dump the stream's metadata as JSON instead of downloading. Typically used in [Checker] to detect whether a streamer is live."),
+    _DlpFlagDef("NO_PART",              cli_flag="--no-part",              default="false",                      preserve=False, type="bool", comment="Do not use .part files while downloading; write directly to the final filename."),
+    _DlpFlagDef("VERBOSE",              cli_flag="--verbose",              default="false",                      preserve=False, type="bool", comment="Print verbose debugging information from yt-dlp."),
+    _DlpFlagDef("FIXUP",                cli_flag="--fixup",                default="",                           preserve=False, type="str",  comment='How yt-dlp should fix up damaged output files after download (e.g. "never" to skip the fixup pass entirely).'),
+    _DlpFlagDef("RETRIES",              cli_flag="--retries",              default="",                           preserve=False, type="int",  comment="Number of times yt-dlp retries on a download error."),
+    _DlpFlagDef("FORMAT",               cli_flag="-f",                     default="",                           preserve=False, type="str",  comment="yt-dlp format selector (e.g. 4, 720p60, best). Typically used in [LQ_Downloader] to force a lower-quality fallback format."),
+    _DlpFlagDef("DOWNLOADER_ARGS",      cli_flag="--downloader-args",      default="",                           preserve=False, type="str",  comment='Extra arguments passed straight to the external downloader, e.g. ffmpeg:"-fps_mode passthrough -copyts -avoid_negative_ts make_zero".'),
+    _DlpFlagDef("EXTRA_ARGS",           cli_flag="",                       default="",                           preserve=False, type="str",  comment="Raw passthrough for any yt-dlp flag that doesn't have a dedicated key above (e.g. --some-flag value). Split the same way a shell command line would be."),
 )
 
 # Default values keyed by name
@@ -178,11 +172,14 @@ _KEY_DEFAULTS: dict[str, str] = {k.name: k.default for k in CONFIG_KEYS}
 # Help comments keyed by name
 _KEY_COMMENTS: dict[str, str] = {k.name: k.comment for k in CONFIG_KEYS}
 
-# Keys that must be preserved across an update (both global and site)
-PRESERVED_KEYS: list[str] = [k.name for k in CONFIG_KEYS if k.preserve]
+# Keys that must be preserved across an update (both global and site, plus
+# the per-section Checker/Downloader/LQ_Downloader keys)
+PRESERVED_KEYS: list[str] = [k.name for k in CONFIG_KEYS if k.preserve] + \
+                             [k.name for k in DOWNLOADER_FLAG_KEYS if k.preserve]
 
 # Lookup: key name -> preserve flag (used to flag "managed" keys in the edit popup)
 _KEY_PRESERVE: dict[str, bool] = {k.name: k.preserve for k in CONFIG_KEYS}
+_KEY_PRESERVE.update({k.name: k.preserve for k in DOWNLOADER_FLAG_KEYS})
 
 
 # Valid SUBFOLDERS modes (new-style values only; true/false are legacy aliases).

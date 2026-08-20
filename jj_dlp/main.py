@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.27.15"
+__version__ = "1.27.16"
 
 import subprocess
 import textwrap
@@ -1860,6 +1860,21 @@ FFMPEG_ERROR_RESTART_THRESHOLD: int = 200
 # view is expected/acceptable, unlike losing real activity lines.
 ACTIVITY_LOG_BUFFER_SIZE: int = 200
 DEBUG_LOG_BUFFER_SIZE:    int = 1000
+
+# Activity lines that describe process-wide state (e.g. the embedded web
+# UI's listen address) rather than any single site. Kept separate from
+# each SiteState's dash_log_lines so a global event is logged once, not
+# once per loaded site, and shows up untagged in the "All" Log tab view.
+_global_log_lines: deque = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)
+_global_log_lock:  threading.Lock = threading.Lock()
+
+
+def _log_global_line(msg: str) -> None:
+    """Append a timestamped line to the process-wide (not per-site) activity log."""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with _global_log_lock:
+        _global_log_lines.append(f"[{ts}] {msg}")
+    _logger.log_dashboard_line(msg)
 
 
 def _merge_lines_by_timestamp(a: List[str], b: List[str]) -> List[str]:
@@ -6423,9 +6438,13 @@ class JJDlpDashboard:
 
         if is_all_sites:
             # Merge activity/debug lines from every site, tagged with the
-            # site's label so lines can still be told apart.
+            # site's label so lines can still be told apart, plus the
+            # process-wide lines (e.g. web UI startup), which aren't tied
+            # to any one site and so appear once here, untagged.
             raw_lines: List[str] = []
             raw_debug: List[str] = []
+            with _global_log_lock:
+                raw_lines.extend(_global_log_lines)
             for site in self.sites:
                 lbl = site.get_cached_config().get(
                     "site_label", os.path.basename(site.config_path))
@@ -8697,8 +8716,10 @@ def main() -> None:
         sites.append(site)
 
     def _dash_log(msg: str):
-        for s in sites:
-            s.log_line(msg)
+        # Global (not per-site) events — e.g. web UI startup/bind-failure
+        # announcements and debug-log write errors — so log once, not once
+        # per loaded site. See _log_global_line.
+        _log_global_line(msg)
 
     def _dash_dbg(msg: str):
         """Route a dbg() line to every site's *debug* log buffer.
