@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.27.14"
+__version__ = "1.27.15"
 
 import subprocess
 import textwrap
@@ -37,12 +37,6 @@ from .logger import (
     configure_debug_log as _configure_debug_log,
 )
 
-from .browser_config import (
-    _SUPPORTED_BROWSERS,
-    _read_browser_from_config,
-    _write_browser_to_config,
-    _write_ask_for_browser_to_config,
-)
 from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS, _compute_config_id, SiteSortManager, SORT_OPTIONS, _SORT_LABELS
 from .config_editor import DOWNLOADER_FLAG_KEYS
 from .config_editor import load_global_config as _load_global_config_typed
@@ -458,9 +452,14 @@ def _build_section_cmd(parser: configparser.ConfigParser, section: str) -> list:
 
     for flag_def in DOWNLOADER_FLAG_KEYS:
         key = flag_def.name
+        # Coerce the schema default ("true"/"false") into the bool used when
+        # the key is missing from this section entirely — e.g. shipped
+        # templates set COOKIES_FROM_BROWSER's default to "true", so an
+        # omitted key still enables cookies rather than silently disabling them.
+        bool_fallback = flag_def.default.strip().lower() not in ("", "false", "0", "no")
 
         if key == "COOKIES_FROM_BROWSER":
-            if sect.getboolean(key, fallback=False):
+            if sect.getboolean(key, fallback=bool_fallback):
                 general = parser["General"] if parser.has_section("General") else {}
                 browser = (general.get("BROWSER", "") or "").strip().lower()
                 if browser and browser != "disabled":
@@ -468,7 +467,7 @@ def _build_section_cmd(parser: configparser.ConfigParser, section: str) -> list:
             continue
 
         if key == "EXTRA_ARGS":
-            extra_raw = sect.get(key, "").strip()
+            extra_raw = sect.get(key, flag_def.default).strip()
             if extra_raw:
                 cmd.extend(shlex.split(extra_raw, posix=True))
             continue
@@ -477,7 +476,7 @@ def _build_section_cmd(parser: configparser.ConfigParser, section: str) -> list:
             continue
 
         if flag_def.type == "bool":
-            if sect.getboolean(key, fallback=False):
+            if sect.getboolean(key, fallback=bool_fallback):
                 cmd.append(flag_def.cli_flag)
         else:
             raw = sect.get(key, "").strip()
@@ -2730,16 +2729,18 @@ def get_live_streamers(streamers: List[str], cfg: dict,
                     f"[!] CHECKER FAILED — liveness checks are not working: {_err_first_line}"
                 )
                 if "cookies database" in _err_lower or "could not find" in _err_lower:
-                    browser = _read_browser_from_config(site.config_path)
+                    browser = str(load_config(site.config_path).get("browser", "firefox")).strip().lower()
                     if browser and browser != "disabled":
                         site.log_line(
                             f"[!] Fix: open {browser} & ensure you are logged in to the site(s), or "
-                            "restart jj-dlp and select a different browser (or "
-                            '"disabled <- remove cookies option") from the browser menu.'
+                            f"edit {os.path.basename(site.config_path)} and set BROWSER to a different "
+                            'browser (or set COOKIES_FROM_BROWSER = false in [Checker]/[Downloader] to '
+                            "disable cookies entirely)."
                         )
                     else:
                         site.log_line(
-                            "[!] Fix: restart jj-dlp and select a different browser from the browser menu."
+                            f"[!] Fix: edit {os.path.basename(site.config_path)} and set BROWSER to a "
+                            "valid browser."
                         )
         elif site._last_checker_error is not None:
             site._last_checker_error = None
@@ -8319,129 +8320,6 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
         elif key in (ord('q'), ord('Q'), 27):
             sys.exit(0)
 
-def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
-    """
-    Browser-cookie picker.
-    ↑/↓ navigate, Enter = confirm, Q = quit.
-    Writes the chosen browser back into each selected config file.
-    Returns chosen_files unmodified.
-    """
-    curses.start_color()
-    curses.use_default_colors()
-    theme.apply_palette(None)   # pairs 1-13 follow the active theme, like the dashboard
-
-    curses.curs_set(0)
-    stdscr.keypad(True)
-
-    # Build a per-file config map for all selected files (used for flag checks).
-    file_cfgs = {
-        fname: load_config(os.path.join(os.getcwd(), fname))
-        for fname in chosen_files
-    }
-
-    first_fpath = os.path.join(os.getcwd(), chosen_files[0])
-
-    # Read the current browser from the first selected config file so we can
-    # pre-select it.  All selected configs will be updated with the same choice.
-    browsers     = _SUPPORTED_BROWSERS          # e.g. ['brave', 'chrome', ..., 'other']
-    nb           = len(browsers)
-    current_br   = _read_browser_from_config(first_fpath)
-    try:
-        br_cursor = browsers.index(current_br)
-    except ValueError:
-        br_cursor = browsers.index("firefox")
-
-    # "Do not show again" toggle state (starts unchecked)
-    do_not_show = False
-
-    while True:
-        stdscr.erase()
-        h, w = stdscr.getmaxyx()
-        stdscr.bkgd(" ", theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum0"))
-
-        # Logo
-        for i, line in enumerate(ASCII_LOGO):
-            JJDlpDashboard.safe_addstr(stdscr, 1 + i, 2, line, theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum6"))
-
-        ts = time.strftime("%Y-%m-%d  %H:%M:%S")
-        JJDlpDashboard.safe_addstr(stdscr, 1, w - len(ts) - 3, ts, theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum1_1"))
-        JJDlpDashboard.safe_addstr(stdscr, 7, 2, "-" * (w - 4), theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum1_2"))
-
-        # Browser sub-title
-        br_title_row = 9
-        JJDlpDashboard.safe_addstr(stdscr, br_title_row, 2,
-                    "SELECT BROWSER",
-                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum5_1"))
-        JJDlpDashboard.safe_addstr(stdscr, br_title_row + 1, 2,
-                    "Select your browser for the yt-dlp --cookies-from-browser option.",
-                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_1"))
-        JJDlpDashboard.safe_addstr(stdscr, br_title_row + 2, 2,
-                    "Note: Chrome based browsers are not supported. Firefox is recommended.",
-                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_2"))
-        applies_to_labels = [
-            file_cfgs[fname].get("site_label")
-            for fname in chosen_files
-            if file_cfgs[fname].get("downloader_cookies", True) or file_cfgs[fname].get("checker_cookies", False)
-        ]
-        JJDlpDashboard.safe_addstr(stdscr, br_title_row + 4, 2,
-                    f"Applies to: {', '.join(applies_to_labels)}",
-                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum4"))
-
-        # Browser list (single-select radio buttons)
-        list_start_row = br_title_row + 6
-        for i, br in enumerate(browsers):
-            row    = list_start_row + i
-            dot    = "(*)" if i == br_cursor else "( )"
-            is_cur = i == br_cursor
-            if is_cur:
-                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum2")
-            else:
-                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum1_3")
-            label = f"  {dot}  {br}" + ("  ← remove cookies option" if br == "disabled" else "")
-            JJDlpDashboard.safe_addstr(stdscr, row, 4, label, attr)
-
-        # "Do not show again" checkbox (below the browser list)
-        dna_row  = list_start_row + nb + 1
-        dna_box  = "[x]" if do_not_show else "[ ]"
-        dna_attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_3") if do_not_show else theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_4")
-        JJDlpDashboard.safe_addstr(stdscr, dna_row, 4,
-                    f"  {dna_box}  Do not show again (press D to toggle)",
-                    dna_attr)
-
-        # Footer
-        footer = "  ↑/↓ navigate  Enter = confirm  D = do not show again  Q = quit  "
-        JJDlpDashboard.safe_addstr(stdscr, h - 1, 0,
-                    footer.ljust(w - 1)[:w - 1],
-                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum5_2"))
-
-        stdscr.refresh()
-        key = stdscr.getch()
-
-        if key in (curses.KEY_UP, ord('k')):
-            br_cursor = (br_cursor - 1) % nb
-        elif key in (curses.KEY_DOWN, ord('j')):
-            br_cursor = (br_cursor + 1) % nb
-        elif key in (ord('d'), ord('D')):
-            do_not_show = not do_not_show
-        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
-            chosen_browser = browsers[br_cursor]
-            for fname in chosen_files:
-                fpath = os.path.join(os.getcwd(), fname)
-                # DOWNLOADER_COOKIES and CHECKER_COOKIES are per-file.
-                write_dl = file_cfgs[fname].get("downloader_cookies", True)
-                write_ck = file_cfgs[fname].get("checker_cookies", False)
-                if write_dl or write_ck:
-                    _write_browser_to_config(fpath, chosen_browser, write_downloader=write_dl, write_checker=write_ck)
-                # If "Do not show again" was checked, persist ASK_FOR_BROWSER = False
-                if do_not_show:
-                    _write_global_conf_key("ASK_FOR_BROWSER", "false")
-            return chosen_files
-        elif key in (ord('q'), ord('Q'), 27):
-            sys.exit(0)
-
-    return chosen_files  # unreachable, satisfies type checker
-
-
 def _input_with_timeout(prompt: str, timeout_seconds: int = 10) -> Optional[str]:
     """Prompt the user for a single keypress (y/n) with a timeout.
 
@@ -8679,19 +8557,6 @@ def main() -> None:
                 chosen = curses.wrapper(_curses_choose_config, found)
 
         config_paths = [os.path.join(cwd, f) for f in chosen]
-
-    # ASK_FOR_BROWSER logic
-    _global_cfg = load_global_config()
-    ask_for_browser = _global_cfg.get("ask_for_browser", None)
-    if ask_for_browser is None:
-        # Fall back to per-site values for backwards compatibility
-        ask_for_browser = any(
-            load_config(p).get("ask_for_browser", True)
-            for p in config_paths
-        )
-
-    if ask_for_browser:
-        curses.wrapper(_curses_choose_browser, config_paths)
 
     # Load global.conf — app-wide settings, independent of any site config.
     global_cfg = load_global_config()

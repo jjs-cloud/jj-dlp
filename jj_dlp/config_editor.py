@@ -82,7 +82,6 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("DEBUG_LOG_PATH",        "global", "",      True,  comment="Path for the debug log file. Can be a relative or absolute path (e.g. logs/debug.log)"),
     _KeyDef("CHECK_FOR_UPDATES",     "global", "true",  True, type="bool",  comment="Whether to check for app updates at startup and periodically (true/false)."),
     _KeyDef("UPDATE_INTERVAL",       "global", "30",    True, type="int",  comment="Number of minutes between app update checks."),
-    _KeyDef("ASK_FOR_BROWSER",       "global", "true",  False, type="bool",  comment="Show the browser chooser on startup (true/false)."),
     _KeyDef("ASK_FOR_CONFIG",        "global", "true",  True, type="bool",  comment="Show the config file chooser on startup (true/false)."),
     _KeyDef("UPDATE_BRANCH",         "global", "main",  True,  comment="Which branch of jj-dlp to update to. (main, testing, or experimental)."),
     _KeyDef("MAX_CONCURRENT_REC",    "global", "0",     True, type="int",  comment='The maximum number of simultaneous recordings allowed to run.  Use the STREAMER SETTINGS panel in the Config tab to adjust the priority of each streamer. (0=no limit)'),
@@ -130,9 +129,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("YT_DLP_PATH_LINUX",     "site",   "",     False, comment='Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
     _KeyDef("PROGRESS_BAR_MAX_HOURS","site",   "10",    True,  comment="Duration of the progress bar in the site panel of the dashboard. (in hours)"),
     _KeyDef("PROGRESS_BAR_WIDTH",    "site",   "58",   True,  comment="Width of the progress bar in the site panel of the dashboard. (in characters)"),
-    _KeyDef("DOWNLOADER_COOKIES",    "site",   "true", False, comment="Whether to write the --cookies-from-browser flag to this config file's [Downloader] section when a browser is selected at startup."),
-    _KeyDef("CHECKER_COOKIES",       "site",   "false", False, comment="Whether to write the --cookies-from-browser flag to this config file's [Checker] section when a browser is selected at startup."),
-    _KeyDef("BROWSER",               "site",   "firefox", False, comment="The browser to use for --cookies-from-browser. One value shared by [Downloader]/[Checker]/[LQ_Downloader] wherever their own COOKIES_FROM_BROWSER = true. Normally set via the browser chooser at startup, not hand-edited."),
+    _KeyDef("BROWSER",               "site",   "firefox", False, comment="The browser to use for --cookies-from-browser. One value shared by [Downloader]/[Checker]/[LQ_Downloader] wherever their own COOKIES_FROM_BROWSER = true."),
     _KeyDef("LAST_LIVE_HIGHLIGHT",   "site",   "0",    True,  comment='Highlight the "Last Live" timestamp when the streamer was last live within X days.'),
     _KeyDef("UPGRADE_QUALITY",       "site",   "true", True, comment="Restart the recording when a higher quality is available. (true/false)."),
 )
@@ -140,8 +137,8 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
 
 # ── [Checker]/[Downloader]/[LQ_Downloader] keys (per-site .conf) ───────────────
 DOWNLOADER_FLAG_KEYS: tuple[_DlpFlagDef, ...] = (
-    _DlpFlagDef("COOKIES_FROM_BROWSER", "--cookies-from-browser", "false", type="bool",
-                comment="Use cookies from the browser set in BROWSER (General section) when yt-dlp runs for this section. Set independently per [Checker]/[Downloader]/[LQ_Downloader]; normally toggled via the browser chooser at startup."),
+    _DlpFlagDef("COOKIES_FROM_BROWSER", "--cookies-from-browser", "true", type="bool",
+                comment="Use cookies from the browser set in BROWSER (General section) when yt-dlp runs for this section. Set independently per [Checker]/[Downloader]/[LQ_Downloader]. Set to false to disable browser cookies for this section entirely."),
     _DlpFlagDef("DUMP_JSON",       "--dump-json",       "false", type="bool",
                 comment="Have yt-dlp dump the stream's metadata as JSON instead of downloading. Typically used in [Checker] to detect whether a streamer is live."),
     _DlpFlagDef("NO_PART",         "--no-part",         "false", type="bool",
@@ -3055,15 +3052,15 @@ class SiteSortManager:
 
 def _validate_value(key: str, value: str) -> tuple[bool, str]:
     """Validate config values based on their expected types."""
-    bool_keys = {"DEBUG_LOGS", "CHECK_FOR_UPDATES", "ASK_FOR_BROWSER", "ASK_FOR_CONFIG",
+    bool_keys = {"DEBUG_LOGS", "CHECK_FOR_UPDATES", "ASK_FOR_CONFIG",
                  "PANEL_RESIZE", "LOGGING", "SPLIT_LOGS", "POPUP_NOTIFICATIONS",
-                 "DOWNLOADER_COOKIES", "CHECKER_COOKIES", "LQ_DOWNLOADER",
-                 "UPGRADE_QUALITY", "WEB_UI"}
+                 "LQ_DOWNLOADER",
+                 "UPGRADE_QUALITY", "WEB_UI"} | {k.name for k in DOWNLOADER_FLAG_KEYS if k.type == "bool"}
     int_keys = {"UPDATE_INTERVAL", "SITE_ORDER", "CHECK_INTERVAL", "COOLDOWN_AFTER_RECORDING",
                 "SPLIT_AFTER", "STALL_CHECK_INTERVAL", "STALL_TIMEOUT", "CONFIG_CHECK_INTERVAL",
                 "POPUP_TIMEOUT", "POPUP_COOLDOWN", "PROGRESS_BAR_MAX_HOURS", "PROGRESS_BAR_WIDTH",
                 "LAST_LIVE_HIGHLIGHT", "MAX_CONCURRENT_REC", "FF_ERR_THRESH", "WEB_UI_PORT",
-                "GRAPH_SCALE"}
+                "GRAPH_SCALE"} | {k.name for k in DOWNLOADER_FLAG_KEYS if k.type == "int"}
     if key in bool_keys:
         if value.lower() not in ("true", "false", "yes", "no", "1", "0"):
             return False, "Must be true or false"
@@ -4118,6 +4115,7 @@ class ConfigEditor:
 
         self.items = []
         current_section = None
+        _dlp_sections = {"Checker", "Downloader", "LQ_Downloader"}
         for i, line in enumerate(self.lines):
             s = line.strip()
             if not s:
@@ -4126,7 +4124,7 @@ class ConfigEditor:
                 continue
             if s.startswith("[") and s.endswith("]"):
                 current_section = s[1:-1]
-                if current_section == "General":
+                if current_section == "General" or current_section in _dlp_sections:
                     self.items.append(ConfigItem(i, True, current_section, "", False, line, ""))
             else:
                 if current_section == "General":
@@ -4142,6 +4140,15 @@ class ConfigEditor:
                         if s.upper() not in _GLOBAL_KEYS:
                             comment = _KEY_COMMENTS.get(s.upper(), "")
                             self.items.append(ConfigItem(i, False, s, "", False, line, comment))
+                elif current_section in _dlp_sections:
+                    if "=" in s:
+                        k, v = s.split("=", 1)
+                        k_stripped = k.strip()
+                        comment = DOWNLOADER_FLAG_COMMENTS.get(k_stripped.upper(), "")
+                        self.items.append(ConfigItem(i, False, k_stripped, v.strip(), True, line, comment))
+                    else:
+                        comment = DOWNLOADER_FLAG_COMMENTS.get(s.upper(), "")
+                        self.items.append(ConfigItem(i, False, s, "", False, line, comment))
 
         if self.items:
             self.selected_idx = min(self.selected_idx, len(self.items) - 1)
