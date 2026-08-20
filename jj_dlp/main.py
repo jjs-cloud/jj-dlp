@@ -805,16 +805,8 @@ def _save_skip_disabled(config_path: str, skip_disabled: Set[str]) -> None:
 
 
 def _backup_global_json_if_due(data: dict) -> None:
-    """Back up global.json into backups/ if it's due, per "_last_backup_ts".
-
-    "Due" means more than _GLOBAL_JSON_BACKUP_INTERVAL seconds have passed
-    since the last backup, or no backup has ever been recorded.  *data* is
-    the dict about to be written by _save_global_json; on a successful (or
-    skipped-because-the-file-doesn't-exist-yet) check, it is updated in
-    place with a fresh "_last_backup_ts" so the new timestamp gets persisted
-    along with the rest of the save.  If copying the file fails, the
-    timestamp is left untouched so the next save retries.
-    """
+    """Back up global.json into backups/ if more than
+    _GLOBAL_JSON_BACKUP_INTERVAL seconds have passed since the last backup."""
     last_backup_ts = data.get("_last_backup_ts")
     now = time.time()
     if isinstance(last_backup_ts, (int, float)) and (now - last_backup_ts) < _GLOBAL_JSON_BACKUP_INTERVAL:
@@ -981,19 +973,8 @@ def _save_disk_rate_history(bars) -> None:
 
 
 def _load_live_since_cache(config_path: str) -> Dict[str, float]:
-    """Return the persisted live-since timestamps for the given site from
-    global.json.
-
-    Each entry maps a streamer name to the Unix epoch at which their
-    *current* live session started. This is read at startup (to seed
-    SiteState.live_sessions so a process restart doesn't reset an
-    in-progress stream's duration back to zero) and again each time a new
-    live session is recognized (to recover the true start time rather than
-    stamping "now"). Only the epoch is persisted — the rest of a
-    LiveSession (quality_upgraded, blocked_while_live flag, enable_anchor,
-    notif_shown) is scoped to the running process and is fine to lose on
-    restart.
-    """
+    """Return the persisted live-since timestamps for the given site from global.json.
+    Maps streamer name to the epoch their current live session started."""
     site_key = os.path.basename(config_path)
     with _global_json_lock:
         global_data = _load_global_json()
@@ -1025,18 +1006,8 @@ def _save_live_since_cache(config_path: str, live_since: Dict[str, float]) -> No
 
 
 def _load_segment_continuation_cache(config_path: str) -> Dict[str, dict]:
-    """Return the persisted AUTO_SUFFIX/SPLIT_AFTER part-numbering
-    continuation state for the given site from global.json.
-
-    Each entry maps a streamer name to {"next_part": int, "unsuffixed_file":
-    str|None}. Read at startup (mirroring _load_live_since_cache) so that a
-    process restart mid-stream can still continue a part sequence rather
-    than silently resetting to part 1 — the same way live_since already
-    survives a restart. Only meaningful for a streamer that's also present
-    in the live_since cache; a stale/orphaned entry for a streamer that
-    isn't live is simply never consulted (mark_live() only seeds from this
-    cache, never reads it directly otherwise).
-    """
+    """Return the persisted AUTO_SUFFIX/SPLIT_AFTER part-numbering continuation
+    state for the given site from global.json."""
     site_key = os.path.basename(config_path)
     with _global_json_lock:
         global_data = _load_global_json()
@@ -1059,11 +1030,8 @@ def _load_segment_continuation_cache(config_path: str) -> Dict[str, dict]:
 
 
 def _save_segment_continuation_cache(config_path: str, mapping: Dict[str, dict]) -> None:
-    """Persist AUTO_SUFFIX/SPLIT_AFTER part-numbering continuation state for
-    the given site into global.json. Mirrors _save_live_since_cache's call
-    pattern — merges with any existing data so other sites' entries are
-    preserved.
-    """
+    """Persist AUTO_SUFFIX/SPLIT_AFTER part-numbering continuation state
+    for the given site into global.json."""
     site_key = os.path.basename(config_path)
     with _global_json_lock:
         global_data = _load_global_json()
@@ -1082,37 +1050,16 @@ def _save_segment_continuation_cache(config_path: str, mapping: Dict[str, dict])
 @dataclass
 class LiveSession:
     """All state scoped to one continuous live session for one streamer.
-
-    Created by SiteState.mark_live() the moment a streamer is first
-    observed live, and discarded by SiteState.mark_offline() the moment
-    they're observed offline. While a streamer has an entry in
-    SiteState.live_sessions, they ARE considered live — that dict
-    membership is the single source of truth for liveness, replacing what
-    used to be five separate dicts/sets that had to be kept in sync by
-    convention (dash_live_since, quality_upgraded_streamers,
-    blocked_while_live, enable_anchor_time, notif_shown_session).
-
-    Only `since` is persisted across restarts (see _save_live_since_cache).
-    The rest resets to its default if the process restarts mid-stream.
-    """
+    Only `since` is persisted across restarts; the rest resets on restart."""
     since: float                          # epoch this live session started
     quality_upgraded: bool = False        # UPGRADE_QUALITY already fired once this session
     was_blocked_while_live: bool = False  # observed live-while-disabled at some point this session
-    enable_anchor: Optional[float] = None # set once on the blocked->enabled transition; overrides `since` as the NOTIFY_NO_CONFIRM_FILE anchor
+    enable_anchor: Optional[float] = None # set on blocked->enabled transition; overrides `since` as NOTIFY_NO_CONFIRM_FILE anchor
     notif_shown: bool = False             # a non-recording notification has already fired this session
-    last_restart_anchor: Optional[float] = None  # epoch of the most recent restart this session (stall, LQ, or quality upgrade); gives NOTIFY_NO_CONFIRM_FILE a fresh grace window on the following attempt without touching `since`/`enable_anchor`
-    evicted_for_concurrency: bool = False  # evicted to free a slot for a higher-priority streamer, restart time unknown/unbounded; consumed at actual restart to refresh last_restart_anchor then instead of at eviction time (see was_evicted_for_concurrency)
-    # ── AUTO_SUFFIX / SPLIT_AFTER restart continuity ───────────────────────
-    # Lets a *new* record_stream() attempt (a separate thread/process
-    # launched after a restart — ffmpeg-error threshold, stall recovery,
-    # eviction, etc.) continue the _partN numbering of a previous attempt
-    # for the SAME live session, instead of starting over at a fresh,
-    # unsuffixed filename. Written/read by record_stream() via
-    # SiteState.get_segment_continuation()/set_segment_continuation().
-    # Persisted across app restarts in global.json (same as `since` —
-    # see _load_segment_continuation_cache/_save_segment_continuation_cache),
-    # so a process restart mid-stream can still continue a part sequence
-    # instead of resetting to part 1.
+    last_restart_anchor: Optional[float] = None  # epoch of most recent restart this session; refreshes NOTIFY_NO_CONFIRM_FILE grace window
+    evicted_for_concurrency: bool = False  # evicted for a higher-priority streamer; refreshed at actual restart, not eviction time
+    # AUTO_SUFFIX/SPLIT_AFTER restart continuity: lets a new attempt continue
+    # _partN numbering instead of starting fresh. Persisted in global.json.
     next_segment_part: int = 1
     unsuffixed_file: Optional[str] = None
 
@@ -1142,58 +1089,28 @@ class SiteState:
         # detect when a source switches to a higher resolution mid-recording.
         # Guarded by self.lock. Cleared when the recording ends.
         self.recording_resolution: Dict[str, int] = {}
-        # Resolution (height, in px) actually measured from the on-disk
-        # recording file via ffprobe. Guarded by self.lock. Falls back to
-        # recording_resolution at display time if ffprobe is unavailable. 
-        # Cleared when the recording ends.
+        # ffprobe-measured resolution of the on-disk file; falls back to recording_resolution.
         self.display_resolution: Dict[str, int] = {}
-        # Epoch when the *current* recording attempt for a streamer began
-        # Used purely to gate the recording_resolution fallback in the
-        # dashboard renderer.
+        # Epoch the current recording attempt began; gates the recording_resolution fallback.
         self.recording_attempt_started: Dict[str, float] = {}
-        # streamer -> absolute path of the file yt-dlp is currently writing
-        # for that recording. Guarded by self.lock. Published by
-        # record_stream() once the active output file resolves (and whenever a
-        # SPLIT_AFTER segment switch happens); cleared when the recording
-        # ends. Used by the File Manager's top-bar disk-rate graph so it only
-        # counts files actually being recorded by yt-dlp, never File Manager
-        # artifacts (Move/Fixup/Trim/Split output files).
+        # streamer -> path of the file yt-dlp is currently writing; used by the disk-rate graph.
         self.recording_output_paths: Dict[str, str] = {}
-        # Streamers for which the File Manager's Split popup has requested an
-        # immediate recording restart ("Restart the recording instead"). Consumed
-        # by record_stream()'s split-timer loop, which forces the SPLIT_AFTER
-        # split to fire now (even when SPLIT_AFTER is 0). Guarded by self.lock.
+        # Streamers with a pending immediate-restart request from the Split popup.
         self.manual_split_requests:  Set[str] = set()
         self.recording_threads:   List[threading.Thread] = []
         self.known_streamers:     Set[str] = set()
         self.trigger_event        = threading.Event()
 
         # ── Live session tracking ────────────────────────────────────────
-        # Single source of truth for "how long has this streamer been
-        # live" and everything scoped to that live session.
         self.session_lock         = threading.Lock()
         self.live_sessions:       Dict[str, "LiveSession"] = {}
-        # Only the `since` epoch is persisted (see LiveSession's
-        # docstring). Loaded once here so a process restart mid-stream
-        # recovers the true start time instead of resetting it to "now" —
-        # see mark_live()'s use of this as a one-shot recovery source.
+        # Persisted `since` epochs, recovered on restart (see mark_live()).
         self._live_since_cache:   Dict[str, float] = _load_live_since_cache(config_path)
-        # Persisted AUTO_SUFFIX/SPLIT_AFTER part-numbering continuation state
-        # (see LiveSession.next_segment_part/unsuffixed_file). Loaded once
-        # here, mirroring _live_since_cache, so a process restart mid-stream
-        # recovers where a part sequence left off instead of resetting to
-        # part 1. Consulted by mark_live() when creating a fresh LiveSession.
+        # Persisted AUTO_SUFFIX/SPLIT_AFTER continuation state, recovered on restart.
         self._segment_continuation_cache: Dict[str, dict] = _load_segment_continuation_cache(config_path)
 
-        # Streamers that were disabled via "Skip this stream" (S in the
-        # DISABLE popup) rather than a normal disable — they sit in [Block]
-        # like any other disabled streamer, but the checker loop
-        # auto-removes them from [Block] the next time it observes them
-        # offline, instead of staying disabled indefinitely. Persisted to
-        # global.json (see _load_skip_disabled) so a restart mid-stream
-        # doesn't strand the entry in [Block] with nothing left to know it
-        # was meant to be temporary. Guarded by dash_lock, alongside the
-        # rest of this dashboard/mgmt-popup state.
+        # Streamers disabled via "Skip this stream" — auto-removed from
+        # [Block] once the checker sees them go offline.
         self.skip_disabled:       Set[str] = _load_skip_disabled(config_path)
 
         # Dashboard display state (written by monitor thread, read by renderer)
@@ -1202,22 +1119,11 @@ class SiteState:
         self.dash_next_check_in:  float = 0.0
         self.dash_all_streamers:  List[str] = []
         self.dash_blocked:        Set[str] = set()
-        # Activity log lines are stored in their own bounded buffer so that a
-        # noisy/high-frequency debug tag can never evict real activity lines
-        # (recording started/stopped, errors, etc.) — see dash_debug_lines.
         self.dash_log_lines:      deque = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)   # recent activity log
-        # Debug lines (from logger.dbg()) live in a separate, independently
-        # sized buffer. However chatty a debug tag is, it only ever crowds out
-        # older *debug* lines, never the activity log above.
-        self.dash_debug_lines:    deque = deque(maxlen=DEBUG_LOG_BUFFER_SIZE)      # recent debug-tag log
+        self.dash_debug_lines:    deque = deque(maxlen=DEBUG_LOG_BUFFER_SIZE)      # recent debug-tag log (separate buffer)
         self.dash_stdout_lines:   deque = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)   # recent stdout lines
         self.dash_stderr_lines:   deque = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)   # recent stderr lines
-        # Signature of the last "hard" checker-command failure we surfaced on
-        # the Log tab (see _CHECKER_HARD_ERROR_PATTERNS), or None if the
-        # checker is currently healthy. Only the monitor_site thread for this
-        # site touches this, so no lock is needed. Used to log a failure once
-        # (not every check_interval) and to log a single "recovered" line
-        # when the checker starts working again.
+        # Last "hard" checker-command failure surfaced on the Log tab, or None if healthy.
         self._last_checker_error: Optional[str] = None
         # Same lines, additionally bucketed per-streamer so the STREAMERS
         # panel on the Stdout/Stderr tabs can show one streamer's output in
