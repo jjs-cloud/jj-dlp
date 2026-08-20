@@ -4267,11 +4267,25 @@ class ConfigEditor:
                         
         title = " SITE SETTINGS "
         if self.items:
-            visible_rows = (y2 - site_box_y1) - 2
+            box_inner_rows = (y2 - site_box_y1) - 2
+
+            def _rows_for_range(start_idx: int, end_idx: int) -> int:
+                """Total on-screen rows for items[start_idx:end_idx+1],
+                including a blank separator row before every section header
+                except the very first item in the whole list."""
+                rows = 0
+                for idx in range(start_idx, end_idx + 1):
+                    if idx > 0 and self.items[idx].is_section:
+                        rows += 1
+                    rows += 1
+                return rows
+
             if self.selected_idx < self.scroll_offset:
                 self.scroll_offset = self.selected_idx
-            elif self.selected_idx >= self.scroll_offset + visible_rows:
-                self.scroll_offset = self.selected_idx - visible_rows + 1
+            else:
+                while (self.scroll_offset < self.selected_idx
+                       and _rows_for_range(self.scroll_offset, self.selected_idx) > box_inner_rows):
+                    self.scroll_offset += 1
 
         self.dashboard.safe_addstr(stdscr, site_box_y1, site_x1 + 2, title,
                     theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_live_2"))
@@ -4282,9 +4296,24 @@ class ConfigEditor:
                         theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_dim_3"))
         else:
             row_y = site_box_y1 + 1
-            loop_end = min(len(self.items), self.scroll_offset + visible_rows)
-            for i in range(self.scroll_offset, loop_end):
+            box_bottom = y2 - 1
+            i = self.scroll_offset
+            first_drawn_row_y = None
+            last_drawn_row_y = None
+            loop_end = self.scroll_offset
+            while i < len(self.items):
                 item = self.items[i]
+
+                # Blank separator row before every section header except the
+                # very first item in the whole list.
+                if i > 0 and item.is_section:
+                    row_y += 1
+                    if row_y > box_bottom:
+                        break
+
+                if row_y > box_bottom:
+                    break
+
                 is_selected = self._focus == "site" and (i == self.selected_idx)
 
                 if is_selected:
@@ -4317,14 +4346,20 @@ class ConfigEditor:
                         elif len(val_str) > max_val_w:
                             val_str = val_str[:max_val_w - 1] + "\u25ba"
                         self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 29, val_str, val_attr)
-                
-                # --- Add Scroll Arrows ---
-                if i == self.scroll_offset and self.scroll_offset > 0:
-                    self.dashboard.safe_addstr(stdscr, row_y, site_x2 - 2, "\u25b2", theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_live_4"))
-                if i == loop_end - 1 and loop_end < len(self.items):
-                    self.dashboard.safe_addstr(stdscr, row_y, site_x2 - 2, "\u25bc", theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_live_5"))
-                    
+
+                if first_drawn_row_y is None:
+                    first_drawn_row_y = row_y
+                last_drawn_row_y = row_y
+                loop_end = i + 1
+
                 row_y += 1
+                i += 1
+
+            # --- Add Scroll Arrows ---
+            if self.scroll_offset > 0 and first_drawn_row_y is not None:
+                self.dashboard.safe_addstr(stdscr, first_drawn_row_y, site_x2 - 2, "\u25b2", theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_live_4"))
+            if loop_end < len(self.items) and last_drawn_row_y is not None:
+                self.dashboard.safe_addstr(stdscr, last_drawn_row_y, site_x2 - 2, "\u25bc", theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_live_5"))
 
         # Draw popup (whichever sub-editor owns it)
         if self._focus == "global" and (
