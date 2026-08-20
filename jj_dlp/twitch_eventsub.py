@@ -454,7 +454,8 @@ class TwitchEventSub:
             self._dbg(f"[TWITCH] API {method} {path} → HTTP {e.code}: {body}")
             try:
                 return json.loads(body)
-            except Exception:
+            except Exception as parse_err:
+                self._dbg(f"[TWITCH] API {method} {path} → body not JSON: {parse_err}")
                 return {"_http_status": e.code}
         except Exception as e:
             self._dbg(
@@ -932,8 +933,8 @@ class TwitchEventSub:
                             if hline.lower().startswith(b"content-length:"):
                                 try:
                                     cl = int(hline.split(b":", 1)[1].strip())
-                                except Exception:
-                                    pass
+                                except (ValueError, IndexError) as e:
+                                    self._dbg(f"[TWITCH] http_server: bad Content-Length header: {e}")
                         if len(body_so_far) >= cl:
                             self._dbg(
                                 f"[TWITCH] http_server: req #{req_count} "
@@ -994,8 +995,8 @@ class TwitchEventSub:
             finally:
                 try:
                     conn.close()
-                except Exception:
-                    pass
+                except OSError as e:
+                    self._dbg(f"[TWITCH] http_server: conn.close() failed: {e}")
 
         srv.close()
         self.state.set_server_status("stopped")

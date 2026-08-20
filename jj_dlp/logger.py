@@ -228,8 +228,8 @@ def _get_global_json_cache() -> dict:
     with _json_cache_lock:
         try:
             mtime = os.path.getmtime(path)
-        except Exception:
-            mtime = 0.0
+        except OSError:
+            mtime = 0.0  # file doesn't exist yet (first run) — forces a (re)read below
 
         if mtime != _json_cache_mtime:
             try:
@@ -237,8 +237,8 @@ def _get_global_json_cache() -> dict:
                     data = json.load(f)
                 if not isinstance(data, dict):
                     data = {}
-            except Exception:
-                data = {}
+            except (OSError, json.JSONDecodeError):
+                data = {}  # missing/corrupt global.json — fall back to no tag overrides
             _json_cache = data
             _json_cache_mtime = mtime
 
@@ -295,8 +295,8 @@ def rescan_dbg_call_sites() -> None:
             try:
                 with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
                     src = f.read()
-            except Exception:
-                continue
+            except OSError:
+                continue  # unreadable file — skip it, not fatal to the scan
             rel = os.path.relpath(fpath, _PKG_DIR)
             for m in _CALL_SITE_RE.finditer(src):
                 literal = m.group(2)
@@ -347,8 +347,8 @@ def startup_dbg(msg: str) -> None:
     try:
         with open(_STARTUP_LOG, "a", encoding="utf-8") as f:
             f.write(f"[{ts}] {msg}\n")
-    except Exception:
-        pass
+    except OSError:
+        pass  # startup log write failed; nowhere else to report it this early
 
 
 def startup_dbg_flush() -> None:
@@ -449,8 +449,8 @@ def dbg(msg: str, site_name: str = "") -> None:
                 caller = sys._getframe(1)
                 try:
                     rel = os.path.relpath(os.path.abspath(caller.f_code.co_filename), _PKG_DIR)
-                except Exception:
-                    rel = caller.f_code.co_filename
+                except ValueError:
+                    rel = caller.f_code.co_filename  # different drive on Windows — use raw path
                 callsite_id = f"{rel}:{caller.f_lineno}"
                 if msg_overrides.get(callsite_id) is False:
                     return
@@ -469,8 +469,8 @@ def dbg(msg: str, site_name: str = "") -> None:
     if _dashboard_dbg_ref is not None:
         try:
             _dashboard_dbg_ref(full)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"dbg: dashboard callback failed: {e}", file=sys.stderr)
 
 
 # ── Crash log ─────────────────────────────────────────────────────────────────
@@ -494,8 +494,8 @@ def log_crash(e: Exception) -> None:
         with open(_CRASH_LOG, "a", encoding="utf-8") as f:
             f.write(f"\n{'='*60}\nCRASH at {ts}\n")
             f.write(traceback.format_exc())
-    except Exception:
-        pass
+    except OSError as e:
+        print(f"log_crash: could not write {_CRASH_LOG}: {e}", file=sys.stderr)
 
 
 # ── Log-path helpers ──────────────────────────────────────────────────────────

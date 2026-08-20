@@ -237,8 +237,10 @@ def load_global_config(path: str) -> dict:
     parser = configparser.ConfigParser(allow_no_value=True, interpolation=None, delimiters=('=',))
     try:
         parser.read(path, encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as e:
+        # Parse failed; falling back to defaults for every key, so warn instead of hiding it.
+        # dbg() only (not print) — this can run mid-session while curses owns the screen.
+        _dbg(f"load_global_config: parse failed for {path!r}: {e}")
 
     general = parser["General"] if parser.has_section("General") else {}
 
@@ -304,7 +306,8 @@ def _compute_config_sha(config_path: str) -> str:
     try:
         with open(config_path, "rb") as f:
             return hashlib.sha256(f.read()).hexdigest()[:16]
-    except Exception:
+    except Exception as e:
+        _dbg(f"_compute_config_sha: {e}")
         return ""
 
 
@@ -335,7 +338,8 @@ def _get_site_default_cfg(dashboard, entry: "PriorityEntry") -> dict:
         for site in dashboard.sites:
             if site.config_path == entry.config_path:
                 return site.get_cached_config()
-    except Exception:
+    except Exception as e:
+        _dbg(f"_get_site_default_cfg: {e}")
         pass
     return {}
 
@@ -375,7 +379,8 @@ def _reset_streamer_setting_keys(dashboard, config_id: str, entry: "PriorityEntr
                 config_id, {"config_files": [], "entries": []}
             )["entries"] = entries
             _save_global_json(gdata)
-    except Exception:
+    except Exception as e:
+        _dbg(f"_reset_streamer_setting_keys: {e}")
         pass
 
     # Invalidate the sort manager's priority cache so the "*" has_override
@@ -384,7 +389,8 @@ def _reset_streamer_setting_keys(dashboard, config_id: str, entry: "PriorityEntr
         sort_mgr = getattr(dashboard, "sort_manager", None)
         if sort_mgr is not None:
             sort_mgr._prio_cache_ts = 0.0
-    except Exception:
+    except Exception as e:
+        _dbg(f"_reset_streamer_setting_keys: {e}")
         pass
 
     # Also force the PRIORITY panel itself to reload from disk right now,
@@ -397,7 +403,8 @@ def _reset_streamer_setting_keys(dashboard, config_id: str, entry: "PriorityEntr
         priority_editor = getattr(config_editor, "priority_editor", None)
         if priority_editor is not None:
             priority_editor.force_reload()
-    except Exception:
+    except Exception as e:
+        _dbg(f"_reset_streamer_setting_keys: {e}")
         pass
 
 
@@ -687,7 +694,8 @@ class PriorityEditor:
             sort_mgr = getattr(self.dashboard, "sort_manager", None)
             if sort_mgr is not None:
                 sort_mgr._prio_cache_ts = 0.0
-        except Exception:
+        except Exception as e:
+            _dbg(f"_save: {e}")
             pass
 
     # ── Movement helpers ───────────────────────────────────────────────────────
@@ -1083,7 +1091,8 @@ class QualitySettingsPopup:
                         and e.get("site") == self.entry.site):
                     self.lq_enabled = bool(e.get("lq_enabled", False))
                     break
-        except Exception:
+        except Exception as e:
+            _dbg(f"_load: {e}")
             pass
 
     def _reset(self) -> None:
@@ -1119,7 +1128,8 @@ class QualitySettingsPopup:
                     self.config_id, {"config_files": [], "entries": []}
                 )["entries"] = entries
                 _save_global_json(gdata)
-        except Exception:
+        except Exception as e:
+            _dbg(f"_save: {e}")
             pass
 
     def handle_key(self, key) -> bool:
@@ -1220,7 +1230,8 @@ class NotificationSettingsPopup:
                     else:
                         self.state = "on" if bool(raw) else "off"
                     break
-        except Exception:
+        except Exception as e:
+            _dbg(f"_load: {e}")
             pass
 
     def _save(self) -> None:
@@ -1259,7 +1270,8 @@ class NotificationSettingsPopup:
                     self.config_id, {"config_files": [], "entries": []}
                 )["entries"] = entries
                 _save_global_json(gdata)
-        except Exception:
+        except Exception as e:
+            _dbg(f"_save: {e}")
             pass
 
     def _site_default(self) -> bool:
@@ -1375,7 +1387,8 @@ class AutoSuffixSettingsPopup:
                     else:
                         self.state = raw
                     break
-        except Exception:
+        except Exception as e:
+            _dbg(f"_load: {e}")
             pass
 
     def _save(self) -> None:
@@ -1414,7 +1427,8 @@ class AutoSuffixSettingsPopup:
                     self.config_id, {"config_files": [], "entries": []}
                 )["entries"] = entries
                 _save_global_json(gdata)
-        except Exception:
+        except Exception as e:
+            _dbg(f"_save: {e}")
             pass
 
     def _site_default(self) -> bool:
@@ -1548,7 +1562,8 @@ class OutputDirectorySettingsPopup:
                     self.custom_enabled = bool(e.get("output_dir_custom_enabled", False))
                     self.custom_path = str(e.get("output_dir_custom_path", "") or "")
                     break
-        except Exception:
+        except Exception as e:
+            _dbg(f"_load: {e}")
             pass
         if not self.custom_path:
             self.custom_path = str(self._site_default_output_dir())
@@ -1597,7 +1612,8 @@ class OutputDirectorySettingsPopup:
                     self.config_id, {"config_files": [], "entries": []}
                 )["entries"] = entries
                 _save_global_json(gdata)
-        except Exception:
+        except Exception as e:
+            _dbg(f"_save: {e}")
             pass
 
     # ── Effective-value helpers ────────────────────────────────────────────────
@@ -1610,7 +1626,8 @@ class OutputDirectorySettingsPopup:
         try:
             from .main import load_global_config
             return load_global_config().get("subfolders", "off")
-        except Exception:
+        except Exception as e:
+            _dbg(f"_global_subfolders_mode: {e}")
             return "off"
 
     def _effective_mode(self) -> str:
@@ -1907,7 +1924,8 @@ class SplitSettingsPopup:
                     else:
                         self.mode = "inherit"
                     break
-        except Exception:
+        except Exception as e:
+            _dbg(f"_load: {e}")
             pass
 
     def _save(self) -> None:
@@ -1949,7 +1967,8 @@ class SplitSettingsPopup:
                     self.config_id, {"config_files": [], "entries": []}
                 )["entries"] = entries
                 _save_global_json(gdata)
-        except Exception:
+        except Exception as e:
+            _dbg(f"_save: {e}")
             pass
 
     def _site_default_minutes(self) -> int:
@@ -2185,7 +2204,8 @@ class IntroDelaySettingsPopup:
                         self.minutes = 0
                     self.split = bool(e.get(self._FIELD_SPLIT, False))
                     break
-        except Exception:
+        except Exception as e:
+            _dbg(f"_load: {e}")
             pass
 
     def _save(self) -> None:
@@ -2227,7 +2247,8 @@ class IntroDelaySettingsPopup:
                     self.config_id, {"config_files": [], "entries": []}
                 )["entries"] = entries
                 _save_global_json(gdata)
-        except Exception:
+        except Exception as e:
+            _dbg(f"_save: {e}")
             pass
 
     # ── Validation ─────────────────────────────────────────────────────────────
@@ -2476,7 +2497,8 @@ class ScheduleSettingsPopup:
                     self.recurring_start  = rec.get("start_time", "")
                     self.recurring_end    = rec.get("end_time",   "")
                     break
-        except Exception:
+        except Exception as e:
+            _dbg(f"_load: {e}")
             pass
 
     def _save(self) -> None:
@@ -2526,7 +2548,8 @@ class ScheduleSettingsPopup:
                     self.config_id, {"config_files": [], "entries": []}
                 )["entries"] = entries
                 _save_global_json(gdata)
-        except Exception:
+        except Exception as e:
+            _dbg(f"_save: {e}")
             pass
 
     # ── Field list (dynamic based on mode) ────────────────────────────────────
@@ -2584,7 +2607,8 @@ class ScheduleSettingsPopup:
                                (self.one_off_end,   "End")):
                 try:
                     datetime.strptime(val, self._DATETIME_FMT)
-                except Exception:
+                except Exception as e:
+                    _dbg(f"_validate: {e}")
                     return False, f"{label} must be YYYY-MM-DD HH:MM"
         else:
             if not any(self.recurring_days):
@@ -2593,7 +2617,8 @@ class ScheduleSettingsPopup:
                                (self.recurring_end,   "End")):
                 try:
                     datetime.strptime(val, self._TIME_FMT)
-                except Exception:
+                except Exception as e:
+                    _dbg(f"_validate: {e}")
                     return False, f"{label} time must be HH:MM"
         return True, ""
 
@@ -3001,7 +3026,8 @@ class SiteSortManager:
             general = parser["General"] if parser.has_section("General") else {}
             val     = general.get("SITE_SORT", SORT_DEFAULT).strip().lower()
             return val if val in _SORT_KEYS else SORT_DEFAULT
-        except Exception:
+        except Exception as e:
+            _dbg(f"_load_sort: {e}")
             return SORT_DEFAULT
 
     def _save_sort(self, key: str) -> None:
@@ -3009,7 +3035,8 @@ class SiteSortManager:
         try:
             from .main import _write_global_conf_key
             _write_global_conf_key("SITE_SORT", key)
-        except Exception:
+        except Exception as e:
+            _dbg(f"_save_sort: {e}")
             pass
 
     # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -3045,7 +3072,8 @@ class SiteSortManager:
                 }
             self._prio_cache    = pmap
             self._prio_cache_ts = now
-        except Exception:
+        except Exception as e:
+            _dbg(f"_get_priority_map: {e}")
             pass
         return self._prio_cache
 
@@ -3197,7 +3225,8 @@ class GlobalConfigEditor:
         try:
             with open(self.conf_path, "r", encoding="utf-8") as f:
                 self.lines = f.readlines()
-        except Exception:
+        except Exception as e:
+            _dbg(f"_load: {e}")
             self.lines = []
         self._parse()
 
@@ -3211,7 +3240,8 @@ class GlobalConfigEditor:
         try:
             with open(self.conf_path, "w", encoding="utf-8") as f:
                 f.writelines(lines)
-        except Exception:
+        except Exception as e:
+            _dbg(f"_create_default: {e}")
             pass
 
     def _parse(self):
@@ -3569,7 +3599,8 @@ class GlobalConfigEditor:
         for site in getattr(self.dashboard, "sites", []) or []:
             try:
                 od = site.get_cached_config().get("output_dir")
-            except Exception:
+            except Exception as e:
+                _dbg(f"_build: {e}")
                 od = None
             if od and od not in out_dirs:
                 out_dirs.append(od)
@@ -4110,7 +4141,8 @@ class ConfigEditor:
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 self.lines = f.readlines()
-        except Exception:
+        except Exception as e:
+            _dbg(f"load_config: {e}")
             self.lines = []
 
         self.items = []
@@ -4245,7 +4277,8 @@ class ConfigEditor:
         for i, site in enumerate(self.sites):
             try:
                 lbl = site.get_cached_config().get("site_label", os.path.basename(site.config_path))
-            except Exception:
+            except Exception as e:
+                _dbg(f"draw_tab: {e}")
                 lbl = os.path.basename(site.config_path)
             label = f" {lbl} "
             attr = (theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_hilight_1")

@@ -24,6 +24,7 @@ import curses  # noqa: E402
 
 from . import theme
 from .file_manager import human_rate
+from .logger import dbg
 
 
 class Graph:
@@ -184,7 +185,8 @@ class Graph:
             self._disk_graph_last_subsample = now
             try:
                 inst_rate, grown = self.dashboard.file_manager.sample_active_write_rates()
-            except Exception:
+            except Exception as e:
+                dbg(f"sample_active_write_rates failed: {e}")
                 inst_rate, grown = 0.0, 0.0
             self._disk_graph_instant_rate = inst_rate
             self._disk_graph_window_bytes += grown

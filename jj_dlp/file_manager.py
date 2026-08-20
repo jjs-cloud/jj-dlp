@@ -109,6 +109,7 @@ import curses
 
 from .deps import check_ffmpeg
 from . import theme
+from .logger import dbg
 
 
 def _natural_sort_key(name):

@@ -80,7 +80,8 @@ def _load_config_keys(source_dir=None):
                 sys.path.insert(0, _proj_root)
             from jj_dlp.config_editor import CONFIG_KEYS as _ck
             return _ck
-        except Exception:
+        except Exception as e:
+            _logger().dbg(f"[UPDATER] _get_config_keys fallback import failed: {e}")
             return None
 
 
@@ -108,7 +109,8 @@ def _get_update_branch() -> str:
     try:
         from .main import load_global_config
         branch = load_global_config().get("update_branch", "main")
-    except Exception:
+    except Exception as e:
+        _logger().dbg(f"[UPDATER] _get_update_branch: {e}; defaulting to main")
         branch = "main"
     return branch or "main"
 
@@ -337,7 +339,11 @@ def inject_preserved_keys(new_text, old_config_path, source_dir=None):
     parser = configparser.ConfigParser(allow_no_value=True, interpolation=None)
     try:
         parser.read(old_config_path, encoding='utf-8')
-    except Exception:
+    except Exception as e:
+        # Old config unreadable — preserved keys (custom user settings) won't
+        # carry forward into the updated config.
+        _logger().dbg(f"[UPDATER] inject_preserved_keys: could not read {old_config_path!r}: {e}")
+        print(f"WARNING: could not read {old_config_path}; some settings may not carry over.", file=sys.stderr)
         return new_text
 
     for key in _get_preserved_keys(source_dir):
@@ -389,7 +395,8 @@ def _is_binary(path: str) -> bool:
     try:
         with open(path, 'rb') as f:
             return b'\x00' in f.read(8192)
-    except Exception:
+    except Exception as e:
+        _logger().dbg(f"[UPDATER] _is_binary: could not read {path!r}: {e}")
         return False
 
 
@@ -457,8 +464,8 @@ if __name__ == "__main__":
                 _ts = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
                 with open(os.path.join(_log_dir, "debug.log"), "a", encoding="utf-8") as _lf:
                     _lf.write(f"[{_ts}] [UPDATER][STAGE2-COMPAT] {msg}\n")
-            except Exception:
-                pass
+            except OSError:
+                pass  # last-resort logger; nowhere else to report a write failure
 
         # ── Standalone global.json helpers (env var path from old launcher) ──
         def _json_path() -> str:
@@ -475,15 +482,16 @@ if __name__ == "__main__":
                 with open(_json_path(), "r", encoding="utf-8") as _f:
                     _d = json.load(_f)
                 return _d if isinstance(_d, dict) else {}
-            except Exception:
+            except Exception as e:
+                _sdbg(f"_load_json failed: {e}")
                 return {}
 
         def _save_json(data: dict) -> None:
             try:
                 with open(_json_path(), "w", encoding="utf-8") as _f:
                     json.dump(data, _f, indent=2)
-            except Exception:
-                pass
+            except Exception as e:
+                _sdbg(f"_save_json failed: {e}")
 
         def _mark_done() -> None:
             # Parity with mark_update_completed()/perform_update(): re-fetch
@@ -558,8 +566,8 @@ if __name__ == "__main__":
                 _parser = configparser.ConfigParser(allow_no_value=True, interpolation=None)
                 try:
                     _parser.read(_ucfg, encoding="utf-8")
-                except Exception:
-                    pass
+                except Exception as e:
+                    _sdbg(f"inline inject_preserved_keys: could not read {_ucfg!r}: {e}")
                 for _key in _PKEYS:
                     _oval = None
                     for _sec in _parser.sections():

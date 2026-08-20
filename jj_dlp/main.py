@@ -87,7 +87,8 @@ def _emergency_kill_all() -> None:
     for _s in list(_global_sites):
         try:
             _s.kill_all_procs()
-        except Exception:
+        except Exception as e:
+            dbg(f"_emergency_kill_all: {e}")
             pass
 
 
@@ -298,24 +299,28 @@ def _install_thread_excepthook() -> None:
         # Always persist the full traceback to the debug/crash logs.
         try:
             _logger.log_crash(exc_val)
-        except Exception:
+        except Exception as e:
+            dbg(f"_hook: {e}")
             pass
         try:
             startup_dbg(f"THREAD CRASH: {one_line}\n{tb_text}")
-        except Exception:
+        except Exception as e:
+            dbg(f"_hook: {e}")
             pass
         # Preserve the default behaviour of printing to stderr (useful when
         # running outside the curses UI).
         try:
             print(f"Exception in thread {name}:\n{tb_text}", file=sys.stderr)
-        except Exception:
+        except Exception as e:
+            dbg(f"_hook: {e}")
             pass
 
         # Surface on the Log tab for every site — the user-visible part.
         for s in list(_global_sites):
             try:
                 s.log_line(f"ERROR: {one_line}")
-            except Exception:
+            except Exception as e:
+                dbg(f"_hook: {e}")
                 pass
 
     threading.excepthook = _hook
@@ -346,7 +351,8 @@ def _safe_int(value, default):
     """Convert *value* to int, returning *default* on failure."""
     try:
         return int(value)
-    except Exception:
+    except Exception as e:
+        dbg(f"_safe_int: {e}")
         return default
 
 
@@ -675,7 +681,8 @@ def _write_global_conf_key(key: str, value: str) -> None:
     try:
         with open(path, "r", encoding="utf-8") as f:
             lines = f.readlines()
-    except Exception:
+    except Exception as e:
+        dbg(f"_write_global_conf_key: {e}")
         lines = ["[General]\n"]
 
     section_found = False
@@ -716,7 +723,8 @@ def _write_global_conf_key(key: str, value: str) -> None:
     try:
         with open(path, "w", encoding="utf-8") as f:
             f.writelines(lines)
-    except Exception:
+    except Exception as e:
+        dbg(f"_write_global_conf_key: {e}")
         pass
 
 
@@ -781,7 +789,8 @@ def acquire_single_instance_lock() -> bool:
         f.truncate()
         f.write(f"{os.getpid()}\n")
         f.flush()
-    except Exception:
+    except Exception as e:
+        dbg(f"acquire_single_instance_lock: {e}")
         pass  # Best-effort diagnostics only; the lock itself is already held.
 
     _instance_lock_handle = f  # keep alive so the lock isn't released early
@@ -821,7 +830,8 @@ def _load_global_json() -> dict:
         # file after the fact.
         try:
             size = os.path.getsize(path)
-        except Exception:
+        except OSError as size_err:
+            dbg(f"_load_global_json: {size_err}")
             size = -1
         dbg(f"[GLOBAL_JSON][DIAG] load FAILED: path={path!r} on-disk size={size} error={e!r} — returning {{}} (THIS IS LIKELY THE BUG)")
     return {}
@@ -914,7 +924,8 @@ def _save_global_json(data: dict) -> None:
         dbg(f"[GLOBAL_JSON][DIAG] save FAILED: path={path!r} error={e!r}")
         try:
             os.remove(tmp_path)
-        except Exception:
+        except Exception as e:
+            dbg(f"_save_global_json: {e}")
             pass
 
 def _add_yt_dlp_pid(pid: int) -> None:
@@ -1342,7 +1353,8 @@ class SiteState:
             self._active_procs[streamer] = proc
         try:
             _add_yt_dlp_pid(proc.pid)
-        except Exception:
+        except Exception as e:
+            dbg(f"register_proc: {e}")
             pass
 
     def unregister_proc(self, streamer: str) -> None:
@@ -1352,7 +1364,8 @@ class SiteState:
             if proc:
                 try:
                     _remove_yt_dlp_pid(proc.pid)
-                except Exception:
+                except Exception as e:
+                    dbg(f"unregister_proc: {e}")
                     pass
 
     def set_recording_output(self, streamer: str, path: str) -> None:
@@ -1387,7 +1400,8 @@ class SiteState:
         if proc:
             try:
                 kill_proc(proc)
-            except Exception:
+            except Exception as e:
+                dbg(f"kill_proc_for_streamer: {e}")
                 pass
 
     def set_ffmpeg_error_count(self, streamer: str, count: int) -> None:
@@ -1724,7 +1738,8 @@ class SiteState:
         for streamer, proc in procs.items():
             try:
                 kill_proc(proc)
-            except Exception:
+            except Exception as e:
+                dbg(f"kill_all_procs: {e}")
                 pass
 
     _CFG_CACHE_TTL: float = 2.0  # seconds between re-reads for the dashboard
@@ -1738,7 +1753,8 @@ class SiteState:
             if self._cfg_cache is None or (now - self._cfg_cache_time) >= self._CFG_CACHE_TTL:
                 try:
                     mtime = os.path.getmtime(self.config_path)
-                except Exception:
+                except Exception as e:
+                    dbg(f"get_cached_config: {e}")
                     mtime = 0.0
                 
                 if self._cfg_cache is None or getattr(self, '_cfg_last_mtime', 0.0) != mtime:
@@ -1998,7 +2014,8 @@ def _resolve_mount_point(path: str) -> str:
 
     try:
         real = os.path.realpath(path)
-    except Exception:
+    except Exception as e:
+        dbg(f"_resolve_mount_point: {e}")
         real = path
 
     best = None
@@ -2022,8 +2039,9 @@ def _resolve_mount_point(path: str) -> str:
                         and len(mount_point) > best_len:
                     best = mount_point
                     best_len = len(mount_point)
-    except Exception:
+    except Exception as e:
         # /proc not available (non-Linux) — return the original path
+        dbg(f"_resolve_mount_point: {e}")
         return path
 
     return best if best else path
@@ -2043,8 +2061,9 @@ def _safe_disk_usage(path: str):
         free  = st.f_frsize * st.f_bfree
         used  = total - free
         return shutil._ntuple_diskusage(total, used, free)
-    except Exception:
+    except Exception as e:
         # Last resort — let shutil try the original path
+        dbg(f"_safe_disk_usage: {e}")
         return shutil.disk_usage(path)
 
 
@@ -2267,13 +2286,15 @@ def _send_ntfy_notification(streamer: str, site_label: str, is_recording: bool =
                 try:
                     res_body = response.read().decode("utf-8", errors="replace")
                 except Exception as read_e:
+                    dbg(f"_post: {read_e}")
                     res_body = f"<could not read response body: {read_e}>"
                 dbg(f"[NTFY] Notification sent successfully for {streamer}. "
                     f"Status: {res_code} response_headers={res_headers!r} body={res_body!r}")
         except urllib.error.HTTPError as e:
             try:
                 err_body = e.read().decode("utf-8", errors="replace")
-            except Exception:
+            except Exception as read_e:
+                dbg(f"_post: {read_e}")
                 err_body = "<unreadable>"
             dbg(f"[NTFY] HTTP error sending notification for {streamer}: "
                 f"status={e.code} reason={e.reason!r} body={err_body!r} url={full_url!r}")
@@ -2416,6 +2437,7 @@ def _modify_config_streamer(config_path: str, username: str, action: str) -> str
         with open(config_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
     except Exception as e:
+        dbg(f"_modify_config_streamer: {e}")
         return f"ERROR reading config: {e}"
 
     section_starts: dict = {}
@@ -2501,6 +2523,7 @@ def _modify_config_streamer(config_path: str, username: str, action: str) -> str
         with open(config_path, "w", encoding="utf-8") as f:
             f.writelines(lines)
     except Exception as e:
+        dbg(f"_add_to_section: {e}")
         return f"ERROR writing config: {e}"
 
     return "  ".join(messages)
@@ -2518,15 +2541,18 @@ def open_log_streams(cfg: dict, streamer: str):
             dir_part = os.path.dirname(out_path)
             if dir_part:
                 os.makedirs(dir_part, exist_ok=True)
-        except Exception:
+        except Exception as e:
+            dbg(f"open_log_streams: {e}")
             pass
         try:
             log_out_fp = open(out_path, "a", encoding="utf-8")
-        except Exception:
+        except Exception as e:
+            dbg(f"open_log_streams: {e}")
             pass
         try:
             log_err_fp = log_out_fp if err_path == out_path else open(err_path, "a", encoding="utf-8")
-        except Exception:
+        except Exception as e:
+            dbg(f"open_log_streams: {e}")
             pass
 
     def _close():
@@ -2534,7 +2560,8 @@ def open_log_streams(cfg: dict, streamer: str):
             try:
                 if fp is not None:
                     fp.close()
-            except Exception:
+            except Exception as e:
+                dbg(f"_close: {e}")
                 pass
 
     return subprocess.PIPE, subprocess.PIPE, _close, log_out_fp, log_err_fp
@@ -2609,7 +2636,8 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
                     try:
                         log_fp.write(line + "\n")
                         log_fp.flush()
-                    except Exception:
+                    except Exception as e:
+                        dbg(f"_read_chunk: {e}")
                         pass
                 if site is not None:
                     if pipe_type == "stdout":
@@ -2646,7 +2674,8 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
                     try:
                         log_fp.write(line + "\n")
                         log_fp.flush()
-                    except Exception:
+                    except Exception as e:
+                        dbg(f"_read_chunk: {e}")
                         pass
                 if site is not None:
                     if pipe_type == "stdout":
@@ -2755,7 +2784,8 @@ def get_live_streamers(streamers: List[str], cfg: dict,
                     os.makedirs(dir_part, exist_ok=True)
                 with open(checker_path, "a", encoding="utf-8") as _lf:
                     _lf.write(result.stdout)
-        except Exception:
+        except Exception as e:
+            dbg(f"get_live_streamers: {e}")
             pass
     # Feed checker stdout/stderr into the site's pipe buffers (tagged so the
     # tabs can filter them based on the "Show All" toggle).
@@ -2775,11 +2805,13 @@ def get_live_streamers(streamers: List[str], cfg: dict,
                 ui = cfg.get("username_idx")
                 try:
                     streamer = url.rstrip("/").split("/")[ui if ui is not None else -1].lstrip("@").lower().strip()
-                except Exception:
+                except Exception as e:
+                    dbg(f"get_live_streamers: {e}")
                     streamer = url.rstrip("/").split("/")[-1].lstrip("@").lower().strip()
                 if streamer:
                     live[streamer] = _extract_resolution_height(info)
-        except Exception:
+        except Exception as e:
+            dbg(f"get_live_streamers: {e}")
             pass
     return live
 
@@ -3057,7 +3089,8 @@ def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) ->
     for s in _global_sites:
         try:
             s_cfg = s.get_cached_config()
-        except Exception:
+        except Exception as e:
+            dbg(f"_maybe_trigger_lq: {e}")
             continue
         # Site must have an LQ_Downloader section configured.
         if not s_cfg.get("lq_downloader_cmd"):
@@ -3564,7 +3597,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 site.log_line(f"Failed to start yt-dlp for {streamer}: {e}")
                 try:
                     close_logs()
-                except Exception:
+                except Exception as e:
+                    dbg(f"record_stream: {e}")
                     pass
                 break
 
@@ -3851,7 +3885,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     site.unregister_proc(streamer)
                     try:
                         close_logs()
-                    except Exception:
+                    except Exception as e:
+                        dbg(f"_check_no_confirm_deadline: {e}")
                         pass
                     return
 
@@ -3875,7 +3910,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
                     try:
                         close_logs()
-                    except Exception:
+                    except Exception as e:
+                        dbg(f"_check_no_confirm_deadline: {e}")
                         pass
 
                     return
@@ -3906,7 +3942,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
                     try:
                         close_logs()
-                    except Exception:
+                    except Exception as e:
+                        dbg(f"_check_no_confirm_deadline: {e}")
                         pass
 
                     # ── LQ bandwidth-saving trigger (non-LQ recordings only) ──
@@ -4076,7 +4113,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                                 site.unregister_proc(streamer)
                                 try:
                                     close_logs()
-                                except Exception:
+                                except Exception as e:
+                                    dbg(f"_check_no_confirm_deadline: {e}")
                                     pass
 
                                 proc = next_proc
@@ -4139,7 +4177,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
                             try:
                                 next_close_logs()
-                            except Exception:
+                            except Exception as e:
+                                dbg(f"_check_no_confirm_deadline: {e}")
                                 pass
 
                         except Exception as e:
@@ -4246,7 +4285,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
                             try:
                                 close_logs()
-                            except Exception:
+                            except Exception as e:
+                                dbg(f"_check_no_confirm_deadline: {e}")
                                 pass
 
                             time.sleep(5)
@@ -4268,7 +4308,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
                         try:
                             close_logs()
-                        except Exception:
+                        except Exception as e:
+                            dbg(f"_check_no_confirm_deadline: {e}")
                             pass
 
                         time.sleep(5)
@@ -4370,7 +4411,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     site.clear_ad_alert(streamer)
                     try:
                         close_logs()
-                    except Exception:
+                    except Exception as e:
+                        dbg(f"_check_no_confirm_deadline: {e}")
                         pass
                     return
 
@@ -4408,7 +4450,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
                 try:
                     close_logs()
-                except Exception:
+                except Exception as e:
+                    dbg(f"_check_no_confirm_deadline: {e}")
                     pass
 
                 # ── Clear LQ tracking when streamer goes offline ──────────
@@ -4430,7 +4473,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
         if proc is not None:
             try:
                 kill_proc(proc)
-            except Exception:
+            except Exception as e:
+                dbg(f"_check_no_confirm_deadline: {e}")
                 pass
 
         site.unregister_proc(streamer)
@@ -4438,7 +4482,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
         try:
             close_logs()
-        except Exception:
+        except Exception as e:
+            dbg(f"_check_no_confirm_deadline: {e}")
             pass
 
     finally:
@@ -4699,7 +4744,8 @@ def config_watcher(site: "SiteState", poll_interval: int = 3) -> None:
                         site.known_streamers.update(curr_streamers)
                     site.trigger_event.set()
                 prev_streamers = curr_streamers
-        except Exception:
+        except Exception as e:
+            dbg(f"config_watcher: {e}")
             pass
         site._stop_event.wait(timeout=poll_interval)
 
@@ -4744,7 +4790,8 @@ def _process_streamer_schedules(site: "SiteState") -> None:
         current_site_label = normalize_label(site.get_cached_config().get(
             "site_label", os.path.basename(site.config_path)
         ))
-    except Exception:
+    except Exception as e:
+        dbg(f"normalize_label: {e}")
         current_site_label = normalize_label(os.path.basename(site.config_path))
     
     # Collect actions: list of (streamer, site_label, conf_action, log_label)
@@ -4781,7 +4828,8 @@ def _process_streamer_schedules(site: "SiteState") -> None:
                 return None
             try:
                 return datetime.fromisoformat(s)
-            except Exception:
+            except Exception as e:
+                dbg(f"_parse_attempt: {e}")
                 return None
 
         last_enable  = _parse_attempt(sched.get("last_enable_attempt"))
@@ -5589,7 +5637,8 @@ class JJDlpDashboard:
                 cfg = site.get_cached_config()
                 site_label = cfg.get("site_label", os.path.basename(site.config_path))
                 site_setting_values.append((site_label, cfg))
-            except Exception:
+            except Exception as e:
+                dbg(f"draw_system_panel: {e}")
                 pass
             total_streamers += len(all_s)
             live_cnt += sum(1 for s in all_s if s in live_since)
@@ -5625,7 +5674,8 @@ class JJDlpDashboard:
             for site_label, cfg in site_setting_values:
                 try:
                     split_after = int(cfg.get("split_after", 0) or 0)
-                except Exception:
+                except Exception as e:
+                    dbg(f"_split_after_rows: {e}")
                     split_after = 0
                 if split_after > 0:
                     values.append((site_label, f"{split_after}m", self.C_CHROME))
@@ -5783,7 +5833,8 @@ class JJDlpDashboard:
                     # so a typo'd/missing path doesn't silently merge with an unrelated one.
                     try:
                         return f"dev:{os.stat(path).st_dev}"
-                    except Exception:
+                    except Exception as e:
+                        dbg(f"_dedupe_key: {e}")
                         return f"path:{os.path.normcase(path)}"
 
                 # 1. Global drives (from global.conf) — shown first if configured
@@ -5919,7 +5970,8 @@ class JJDlpDashboard:
             _bar_max_secs = _panel_cfg.get("progress_bar_max_hours", 6) * 3600
             _bar_cfg_w    = max(4, _panel_cfg.get("progress_bar_width", 14))
             _last_live_highlight_days = _panel_cfg.get("last_live_highlight", 0)
-        except Exception:
+        except Exception as e:
+            dbg(f"draw: bad panel config, using defaults: {e}")
             _bar_max_secs = 6 * 3600
             _bar_cfg_w    = 14
             _last_live_highlight_days = 0
@@ -7805,6 +7857,7 @@ class JJDlpDashboard:
         except FileNotFoundError:
             return [f"Changelog not found at:", changelog_path]
         except Exception as e:
+            dbg(f"_load_changelog_lines: {e}")
             return [f"Error reading changelog: {e}"]
 
     def open_changelog_popup(self) -> None:
@@ -8114,14 +8167,16 @@ class JJDlpDashboard:
         """
         try:
             curses.update_lines_cols()
-        except Exception:
+        except Exception as e:
+            dbg(f"_handle_possible_resize: {e}")
             pass
         size = self.stdscr.getmaxyx()
         if size != getattr(self, "_last_term_size", size):
             self._last_term_size = size
             try:
                 curses.resizeterm(*size)
-            except Exception:
+            except Exception as e:
+                dbg(f"_handle_possible_resize: {e}")
                 pass
             # touchwin() marks every cell as "changed" so the next
             # refresh() is forced to resend the whole screen instead of
@@ -8402,7 +8457,8 @@ def _check_and_kill_zombie_yt_dlps() -> None:
                     out = subprocess.check_output(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"], text=True, creationflags=subprocess.CREATE_NO_WINDOW)
                     if str(pid) in out:
                         running_pids.append(pid)
-                except Exception:
+                except Exception as e:
+                    dbg(f"_check_and_kill_zombie_yt_dlps: {e}")
                     pass
             else:
                 os.kill(pid, 0)
@@ -8411,8 +8467,9 @@ def _check_and_kill_zombie_yt_dlps() -> None:
                         cmd = _f.read()
                     if "yt_dlp" in cmd or "yt-dlp" in cmd:
                         running_pids.append(pid)
-                except Exception:
+                except Exception as e:
                     # process might have died or no permission, assume running
+                    dbg(f"_check_and_kill_zombie_yt_dlps: {e}")
                     running_pids.append(pid)
         except OSError:
             pass
@@ -8716,7 +8773,8 @@ def main() -> None:
         if dashboard is not None:
             try:
                 dashboard._persist_graph_history()
-            except Exception:
+            except Exception as e:
+                dbg(f"_run_dashboard: {e}")
                 pass
 
         for site in sites:
@@ -8724,7 +8782,8 @@ def main() -> None:
             if site.eventsub is not None:
                 try:
                     site.eventsub.stop(timeout=5)
-                except Exception:
+                except Exception as e:
+                    dbg(f"_run_dashboard: {e}")
                     pass
 
         print(f"\njj-dlp v{__version__}  ·  Shutting down...")
