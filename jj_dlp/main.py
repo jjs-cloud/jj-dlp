@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.27.16"
+__version__ = "1.27.17"
 
 import subprocess
 import textwrap
@@ -77,19 +77,35 @@ _win_ctrl_handler_ref = None
 
 
 def _emergency_kill_all() -> None:
-    """Kill every yt-dlp/ffmpeg process across every loaded site.
+    """Stop every loaded site and kill its yt-dlp/ffmpeg processes.
 
     This is the last-resort cleanup path invoked from OS-level close/kill
     signals (X button, console close, SIGHUP/SIGTERM) where the normal
     dashboard quit sequence never gets a chance to run. Safe to call more
     than once and safe to call with zero sites loaded.
-    """
+
+    Calls site.stop() so _stop_event is set *before* the kill."""
     for _s in list(_global_sites):
         try:
-            _s.kill_all_procs()
+            _s.stop()
         except Exception as e:
             dbg(f"_emergency_kill_all: {e}")
             pass
+    # Best-effort: give threads a brief window to reach their finally:
+    # blocks and persist segment-continuation state before the process
+    # is torn down.
+    deadline = time.time() + 2.5
+    for _s in list(_global_sites):
+        for _t in list(_s.recording_threads):
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return
+            if _t.is_alive():
+                try:
+                    _t.join(timeout=remaining)
+                except Exception as e:
+                    dbg(f"_emergency_kill_all: join failed: {e}")
+                    pass
 
 
 def _install_windows_job_object() -> None:
@@ -3506,6 +3522,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 dbg(f"[SPLIT][record_stream] in-thread restart continuity for "
                     f"streamer={streamer!r}: segment_num {_prev_segment_num} -> "
                     f"{segment_num} pending_rename={_pending_rename_file!r}")
+                # Persist immediately rather than waiting for this thread to exit
+                site.set_segment_continuation(
+                    streamer, segment_num, _pending_rename_file
+                )
 
             current_output_tmpl = cfg["output_tmpl"]
             # For segment 1 we intentionally omit the _part1 suffix — it will be
@@ -4148,6 +4168,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                                 # silently overrun SPLIT_AFTER by the verification delay.
                                 recording_start_time = next_proc_start_time
                                 segment_num = next_segment_num
+                                # Persist immediately rather than waiting for this thread's finally: block.
+                                site.set_segment_continuation(streamer, segment_num, None)
 
                                 if _intro_delay_disable_after_split:
                                     split_after_seconds = 0
