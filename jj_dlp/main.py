@@ -3367,7 +3367,7 @@ def _launch_yt_dlp_attempt(cmd: list, out_target, err_target, close_logs,
                 "ffmpeg_error_event": ffmpeg_error_event,
                 "streamer": streamer,
                 "site": site,
-                "ad_alerts_enabled": cfg.get("ad_alerts", False),
+                "ad_alert_pattern": _compile_ad_alert_pattern(cfg),
             },
             daemon=True
         ).start()
@@ -3380,7 +3380,7 @@ def _launch_yt_dlp_attempt(cmd: list, out_target, err_target, close_logs,
                 "ffmpeg_error_event": ffmpeg_error_event,
                 "streamer": streamer,
                 "site": site,
-                "ad_alerts_enabled": cfg.get("ad_alerts", False),
+                "ad_alert_pattern": _compile_ad_alert_pattern(cfg),
             },
             daemon=True
         ).start()
@@ -3623,7 +3623,7 @@ def _spawn_and_verify_split_segment(next_cmd: list, cfg: dict, next_out_target, 
         kwargs={
             "streamer": streamer,
             "site": site,
-            "ad_alerts_enabled": cfg.get("ad_alerts", False),
+            "ad_alert_pattern": _compile_ad_alert_pattern(cfg),
         },
         daemon=True
     ).start()
@@ -3634,7 +3634,7 @@ def _spawn_and_verify_split_segment(next_cmd: list, cfg: dict, next_out_target, 
         kwargs={
             "streamer": streamer,
             "site": site,
-            "ad_alerts_enabled": cfg.get("ad_alerts", False),
+            "ad_alert_pattern": _compile_ad_alert_pattern(cfg),
         },
         daemon=True
     ).start()
