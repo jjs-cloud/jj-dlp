@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.27.20"
+__version__ = "1.27.21"
 
 import subprocess
 import textwrap
@@ -8395,8 +8395,6 @@ def main() -> None:
         print(f"\njj-dlp v{__version__}  ·  Aborted during ffmpeg check.")
         sys.exit(1)
 
-    _check_and_kill_zombie_yt_dlps()
-
     # Install orphan-process protection as early as possible, before any
     # yt-dlp/ffmpeg process can be spawned. Ensures that no matter how
     # jj-dlp's window/console gets closed (X button, taskkill, logoff,
@@ -8429,6 +8427,9 @@ def main() -> None:
         sys.exit(0)
 
     # ── Refuse to start a second instance ─────────────────────────────────────
+    # Must run before _check_and_kill_zombie_yt_dlps(): otherwise a second
+    # instance launched while the first is still recording would see the
+    # first instance's live yt-dlp children and misreport them as orphaned.
     if not acquire_single_instance_lock():
         print(
             f"\njj-dlp v{__version__}  ·  Another instance of jj-dlp appears to be running.\n"
@@ -8437,6 +8438,8 @@ def main() -> None:
         )
         input("\nPress Enter to close...")
         sys.exit(1)
+
+    _check_and_kill_zombie_yt_dlps()
 
     # ── Config discovery / selection ──────────────────────────────────────────
     if args.config is not None:
