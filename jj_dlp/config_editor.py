@@ -4098,6 +4098,7 @@ class ConfigEditor:
         self.selected_idx = 0
         self.popup_mode = False
         self.popup_buf = ""
+        self.popup_cursor = 0
         self.popup_error = ""
         self.lines = []
         self.items = []
@@ -4408,7 +4409,11 @@ class ConfigEditor:
 
     def draw_popup(self, stdscr):
         h, w = stdscr.getmaxyx()
-        box_w = min(60, w - 4)
+
+        # "New Value:" label is 10 chars, value starts at bx1+13; widen the
+        # box so the full value (plus cursor) fits without truncation.
+        needed_w = 13 + len(self.popup_buf) + 1 + 2
+        box_w = min(max(60, needed_w), w - 4)
         inner_w = box_w - 4
 
         comment_lines = []
@@ -4447,12 +4452,22 @@ class ConfigEditor:
             row += 1
 
         self.dashboard.safe_addstr(stdscr, row, bx1 + 2, "New Value:", theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_warn_2"))
-        self.dashboard.safe_addstr(stdscr, row, bx1 + 13, (self.popup_buf + "_")[:box_w - 15], theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_normal_2"))
+
+        # Insertion-point cursor, like OutputDirectorySettingsPopup's "Path:" field.
+        val_x   = bx1 + 13
+        max_len = max(1, bx2 - val_x - 1)
+        buf     = self.popup_buf
+        cur     = min(self.popup_cursor, len(buf))
+        shown   = buf[:cur] + "_" + buf[cur:]
+        if len(shown) > max_len:
+            start = max(0, cur - max_len + 1)
+            shown = shown[start:start + max_len]
+        self.dashboard.safe_addstr(stdscr, row, val_x, shown[:max_len], theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_normal_2"))
 
         if self.popup_error:
             self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, f" Error: {self.popup_error} ", theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_warn_3"))
         else:
-            self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel ", theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_invhead"))
+            self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel  \u2190\u2192/Home/End:Move ", theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_invhead"))
 
     def handle_key(self, key) -> bool:
         """Returns True if the key was consumed by the editor."""
@@ -4492,15 +4507,34 @@ class ConfigEditor:
             return self.global_editor.handle_key(key)
 
         # ── Site panel focus ──────────────────────────────────────────────────
+        # Default popup for any site config key without its own custom popup
+        # (e.g. AD_ALERT_PATTERNS). Edits with an insertion-point cursor, like
+        # OutputDirectorySettingsPopup's "Path:" field, instead of append-only.
         if self.popup_mode:
+            cur = self.popup_cursor
             if key == 27:
                 self.popup_mode = False
                 self.popup_buf = ""
+                self.popup_cursor = 0
                 self.popup_error = ""
                 self.editing_item = None
             elif key in (curses.KEY_BACKSPACE, 127, 8):
-                self.popup_buf = self.popup_buf[:-1]
+                if cur > 0:
+                    self.popup_buf = self.popup_buf[:cur - 1] + self.popup_buf[cur:]
+                    self.popup_cursor = cur - 1
                 self.popup_error = ""
+            elif key in (curses.KEY_DC,):
+                if cur < len(self.popup_buf):
+                    self.popup_buf = self.popup_buf[:cur] + self.popup_buf[cur + 1:]
+                self.popup_error = ""
+            elif key == curses.KEY_LEFT:
+                self.popup_cursor = max(0, cur - 1)
+            elif key == curses.KEY_RIGHT:
+                self.popup_cursor = min(len(self.popup_buf), cur + 1)
+            elif key == curses.KEY_HOME:
+                self.popup_cursor = 0
+            elif key == curses.KEY_END:
+                self.popup_cursor = len(self.popup_buf)
             elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
                 if self.editing_item:
                     new_val = self.popup_buf.strip()
@@ -4527,10 +4561,12 @@ class ConfigEditor:
                     self.priority_editor.force_reload()
                 self.popup_mode = False
                 self.popup_buf = ""
+                self.popup_cursor = 0
                 self.popup_error = ""
                 self.editing_item = None
             elif 32 <= key < 127:
-                self.popup_buf += chr(key)
+                self.popup_buf = self.popup_buf[:cur] + chr(key) + self.popup_buf[cur:]
+                self.popup_cursor = cur + 1
                 self.popup_error = ""
             return True
 
@@ -4552,6 +4588,7 @@ class ConfigEditor:
                     self.popup_buf = self.editing_item.value
                 else:
                     self.popup_buf = self.editing_item.key
+                self.popup_cursor = len(self.popup_buf)
                 self.popup_mode = True
             return True
 
