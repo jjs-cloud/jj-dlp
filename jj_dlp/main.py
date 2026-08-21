@@ -3673,6 +3673,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 _no_confirm_anchor_src += "+floored_at_process_start"
             _no_confirm_deadline = _no_confirm_anchor_val + stall_timeout + _no_confirm_grace_seconds
             _no_confirm_warned   = False
+            # Independent size baseline for _check_no_confirm_deadline(),
+            # decoupled from the stall-checker's last_size.
+            _no_confirm_last_size = last_size
             dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: confirmation deadline for "
                 f"streamer={streamer!r} = {_no_confirm_anchor_src}+{stall_timeout}s"
                 f"{f'+{_no_confirm_grace_seconds:.0f}s intro-delay grace' if _no_confirm_grace_seconds else ''} "
@@ -3689,7 +3692,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 # (and real write failures) can make yt-dlp exit in well
                 # under stall_check_interval on every retry, which previously
                 # meant this check was never reached at all.
-                nonlocal _no_confirm_warned
+                nonlocal _no_confirm_warned, _no_confirm_last_size
                 # FIX: guard so this function never fires for a streamer that's
                 # being evicted or the app is shutting down, no matter which
                 # call site invokes it.
@@ -3706,10 +3709,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         )
                     else:
                         _nc_size, _nc_file_error = 0, True
-                    # Check actual growth directly instead of relying on
-                    # growth_seen, which only updates on the periodic stall-
-                    # check cycle and can lag behind real writes.
-                    if _nc_size > last_size:
+                    # Compare against our own last poll, not the stall-checker's
+                    # last_size, to avoid racing its separate 30s updates.
+                    if _nc_size > _no_confirm_last_size:
+                        _no_confirm_last_size = _nc_size
                         return
                     _no_confirm_warned = True
                     dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: file not confirmed for "
@@ -3720,7 +3723,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         f"live_since={site.get_live_since(streamer)} "
                         f"enable_anchor={site.get_enable_anchor(streamer)} "
                         f"attempt_age={time.time() - recording_start_time:.1f}s "
-                        f"active_file={active_file!r} last_size={last_size} "
+                        f"active_file={active_file!r} last_size={_no_confirm_last_size} "
                         f"cur_size={_nc_size} file_error={_nc_file_error} "
                         f"growth_seen={growth_seen}",
                         site_name=streamer)
@@ -4037,6 +4040,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                                 # the new segment.
                                 _no_confirm_deadline = time.time() + stall_timeout
                                 _no_confirm_warned   = False
+                                _no_confirm_last_size = 0
 
                                 dbg(f"[SPLIT][record_stream] switched to part {segment_num} "
                                     f"pid={proc.pid} active_file={active_file!r} "
