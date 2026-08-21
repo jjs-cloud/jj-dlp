@@ -5628,12 +5628,12 @@ class JJDlpDashboard:
                         break
                     _label = _streamer[:label_w].ljust(label_w)
                     _val   = str(_count)
+                    # Same color as "ad detected" counter
+                    _ffmpeg_attr = theme.attr(self, "main_jjdlpdashboard_split_after_rows_warn_2")
                     self.safe_addstr(self.stdscr, ffmpeg_row_y, x1 + 2,
-                                _label,
-                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_rec_2"))
+                                _label, _ffmpeg_attr)
                     self.safe_addstr(self.stdscr, ffmpeg_row_y, x1 + 2 + label_w + 1,
-                                _val[:inner_w - label_w - 1],
-                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_rec_3"))
+                                _val[:inner_w - label_w - 1], _ffmpeg_attr)
                     ffmpeg_row_y += 1
                 disk_row_y = ffmpeg_row_y + 1
         except Exception as _ffmpeg_err_exc:
@@ -5834,6 +5834,7 @@ class JJDlpDashboard:
         live_since   = site.snapshot_live_since()
         with site.dash_lock:
             ad_alert_streamers = set(site.ad_alerts.keys())
+            ffmpeg_error_streamers = {s for s, c in site.ffmpeg_error_counts.items() if c > 0}
         with site.lock:
             recording     = set(site.currently_recording)
             intro_delay_pending = set(site.intro_delay_pending)
@@ -6069,7 +6070,7 @@ class JJDlpDashboard:
                                    if recording_res.get(s) is None
                                    else _live_bar(elapsed, bar_w, _bar_max_secs))
                     bar_attr    = (theme.attr(self, "main_jjdlpdashboard_split_after_rows_warn_2")
-                                   if s in ad_alert_streamers
+                                   if s in ad_alert_streamers or s in ffmpeg_error_streamers
                                    else theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_9"))
                     dur_str     = _fmt_duration(elapsed)
                     if not (is_rec and recording_res.get(s) is not None):
