@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.27.18"
+__version__ = "1.27.19"
 
 import subprocess
 import textwrap
@@ -3697,9 +3697,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     return
                 if (notify_no_confirm_file
                         and not _no_confirm_warned
-                        and not growth_seen
                         and time.time() >= _no_confirm_deadline):
-                    _no_confirm_warned = True
                     if active_file:
                         _nc_size, _, _, _nc_file_error = get_streamer_file_size(
                             output_dir, streamer, cfg=cfg,
@@ -3708,6 +3706,12 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         )
                     else:
                         _nc_size, _nc_file_error = 0, True
+                    # Check actual growth directly instead of relying on
+                    # growth_seen, which only updates on the periodic stall-
+                    # check cycle and can lag behind real writes.
+                    if _nc_size > last_size:
+                        return
+                    _no_confirm_warned = True
                     dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: file not confirmed for "
                         f"streamer={streamer!r} within {int(stall_timeout)}s "
                         f"(deadline={_no_confirm_deadline:.2f}) — sending warning; "
