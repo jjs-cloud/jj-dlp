@@ -3174,15 +3174,21 @@ def _resolve_intro_delay(cfg: dict, entry_info: dict) -> dict:
     return overridden
 
 
-def record_stream(streamer: str, cfg: dict, site: "SiteState",
-                  use_lq: bool = False, show_popup: bool = True,
-                  eviction_warning: str = "") -> None:
-    channel_url = cfg["site_tmpl"].format(username=streamer)
-    output_dir  = cfg["output_dir"]
+# ══════════════════════════════════════════════════════════════════════════
+# record_stream() helpers
+#
+# record_stream() used to be a single ~1230-line function. The pieces below
+# are straight-line "extract method" splits of that function: each one is a
+# self-contained step (attempt setup, process launch, teardown, ...) with no
+# behavior changes. The two nested loops that actually drive an attempt
+# (retry/restart, and the per-second stall/split check) are left in
+# record_stream() itself, since their break/continue/return statements are
+# what make them loops in the first place.
+# ══════════════════════════════════════════════════════════════════════════
 
-    # Nest recordings under a subfolder per SUBFOLDERS mode in global.conf,
-    # unless this streamer has a per-streamer Output Directory override
-    # (set via the Output Directory settings popup / _resolve_output_dir()).
+def _resolve_recording_output_dir(cfg: dict, streamer: str) -> str:
+    """Apply the SUBFOLDERS mode (or per-streamer override) to OUTPUT_DIR and create it."""
+    output_dir = cfg["output_dir"]
     _global_cfg_rs = load_global_config()
     _subfolders_mode = cfg.get("subfolders_mode_override") or _global_cfg_rs.get("subfolders", "off")
     _site_label = cfg.get("site_label", "")
@@ -3195,74 +3201,41 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
     elif _subfolders_mode == "site-streamer":
         output_dir = os.path.join(output_dir, _site_label, streamer)
     # "off" (or any unrecognized value) leaves output_dir unchanged.
-
     os.makedirs(output_dir, exist_ok=True)
+    return output_dir
 
+
+def _init_continuity_settings(cfg: dict) -> tuple:
+    """Resolve SPLIT_AFTER/AUTO_SUFFIX into (split_after_minutes, split_after_seconds, auto_suffix_enabled, continuity_active)."""
     split_after_minutes = max(0, cfg.get("split_after", 0))
     split_after_seconds = split_after_minutes * 60
-
-    # ── AUTO_SUFFIX / SPLIT_AFTER restart continuity ───────────────────────
-    # Whenever this is True, any restart of the recording for this streamer
-    # — whether an in-thread restart (ffmpeg-error threshold, stall
-    # recovery, normal yt-dlp exit while still live) or a brand-new
-    # record_stream() call for the same live session (e.g. after eviction)
-    # — continues _partN numbering instead of starting a fresh, separately
-    # named file. SPLIT_AFTER>0 already implies this (fixes a prior bug
-    # where in-thread restarts silently dropped the _partN suffix);
-    # AUTO_SUFFIX extends the same behavior to restarts even when
-    # SPLIT_AFTER is 0/off. Neither setting causes AUTO_SUFFIX by itself to
-    # trigger a *periodic* split — that's still governed purely by
-    # SPLIT_AFTER's timer loop further down.
     auto_suffix_enabled = bool(cfg.get("auto_suffix", True))
-    continuity_active   = (split_after_minutes > 0) or auto_suffix_enabled
+    continuity_active = (split_after_minutes > 0) or auto_suffix_enabled
+    return split_after_minutes, split_after_seconds, auto_suffix_enabled, continuity_active
 
-    _global_cfg_nc = load_global_config()
-    notify_confirm_file = _global_cfg_nc.get("notify_confirm_file", True)
-    notify_no_confirm_file = _global_cfg_nc.get("notify_no_confirm_file", False)
-    initial_notification_sent = not notify_confirm_file
-    dbg(f"[NOTIFY] NOTIFY_CONFIRM_FILE={notify_confirm_file} NOTIFY_NO_CONFIRM_FILE={notify_no_confirm_file} "
-        f"for streamer={streamer!r} — "
-        f"initial_notification_sent={initial_notification_sent} "
-        f"({'live notification already fired, nothing held back' if initial_notification_sent else 'live notification held until file growth is confirmed'})",
-        site_name=streamer)
 
-    # ── Intro Delay ──────────────────────────────────────────────────────────
-    # Notifications for "streamer is live" already fired in
-    # start_recording_if_needed() before this thread was started, so holding
-    # things up here only ever delays the *recording*, never the notification.
+def _apply_intro_delay(streamer: str, cfg: dict, site: "SiteState",
+                        show_popup: bool, eviction_warning: str,
+                        notify_confirm_file: bool,
+                        split_after_minutes: int, split_after_seconds: int):
+    """Block for INTRO_DELAY if configured. Returns None if the streamer was
+    stopped/evicted during the wait (caller must return immediately without
+    touching the finally-block bookkeeping, matching the original inline
+    behavior), otherwise (split_after_minutes, split_after_seconds,
+    intro_delay_disable_after_split, no_confirm_grace_seconds)."""
     intro_delay_enabled = bool(cfg.get("intro_delay_enabled", False))
     intro_delay_minutes = max(0, cfg.get("intro_delay_minutes", 0))
-    intro_delay_split   = bool(cfg.get("intro_delay_split", False))
-    # Set once the intro-delay-driven split segment is confirmed, so the
-    # SPLIT_AFTER loop below is told to stop splitting for the rest of the
-    # stream instead of continuing to split every intro_delay_minutes.
-    _intro_delay_disable_after_split = False
-    # NOTIFY_NO_CONFIRM_FILE grace period (seconds): when Intro Delay holds
-    # the recording start, the file is *intentionally* not written for the
-    # first intro_delay_minutes. The no-confirm deadline below is anchored
-    # to the streamer's live-since time, not to when record_stream actually
-    # starts writing — so without this extra allowance, streamers using
-    # Intro Delay would trip the write-failure alert as a false positive
-    # every time. Only applies to the "hold" branch below (not
-    # intro_delay_split, which doesn't delay the write).
-    _no_confirm_grace_seconds = 0.0
+    intro_delay_split = bool(cfg.get("intro_delay_split", False))
+    intro_delay_disable_after_split = False
+    no_confirm_grace_seconds = 0.0
 
     if intro_delay_enabled and intro_delay_minutes > 0 and intro_delay_split:
-        # Reuse the SPLIT_AFTER machinery as-is: force the *first* split to
-        # land at the intro-delay boundary, then disable further splitting
-        # once that split is confirmed (see the split_success branch below).
         split_after_minutes = intro_delay_minutes
         split_after_seconds = split_after_minutes * 60
-        _intro_delay_disable_after_split = True
+        intro_delay_disable_after_split = True
         dbg(f"[INTRO_DELAY] streamer={streamer!r} split mode: first split forced "
             f"at {intro_delay_minutes}m, further splitting disabled afterward")
     elif intro_delay_enabled and intro_delay_minutes > 0:
-        # Anchor the hold to when the streamer actually went live, not to
-        # time.time() at thread-start. This means elapsed live time counts
-        # toward the delay: e.g. if a streamer was live for 10m before
-        # being enabled and intro_delay is 5m, the delay window has
-        # already passed and recording starts immediately instead of
-        # waiting a further 5m from the enable.
         _intro_delay_anchor = site.get_live_since(streamer) or time.time()
         _delay_deadline = _intro_delay_anchor + intro_delay_minutes * 60
         _delay_remaining = max(0.0, _delay_deadline - time.time())
@@ -3278,26 +3251,484 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 with site.lock:
                     site.currently_recording.discard(streamer)
                     site.intro_delay_pending.discard(streamer)
-                return
+                return None
             site._stop_event.wait(timeout=min(1.0, _delay_deadline - time.time()))
         with site.lock:
             site.intro_delay_pending.discard(streamer)
-        # Extend the NOTIFY_NO_CONFIRM_FILE deadline by the hold duration so
-        # the write-failure alert doesn't fire on the file that was
-        # intentionally never written during the delay window.
-        _no_confirm_grace_seconds = intro_delay_minutes * 60
+        no_confirm_grace_seconds = intro_delay_minutes * 60
         dbg(f"[INTRO_DELAY] streamer={streamer!r} delay elapsed — starting recording")
-        # The initial "is live" notification was sent as "Not recording /
-        # Reason: Intro Delay" back in start_recording_if_needed(). Now that
-        # the hold is over and the download is about to actually start, send
-        # the real "recording" notification. Reset the cooldown timer first
-        # so a short Intro Delay (less than POPUP_COOLDOWN) can't suppress
-        # this second, distinct notification.
         site.notif_last_shown[streamer] = 0
         if not notify_confirm_file:
             _maybe_show_live_popup(streamer, cfg, site, show_popup=show_popup,
                                    source="intro_delay", is_recording=True,
                                    warning=eviction_warning)
+
+    return split_after_minutes, split_after_seconds, intro_delay_disable_after_split, no_confirm_grace_seconds
+
+
+def _record_lq_attempt(streamer: str, cfg: dict, site: "SiteState", use_lq: bool) -> None:
+    """Record an LQ attempt immediately so a re-entrant LQ trigger can't target this streamer again."""
+    if not use_lq:
+        return
+    _lq_site_label = cfg.get("site_label", os.path.basename(site.config_path))
+    with _lq_attempted_lock:
+        _lq_attempted[(streamer, _lq_site_label)] = time.time()
+    dbg(f"[LQ] LQ attempt recorded for {streamer} on {_lq_site_label}")
+
+
+def _resume_segment_continuity(site: "SiteState", streamer: str, continuity_active: bool,
+                                segment_num: int, pending_rename_file):
+    """Pick up cross-thread AUTO_SUFFIX/SPLIT_AFTER continuity, if any."""
+    if continuity_active:
+        _cont = site.get_segment_continuation(streamer)
+        if _cont and _cont[0] > 1:
+            segment_num, pending_rename_file = _cont
+            dbg(f"[SPLIT][record_stream] resuming cross-thread continuity for "
+                f"streamer={streamer!r}: segment_num={segment_num} "
+                f"pending_rename={pending_rename_file!r}")
+    return segment_num, pending_rename_file
+
+
+def _bump_segment_for_inplace_restart(site: "SiteState", streamer: str,
+                                       segment_num: int, active_file):
+    """Advance segment_num for an in-thread restart (ffmpeg-error/stall/normal-exit) and persist it."""
+    _prev_segment_num = segment_num
+    segment_num = _prev_segment_num + 1
+    pending_rename_file = active_file if (_prev_segment_num == 1 and active_file) else None
+    dbg(f"[SPLIT][record_stream] in-thread restart continuity for "
+        f"streamer={streamer!r}: segment_num {_prev_segment_num} -> "
+        f"{segment_num} pending_rename={pending_rename_file!r}")
+    site.set_segment_continuation(streamer, segment_num, pending_rename_file)
+    return segment_num, pending_rename_file
+
+
+def _build_segment_output_paths(cfg: dict, output_dir: str, continuity_active: bool, segment_num: int):
+    """Resolve this attempt's output template/path, adding the _partN suffix if applicable."""
+    current_output_tmpl = cfg["output_tmpl"]
+    # For segment 1 we intentionally omit the _part1 suffix — it will be
+    # retroactively added (via rename) only if a second part is ever created.
+    if continuity_active and segment_num > 1:
+        current_output_tmpl = add_segment_suffix_to_tmpl(current_output_tmpl, segment_num)
+    output_path = _simulation.get_write_failure_output_path(output_dir, current_output_tmpl)
+    return current_output_tmpl, output_path
+
+
+def _select_downloader_cmd(cfg: dict, use_lq: bool, streamer: str) -> list:
+    """Pick the LQ downloader command when requested, falling back to the normal one."""
+    active_dl_cmd = cfg["downloader_cmd"]
+    if use_lq:
+        _lq_cmd = cfg.get("lq_downloader_cmd", [])
+        if _lq_cmd:
+            active_dl_cmd = _lq_cmd
+        else:
+            dbg(f"[LQ] use_lq=True but lq_downloader_cmd is empty — falling back to normal downloader for {streamer}")
+    return active_dl_cmd
+
+
+def _build_sidecar_path(output_dir: str, streamer: str) -> str:
+    """Build a unique per-attempt path for yt-dlp's --print-to-file resolved-filename sidecar."""
+    _sidecar_token = _re.sub(r"[^A-Za-z0-9_.-]", "_", streamer) or "streamer"
+    return os.path.join(output_dir, f".jjdlp_filename_{_sidecar_token}_{uuid.uuid4().hex}.tmp")
+
+
+def _launch_yt_dlp_attempt(cmd: list, out_target, err_target, close_logs,
+                            log_out_fp, log_err_fp,
+                            cfg: dict, site: "SiteState", streamer: str):
+    """Popen the downloader and start its stdout/stderr drain threads.
+    Returns None on failure (already logged and close_logs() called), else
+    (proc, proc_start_time, ffmpeg_error_counter, ffmpeg_error_event)."""
+    try:
+        _popen_kwargs: dict = dict(stdout=out_target, stderr=err_target)
+        if sys.platform == "win32":
+            _popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        else:
+            # Put the child in its own process group so we can kill both
+            # the PyInstaller bootloader and the real yt-dlp process at once.
+            _popen_kwargs["start_new_session"] = True
+        dbg(f"[POPEN] streamer={streamer!r} cmd={cmd_display_str(cmd)!r}")
+        dbg(f"[POPEN] Windows CREATE_NO_WINDOW={'yes' if sys.platform == 'win32' else 'n/a'}")
+        dbg(f"[POPEN] PYTHONPATH={os.environ.get('PYTHONPATH', '<not set>')!r}")
+        proc = subprocess.Popen(cmd, **_popen_kwargs)
+        proc_start_time = time.time()
+        dbg(f"[POPEN] launched pid={proc.pid}")
+
+        site.register_proc(streamer, proc)
+
+        ffmpeg_error_counter = [0]
+        ffmpeg_error_event = threading.Event()
+        site.clear_ffmpeg_error_count(streamer)
+        site.clear_stall_since(streamer)
+
+        threading.Thread(
+            target=_drain_pipe,
+            args=(proc.stdout, log_out_fp, "stdout"),
+            kwargs={
+                "ffmpeg_error_counter": ffmpeg_error_counter,
+                "ffmpeg_error_event": ffmpeg_error_event,
+                "streamer": streamer,
+                "site": site,
+                "ad_alerts_enabled": cfg.get("ad_alerts", False),
+            },
+            daemon=True
+        ).start()
+
+        threading.Thread(
+            target=_drain_pipe,
+            args=(proc.stderr, log_err_fp, "stderr"),
+            kwargs={
+                "ffmpeg_error_counter": ffmpeg_error_counter,
+                "ffmpeg_error_event": ffmpeg_error_event,
+                "streamer": streamer,
+                "site": site,
+                "ad_alerts_enabled": cfg.get("ad_alerts", False),
+            },
+            daemon=True
+        ).start()
+
+        return proc, proc_start_time, ffmpeg_error_counter, ffmpeg_error_event
+
+    except Exception as e:
+        site.log_line(f"Failed to start yt-dlp for {streamer}: {e}")
+        try:
+            close_logs()
+        except Exception as e2:
+            dbg(f"_launch_yt_dlp_attempt: close_logs() failed for {streamer!r}: {e2}")
+        return None
+
+
+def _resolve_active_recording_file(proc, sidecar_path: str, output_dir: str, streamer: str):
+    """3-tier fallback to find the file yt-dlp is actually writing to:
+    1. the --print-to-file sidecar (UTF-8, avoids console encoding issues),
+    2. (handled live elsewhere via _drain_pipe), 3. left to the caller.
+    Waits up to 15s for the sidecar, then up to 5s for the resolved file to
+    appear on disk. Returns the path, or None if it couldn't be resolved."""
+    _FILENAME_WAIT_TIMEOUT = 15.0
+    active_file = None
+    _sidecar_deadline = time.time() + _FILENAME_WAIT_TIMEOUT
+    while time.time() < _sidecar_deadline:
+        if os.path.isfile(sidecar_path):
+            try:
+                with open(sidecar_path, "r", encoding="utf-8") as _sf:
+                    # --print-to-file appends rather than overwrites, so
+                    # the sidecar may have multiple lines (retries,
+                    # format re-selection, and/or multiple timings).
+                    # Scan from bottom to top, preferring absolute
+                    # paths (%(filepath)s result) over relative ones
+                    # (raw output-template result).
+                    _sc_lines = [ln.strip() for ln in _sf.read().splitlines() if ln.strip()]
+                raw_abs = None
+                raw_rel = ""
+                for ln in reversed(_sc_lines):
+                    if not ln or ln == "NA":
+                        continue
+                    if os.path.isabs(ln):
+                        raw_abs = ln  # prefer absolute (%(filepath)s)
+                    else:
+                        if not raw_rel:
+                            raw_rel = ln  # keep first (last) relative
+                raw_dest = raw_abs if raw_abs is not None else raw_rel
+            except Exception as _sc_read_err:
+                dbg(f"[STALL] error reading filename sidecar {sidecar_path!r}: "
+                    f"{_sc_read_err!r}", site_name=streamer)
+                raw_dest = ""
+            # The sidecar has served its purpose the moment we've read
+            # it — remove it right away rather than waiting for
+            # end-of-recording cleanup.
+            try:
+                os.remove(sidecar_path)
+            except OSError:
+                pass
+
+            if raw_dest:
+                if os.path.isabs(raw_dest):
+                    candidate = raw_dest
+                else:
+                    # This is the raw output template result (e.g.
+                    # from "%(uploader)s %(title)s ...").  yt-dlp
+                    # resolves the template but does NOT apply
+                    # filesystem sanitization — that happens later
+                    # when the file is created.  Replicate the
+                    # Windows sanitization here so the candidate
+                    # path matches the actual file on disk.
+                    _sanitized = _re.sub(r'[<>:"/\\|?*]', '_', raw_dest)
+                    _sanitized = _re.sub(r'[\x00-\x1f\x7f]', '', _sanitized)
+                    _sanitized = _sanitized.strip(' .')
+                    candidate = os.path.join(output_dir, _sanitized)
+                # The sidecar is written at before_dl, but the actual
+                # output file may not exist yet (yt-dlp opens it
+                # slightly after the hook fires).  Wait a few seconds
+                # for the file to appear before giving up.
+                _file_deadline = time.time() + 5.0
+                while time.time() < _file_deadline:
+                    if os.path.exists(candidate):
+                        active_file = candidate
+                        dbg(f"[STALL] resolved active_file from filename sidecar: "
+                            f"{active_file!r}", site_name=streamer)
+                        break
+                    if proc.poll() is not None:
+                        break
+                    time.sleep(0.25)
+                if not active_file:
+                    dbg(f"[STALL] sidecar candidate {candidate!r} (from {raw_dest!r}) "
+                        f"does not exist after 5s, discarding.", site_name=streamer)
+            break
+
+        if proc.poll() is not None:
+            # Process already exited without ever writing the sidecar —
+            # no point waiting out the rest of the timeout.
+            dbg(f"[STALL] proc exited before writing filename sidecar "
+                f"(returncode={proc.returncode})", site_name=streamer)
+            break
+
+        time.sleep(0.25)
+    else:
+        dbg(f"[STALL] timed out after {_FILENAME_WAIT_TIMEOUT}s waiting for "
+            f"filename sidecar {sidecar_path!r}", site_name=streamer)
+
+    # Best-effort cleanup: if we broke out early (timeout / proc exit)
+    # before the sidecar ever appeared, make sure nothing is left behind.
+    if not active_file:
+        try:
+            if os.path.isfile(sidecar_path):
+                os.remove(sidecar_path)
+        except OSError:
+            pass
+
+    return active_file
+
+
+def _publish_active_file_and_finalize_rename(site: "SiteState", streamer: str, active_file,
+                                              pending_rename_file, segment_num: int):
+    """Publish active_file for the disk-rate graph and, if a prior attempt's
+    file is still waiting on a retroactive _partN rename, apply it now that
+    this attempt's file has resolved. Returns the (possibly cleared)
+    pending_rename_file."""
+    if not active_file:
+        return pending_rename_file
+
+    site.set_recording_output(streamer, active_file)
+
+    if (pending_rename_file and pending_rename_file != active_file
+            and os.path.isfile(pending_rename_file)):
+        _prev_part_path = add_segment_suffix_to_tmpl(pending_rename_file, segment_num - 1)
+        try:
+            os.rename(pending_rename_file, _prev_part_path)
+            site.log_line(f"Renamed previous segment to: {os.path.basename(_prev_part_path)}")
+            dbg(f"[SPLIT][record_stream] renamed continuation segment: "
+                f"{pending_rename_file!r} -> {_prev_part_path!r}")
+        except Exception as _ren_err:
+            dbg(f"[SPLIT][record_stream] rename of continuation segment "
+                f"FAILED: {_ren_err!r}")
+        pending_rename_file = None
+
+    return pending_rename_file
+
+
+def _compute_no_confirm_deadline(site: "SiteState", streamer: str, stall_timeout: float,
+                                  no_confirm_grace_seconds: float) -> float:
+    """Compute the NOTIFY_NO_CONFIRM_FILE deadline for this attempt (see original
+    comment: anchored to live-since/enable-anchor/last-restart-anchor, floored
+    at this process's own start time, plus any Intro Delay grace period)."""
+    _no_confirm_anchor_val = site.get_enable_anchor(streamer)
+    _no_confirm_anchor_src = "enable_anchor"
+    if _no_confirm_anchor_val is None:
+        _no_confirm_anchor_val = site.get_live_since(streamer) or time.time()
+        _no_confirm_anchor_src = "live_since"
+    _last_restart_anchor = site.get_last_restart_anchor(streamer)
+    if _last_restart_anchor is not None and _last_restart_anchor > _no_confirm_anchor_val:
+        _no_confirm_anchor_val = _last_restart_anchor
+        _no_confirm_anchor_src = "last_restart_anchor"
+    if _no_confirm_anchor_val < _SCRIPT_START_TIME:
+        dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: {_no_confirm_anchor_src} "
+            f"({_no_confirm_anchor_val:.2f}) predates this process's start "
+            f"({_SCRIPT_START_TIME:.2f}) — flooring anchor at process start "
+            f"for streamer={streamer!r}",
+            site_name=streamer)
+        _no_confirm_anchor_val = _SCRIPT_START_TIME
+        _no_confirm_anchor_src += "+floored_at_process_start"
+    _no_confirm_deadline = _no_confirm_anchor_val + stall_timeout + no_confirm_grace_seconds
+    dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: confirmation deadline for "
+        f"streamer={streamer!r} = {_no_confirm_anchor_src}+{stall_timeout}s"
+        f"{f'+{no_confirm_grace_seconds:.0f}s intro-delay grace' if no_confirm_grace_seconds else ''} "
+        f"({_no_confirm_deadline:.2f}), live_since={site.get_live_since(streamer)}, "
+        f"enable_anchor={site.get_enable_anchor(streamer)}",
+        site_name=streamer)
+    return _no_confirm_deadline
+
+
+def _teardown_attempt(site: "SiteState", streamer: str, proc, close_logs, *,
+                       kill: bool = True, wait_after_kill: bool = False,
+                       clear_stall: bool = False, clear_ffmpeg_error: bool = False,
+                       clear_ad_alert: bool = False) -> None:
+    """End a recording attempt: optionally kill+wait the process, unregister
+    it, clear the requested per-streamer flags, and close the log files.
+    Every normal-path recording teardown in record_stream funnels through
+    here so the cleanup can't drift between call sites."""
+    if kill and proc is not None:
+        kill_proc(proc)
+        if wait_after_kill:
+            proc.wait()
+    site.unregister_proc(streamer)
+    if clear_stall:
+        site.clear_stall_since(streamer)
+    if clear_ffmpeg_error:
+        site.clear_ffmpeg_error_count(streamer)
+    if clear_ad_alert:
+        site.clear_ad_alert(streamer)
+    try:
+        close_logs()
+    except Exception as e:
+        dbg(f"_teardown_attempt: close_logs() failed for {streamer!r}: {e}")
+
+
+def _update_measured_quality(site: "SiteState", streamer: str, active_file, file_error: bool) -> None:
+    """Measure the on-disk resolution via ffprobe and publish it for the dashboard."""
+    if file_error:
+        with site.lock:
+            site.display_resolution.pop(streamer, None)
+        dbg(f"[QUALITY] file_error={file_error!r} - clearing measured resolution", site_name=streamer)
+        return
+    _measured_height = probe_file_height(active_file)
+    with site.lock:
+        _prev_measured = site.display_resolution.get(streamer)
+        if _measured_height is not None:
+            site.display_resolution[streamer] = _measured_height
+        else:
+            site.display_resolution.pop(streamer, None)
+    dbg(f"[QUALITY] measured_height={_measured_height!r}p "
+        f"(prev={_prev_measured!r}p) recording_resolution_baseline={site.recording_resolution.get(streamer)!r}p "
+        f"file={active_file!r}", site_name=streamer)
+
+
+def _spawn_and_verify_split_segment(next_cmd: list, cfg: dict, next_out_target, next_err_target,
+                                     next_log_out_fp, next_log_err_fp,
+                                     output_dir: str, streamer: str, site: "SiteState", part_suffix: str):
+    """Launch the next segment's yt-dlp process, wait for its exact output
+    file to appear, then confirm it's growing. Returns
+    (next_proc, next_proc_start_time, next_file, split_success)."""
+    _next_popen_kwargs: dict = dict(stdout=next_out_target, stderr=next_err_target)
+    if sys.platform != "win32":
+        # Same process-group isolation as the primary Popen.
+        _next_popen_kwargs["start_new_session"] = True
+    dbg(f"[POPEN] streamer={streamer!r} split cmd={cmd_display_str(next_cmd)!r}")
+    next_proc = subprocess.Popen(next_cmd, **_next_popen_kwargs)
+
+    next_proc_start_time = time.time()
+    dbg(f"[SPLIT][record_stream] next_proc started pid={next_proc.pid} "
+        f"next_proc_start_time={next_proc_start_time:.3f}")
+
+    threading.Thread(
+        target=_drain_pipe,
+        args=(next_proc.stdout, next_log_out_fp, "stdout"),
+        kwargs={
+            "streamer": streamer,
+            "site": site,
+            "ad_alerts_enabled": cfg.get("ad_alerts", False),
+        },
+        daemon=True
+    ).start()
+
+    threading.Thread(
+        target=_drain_pipe,
+        args=(next_proc.stderr, next_log_err_fp, "stderr"),
+        kwargs={
+            "streamer": streamer,
+            "site": site,
+            "ad_alerts_enabled": cfg.get("ad_alerts", False),
+        },
+        daemon=True
+    ).start()
+
+    # Wait for the exact new segment file.
+    # Do NOT use wait_for_streamer_file here — it does a
+    # fuzzy mtime search and can return the *previous*
+    # segment's file if the old proc is still writing to it
+    # and bumps its mtime past next_proc_start_time.
+    # Instead, search by the exact _partN suffix so we only
+    # accept the file that belongs to this new segment.
+    next_file = None
+    _nf_deadline = time.time() + 30.0
+    dbg(f"[SPLIT][record_stream] waiting for exact segment file "
+        f"part_suffix={part_suffix!r} pid={next_proc.pid} "
+        f"next_proc_start_time={next_proc_start_time:.3f} timeout=30s")
+    while time.time() < _nf_deadline:
+        if os.path.isdir(output_dir):
+            for _f in os.listdir(output_dir):
+                _fp = os.path.join(output_dir, _f)
+                if (os.path.isfile(_fp)
+                        and streamer.lower() in _f.lower()
+                        and part_suffix.lower() in _f.lower()
+                        and os.path.getmtime(_fp) >= next_proc_start_time):
+                    next_file = _fp
+                    break
+        if next_file:
+            dbg(f"[SPLIT][record_stream] exact segment file found: "
+                f"{next_file!r} elapsed={30.0-(_nf_deadline-time.time()):.1f}s")
+            break
+        dbg(f"[SPLIT][record_stream] still waiting for {part_suffix!r} file "
+            f"remaining={_nf_deadline-time.time():.1f}s")
+        time.sleep(0.5)
+
+    if next_file is None:
+        dbg(f"[SPLIT][record_stream] TIMEOUT — exact segment file not found "
+            f"part_suffix={part_suffix!r} pid={next_proc.pid}")
+    dbg(f"[SPLIT][record_stream] segment file search result: {next_file!r}")
+
+    split_success = (
+        next_file is not None and
+        wait_for_new_file_growth(next_file, timeout=15.0)
+    )
+    dbg(f"[SPLIT][record_stream] split_success={split_success} "
+        f"next_file={next_file!r}")
+
+    return next_proc, next_proc_start_time, next_file, split_success
+
+
+def _clear_lq_attempt_on_offline(streamer: str, cfg: dict, site: "SiteState") -> None:
+    """Clear the LQ-attempted marker once a streamer goes offline, so the
+    next live session is eligible for the normal downloader again."""
+    _offline_site_label = cfg.get("site_label", os.path.basename(site.config_path))
+    with _lq_attempted_lock:
+        _lq_attempted.pop((streamer, _offline_site_label), None)
+
+
+def _update_last_live_cache(site: "SiteState", streamer: str) -> None:
+    """Record that this streamer just finished a live session, for the last-live cache."""
+    with site.dash_lock:
+        site.dash_last_live[streamer] = time.time()
+        _last_live_snapshot = dict(site.dash_last_live)
+    _save_last_live_cache(site.config_path, _last_live_snapshot)
+
+
+def record_stream(streamer: str, cfg: dict, site: "SiteState",
+                  use_lq: bool = False, show_popup: bool = True,
+                  eviction_warning: str = "") -> None:
+    channel_url = cfg["site_tmpl"].format(username=streamer)
+    output_dir = _resolve_recording_output_dir(cfg, streamer)
+
+    split_after_minutes, split_after_seconds, auto_suffix_enabled, continuity_active = \
+        _init_continuity_settings(cfg)
+
+    _global_cfg_nc = load_global_config()
+    notify_confirm_file = _global_cfg_nc.get("notify_confirm_file", True)
+    notify_no_confirm_file = _global_cfg_nc.get("notify_no_confirm_file", False)
+    initial_notification_sent = not notify_confirm_file
+    dbg(f"[NOTIFY] NOTIFY_CONFIRM_FILE={notify_confirm_file} NOTIFY_NO_CONFIRM_FILE={notify_no_confirm_file} "
+        f"for streamer={streamer!r} — "
+        f"initial_notification_sent={initial_notification_sent} "
+        f"({'live notification already fired, nothing held back' if initial_notification_sent else 'live notification held until file growth is confirmed'})",
+        site_name=streamer)
+
+    # Intro Delay may block for a while, and returns None if the streamer
+    # was stopped/evicted during the wait — mirrors the original inline
+    # `return` (before the try/finally below), so the finally-block
+    # bookkeeping is deliberately skipped here too, same as before.
+    _intro_result = _apply_intro_delay(
+        streamer, cfg, site, show_popup, eviction_warning, notify_confirm_file,
+        split_after_minutes, split_after_seconds)
+    if _intro_result is None:
+        return
+    split_after_minutes, split_after_seconds, _intro_delay_disable_after_split, _no_confirm_grace_seconds = _intro_result
 
     dbg(f"[SPLIT][record_stream] ENTER streamer={streamer!r} "
         f"split_after_minutes={split_after_minutes} split_after_seconds={split_after_seconds} "
@@ -3305,14 +3736,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
     site.log_line(f"Recording started: {streamer}" + (" [LQ]" if use_lq else ""))
 
-    # ── LQ attempt bookkeeping ────────────────────────────────────────────────
     # Record the attempt immediately so that re-entrant LQ triggers during this
     # session cannot target this streamer again (even if the proc hasn't opened yet).
-    if use_lq:
-        _lq_site_label = cfg.get("site_label", os.path.basename(site.config_path))
-        with _lq_attempted_lock:
-            _lq_attempted[(_lq_site_label_key := (streamer, _lq_site_label))] = time.time()
-        dbg(f"[LQ] LQ attempt recorded for {streamer} on {_lq_site_label}")
+    _record_lq_attempt(streamer, cfg, site, use_lq)
 
     proc = None
     close_logs = lambda: None
@@ -3327,19 +3753,13 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
     _split_retry_cooldown_seconds = 60.0
     next_split_retry_time = 0.0
 
-    # ── Resume cross-thread continuity, if any ──────────────────────────────
     # If a previous record_stream() attempt for this same live session (a
     # different thread call — e.g. before an eviction) left off mid-way
     # through a part sequence, pick up where it left off instead of
     # starting back at part 1. See SiteState.get_segment_continuation().
     _pending_rename_file = None
-    if continuity_active:
-        _cont = site.get_segment_continuation(streamer)
-        if _cont and _cont[0] > 1:
-            segment_num, _pending_rename_file = _cont
-            dbg(f"[SPLIT][record_stream] resuming cross-thread continuity for "
-                f"streamer={streamer!r}: segment_num={segment_num} "
-                f"pending_rename={_pending_rename_file!r}")
+    segment_num, _pending_rename_file = _resume_segment_continuity(
+        site, streamer, continuity_active, segment_num, _pending_rename_file)
 
     _outer_iteration = 0
 
@@ -3353,59 +3773,21 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 # Restarting within this same thread (ffmpeg-error threshold,
                 # stall recovery, or a normal yt-dlp exit while still live) —
                 # this new attempt is another part of the same recording.
-                _prev_segment_num = segment_num
-                segment_num = _prev_segment_num + 1
-                _pending_rename_file = (
-                    active_file if (_prev_segment_num == 1 and active_file) else None
-                )
-                dbg(f"[SPLIT][record_stream] in-thread restart continuity for "
-                    f"streamer={streamer!r}: segment_num {_prev_segment_num} -> "
-                    f"{segment_num} pending_rename={_pending_rename_file!r}")
-                # Persist immediately rather than waiting for this thread to exit
-                site.set_segment_continuation(
-                    streamer, segment_num, _pending_rename_file
-                )
+                segment_num, _pending_rename_file = _bump_segment_for_inplace_restart(
+                    site, streamer, segment_num, active_file)
 
-            current_output_tmpl = cfg["output_tmpl"]
-            # For segment 1 we intentionally omit the _part1 suffix — it will be
-            # retroactively added (via rename) only if a second part is ever created.
-            if continuity_active and segment_num > 1:
-                current_output_tmpl = add_segment_suffix_to_tmpl(
-                    current_output_tmpl,
-                    segment_num
-                )
+            current_output_tmpl, output_path = _build_segment_output_paths(
+                cfg, output_dir, continuity_active, segment_num)
 
-            output_path = _simulation.get_write_failure_output_path(
-                output_dir, current_output_tmpl)
-
-            # ── Select downloader command (normal vs LQ) ──────────────────
-            _active_dl_cmd = cfg["downloader_cmd"]
-            if use_lq:
-                _lq_cmd = cfg.get("lq_downloader_cmd", [])
-                if _lq_cmd:
-                    _active_dl_cmd = _lq_cmd
-                else:
-                    dbg(f"[LQ] use_lq=True but lq_downloader_cmd is empty — falling back to normal downloader for {streamer}")
+            _active_dl_cmd = _select_downloader_cmd(cfg, use_lq, streamer)
 
             # yt-dlp writes the resolved filename into this sidecar file (in
             # UTF-8) via --print-to-file, so we never have to reconstruct the
             # filename from possibly-mangled stdout text (e.g. emoji/CJK
             # characters getting corrupted by console code-page issues on
-            # Windows).  One unique file per attempt, written to OUTPUT_DIR,
+            # Windows). One unique file per attempt, written to OUTPUT_DIR,
             # deleted as soon as we've read it.
-            #
-            # Two templates are written:
-            #   1. %(filepath)s  → full path (some extractors return "NA")
-            #   2. the raw output template → filename-only (works for
-            #      extractors like TikTok live where %(filepath)s is "NA"
-            #      but individual fields like %(title)s are resolvable).
-            # The sidecar reading code below picks the last non-"NA" line and
-            # applies Windows filename sanitisation when the value is a plain
-            # filename (not an absolute path).
-            _sidecar_token = _re.sub(r"[^A-Za-z0-9_.-]", "_", streamer) or "streamer"
-            _sidecar_path = os.path.join(
-                output_dir, f".jjdlp_filename_{_sidecar_token}_{uuid.uuid4().hex}.tmp"
-            )
+            _sidecar_path = _build_sidecar_path(output_dir, streamer)
 
             cmd = build_yt_dlp_command(
                 cfg["yt_dlp_path"],
@@ -3419,202 +3801,18 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
             out_target, err_target, close_logs, log_out_fp, log_err_fp = open_log_streams(cfg, streamer)
 
-            try:
-                _popen_kwargs: dict = dict(stdout=out_target, stderr=err_target)
-                if sys.platform == "win32":
-                    _popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-                else:
-                    # Put the child in its own process group so we can kill both
-                    # the PyInstaller bootloader and the real yt-dlp process at once.
-                    _popen_kwargs["start_new_session"] = True
-                dbg(f"[POPEN] streamer={streamer!r} cmd={cmd_display_str(cmd)!r}")
-                dbg(f"[POPEN] Windows CREATE_NO_WINDOW={'yes' if sys.platform == 'win32' else 'n/a'}")
-                dbg(f"[POPEN] PYTHONPATH={os.environ.get('PYTHONPATH', '<not set>')!r}")
-                proc = subprocess.Popen(cmd, **_popen_kwargs)
-                proc_start_time = time.time()
-                dbg(f"[POPEN] launched pid={proc.pid}")
-
-                site.register_proc(streamer, proc)
-
-                ffmpeg_error_counter = [0]
-                ffmpeg_error_event   = threading.Event()
-                site.clear_ffmpeg_error_count(streamer)
-                site.clear_stall_since(streamer)
-
-                threading.Thread(
-                    target=_drain_pipe,
-                    args=(proc.stdout, log_out_fp, "stdout"),
-                    kwargs={
-                        "ffmpeg_error_counter": ffmpeg_error_counter,
-                        "ffmpeg_error_event": ffmpeg_error_event,
-                        "streamer": streamer,
-                        "site": site,
-                        "ad_alert_pattern": _compile_ad_alert_pattern(cfg),
-                    },
-                    daemon=True
-                ).start()
-
-                threading.Thread(
-                    target=_drain_pipe,
-                    args=(proc.stderr, log_err_fp, "stderr"),
-                    kwargs={
-                        "ffmpeg_error_counter": ffmpeg_error_counter,
-                        "ffmpeg_error_event": ffmpeg_error_event,
-                        "streamer": streamer,
-                        "site": site,
-                        "ad_alert_pattern": _compile_ad_alert_pattern(cfg),
-                    },
-                    daemon=True
-                ).start()
-
-            except Exception as e:
-                site.log_line(f"Failed to start yt-dlp for {streamer}: {e}")
-                try:
-                    close_logs()
-                except Exception as e:
-                    dbg(f"record_stream: {e}")
-                    pass
+            _launch_result = _launch_yt_dlp_attempt(
+                cmd, out_target, err_target, close_logs, log_out_fp, log_err_fp,
+                cfg, site, streamer)
+            if _launch_result is None:
                 break
+            proc, proc_start_time, ffmpeg_error_counter, ffmpeg_error_event = _launch_result
 
-            # ── Resolve active output file ────────────────────────────────
-            # 3-tier fallback chain:
-            #   1. Sidecar file written by yt-dlp itself (--print-to-file on
-            #      "before_dl"), read in UTF-8 — avoids any console/stdout
-            #      encoding issues (e.g. mangled emoji/CJK titles on Windows).
-            #   2. yt-dlp's "[download] Destination: ..." stdout/stderr line,
-            #      parsed live by _drain_pipe — covers extractors where
-            #      %(filepath)s isn't resolvable yet at "before_dl", 
-            #      which writes "NA" to the sidecar).
-            #   3. Re-running yt-dlp with --dump-json to ask it directly for
-            #      the filename it would use — slowest, and can, in principle,
-            #      compute a slightly different name if anything in the
-            #      template is time-sensitive, but is the most tolerant of
-            #      extractor quirks.
-            _FILENAME_WAIT_TIMEOUT = 15.0
-            active_file = None
-            _sidecar_deadline = time.time() + _FILENAME_WAIT_TIMEOUT
-            while time.time() < _sidecar_deadline:
-                if os.path.isfile(_sidecar_path):
-                    try:
-                        with open(_sidecar_path, "r", encoding="utf-8") as _sf:
-                            # --print-to-file appends rather than overwrites, so
-                            # the sidecar may have multiple lines (retries,
-                            # format re-selection, and/or multiple timings).
-                            # Scan from bottom to top, preferring absolute
-                            # paths (%(filepath)s result) over relative ones
-                            # (raw output-template result).
-                            _sc_lines = [ln.strip() for ln in _sf.read().splitlines() if ln.strip()]
-                        raw_abs = None
-                        raw_rel = ""
-                        for ln in reversed(_sc_lines):
-                            if not ln or ln == "NA":
-                                continue
-                            if os.path.isabs(ln):
-                                raw_abs = ln  # prefer absolute (%(filepath)s)
-                            else:
-                                if not raw_rel:
-                                    raw_rel = ln  # keep first (last) relative
-                        raw_dest = raw_abs if raw_abs is not None else raw_rel
-                    except Exception as _sc_read_err:
-                        dbg(f"[STALL] error reading filename sidecar {_sidecar_path!r}: "
-                            f"{_sc_read_err!r}", site_name=streamer)
-                        raw_dest = ""
-                    # The sidecar has served its purpose the moment we've read
-                    # it — remove it right away rather than waiting for
-                    # end-of-recording cleanup.
-                    try:
-                        os.remove(_sidecar_path)
-                    except OSError:
-                        pass
-
-                    if raw_dest:
-                        if os.path.isabs(raw_dest):
-                            candidate = raw_dest
-                        else:
-                            # This is the raw output template result (e.g.
-                            # from "%(uploader)s %(title)s ...").  yt-dlp
-                            # resolves the template but does NOT apply
-                            # filesystem sanitization — that happens later
-                            # when the file is created.  Replicate the
-                            # Windows sanitization here so the candidate
-                            # path matches the actual file on disk.
-                            _sanitized = _re.sub(r'[<>:"/\\|?*]', '_', raw_dest)
-                            _sanitized = _re.sub(r'[\x00-\x1f\x7f]', '', _sanitized)
-                            _sanitized = _sanitized.strip(' .')
-                            candidate = os.path.join(output_dir, _sanitized)
-                        # The sidecar is written at before_dl, but the actual
-                        # output file may not exist yet (yt-dlp opens it
-                        # slightly after the hook fires).  Wait a few seconds
-                        # for the file to appear before giving up.
-                        _file_deadline = time.time() + 5.0
-                        while time.time() < _file_deadline:
-                            if os.path.exists(candidate):
-                                active_file = candidate
-                                dbg(f"[STALL] resolved active_file from filename sidecar: "
-                                    f"{active_file!r}", site_name=streamer)
-                                break
-                            if proc.poll() is not None:
-                                break
-                            time.sleep(0.25)
-                        if not active_file:
-                            dbg(f"[STALL] sidecar candidate {candidate!r} (from {raw_dest!r}) "
-                                f"does not exist after 5s, discarding.", site_name=streamer)
-                    break
-
-                if proc.poll() is not None:
-                    # Process already exited without ever writing the sidecar —
-                    # no point waiting out the rest of the timeout.
-                    dbg(f"[STALL] proc exited before writing filename sidecar "
-                        f"(returncode={proc.returncode})", site_name=streamer)
-                    break
-
-                time.sleep(0.25)
-            else:
-                dbg(f"[STALL] timed out after {_FILENAME_WAIT_TIMEOUT}s waiting for "
-                    f"filename sidecar {_sidecar_path!r}", site_name=streamer)
-
-            # Best-effort cleanup: if we broke out early (timeout / proc exit)
-            # before the sidecar ever appeared, make sure nothing is left behind.
-            if not active_file:
-                try:
-                    if os.path.isfile(_sidecar_path):
-                        os.remove(_sidecar_path)
-                except OSError:
-                    pass
-
-            # Publish the resolved output file so the top-bar disk-rate graph
-            # can count exactly which file(s) yt-dlp is actively recording
-            # (and only those — never File Manager Move/Fixup/Trim/Split
-            # output). If resolution failed, nothing is published and the
-            # graph reads zero until the file resolves.
-            if active_file:
-                site.set_recording_output(streamer, active_file)
-
-                # Continuation from a prior attempt (this thread's own
-                # in-thread restart, or a separate earlier record_stream()
-                # call for the same live session) is confirmed now that this
-                # attempt's file resolved — retroactively rename that prior
-                # attempt's unsuffixed file to _partN now that we know a
-                # later part exists. Mirrors the SPLIT_AFTER mid-recording
-                # rename-of-part1 logic further below, just triggered at a
-                # different point (attempt start vs. confirmed mid-recording
-                # split).
-                if (_pending_rename_file and _pending_rename_file != active_file
-                        and os.path.isfile(_pending_rename_file)):
-                    _prev_part_path = add_segment_suffix_to_tmpl(
-                        _pending_rename_file, segment_num - 1
-                    )
-                    try:
-                        os.rename(_pending_rename_file, _prev_part_path)
-                        site.log_line(
-                            f"Renamed previous segment to: {os.path.basename(_prev_part_path)}"
-                        )
-                        dbg(f"[SPLIT][record_stream] renamed continuation segment: "
-                            f"{_pending_rename_file!r} -> {_prev_part_path!r}")
-                    except Exception as _ren_err:
-                        dbg(f"[SPLIT][record_stream] rename of continuation segment "
-                            f"FAILED: {_ren_err!r}")
-                    _pending_rename_file = None
+            # Resolve the file this attempt is actually writing to (sidecar-based,
+            # with a bounded wait) and publish/finalize any pending rename.
+            active_file = _resolve_active_recording_file(proc, _sidecar_path, output_dir, streamer)
+            _pending_rename_file = _publish_active_file_and_finalize_rename(
+                site, streamer, active_file, _pending_rename_file, segment_num)
 
             last_size, _, _, _ = get_streamer_file_size(
                 output_dir,
@@ -3628,60 +3826,11 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             recording_start_time = time.time()
             stall_check_interval = cfg["stall_check_interval"]
             stall_timeout        = cfg["stall_timeout"]
-            # NOTIFY_NO_CONFIRM_FILE tracking: if the recording file has not been
-            # confirmed within one STALL_TIMEOUT window (anchored to when the
-            # streamer went live), fire a warning notification. yt-dlp can exit
-            # 'normally' during a failure, so this deadline is the backstop —
-            # and because of that, the anchor must be a persistent, session-
-            # long value (the streamer's live-since time), not something reset
-            # per attempt, since a retry after a failed attempt should still
-            # measure from the same start point.
-            #
-            # live-since is correct and is never reset — it's the source of
-            # truth for how long the streamer has actually been live. But if
-            # this streamer was ever live-while-disabled during the current
-            # session, get_enable_anchor() holds a separate, persistent
-            # anchor set once at the moment of enabling, and reused for
-            # every attempt/retry afterward — otherwise a retry following a
-            # fast failure would fall back to the stale live-since time and
-            # fire a false-positive alert almost immediately, exactly as
-            # live-since predates the enable.
-            _no_confirm_anchor_val = site.get_enable_anchor(streamer)
-            _no_confirm_anchor_src = "enable_anchor"
-            if _no_confirm_anchor_val is None:
-                _no_confirm_anchor_val = site.get_live_since(streamer) or time.time()
-                _no_confirm_anchor_src = "live_since"
-            # If this attempt follows a restart (stall, LQ, or quality
-            # upgrade), take the more recent of the two anchors to avoid
-            # firing the write-failure alert
-            _last_restart_anchor = site.get_last_restart_anchor(streamer)
-            if _last_restart_anchor is not None and _last_restart_anchor > _no_confirm_anchor_val:
-                _no_confirm_anchor_val = _last_restart_anchor
-                _no_confirm_anchor_src = "last_restart_anchor"
-            # Floor the anchor at this process's own start time.  If the
-            # streamer had been live for longer than stall_timeout already,
-            # using the raw persisted anchor would put _no_confirm_deadline
-            # in the past before this attempt even starts, firing the
-            # write-failure alert immediately on every launch. 
-            if _no_confirm_anchor_val < _SCRIPT_START_TIME:
-                dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: {_no_confirm_anchor_src} "
-                    f"({_no_confirm_anchor_val:.2f}) predates this process's start "
-                    f"({_SCRIPT_START_TIME:.2f}) — flooring anchor at process start "
-                    f"for streamer={streamer!r}",
-                    site_name=streamer)
-                _no_confirm_anchor_val = _SCRIPT_START_TIME
-                _no_confirm_anchor_src += "+floored_at_process_start"
-            _no_confirm_deadline = _no_confirm_anchor_val + stall_timeout + _no_confirm_grace_seconds
-            _no_confirm_warned   = False
-            # Independent size baseline for _check_no_confirm_deadline(),
-            # decoupled from the stall-checker's last_size.
-            _no_confirm_last_size = last_size
-            dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: confirmation deadline for "
-                f"streamer={streamer!r} = {_no_confirm_anchor_src}+{stall_timeout}s"
-                f"{f'+{_no_confirm_grace_seconds:.0f}s intro-delay grace' if _no_confirm_grace_seconds else ''} "
-                f"({_no_confirm_deadline:.2f}), live_since={site.get_live_since(streamer)}, "
-                f"enable_anchor={site.get_enable_anchor(streamer)}",
-                site_name=streamer)
+            # NOTIFY_NO_CONFIRM_FILE tracking: see _compute_no_confirm_deadline()
+            # for the anchor-selection reasoning.
+            _no_confirm_deadline = _compute_no_confirm_deadline(
+                site, streamer, stall_timeout, _no_confirm_grace_seconds)
+            _no_confirm_warned = False
 
             def _check_no_confirm_deadline():
                 # Fires the NOTIFY_NO_CONFIRM_FILE warning as soon as the
@@ -3692,7 +3841,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 # (and real write failures) can make yt-dlp exit in well
                 # under stall_check_interval on every retry, which previously
                 # meant this check was never reached at all.
-                nonlocal _no_confirm_warned, _no_confirm_last_size
+                nonlocal _no_confirm_warned
                 # FIX: guard so this function never fires for a streamer that's
                 # being evicted or the app is shutting down, no matter which
                 # call site invokes it.
@@ -3714,12 +3863,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: file not confirmed for "
                         f"streamer={streamer!r} within {int(stall_timeout)}s "
                         f"(deadline={_no_confirm_deadline:.2f}) — sending warning; "
-                        f"anchor_src={_no_confirm_anchor_src} "
-                        f"anchor_val={_no_confirm_anchor_val:.2f} "
-                        f"live_since={site.get_live_since(streamer)} "
-                        f"enable_anchor={site.get_enable_anchor(streamer)} "
                         f"attempt_age={time.time() - recording_start_time:.1f}s "
-                        f"active_file={active_file!r} last_size={_no_confirm_last_size} "
+                        f"active_file={active_file!r} last_size={last_size} "
                         f"cur_size={_nc_size} file_error={_nc_file_error} "
                         f"growth_seen={growth_seen}",
                         site_name=streamer)
@@ -3757,14 +3902,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             while proc.poll() is None:
 
                 if site._stop_event.is_set() or streamer in site.evicted_streamers:
-                    kill_proc(proc)
-                    proc.wait()
-                    site.unregister_proc(streamer)
-                    try:
-                        close_logs()
-                    except Exception as e:
-                        dbg(f"_check_no_confirm_deadline: {e}")
-                        pass
+                    _teardown_attempt(site, streamer, proc, close_logs, wait_after_kill=True)
                     return
 
                 _t0 = time.time()
@@ -3779,26 +3917,16 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     # `finally` block below do currently_recording.discard(),
                     # the AUTO_SUFFIX/SPLIT_AFTER set_segment_continuation()
                     # write, and the single cooldown wait, in that order.
-                    kill_proc(proc)
                     site.log_line(f"Recording STOPPED (blocked) -> {streamer}")
-                    site.unregister_proc(streamer)
-                    site.clear_ffmpeg_error_count(streamer)
-                    site.clear_stall_since(streamer)
-
-                    try:
-                        close_logs()
-                    except Exception as e:
-                        dbg(f"_check_no_confirm_deadline: {e}")
-                        pass
-
+                    _teardown_attempt(site, streamer, proc, close_logs,
+                                       clear_stall=True, clear_ffmpeg_error=True)
                     return
 
-                # ── LQ-restart simulation (DEBUG) ──────────────────────────
-                # Injects simulated ffmpeg-error counts so the real LQ
-                # machinery can be exercised without a genuinely degraded
-                # stream. See _SIMULATE_LQ_RESTART up top. Placed just before
-                # the event check below so a simulated threshold hit is caught
-                # on the very next loop iteration.
+                # LQ-restart simulation (DEBUG): injects simulated ffmpeg-error
+                # counts so the real LQ machinery can be exercised without a
+                # genuinely degraded stream. See _SIMULATE_LQ_RESTART up top.
+                # Placed just before the event check below so a simulated
+                # threshold hit is caught on the very next loop iteration.
                 _simulation._maybe_simulate_lq_errors(
                     streamer, site, use_lq, growth_seen,
                     ffmpeg_error_counter, ffmpeg_error_event,
@@ -3813,18 +3941,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     _refresh_restart_anchor_if_growing(
                         site, streamer, growth_seen, reason="ffmpeg_error_threshold")
 
-                    kill_proc(proc)
-                    site.unregister_proc(streamer)
-                    site.clear_ad_alert(streamer)
+                    _teardown_attempt(site, streamer, proc, close_logs, clear_ad_alert=True)
 
-                    try:
-                        close_logs()
-                    except Exception as e:
-                        dbg(f"_check_no_confirm_deadline: {e}")
-                        pass
-
-                    # ── LQ bandwidth-saving trigger (non-LQ recordings only) ──
-                    # Only trigger LQ for normal recordings; if a LQ recording
+                    # LQ bandwidth-saving trigger (non-LQ recordings only):
+                    # only trigger LQ for normal recordings; if a LQ recording
                     # itself hits the threshold we just let it restart normally.
                     if not use_lq:
                         _maybe_trigger_lq(site, streamer)
@@ -3880,84 +4000,11 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         next_out_target, next_err_target, next_close_logs, next_log_out_fp, next_log_err_fp = open_log_streams(cfg, streamer)
 
                         try:
-                            _next_popen_kwargs: dict = dict(
-                                stdout=next_out_target,
-                                stderr=next_err_target,
-                            )
-                            if sys.platform != "win32":
-                                # Same process-group isolation as the primary Popen above.
-                                _next_popen_kwargs["start_new_session"] = True
-                            dbg(f"[POPEN] streamer={streamer!r} split cmd={cmd_display_str(next_cmd)!r}")
-                            next_proc = subprocess.Popen(next_cmd, **_next_popen_kwargs)
-
-                            next_proc_start_time = time.time()
-                            dbg(f"[SPLIT][record_stream] next_proc started pid={next_proc.pid} "
-                                f"next_proc_start_time={next_proc_start_time:.3f}")
-
-                            threading.Thread(
-                                target=_drain_pipe,
-                                args=(next_proc.stdout, next_log_out_fp, "stdout"),
-                                kwargs={
-                                    "streamer": streamer,
-                                    "site": site,
-                                    "ad_alert_pattern": _compile_ad_alert_pattern(cfg),
-                                },
-                                daemon=True
-                            ).start()
-
-                            threading.Thread(
-                                target=_drain_pipe,
-                                args=(next_proc.stderr, next_log_err_fp, "stderr"),
-                                kwargs={
-                                    "streamer": streamer,
-                                    "site": site,
-                                    "ad_alert_pattern": _compile_ad_alert_pattern(cfg),
-                                },
-                                daemon=True
-                            ).start()
-
-                            # Wait for the exact new segment file.
-                            # Do NOT use wait_for_streamer_file here — it does a
-                            # fuzzy mtime search and can return the *previous*
-                            # segment's file if the old proc is still writing to it
-                            # and bumps its mtime past next_proc_start_time.
-                            # Instead, search by the exact _partN suffix so we only
-                            # accept the file that belongs to this new segment.
                             part_suffix = f"_part{next_segment_num}"
-                            next_file = None
-                            _nf_deadline = time.time() + 30.0
-                            dbg(f"[SPLIT][record_stream] waiting for exact segment file "
-                                f"part_suffix={part_suffix!r} pid={next_proc.pid} "
-                                f"next_proc_start_time={next_proc_start_time:.3f} timeout=30s")
-                            while time.time() < _nf_deadline:
-                                if os.path.isdir(output_dir):
-                                    for _f in os.listdir(output_dir):
-                                        _fp = os.path.join(output_dir, _f)
-                                        if (os.path.isfile(_fp)
-                                                and streamer.lower() in _f.lower()
-                                                and part_suffix.lower() in _f.lower()
-                                                and os.path.getmtime(_fp) >= next_proc_start_time):
-                                            next_file = _fp
-                                            break
-                                if next_file:
-                                    dbg(f"[SPLIT][record_stream] exact segment file found: "
-                                        f"{next_file!r} elapsed={30.0-(_nf_deadline-time.time()):.1f}s")
-                                    break
-                                dbg(f"[SPLIT][record_stream] still waiting for {part_suffix!r} file "
-                                    f"remaining={_nf_deadline-time.time():.1f}s")
-                                time.sleep(0.5)
-
-                            if next_file is None:
-                                dbg(f"[SPLIT][record_stream] TIMEOUT — exact segment file not found "
-                                    f"part_suffix={part_suffix!r} pid={next_proc.pid}")
-                            dbg(f"[SPLIT][record_stream] segment file search result: {next_file!r}")
-
-                            split_success = (
-                                next_file is not None and
-                                wait_for_new_file_growth(next_file, timeout=15.0)
-                            )
-                            dbg(f"[SPLIT][record_stream] split_success={split_success} "
-                                f"next_file={next_file!r}")
+                            next_proc, next_proc_start_time, next_file, split_success = _spawn_and_verify_split_segment(
+                                next_cmd, cfg, next_out_target, next_err_target,
+                                next_log_out_fp, next_log_err_fp,
+                                output_dir, streamer, site, part_suffix)
 
                             if split_success:
                                 site.log_line(
@@ -3991,8 +4038,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                                 try:
                                     close_logs()
                                 except Exception as e:
-                                    dbg(f"_check_no_confirm_deadline: {e}")
-                                    pass
+                                    dbg(f"record_stream: close_logs() failed for {streamer!r} during split switch: {e}")
 
                                 proc = next_proc
                                 close_logs = next_close_logs
@@ -4036,7 +4082,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                                 # the new segment.
                                 _no_confirm_deadline = time.time() + stall_timeout
                                 _no_confirm_warned   = False
-                                _no_confirm_last_size = 0
 
                                 dbg(f"[SPLIT][record_stream] switched to part {segment_num} "
                                     f"pid={proc.pid} active_file={active_file!r} "
@@ -4058,8 +4103,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                             try:
                                 next_close_logs()
                             except Exception as e:
-                                dbg(f"_check_no_confirm_deadline: {e}")
-                                pass
+                                dbg(f"record_stream: next_close_logs() failed for {streamer!r} after failed split: {e}")
 
                         except Exception as e:
                             dbg(f"[SPLIT][record_stream] EXCEPTION launching next proc: "
@@ -4100,28 +4144,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         known_filename=active_file,
                     )
 
-                    # ── Dashboard quality display (independent of stall logic) ──
-                    # Measure the actual on-disk resolution via ffprobe, reusing
+                    # Dashboard quality display (independent of stall logic):
+                    # measure the actual on-disk resolution via ffprobe, reusing
                     # the same active_file the stall checker just used above.
-                    #
-                    # If the file can't be located this cycle (file_error),
-                    # clear the measured value.  If ffprobe
-                    # itself is unavailable, also clear it. 
-                    if file_error:
-                        with site.lock:
-                            site.display_resolution.pop(streamer, None)
-                        dbg(f"[QUALITY] file_error={file_error!r} - clearing measured resolution", site_name=streamer)
-                    else:
-                        _measured_height = probe_file_height(active_file)
-                        with site.lock:
-                            _prev_measured = site.display_resolution.get(streamer)
-                            if _measured_height is not None:
-                                site.display_resolution[streamer] = _measured_height
-                            else:
-                                site.display_resolution.pop(streamer, None)
-                        dbg(f"[QUALITY] measured_height={_measured_height!r}p "
-                            f"(prev={_prev_measured!r}p) recording_resolution_baseline={site.recording_resolution.get(streamer)!r}p "
-                            f"file={active_file!r}", site_name=streamer)
+                    _update_measured_quality(site, streamer, active_file, file_error)
 
                     if file_error:
                         # We couldn't even locate/read the recording file this
@@ -4157,18 +4183,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                                 f"{int(_file_error_elapsed)}s — restarting"
                             )
                             site.set_write_unconfirmed(streamer)
-
-                            kill_proc(proc)
-                            site.unregister_proc(streamer)
-                            site.clear_stall_since(streamer)
-                            site.clear_ad_alert(streamer)
-
-                            try:
-                                close_logs()
-                            except Exception as e:
-                                dbg(f"_check_no_confirm_deadline: {e}")
-                                pass
-
+                            _teardown_attempt(site, streamer, proc, close_logs,
+                                               clear_stall=True, clear_ad_alert=True)
                             time.sleep(5)
                             break
 
@@ -4181,17 +4197,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         _refresh_restart_anchor_if_growing(
                             site, streamer, growth_seen, reason="stall_detected")
 
-                        kill_proc(proc)
-                        site.unregister_proc(streamer)
-                        site.clear_stall_since(streamer)
-                        site.clear_ad_alert(streamer)
-
-                        try:
-                            close_logs()
-                        except Exception as e:
-                            dbg(f"_check_no_confirm_deadline: {e}")
-                            pass
-
+                        _teardown_attempt(site, streamer, proc, close_logs,
+                                           clear_stall=True, clear_ad_alert=True)
                         time.sleep(5)
                         break
 
@@ -4199,7 +4206,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         # File size went BACKWARDS since the last poll — the
                         # file was truncated/reopened (e.g. yt-dlp reopening
                         # the output file from byte 0 after a live-stream
-                        # reconnect instead of resuming/appending). 
+                        # reconnect instead of resuming/appending).
                         dbg(f"[STALL] COLLAPSE DETECTED: size dropped "
                             f"{last_size} -> {current_size} "
                             f"(-{last_size - current_size} bytes) — file was "
@@ -4285,15 +4292,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 # bookkeeping, no safety-net check) instead of treating it
                 # like a normal end-of-attempt.
                 if site._stop_event.is_set() or streamer in site.evicted_streamers:
-                    site.unregister_proc(streamer)
-                    site.clear_stall_since(streamer)
-                    site.clear_ffmpeg_error_count(streamer)
-                    site.clear_ad_alert(streamer)
-                    try:
-                        close_logs()
-                    except Exception as e:
-                        dbg(f"_check_no_confirm_deadline: {e}")
-                        pass
+                    _teardown_attempt(site, streamer, proc, close_logs, kill=False,
+                                       clear_stall=True, clear_ffmpeg_error=True, clear_ad_alert=True)
                     return
 
                 # Normal yt-dlp exit (return code 0) is a valid restart
@@ -4323,28 +4323,15 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 # chance here before we report the attempt as finished.
                 _check_no_confirm_deadline()
 
-                site.unregister_proc(streamer)
-                site.clear_stall_since(streamer)
-                site.clear_ffmpeg_error_count(streamer)
-                site.clear_ad_alert(streamer)
+                _teardown_attempt(site, streamer, proc, close_logs, kill=False,
+                                   clear_stall=True, clear_ffmpeg_error=True, clear_ad_alert=True)
 
-                try:
-                    close_logs()
-                except Exception as e:
-                    dbg(f"_check_no_confirm_deadline: {e}")
-                    pass
+                # Clear LQ tracking when streamer goes offline: this ensures
+                # the next time they go live the normal downloader is used
+                # (LQ is only attempted once per online session).
+                _clear_lq_attempt_on_offline(streamer, cfg, site)
 
-                # ── Clear LQ tracking when streamer goes offline ──────────
-                # This ensures the next time they go live the normal downloader
-                # is used (LQ is only attempted once per online session).
-                _offline_site_label = cfg.get("site_label", os.path.basename(site.config_path))
-                with _lq_attempted_lock:
-                    _lq_attempted.pop((streamer, _offline_site_label), None)
-
-                with site.dash_lock:
-                    site.dash_last_live[streamer] = time.time()
-                    _last_live_snapshot = dict(site.dash_last_live)
-                _save_last_live_cache(site.config_path, _last_live_snapshot)
+                _update_last_live_cache(site, streamer)
 
                 site.log_line(f"Recording finished: {streamer}")
                 break
@@ -4354,8 +4341,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             try:
                 kill_proc(proc)
             except Exception as e:
-                dbg(f"_check_no_confirm_deadline: {e}")
-                pass
+                dbg(f"record_stream: kill_proc() failed for {streamer!r} during KeyboardInterrupt: {e}")
 
         site.unregister_proc(streamer)
         site.clear_ad_alert(streamer)
@@ -4363,8 +4349,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
         try:
             close_logs()
         except Exception as e:
-            dbg(f"_check_no_confirm_deadline: {e}")
-            pass
+            dbg(f"record_stream: close_logs() failed for {streamer!r} during KeyboardInterrupt: {e}")
 
     finally:
         with site.lock:
@@ -4388,16 +4373,16 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             # stopped (normal end, eviction, or crash).
             site.evicted_streamers.discard(streamer)
 
-        # ── AUTO_SUFFIX / SPLIT_AFTER restart continuity ────────────────────
-        # Persist enough state for a *future* record_stream() attempt (a
-        # separate thread call for this same live session — e.g. after an
-        # eviction) to continue this part sequence instead of starting back
-        # at part 1. A no-op if the live session already ended (streamer
-        # went offline) — see SiteState.set_segment_continuation().
-        # segment_num==1 means this attempt's file was never suffixed, so
-        # it's the one that would need a retroactive rename if a
-        # continuation attempt follows; segment_num>1 means it was already
-        # suffixed at creation, so there's nothing pending.
+        # AUTO_SUFFIX / SPLIT_AFTER restart continuity: persist enough state
+        # for a *future* record_stream() attempt (a separate thread call for
+        # this same live session — e.g. after an eviction) to continue this
+        # part sequence instead of starting back at part 1. A no-op if the
+        # live session already ended (streamer went offline) — see
+        # SiteState.set_segment_continuation(). segment_num==1 means this
+        # attempt's file was never suffixed, so it's the one that would need
+        # a retroactive rename if a continuation attempt follows;
+        # segment_num>1 means it was already suffixed at creation, so
+        # there's nothing pending.
         _unsuffixed_for_continuation = (
             active_file if (active_file and segment_num == 1) else None
         )
