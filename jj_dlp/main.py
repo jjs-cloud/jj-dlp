@@ -3700,7 +3700,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     return
                 if (notify_no_confirm_file
                         and not _no_confirm_warned
+                        and not growth_seen
                         and time.time() >= _no_confirm_deadline):
+                    _no_confirm_warned = True
                     if active_file:
                         _nc_size, _, _, _nc_file_error = get_streamer_file_size(
                             output_dir, streamer, cfg=cfg,
@@ -3709,12 +3711,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         )
                     else:
                         _nc_size, _nc_file_error = 0, True
-                    # Compare against our own last poll, not the stall-checker's
-                    # last_size, to avoid racing its separate 30s updates.
-                    if _nc_size > _no_confirm_last_size:
-                        _no_confirm_last_size = _nc_size
-                        return
-                    _no_confirm_warned = True
                     dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: file not confirmed for "
                         f"streamer={streamer!r} within {int(stall_timeout)}s "
                         f"(deadline={_no_confirm_deadline:.2f}) — sending warning; "
