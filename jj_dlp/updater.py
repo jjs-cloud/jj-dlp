@@ -18,7 +18,7 @@ _API_BASE   = "https://api.github.com/repos/jjs-cloud/jj-dlp"
 # ── Updater version ───────────────────────────────────────────────────────────
 # Incremented independently of the main jj-dlp version so we can tell which
 # updater logic is actually running during an update.
-UPDATER_VERSION = "2.4.1"
+UPDATER_VERSION = "2.4.2"
 
 # ── Lazy package imports ──────────────────────────────────────────────────────
 # Relative imports are deferred to call time so this file is also safe to
@@ -151,6 +151,7 @@ PRESERVED_SECTIONS = ["Streamers", "Block"]
 def check_for_updates_background():
     """Checks for updates in the background and saves the status to global.json."""
     try:
+        from .main import _global_json_lock
         branch = _get_update_branch()
         api_commits_url = _api_commits_url(branch)
         _logger().dbg(f"[UPDATER] check_for_updates_background: branch={branch} url={api_commits_url}")
@@ -164,38 +165,41 @@ def check_for_updates_background():
             _logger().dbg("[UPDATER] check_for_updates_background: API response missing sha")
             return
 
-        global_data = _load_global_json()
-        current_sha = global_data.get('update_info', {}).get('current_sha')
-        _logger().dbg(f"[UPDATER] check_for_updates_background: current_sha={current_sha}")
+        with _global_json_lock:
+            global_data = _load_global_json()
+            current_sha = global_data.get('update_info', {}).get('current_sha')
+            _logger().dbg(f"[UPDATER] check_for_updates_background: current_sha={current_sha}")
 
-        update_info = global_data.setdefault('update_info', {})
-        if current_sha:
-            update_info['update_available'] = current_sha != latest_sha
-        else:
-            # ← takes this branch on fresh clone
-            update_info['current_sha'] = latest_sha
-            update_info['update_available'] = False
+            update_info = global_data.setdefault('update_info', {})
+            if current_sha:
+                update_info['update_available'] = current_sha != latest_sha
+            else:
+                # ← takes this branch on fresh clone
+                update_info['current_sha'] = latest_sha
+                update_info['update_available'] = False
 
-        update_info['latest_sha'] = latest_sha
-        _logger().dbg(f"[UPDATER] check_for_updates_background: update_info current_sha={update_info.get('current_sha')} latest_sha={latest_sha} update_available={update_info.get('update_available')}")
-        _save_global_json(global_data)
+            update_info['latest_sha'] = latest_sha
+            _logger().dbg(f"[UPDATER] check_for_updates_background: update_info current_sha={update_info.get('current_sha')} latest_sha={latest_sha} update_available={update_info.get('update_available')}")
+            _save_global_json(global_data)
     except Exception as e:
         _logger().dbg(f"[UPDATER] check_for_updates_background: failed during update check: {e}")
 
 
 def mark_update_completed(installed_sha: str | None = None):
-    global_data = _load_global_json()
-    update_info = global_data.setdefault('update_info', {})
-    # Prefer the freshly-fetched SHA passed in by perform_update() so that
-    # rapid back-to-back commits don't leave current_sha pointing at a stale
-    # value and cause a spurious "Update Available" on the next launch.
-    sha_to_record = installed_sha or update_info.get('latest_sha')
-    if sha_to_record:
-        update_info['current_sha'] = sha_to_record
-        update_info['latest_sha'] = sha_to_record
-    update_info['update_available'] = False
-    _logger().dbg(f"[UPDATER] mark_update_completed: current_sha={update_info.get('current_sha')} latest_sha={update_info.get('latest_sha')} update_available=False")
-    _save_global_json(global_data)
+    from .main import _global_json_lock
+    with _global_json_lock:
+        global_data = _load_global_json()
+        update_info = global_data.setdefault('update_info', {})
+        # Prefer the freshly-fetched SHA passed in by perform_update() so that
+        # rapid back-to-back commits don't leave current_sha pointing at a stale
+        # value and cause a spurious "Update Available" on the next launch.
+        sha_to_record = installed_sha or update_info.get('latest_sha')
+        if sha_to_record:
+            update_info['current_sha'] = sha_to_record
+            update_info['latest_sha'] = sha_to_record
+        update_info['update_available'] = False
+        _logger().dbg(f"[UPDATER] mark_update_completed: current_sha={update_info.get('current_sha')} latest_sha={update_info.get('latest_sha')} update_available=False")
+        _save_global_json(global_data)
     _logger().dbg("[UPDATER] mark_update_completed: _save_global_json() returned")
 
 

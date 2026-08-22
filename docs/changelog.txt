@@ -8,7 +8,7 @@
 - added "--retries 0" to tiktok-live.conf so connection retries don't overwrite the recording file.  the tradeoff is more files get created for tiktok live recordings
 - twitch and tiktok live now use "--COOKIES-FROM-BROWSER firefox" by default. Make sure you are logged into twitch and tiktok in firefox.
 - improved the editablity of the settings in the Config tab
-- fixed a bug that would wipe some streamer settings when reordering the streamer
+- fixed a bug that would wipe some streamer settings when re-ordering the streamer
 
 ====================
 ====================

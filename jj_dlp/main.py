@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.27.21"
+__version__ = "1.27.22"
 
 import subprocess
 import textwrap
@@ -792,16 +792,17 @@ def _load_skip_disabled(config_path: str) -> Set[str]:
 
 
 def _save_skip_disabled(config_path: str, skip_disabled: Set[str]) -> None:
-    gdata = _load_global_json()
-    all_skip = gdata.get("skip_disabled", {})
-    if not isinstance(all_skip, dict):
-        all_skip = {}
-    if skip_disabled:
-        all_skip[config_path] = sorted(skip_disabled)
-    else:
-        all_skip.pop(config_path, None)
-    gdata["skip_disabled"] = all_skip
-    _save_global_json(gdata)
+    with _global_json_lock:
+        gdata = _load_global_json()
+        all_skip = gdata.get("skip_disabled", {})
+        if not isinstance(all_skip, dict):
+            all_skip = {}
+        if skip_disabled:
+            all_skip[config_path] = sorted(skip_disabled)
+        else:
+            all_skip.pop(config_path, None)
+        gdata["skip_disabled"] = all_skip
+        _save_global_json(gdata)
 
 
 def _backup_global_json_if_due(data: dict) -> None:
