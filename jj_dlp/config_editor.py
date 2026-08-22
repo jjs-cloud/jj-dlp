@@ -407,14 +407,14 @@ class PriorityEntryStore:
 
     def _mutate(self, fn, create_if_missing: bool) -> None:
         try:
-            from .main import _global_json_lock, _load_global_json, _save_global_json
-            with _global_json_lock:
-                gdata   = _load_global_json()
+            from .main import _update_global_json
+
+            def _apply(gdata):
                 entries = self._entries(gdata)
                 target  = self._find(entries)
                 if target is None:
                     if not create_if_missing:
-                        return
+                        return False
                     target = {
                         "streamer":   self.entry.streamer,
                         "site":       self.entry.site,
@@ -427,7 +427,7 @@ class PriorityEntryStore:
                 gdata.setdefault("priorities", {}).setdefault(
                     self.config_id, {"config_files": [], "entries": []}
                 )["entries"] = entries
-                _save_global_json(gdata)
+            _update_global_json(_apply)
         except Exception as e:
             _dbg(f"PriorityEntryStore._mutate: {e}")
             pass
@@ -715,16 +715,13 @@ class PriorityEditor:
         if not self._config_id:
             return
         config_paths = [site.config_path for site in self.dashboard.sites]
-        from .main import _global_json_lock, _load_global_json, _save_global_json
-        with _global_json_lock:
-            global_data = _load_global_json()
-            if "priorities" not in global_data or not isinstance(global_data["priorities"], dict):
-                global_data["priorities"] = {}
+        from .main import _update_global_json
+
+        def _mutate(gdata):
+            priorities = gdata.setdefault("priorities", {})
             # Build a lookup of any extra fields already stored (e.g. schedule)
             # so we can carry them forward rather than losing them on every save.
-            existing_entries = (global_data["priorities"]
-                                .get(self._config_id, {})
-                                .get("entries", []))
+            existing_entries = priorities.get(self._config_id, {}).get("entries", [])
             existing_map: dict = {}
             for ex in existing_entries:
                 key = (ex.get("streamer", ""), ex.get("site", ""))
@@ -742,11 +739,11 @@ class PriorityEditor:
                 })
                 entries_data.append(entry_dict)
 
-            global_data["priorities"][self._config_id] = {
+            priorities[self._config_id] = {
                 "config_files": config_paths,
                 "entries":      entries_data,
             }
-            _save_global_json(global_data)
+        _update_global_json(_mutate)
 
         # Invalidate the sort manager's priority cache so the panel re-sorts immediately.
         try:
@@ -3096,11 +3093,11 @@ class GlobalConfigEditor:
 
         # 2. Persist tag overrides to global.json.
         try:
-            from .main import _global_json_lock, _load_global_json, _save_global_json
-            with _global_json_lock:
-                gdata = _load_global_json()
+            from .main import _update_global_json
+
+            def _mutate(gdata):
                 gdata["debug_log_tags"] = self._debug_tags_state
-                _save_global_json(gdata)
+            _update_global_json(_mutate)
         except Exception as e:
             _dbg(f"[CONFIG] _save_debug_tags: failed to write global.json: {e}")
 
@@ -3161,12 +3158,11 @@ class GlobalConfigEditor:
     def _save_msg_filters(self) -> None:
         """Persist this tag's on/off switch and its per-message overrides."""
         try:
-            from .main import _global_json_lock, _load_global_json, _save_global_json
+            from .main import _update_global_json
         except ImportError:
-            from main import _global_json_lock, _load_global_json, _save_global_json  # type: ignore[no-redef]
+            from main import _update_global_json  # type: ignore[no-redef]
 
-        with _global_json_lock:
-            gdata = _load_global_json()
+        def _mutate(gdata):
             gdata["debug_log_tags"] = self._debug_tags_state
 
             all_filters = gdata.get("debug_log_message_filters", {})
@@ -3180,8 +3176,7 @@ class GlobalConfigEditor:
             else:
                 all_filters.pop(self._msg_filters_tag, None)
             gdata["debug_log_message_filters"] = all_filters
-
-            _save_global_json(gdata)
+        _update_global_json(_mutate)
         _dbg(f"[CONFIG] _save_msg_filters: tag={self._msg_filters_tag!r} "
              f"disabled={sorted(k for k, v in self._msg_filters_state.items() if not v)}")
 

@@ -53,6 +53,10 @@ def _save_global_json(data: dict) -> None:
     from .main import _save_global_json as _f
     _f(data)
 
+def _update_global_json(mutate_fn) -> dict:
+    from .main import _update_global_json as _f
+    return _f(mutate_fn)
+
 def _load_config_keys(source_dir=None):
     """Return the CONFIG_KEYS tuple.
 
@@ -151,7 +155,6 @@ PRESERVED_SECTIONS = ["Streamers", "Block"]
 def check_for_updates_background():
     """Checks for updates in the background and saves the status to global.json."""
     try:
-        from .main import _global_json_lock
         branch = _get_update_branch()
         api_commits_url = _api_commits_url(branch)
         _logger().dbg(f"[UPDATER] check_for_updates_background: branch={branch} url={api_commits_url}")
@@ -165,8 +168,7 @@ def check_for_updates_background():
             _logger().dbg("[UPDATER] check_for_updates_background: API response missing sha")
             return
 
-        with _global_json_lock:
-            global_data = _load_global_json()
+        def _mutate(global_data):
             current_sha = global_data.get('update_info', {}).get('current_sha')
             _logger().dbg(f"[UPDATER] check_for_updates_background: current_sha={current_sha}")
 
@@ -180,15 +182,13 @@ def check_for_updates_background():
 
             update_info['latest_sha'] = latest_sha
             _logger().dbg(f"[UPDATER] check_for_updates_background: update_info current_sha={update_info.get('current_sha')} latest_sha={latest_sha} update_available={update_info.get('update_available')}")
-            _save_global_json(global_data)
+        _update_global_json(_mutate)
     except Exception as e:
         _logger().dbg(f"[UPDATER] check_for_updates_background: failed during update check: {e}")
 
 
 def mark_update_completed(installed_sha: str | None = None):
-    from .main import _global_json_lock
-    with _global_json_lock:
-        global_data = _load_global_json()
+    def _mutate(global_data):
         update_info = global_data.setdefault('update_info', {})
         # Prefer the freshly-fetched SHA passed in by perform_update() so that
         # rapid back-to-back commits don't leave current_sha pointing at a stale
@@ -199,7 +199,7 @@ def mark_update_completed(installed_sha: str | None = None):
             update_info['latest_sha'] = sha_to_record
         update_info['update_available'] = False
         _logger().dbg(f"[UPDATER] mark_update_completed: current_sha={update_info.get('current_sha')} latest_sha={update_info.get('latest_sha')} update_available=False")
-        _save_global_json(global_data)
+    _update_global_json(_mutate)
     _logger().dbg("[UPDATER] mark_update_completed: _save_global_json() returned")
 
 
@@ -497,6 +497,12 @@ if __name__ == "__main__":
             except Exception as e:
                 _sdbg(f"_save_json failed: {e}")
 
+        def _update_json(mutate_fn) -> dict:
+            data = _load_json()
+            if mutate_fn(data) is not False:
+                _save_json(data)
+            return data
+
         def _mark_done() -> None:
             # Parity with mark_update_completed()/perform_update(): re-fetch
             # the branch HEAD SHA now, post-install, so that additional
@@ -509,15 +515,15 @@ if __name__ == "__main__":
                 _post_sha = _fetch_latest_sha(_branch)
                 _sdbg(f"mark_done: post-install SHA fetch for branch={_branch}: {_post_sha}")
 
-            _gd = _load_json()
-            _ui = _gd.setdefault("update_info", {})
-            _ls = _post_sha or _ui.get("latest_sha")
-            if _ls:
-                _ui["current_sha"] = _ls
-                _ui["latest_sha"] = _ls
-            _ui["update_available"] = False
-            _sdbg(f"mark_done: current_sha={_ui.get('current_sha')} latest_sha={_ui.get('latest_sha')} update_available=False")
-            _save_json(_gd)
+            def _mutate(gd):
+                ui = gd.setdefault("update_info", {})
+                ls = _post_sha or ui.get("latest_sha")
+                if ls:
+                    ui["current_sha"] = ls
+                    ui["latest_sha"] = ls
+                ui["update_available"] = False
+                _sdbg(f"mark_done: current_sha={ui.get('current_sha')} latest_sha={ui.get('latest_sha')} update_available=False")
+            _update_json(_mutate)
 
         # ── PRESERVED_KEYS: read from the freshly downloaded config_editor,
         #    falling back to the installed package if unavailable ───────────

@@ -478,16 +478,13 @@ class FileManagerTab:
 
     def _save_settings(self):
         try:
-            from .main import _load_global_json, _save_global_json, _global_json_lock
-            with _global_json_lock:
-                data = _load_global_json()
-                fm = data.get("file_manager", {})
-                if not isinstance(fm, dict):
-                    fm = {}
+            from .main import _update_global_json
+
+            def _mutate(data):
+                fm = data.setdefault("file_manager", {})
                 fm["sort_key"] = self._sort_key
                 fm["delete_mode"] = self._delete_mode
-                data["file_manager"] = fm
-                _save_global_json(data)
+            _update_global_json(_mutate)
         except Exception as e:
             dbg(f"_save_settings: {e}")
             pass

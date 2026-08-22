@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.27.22"
+__version__ = "1.27.23"
 
 import subprocess
 import textwrap
@@ -792,17 +792,13 @@ def _load_skip_disabled(config_path: str) -> Set[str]:
 
 
 def _save_skip_disabled(config_path: str, skip_disabled: Set[str]) -> None:
-    with _global_json_lock:
-        gdata = _load_global_json()
-        all_skip = gdata.get("skip_disabled", {})
-        if not isinstance(all_skip, dict):
-            all_skip = {}
+    def _mutate(gdata):
+        all_skip = gdata.setdefault("skip_disabled", {})
         if skip_disabled:
             all_skip[config_path] = sorted(skip_disabled)
         else:
             all_skip.pop(config_path, None)
-        gdata["skip_disabled"] = all_skip
-        _save_global_json(gdata)
+    _update_global_json(_mutate)
 
 
 def _backup_global_json_if_due(data: dict) -> None:
@@ -858,23 +854,37 @@ def _save_global_json(data: dict) -> None:
             dbg(f"_save_global_json: {e}")
             pass
 
-def _add_yt_dlp_pid(pid: int) -> None:
+def _update_global_json(mutate_fn) -> dict:
+    """Load global.json, apply mutate_fn(gdata), and save unless it returns False."""
     with _global_json_lock:
         gdata = _load_global_json()
-        pids = gdata.get("yt_dlp_pids", [])
-        if pid not in pids:
-            pids.append(pid)
-            gdata["yt_dlp_pids"] = pids
+        if mutate_fn(gdata) is not False:
             _save_global_json(gdata)
+        return gdata
+
+
+def _site_json_bucket(gdata: dict, config_path: str) -> dict:
+    """Return gdata['sites'][site_key], creating it if needed."""
+    sites = gdata.setdefault("sites", {})
+    return sites.setdefault(os.path.basename(config_path), {})
+
+
+def _add_yt_dlp_pid(pid: int) -> None:
+    def _mutate(gdata):
+        pids = gdata.setdefault("yt_dlp_pids", [])
+        if pid in pids:
+            return False
+        pids.append(pid)
+    _update_global_json(_mutate)
 
 def _remove_yt_dlp_pid(pid: int) -> None:
-    with _global_json_lock:
-        gdata = _load_global_json()
+    def _mutate(gdata):
         pids = gdata.get("yt_dlp_pids", [])
-        if pid in pids:
-            pids.remove(pid)
-            gdata["yt_dlp_pids"] = pids
-            _save_global_json(gdata)
+        if pid not in pids:
+            return False
+        pids.remove(pid)
+        gdata["yt_dlp_pids"] = pids
+    _update_global_json(_mutate)
 
 
 def _load_last_live_cache(config_path: str) -> Dict[str, float]:
@@ -899,17 +909,9 @@ def _save_last_live_cache(config_path: str, last_live: Dict[str, float]) -> None
 
     Merges with any existing data so other sites' entries are preserved.
     """
-    site_key = os.path.basename(config_path)
-    with _global_json_lock:
-        global_data = _load_global_json()
-        if "sites" not in global_data or not isinstance(global_data["sites"], dict):
-            global_data["sites"] = {}
-        if site_key not in global_data["sites"] or not isinstance(global_data["sites"][site_key], dict):
-            global_data["sites"][site_key] = {}
-        global_data["sites"][site_key]["last_live"] = {
-            streamer: timestamp for streamer, timestamp in last_live.items()
-        }
-        _save_global_json(global_data)
+    def _mutate(gdata):
+        _site_json_bucket(gdata, config_path)["last_live"] = dict(last_live)
+    _update_global_json(_mutate)
 
 
 # How many of the most recent disk-rate graph bars to persist across restarts.
@@ -934,15 +936,9 @@ def _load_last_gql_backfill_ts(config_path: str) -> Optional[float]:
 
 def _save_last_gql_backfill_ts(config_path: str, ts: float) -> None:
     """Persist the epoch this site's last_live GQL backfill last fired."""
-    site_key = os.path.basename(config_path)
-    with _global_json_lock:
-        global_data = _load_global_json()
-        if "sites" not in global_data or not isinstance(global_data["sites"], dict):
-            global_data["sites"] = {}
-        if site_key not in global_data["sites"] or not isinstance(global_data["sites"][site_key], dict):
-            global_data["sites"][site_key] = {}
-        global_data["sites"][site_key]["last_gql_backfill_ts"] = ts
-        _save_global_json(global_data)
+    def _mutate(gdata):
+        _site_json_bucket(gdata, config_path)["last_gql_backfill_ts"] = ts
+    _update_global_json(_mutate)
 
 
 def _load_disk_rate_history() -> List[float]:
@@ -967,10 +963,9 @@ def _save_disk_rate_history(bars) -> None:
     Merges with any existing data so other keys are preserved. Keeps at most
     _GRAPH_PERSIST_BARS entries.
     """
-    with _global_json_lock:
-        global_data = _load_global_json()
-        global_data["disk_rate_history"] = [float(b) for b in bars][-_GRAPH_PERSIST_BARS:]
-        _save_global_json(global_data)
+    def _mutate(gdata):
+        gdata["disk_rate_history"] = [float(b) for b in bars][-_GRAPH_PERSIST_BARS:]
+    _update_global_json(_mutate)
 
 
 def _load_live_since_cache(config_path: str) -> Dict[str, float]:
@@ -993,17 +988,9 @@ def _save_live_since_cache(config_path: str, live_since: Dict[str, float]) -> No
     Called on every live/offline transition (see SiteState.mark_live /
     mark_offline), mirroring _save_last_live_cache's call pattern.
     """
-    site_key = os.path.basename(config_path)
-    with _global_json_lock:
-        global_data = _load_global_json()
-        if "sites" not in global_data or not isinstance(global_data["sites"], dict):
-            global_data["sites"] = {}
-        if site_key not in global_data["sites"] or not isinstance(global_data["sites"][site_key], dict):
-            global_data["sites"][site_key] = {}
-        global_data["sites"][site_key]["live_since"] = {
-            streamer: timestamp for streamer, timestamp in live_since.items()
-        }
-        _save_global_json(global_data)
+    def _mutate(gdata):
+        _site_json_bucket(gdata, config_path)["live_since"] = dict(live_since)
+    _update_global_json(_mutate)
 
 
 def _load_segment_continuation_cache(config_path: str) -> Dict[str, dict]:
@@ -1033,19 +1020,13 @@ def _load_segment_continuation_cache(config_path: str) -> Dict[str, dict]:
 def _save_segment_continuation_cache(config_path: str, mapping: Dict[str, dict]) -> None:
     """Persist AUTO_SUFFIX/SPLIT_AFTER part-numbering continuation state
     for the given site into global.json."""
-    site_key = os.path.basename(config_path)
-    with _global_json_lock:
-        global_data = _load_global_json()
-        if "sites" not in global_data or not isinstance(global_data["sites"], dict):
-            global_data["sites"] = {}
-        if site_key not in global_data["sites"] or not isinstance(global_data["sites"][site_key], dict):
-            global_data["sites"][site_key] = {}
-        global_data["sites"][site_key]["segment_continuation"] = {
+    def _mutate(gdata):
+        _site_json_bucket(gdata, config_path)["segment_continuation"] = {
             streamer: {"next_part": entry.get("next_part", 1),
                        "unsuffixed_file": entry.get("unsuffixed_file")}
             for streamer, entry in mapping.items()
         }
-        _save_global_json(global_data)
+    _update_global_json(_mutate)
 
 
 @dataclass
@@ -4871,8 +4852,7 @@ def _process_streamer_schedules(site: "SiteState") -> None:
         dbg(f"[CHECKER] schedule {log_label} {streamer}: {result.strip()}", site.config_path)
 
     # Persist attempt timestamps (re-read to avoid racing with other writers).
-    with _global_json_lock:
-        gdata   = _load_global_json()
+    def _mutate(gdata):
         entries = (gdata.get("priorities", {})
                        .get(config_id, {})
                        .get("entries", []))
@@ -4887,7 +4867,7 @@ def _process_streamer_schedules(site: "SiteState") -> None:
                     break
         if "priorities" in gdata and config_id in gdata["priorities"]:
             gdata["priorities"][config_id]["entries"] = entries
-        _save_global_json(gdata)
+    _update_global_json(_mutate)
 
     # Trigger an immediate liveness recheck so the new enable/disable state is
     # picked up without waiting for the full check_interval.
@@ -7685,10 +7665,9 @@ class JJDlpDashboard:
 
     def _mark_changelog_shown(self) -> None:
         """Persist changelog_shown=True immediately when the popup opens."""
-        with _global_json_lock:
-            gd = _load_global_json()
-            gd["changelog_shown"] = True
-            _save_global_json(gd)
+        def _mutate(gdata):
+            gdata["changelog_shown"] = True
+        _update_global_json(_mutate)
         dbg("[CHANGELOG] changelog_shown marked True")
 
     def _load_changelog_lines(self) -> List[str]:
@@ -8209,12 +8188,12 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
         elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
             if selected:
                 chosen_files = [found[i] for i in sorted(selected)]
-                
+
                 # Save chosen config files to global.json
-                global_data = _load_global_json()
-                global_data["startup_configs"] = chosen_files
-                _save_global_json(global_data)
-                
+                def _mutate(gdata):
+                    gdata["startup_configs"] = chosen_files
+                _update_global_json(_mutate)
+
                 if do_not_show_config:
                     _write_global_conf_key("ASK_FOR_CONFIG", "false")
                 
@@ -8338,10 +8317,9 @@ def _check_and_kill_zombie_yt_dlps() -> None:
                         except OSError:
                             pass
 
-    with _global_json_lock:
-        gdata = _load_global_json()
+    def _mutate(gdata):
         gdata["yt_dlp_pids"] = []
-        _save_global_json(gdata)
+    _update_global_json(_mutate)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # main()
