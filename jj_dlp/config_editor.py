@@ -342,6 +342,122 @@ def _get_site_default_cfg(dashboard, entry: "PriorityEntry") -> dict:
     return {}
 
 
+class PriorityEntryStore:
+    """Read/write access to one streamer's record inside
+    priorities[config_id]['entries'] in global.json.
+
+    Every per-streamer settings popup (Quality, Notifications, Auto-Suffix,
+    Subfolders, Split, Intro Delay, Schedule) persists into the same
+    find-or-create record; this centralizes that lookup/creation/save cycle
+    so a new field only ever needs to be threaded through here once, instead
+    of being reimplemented (and possibly forgotten) in each popup.
+    """
+
+    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
+        self.dashboard = dashboard
+        self.entry     = entry
+        self.config_id = config_id
+
+    def load(self) -> dict:
+        """Return a copy of this streamer's saved record, or {} if none."""
+        try:
+            from .main import _global_json_lock, _load_global_json
+            with _global_json_lock:
+                gdata = _load_global_json()
+            found = self._find(self._entries(gdata))
+            return dict(found) if found else {}
+        except Exception as e:
+            _dbg(f"PriorityEntryStore.load: {e}")
+            return {}
+
+    def update(self, **fields) -> None:
+        """Set *fields* on this streamer's record, creating it if needed."""
+        self._mutate(lambda target: target.update(fields), create_if_missing=True)
+
+    def clear(self, *keys: str) -> None:
+        """Remove *keys* from this streamer's record. No-op (and no file
+        write) if the record doesn't exist — never creates one just to
+        clear it."""
+        self._mutate(lambda target: [target.pop(k, None) for k in keys],
+                     create_if_missing=False)
+
+    def mutate(self, fn) -> None:
+        """Escape hatch for a bespoke atomic read-modify-write: *fn* is
+        called with the find-or-created record dict to edit in place."""
+        self._mutate(fn, create_if_missing=True)
+
+    def reset(self, *keys: str) -> None:
+        """Like clear(), but also refreshes the PRIORITY panel's cached
+        override state immediately (used by the 'R' Reset hotkey, where the
+        popup stays open and can't rely on the usual on-close reload)."""
+        self.clear(*keys)
+        self._notify_reset()
+
+    # ── internals ────────────────────────────────────────────────────────
+
+    def _entries(self, gdata: dict) -> list:
+        return gdata.get("priorities", {}).get(self.config_id, {}).get("entries", [])
+
+    def _find(self, entries: list) -> "Optional[dict]":
+        return next(
+            (e for e in entries
+             if e.get("streamer") == self.entry.streamer and e.get("site") == self.entry.site),
+            None,
+        )
+
+    def _mutate(self, fn, create_if_missing: bool) -> None:
+        try:
+            from .main import _global_json_lock, _load_global_json, _save_global_json
+            with _global_json_lock:
+                gdata   = _load_global_json()
+                entries = self._entries(gdata)
+                target  = self._find(entries)
+                if target is None:
+                    if not create_if_missing:
+                        return
+                    target = {
+                        "streamer":   self.entry.streamer,
+                        "site":       self.entry.site,
+                        "config_sha": self.entry.config_sha,
+                        "priority":   len(entries),
+                        "bypass":     self.entry.bypass,
+                    }
+                    entries.append(target)
+                fn(target)
+                gdata.setdefault("priorities", {}).setdefault(
+                    self.config_id, {"config_files": [], "entries": []}
+                )["entries"] = entries
+                _save_global_json(gdata)
+        except Exception as e:
+            _dbg(f"PriorityEntryStore._mutate: {e}")
+            pass
+
+    def _notify_reset(self) -> None:
+        # Invalidate the sort manager's priority cache so the "*" has_override
+        # marker in the SORT/site-list views refreshes immediately.
+        try:
+            sort_mgr = getattr(self.dashboard, "sort_manager", None)
+            if sort_mgr is not None:
+                sort_mgr._prio_cache_ts = 0.0
+        except Exception as e:
+            _dbg(f"PriorityEntryStore._notify_reset: {e}")
+            pass
+
+        # Also force the PRIORITY panel itself to reload from disk right now,
+        # rather than waiting for the settings popup stack to fully close.
+        # This makes the "*" marker beside the streamer's name disappear the
+        # moment the reset is confirmed, instead of only after pressing Esc
+        # back out to the streamer list.
+        try:
+            config_editor = getattr(self.dashboard, "config_editor", None)
+            priority_editor = getattr(config_editor, "priority_editor", None)
+            if priority_editor is not None:
+                priority_editor.force_reload()
+        except Exception as e:
+            _dbg(f"PriorityEntryStore._notify_reset: {e}")
+            pass
+
+
 # ── Per-streamer setting override keys, grouped by which popup owns them ────
 # Used by the 'R' (Reset) hotkey on each settings popup: a sub-popup passes
 # only the keys it owns, while StreamerSettingsPopup (the top-level menu)
@@ -361,49 +477,7 @@ def _reset_streamer_setting_keys(dashboard, config_id: str, entry: "PriorityEntr
                                   keys: "tuple[str, ...]") -> None:
     """Remove *keys* from entry's record in global.json, reverting those
     settings back to inherited / site-default behavior."""
-    try:
-        from .main import _global_json_lock, _load_global_json, _save_global_json
-        with _global_json_lock:
-            gdata   = _load_global_json()
-            entries = (gdata.get("priorities", {})
-                           .get(config_id, {})
-                           .get("entries", []))
-            for e in entries:
-                if e.get("streamer") == entry.streamer and e.get("site") == entry.site:
-                    for k in keys:
-                        e.pop(k, None)
-                    break
-            gdata.setdefault("priorities", {}).setdefault(
-                config_id, {"config_files": [], "entries": []}
-            )["entries"] = entries
-            _save_global_json(gdata)
-    except Exception as e:
-        _dbg(f"_reset_streamer_setting_keys: {e}")
-        pass
-
-    # Invalidate the sort manager's priority cache so the "*" has_override
-    # marker in the SORT/site-list views refreshes immediately.
-    try:
-        sort_mgr = getattr(dashboard, "sort_manager", None)
-        if sort_mgr is not None:
-            sort_mgr._prio_cache_ts = 0.0
-    except Exception as e:
-        _dbg(f"_reset_streamer_setting_keys: {e}")
-        pass
-
-    # Also force the PRIORITY panel itself to reload from disk right now,
-    # rather than waiting for the settings popup stack to fully close.
-    # This makes the "*" marker beside the streamer's name disappear the
-    # moment the reset is confirmed, instead of only after pressing Esc
-    # back out to the streamer list.
-    try:
-        config_editor = getattr(dashboard, "config_editor", None)
-        priority_editor = getattr(config_editor, "priority_editor", None)
-        if priority_editor is not None:
-            priority_editor.force_reload()
-    except Exception as e:
-        _dbg(f"_reset_streamer_setting_keys: {e}")
-        pass
+    PriorityEntryStore(dashboard, entry, config_id).reset(*keys)
 
 
 class ConfirmResetPopup:
@@ -1059,63 +1133,20 @@ class QualitySettingsPopup:
         self.dashboard = dashboard
         self.entry     = entry
         self.config_id = config_id
+        self._store    = PriorityEntryStore(dashboard, entry, config_id)
         self.lq_enabled = False
         self._confirm_reset: "Optional[ConfirmResetPopup]" = None
         self._load()
 
     def _load(self) -> None:
-        try:
-            from .main import _global_json_lock, _load_global_json
-            with _global_json_lock:
-                gdata = _load_global_json()
-            entries = (gdata.get("priorities", {})
-                           .get(self.config_id, {})
-                           .get("entries", []))
-            for e in entries:
-                if (e.get("streamer") == self.entry.streamer
-                        and e.get("site") == self.entry.site):
-                    self.lq_enabled = bool(e.get("lq_enabled", False))
-                    break
-        except Exception as e:
-            _dbg(f"_load: {e}")
-            pass
+        self.lq_enabled = bool(self._store.load().get("lq_enabled", False))
 
     def _reset(self) -> None:
-        _reset_streamer_setting_keys(self.dashboard, self.config_id, self.entry, ("lq_enabled",))
+        self._store.reset("lq_enabled")
         self._load()
 
     def _save(self) -> None:
-        try:
-            from .main import _global_json_lock, _load_global_json, _save_global_json
-            with _global_json_lock:
-                gdata   = _load_global_json()
-                entries = (gdata.get("priorities", {})
-                               .get(self.config_id, {})
-                               .get("entries", []))
-                target = None
-                for e in entries:
-                    if (e.get("streamer") == self.entry.streamer
-                            and e.get("site") == self.entry.site):
-                        target = e
-                        break
-                if target is None:
-                    target = {
-                        "streamer":   self.entry.streamer,
-                        "site":       self.entry.site,
-                        "config_sha": self.entry.config_sha,
-                        "priority":   len(entries),
-                        "bypass":     self.entry.bypass,
-                    }
-                    entries.append(target)
-                target["lq_enabled"] = self.lq_enabled
-
-                gdata.setdefault("priorities", {}).setdefault(
-                    self.config_id, {"config_files": [], "entries": []}
-                )["entries"] = entries
-                _save_global_json(gdata)
-        except Exception as e:
-            _dbg(f"_save: {e}")
-            pass
+        self._store.update(lq_enabled=self.lq_enabled)
 
     def handle_key(self, key) -> bool:
         if self._confirm_reset is not None:
@@ -1190,74 +1221,27 @@ class NotificationSettingsPopup:
         self.dashboard = dashboard
         self.entry     = entry
         self.config_id = config_id
+        self._store    = PriorityEntryStore(dashboard, entry, config_id)
         self.state: str = "inherit"   # "inherit" | "on" | "off"
         self._confirm_reset: "Optional[ConfirmResetPopup]" = None
         self._load()
 
     def _reset(self) -> None:
-        _reset_streamer_setting_keys(self.dashboard, self.config_id, self.entry, ("notifications_enabled",))
+        self._store.reset("notifications_enabled")
         self._load()
 
     def _load(self) -> None:
-        try:
-            from .main import _global_json_lock, _load_global_json
-            with _global_json_lock:
-                gdata = _load_global_json()
-            entries = (gdata.get("priorities", {})
-                           .get(self.config_id, {})
-                           .get("entries", []))
-            for e in entries:
-                if (e.get("streamer") == self.entry.streamer
-                        and e.get("site") == self.entry.site):
-                    raw = e.get("notifications_enabled", None)
-                    if raw is None:
-                        self.state = "inherit"
-                    else:
-                        self.state = "on" if bool(raw) else "off"
-                    break
-        except Exception as e:
-            _dbg(f"_load: {e}")
-            pass
+        raw = self._store.load().get("notifications_enabled")
+        self.state = "inherit" if raw is None else ("on" if raw else "off")
 
     def _save(self) -> None:
-        try:
-            from .main import _global_json_lock, _load_global_json, _save_global_json
-            with _global_json_lock:
-                gdata   = _load_global_json()
-                entries = (gdata.get("priorities", {})
-                               .get(self.config_id, {})
-                               .get("entries", []))
-                target = None
-                for e in entries:
-                    if (e.get("streamer") == self.entry.streamer
-                            and e.get("site") == self.entry.site):
-                        target = e
-                        break
-                if self.state == "inherit":
-                    # Nothing to override — remove any prior explicit value
-                    # rather than writing one, so this streamer stops
-                    # showing up as having a Notifications override.
-                    if target is not None:
-                        target.pop("notifications_enabled", None)
-                else:
-                    if target is None:
-                        target = {
-                            "streamer":   self.entry.streamer,
-                            "site":       self.entry.site,
-                            "config_sha": self.entry.config_sha,
-                            "priority":   len(entries),
-                            "bypass":     self.entry.bypass,
-                        }
-                        entries.append(target)
-                    target["notifications_enabled"] = (self.state == "on")
-
-                gdata.setdefault("priorities", {}).setdefault(
-                    self.config_id, {"config_files": [], "entries": []}
-                )["entries"] = entries
-                _save_global_json(gdata)
-        except Exception as e:
-            _dbg(f"_save: {e}")
-            pass
+        if self.state == "inherit":
+            # Nothing to override — remove any prior explicit value rather
+            # than writing one, so this streamer stops showing up as
+            # having a Notifications override.
+            self._store.clear("notifications_enabled")
+        else:
+            self._store.update(notifications_enabled=(self.state == "on"))
 
     def _site_default(self) -> bool:
         cfg = _get_site_default_cfg(self.dashboard, self.entry)
@@ -1347,74 +1331,27 @@ class AutoSuffixSettingsPopup:
         self.dashboard = dashboard
         self.entry     = entry
         self.config_id = config_id
+        self._store    = PriorityEntryStore(dashboard, entry, config_id)
         self.state: str = "inherit"   # "inherit" | "on" | "off"
         self._confirm_reset: "Optional[ConfirmResetPopup]" = None
         self._load()
 
     def _reset(self) -> None:
-        _reset_streamer_setting_keys(self.dashboard, self.config_id, self.entry, ("auto_suffix_mode",))
+        self._store.reset("auto_suffix_mode")
         self._load()
 
     def _load(self) -> None:
-        try:
-            from .main import _global_json_lock, _load_global_json
-            with _global_json_lock:
-                gdata = _load_global_json()
-            entries = (gdata.get("priorities", {})
-                           .get(self.config_id, {})
-                           .get("entries", []))
-            for e in entries:
-                if (e.get("streamer") == self.entry.streamer
-                        and e.get("site") == self.entry.site):
-                    raw = e.get("auto_suffix_mode", None)
-                    if raw not in ("on", "off"):
-                        self.state = "inherit"
-                    else:
-                        self.state = raw
-                    break
-        except Exception as e:
-            _dbg(f"_load: {e}")
-            pass
+        raw = self._store.load().get("auto_suffix_mode")
+        self.state = raw if raw in ("on", "off") else "inherit"
 
     def _save(self) -> None:
-        try:
-            from .main import _global_json_lock, _load_global_json, _save_global_json
-            with _global_json_lock:
-                gdata   = _load_global_json()
-                entries = (gdata.get("priorities", {})
-                               .get(self.config_id, {})
-                               .get("entries", []))
-                target = None
-                for e in entries:
-                    if (e.get("streamer") == self.entry.streamer
-                            and e.get("site") == self.entry.site):
-                        target = e
-                        break
-                if self.state == "inherit":
-                    # Nothing to override — remove any prior explicit value
-                    # rather than writing one, so this streamer stops
-                    # showing up as having an Auto-Suffix override.
-                    if target is not None:
-                        target.pop("auto_suffix_mode", None)
-                else:
-                    if target is None:
-                        target = {
-                            "streamer":   self.entry.streamer,
-                            "site":       self.entry.site,
-                            "config_sha": self.entry.config_sha,
-                            "priority":   len(entries),
-                            "bypass":     self.entry.bypass,
-                        }
-                        entries.append(target)
-                    target["auto_suffix_mode"] = self.state
-
-                gdata.setdefault("priorities", {}).setdefault(
-                    self.config_id, {"config_files": [], "entries": []}
-                )["entries"] = entries
-                _save_global_json(gdata)
-        except Exception as e:
-            _dbg(f"_save: {e}")
-            pass
+        if self.state == "inherit":
+            # Nothing to override — remove any prior explicit value rather
+            # than writing one, so this streamer stops showing up as
+            # having an Auto-Suffix override.
+            self._store.clear("auto_suffix_mode")
+        else:
+            self._store.update(auto_suffix_mode=self.state)
 
     def _site_default(self) -> bool:
         cfg = _get_site_default_cfg(self.dashboard, self.entry)
@@ -1517,6 +1454,7 @@ class OutputDirectorySettingsPopup:
         self.dashboard = dashboard
         self.entry     = entry
         self.config_id = config_id
+        self._store    = PriorityEntryStore(dashboard, entry, config_id)
 
         self.mode:           str  = "inherit"
         self.custom_enabled: bool = False
@@ -1532,74 +1470,31 @@ class OutputDirectorySettingsPopup:
     # ── Persistence ────────────────────────────────────────────────────────────
 
     def _load(self) -> None:
-        try:
-            from .main import _global_json_lock, _load_global_json
-            with _global_json_lock:
-                gdata = _load_global_json()
-            entries = (gdata.get("priorities", {})
-                           .get(self.config_id, {})
-                           .get("entries", []))
-            for e in entries:
-                if (e.get("streamer") == self.entry.streamer
-                        and e.get("site") == self.entry.site):
-                    raw = e.get("output_dir_mode")
-                    self.mode = raw if raw in SUBFOLDERS_MODES else "inherit"
-                    self.custom_enabled = bool(e.get("output_dir_custom_enabled", False))
-                    self.custom_path = str(e.get("output_dir_custom_path", "") or "")
-                    break
-        except Exception as e:
-            _dbg(f"_load: {e}")
-            pass
+        saved = self._store.load()
+        raw = saved.get("output_dir_mode")
+        self.mode = raw if raw in SUBFOLDERS_MODES else "inherit"
+        self.custom_enabled = bool(saved.get("output_dir_custom_enabled", False))
+        self.custom_path = str(saved.get("output_dir_custom_path", "") or "")
         if not self.custom_path:
             self.custom_path = str(self._site_default_output_dir())
         self._path_cursor = len(self.custom_path)
 
     def _save(self) -> None:
-        try:
-            from .main import _global_json_lock, _load_global_json, _save_global_json
-            with _global_json_lock:
-                gdata   = _load_global_json()
-                entries = (gdata.get("priorities", {})
-                               .get(self.config_id, {})
-                               .get("entries", []))
-                target = None
-                for e in entries:
-                    if (e.get("streamer") == self.entry.streamer
-                            and e.get("site") == self.entry.site):
-                        target = e
-                        break
-                no_override = (self.mode == "inherit" and not self.custom_enabled)
-                if no_override:
-                    # Nothing to override — clear any prior explicit values
-                    # rather than writing them.
-                    if target is not None:
-                        target.pop("output_dir_mode", None)
-                        target.pop("output_dir_custom_enabled", None)
-                        target.pop("output_dir_custom_path", None)
-                else:
-                    if target is None:
-                        target = {
-                            "streamer":   self.entry.streamer,
-                            "site":       self.entry.site,
-                            "config_sha": self.entry.config_sha,
-                            "priority":   len(entries),
-                            "bypass":     self.entry.bypass,
-                        }
-                        entries.append(target)
-                    if self.mode == "inherit":
-                        target.pop("output_dir_mode", None)
-                    else:
-                        target["output_dir_mode"] = self.mode
-                    target["output_dir_custom_enabled"] = self.custom_enabled
-                    target["output_dir_custom_path"] = self.custom_path.strip() if self.custom_enabled else ""
+        if self.mode == "inherit" and not self.custom_enabled:
+            # Nothing to override — clear any prior explicit values rather
+            # than writing them.
+            self._store.clear("output_dir_mode", "output_dir_custom_enabled",
+                               "output_dir_custom_path")
+            return
 
-                gdata.setdefault("priorities", {}).setdefault(
-                    self.config_id, {"config_files": [], "entries": []}
-                )["entries"] = entries
-                _save_global_json(gdata)
-        except Exception as e:
-            _dbg(f"_save: {e}")
-            pass
+        def _apply(target):
+            if self.mode == "inherit":
+                target.pop("output_dir_mode", None)
+            else:
+                target["output_dir_mode"] = self.mode
+            target["output_dir_custom_enabled"] = self.custom_enabled
+            target["output_dir_custom_path"] = self.custom_path.strip() if self.custom_enabled else ""
+        self._store.mutate(_apply)
 
     # ── Effective-value helpers ────────────────────────────────────────────────
 
@@ -1746,10 +1641,7 @@ class OutputDirectorySettingsPopup:
         return True, ""
 
     def _reset(self) -> None:
-        _reset_streamer_setting_keys(
-            self.dashboard, self.config_id, self.entry,
-            ("output_dir_mode", "output_dir_custom_enabled", "output_dir_custom_path"),
-        )
+        self._store.reset("output_dir_mode", "output_dir_custom_enabled", "output_dir_custom_path")
         self._sel = 0
         self._load()
 
@@ -1859,6 +1751,7 @@ class SplitSettingsPopup:
         self.dashboard = dashboard
         self.entry     = entry
         self.config_id = config_id
+        self._store    = PriorityEntryStore(dashboard, entry, config_id)
 
         self.mode:        str  = "inherit"   # "inherit" | "on" | "off"
         self.split_after: int  = 0
@@ -1872,89 +1765,43 @@ class SplitSettingsPopup:
         self._load()
 
     def _reset(self) -> None:
-        _reset_streamer_setting_keys(
-            self.dashboard, self.config_id, self.entry,
-            ("split_mode", "split_after", "split_enabled"),
-        )
+        self._store.reset("split_mode", "split_after", "split_enabled")
         self._sel = 0
         self._load()
 
     # ── Persistence ────────────────────────────────────────────────────────────
 
     def _load(self) -> None:
+        saved = self._store.load()
         try:
-            from .main import _global_json_lock, _load_global_json
-            with _global_json_lock:
-                gdata = _load_global_json()
-            entries = (gdata.get("priorities", {})
-                           .get(self.config_id, {})
-                           .get("entries", []))
-            for e in entries:
-                if (e.get("streamer") == self.entry.streamer
-                        and e.get("site") == self.entry.site):
-                    try:
-                        self.split_after = max(0, int(e.get("split_after", 0) or 0))
-                    except (TypeError, ValueError):
-                        self.split_after = 0
+            self.split_after = max(0, int(saved.get("split_after", 0) or 0))
+        except (TypeError, ValueError):
+            self.split_after = 0
 
-                    raw_mode = e.get("split_mode")
-                    if raw_mode in ("on", "off"):
-                        self.mode = raw_mode
-                    elif raw_mode is None:
-                        # Legacy data written by the old two-state popup:
-                        # enabled + minutes > 0 meant an override; anything
-                        # else meant inherit (there was no "force off").
-                        legacy_enabled = bool(e.get("split_enabled", False))
-                        self.mode = "on" if (legacy_enabled and self.split_after > 0) else "inherit"
-                    else:
-                        self.mode = "inherit"
-                    break
-        except Exception as e:
-            _dbg(f"_load: {e}")
-            pass
+        raw_mode = saved.get("split_mode")
+        if raw_mode in ("on", "off"):
+            self.mode = raw_mode
+        elif raw_mode is None:
+            # Legacy data written by the old two-state popup: enabled +
+            # minutes > 0 meant an override; anything else meant inherit
+            # (there was no "force off").
+            legacy_enabled = bool(saved.get("split_enabled", False))
+            self.mode = "on" if (legacy_enabled and self.split_after > 0) else "inherit"
+        else:
+            self.mode = "inherit"
 
     def _save(self) -> None:
-        try:
-            from .main import _global_json_lock, _load_global_json, _save_global_json
-            with _global_json_lock:
-                gdata   = _load_global_json()
-                entries = (gdata.get("priorities", {})
-                               .get(self.config_id, {})
-                               .get("entries", []))
-                target = None
-                for e in entries:
-                    if (e.get("streamer") == self.entry.streamer
-                            and e.get("site") == self.entry.site):
-                        target = e
-                        break
-                if self.mode == "inherit":
-                    # Nothing to override — clear any prior explicit value
-                    # (new or legacy) rather than writing one.
-                    if target is not None:
-                        target.pop("split_mode", None)
-                        target.pop("split_enabled", None)
-                        target.pop("split_after", None)
-                else:
-                    if target is None:
-                        target = {
-                            "streamer":   self.entry.streamer,
-                            "site":       self.entry.site,
-                            "config_sha": self.entry.config_sha,
-                            "priority":   len(entries),
-                            "bypass":     self.entry.bypass,
-                        }
-                        entries.append(target)
-                    target["split_mode"] = self.mode
-                    target["split_after"] = self.split_after if self.mode == "on" else 0
-                    target.pop("split_enabled", None)  # fully migrated to split_mode
+        if self.mode == "inherit":
+            # Nothing to override — clear any prior explicit value (new or
+            # legacy) rather than writing one.
+            self._store.clear("split_mode", "split_enabled", "split_after")
+            return
 
-                gdata.setdefault("priorities", {}).setdefault(
-                    self.config_id, {"config_files": [], "entries": []}
-                )["entries"] = entries
-                _save_global_json(gdata)
-        except Exception as e:
-            _dbg(f"_save: {e}")
-            pass
+        def _apply(target):
+            target["split_mode"] = self.mode
+            target["split_after"] = self.split_after if self.mode == "on" else 0
+            target.pop("split_enabled", None)  # fully migrated to split_mode
+        self._store.mutate(_apply)
 
     def _site_default_minutes(self) -> int:
         cfg = _get_site_default_cfg(self.dashboard, self.entry)
@@ -2148,6 +1995,7 @@ class IntroDelaySettingsPopup:
         self.dashboard = dashboard
         self.entry     = entry
         self.config_id = config_id
+        self._store    = PriorityEntryStore(dashboard, entry, config_id)
 
         self.enabled: bool = False
         self.minutes: int  = 0
@@ -2162,79 +2010,32 @@ class IntroDelaySettingsPopup:
         self._load()
 
     def _reset(self) -> None:
-        _reset_streamer_setting_keys(
-            self.dashboard, self.config_id, self.entry,
-            (self._FIELD_ENABLED, self._FIELD_MINUTES, self._FIELD_SPLIT),
-        )
+        self._store.reset(self._FIELD_ENABLED, self._FIELD_MINUTES, self._FIELD_SPLIT)
         self._sel = 0
         self._load()
 
     # ── Persistence ────────────────────────────────────────────────────────────
 
     def _load(self) -> None:
+        saved = self._store.load()
+        self.enabled = bool(saved.get(self._FIELD_ENABLED, False))
         try:
-            from .main import _global_json_lock, _load_global_json
-            with _global_json_lock:
-                gdata = _load_global_json()
-            entries = (gdata.get("priorities", {})
-                           .get(self.config_id, {})
-                           .get("entries", []))
-            for e in entries:
-                if (e.get("streamer") == self.entry.streamer
-                        and e.get("site") == self.entry.site):
-                    self.enabled = bool(e.get(self._FIELD_ENABLED, False))
-                    try:
-                        self.minutes = max(0, int(e.get(self._FIELD_MINUTES, 0) or 0))
-                    except (TypeError, ValueError):
-                        self.minutes = 0
-                    self.split = bool(e.get(self._FIELD_SPLIT, False))
-                    break
-        except Exception as e:
-            _dbg(f"_load: {e}")
-            pass
+            self.minutes = max(0, int(saved.get(self._FIELD_MINUTES, 0) or 0))
+        except (TypeError, ValueError):
+            self.minutes = 0
+        self.split = bool(saved.get(self._FIELD_SPLIT, False))
 
     def _save(self) -> None:
-        try:
-            from .main import _global_json_lock, _load_global_json, _save_global_json
-            with _global_json_lock:
-                gdata   = _load_global_json()
-                entries = (gdata.get("priorities", {})
-                               .get(self.config_id, {})
-                               .get("entries", []))
-                target = None
-                for e in entries:
-                    if (e.get("streamer") == self.entry.streamer
-                            and e.get("site") == self.entry.site):
-                        target = e
-                        break
-                if not self.enabled:
-                    # Nothing to override — clear any prior explicit values
-                    # rather than writing them.
-                    if target is not None:
-                        target.pop(self._FIELD_ENABLED, None)
-                        target.pop(self._FIELD_MINUTES, None)
-                        target.pop(self._FIELD_SPLIT, None)
-                else:
-                    if target is None:
-                        target = {
-                            "streamer":   self.entry.streamer,
-                            "site":       self.entry.site,
-                            "config_sha": self.entry.config_sha,
-                            "priority":   len(entries),
-                            "bypass":     self.entry.bypass,
-                        }
-                        entries.append(target)
-                    target[self._FIELD_ENABLED] = True
-                    target[self._FIELD_MINUTES] = self.minutes
-                    target[self._FIELD_SPLIT]   = self.split
-
-                gdata.setdefault("priorities", {}).setdefault(
-                    self.config_id, {"config_files": [], "entries": []}
-                )["entries"] = entries
-                _save_global_json(gdata)
-        except Exception as e:
-            _dbg(f"_save: {e}")
-            pass
+        if not self.enabled:
+            # Nothing to override — clear any prior explicit values rather
+            # than writing them.
+            self._store.clear(self._FIELD_ENABLED, self._FIELD_MINUTES, self._FIELD_SPLIT)
+            return
+        self._store.update(**{
+            self._FIELD_ENABLED: True,
+            self._FIELD_MINUTES: self.minutes,
+            self._FIELD_SPLIT:   self.split,
+        })
 
     # ── Validation ─────────────────────────────────────────────────────────────
 
@@ -2436,6 +2237,7 @@ class ScheduleSettingsPopup:
         self.dashboard = dashboard
         self.entry     = entry
         self.config_id = config_id
+        self._store    = PriorityEntryStore(dashboard, entry, config_id)
 
         # Working copies of schedule settings
         self.schedule_enabled: bool      = False
@@ -2460,82 +2262,36 @@ class ScheduleSettingsPopup:
 
     def _load(self) -> None:
         """Load saved schedule settings from global.json into working state."""
-        try:
-            from .main import _global_json_lock, _load_global_json
-            with _global_json_lock:
-                gdata = _load_global_json()
-            entries = (gdata.get("priorities", {})
-                           .get(self.config_id, {})
-                           .get("entries", []))
-            for e in entries:
-                if (e.get("streamer") == self.entry.streamer
-                        and e.get("site") == self.entry.site):
-                    sched = e.get("schedule", {})
-                    self.schedule_enabled = bool(sched.get("enabled", False))
-                    self.mode             = sched.get("mode", "one_off")
-                    oo  = sched.get("one_off", {})
-                    self.one_off_start    = oo.get("start", "")
-                    self.one_off_end      = oo.get("end",   "")
-                    rec = sched.get("recurring", {})
-                    days_list             = rec.get("days", [])
-                    self.recurring_days   = [(i in days_list) for i in range(7)]
-                    self.recurring_start  = rec.get("start_time", "")
-                    self.recurring_end    = rec.get("end_time",   "")
-                    break
-        except Exception as e:
-            _dbg(f"_load: {e}")
-            pass
+        sched = self._store.load().get("schedule", {})
+        self.schedule_enabled = bool(sched.get("enabled", False))
+        self.mode             = sched.get("mode", "one_off")
+        oo  = sched.get("one_off", {})
+        self.one_off_start    = oo.get("start", "")
+        self.one_off_end      = oo.get("end",   "")
+        rec = sched.get("recurring", {})
+        days_list             = rec.get("days", [])
+        self.recurring_days   = [(i in days_list) for i in range(7)]
+        self.recurring_start  = rec.get("start_time", "")
+        self.recurring_end    = rec.get("end_time",   "")
 
     def _save(self) -> None:
         """Write current working state back to global.json under priorities[…][entries]."""
-        try:
-            from .main import _global_json_lock, _load_global_json, _save_global_json
-            with _global_json_lock:
-                gdata   = _load_global_json()
-                entries = (gdata.get("priorities", {})
-                               .get(self.config_id, {})
-                               .get("entries", []))
-                target = None
-                for e in entries:
-                    if (e.get("streamer") == self.entry.streamer
-                            and e.get("site") == self.entry.site):
-                        target = e
-                        break
-                if target is None:
-                    # No pre-existing entry (e.g. a fresh clone where the
-                    # PRIORITY panel's seed hasn't run yet, or this streamer
-                    # was added after the last seed/save). Create one rather
-                    # than silently dropping the schedule the user just set.
-                    target = {
-                        "streamer":   self.entry.streamer,
-                        "site":       self.entry.site,
-                        "config_sha": self.entry.config_sha,
-                        "priority":   len(entries),
-                        "bypass":     self.entry.bypass,
-                    }
-                    entries.append(target)
-                sched = target.setdefault("schedule", {})
-                sched["enabled"] = self.schedule_enabled
-                sched["mode"]    = self.mode
-                sched.setdefault("one_off", {}).update({
-                    "start": self.one_off_start,
-                    "end":   self.one_off_end,
-                })
-                sched.setdefault("recurring", {}).update({
-                    "days":       [i for i, v in enumerate(self.recurring_days) if v],
-                    "start_time": self.recurring_start,
-                    "end_time":   self.recurring_end,
-                })
-                # last_enable_attempt / last_disable_attempt are managed by
-                # the scheduling engine; never overwrite them here.
-
-                gdata.setdefault("priorities", {}).setdefault(
-                    self.config_id, {"config_files": [], "entries": []}
-                )["entries"] = entries
-                _save_global_json(gdata)
-        except Exception as e:
-            _dbg(f"_save: {e}")
-            pass
+        def _apply(target):
+            sched = target.setdefault("schedule", {})
+            sched["enabled"] = self.schedule_enabled
+            sched["mode"]    = self.mode
+            sched.setdefault("one_off", {}).update({
+                "start": self.one_off_start,
+                "end":   self.one_off_end,
+            })
+            sched.setdefault("recurring", {}).update({
+                "days":       [i for i, v in enumerate(self.recurring_days) if v],
+                "start_time": self.recurring_start,
+                "end_time":   self.recurring_end,
+            })
+            # last_enable_attempt / last_disable_attempt are managed by
+            # the scheduling engine; never overwrite them here.
+        self._store.mutate(_apply)
 
     # ── Field list (dynamic based on mode) ────────────────────────────────────
 
@@ -2579,7 +2335,7 @@ class ScheduleSettingsPopup:
     # ── Validation ─────────────────────────────────────────────────────────────
 
     def _reset(self) -> None:
-        _reset_streamer_setting_keys(self.dashboard, self.config_id, self.entry, ("schedule",))
+        self._store.reset("schedule")
         self._sel = 0
         self._day_cursor = 0
         self._load()
