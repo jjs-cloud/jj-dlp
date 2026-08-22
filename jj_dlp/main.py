@@ -4152,10 +4152,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     if file_error:
                         # We couldn't even locate/read the recording file this
                         # cycle (e.g. active_file points at a filename that
-                        # doesn't exist). Don't let that masquerade as "no
-                        # growth" — that would show a false "stalled" state on
-                        # the dashboard. Just give up on stall detection for
-                        # this file until it resolves itself.
+                        # doesn't exist). Note: This only fires if yt-dlp stays alive
+                        # for the duration of STALL_TIMEOUT without producing a
+                        # file.
                         dbg("[STALL] filename lookup failed — giving up on "
                             "stall detection for this cycle", site_name=streamer)
                         site.clear_stall_since(streamer)
