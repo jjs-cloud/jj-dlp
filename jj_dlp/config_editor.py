@@ -658,14 +658,15 @@ class PriorityEditor:
 
             entries_data = []
             for i, e in enumerate(self._entries):
-                ex = existing_map.get((e.streamer, e.site), {})
-                entry_dict: dict = {
+                entry_dict = dict(existing_map.get((e.streamer, e.site), {}))
+                entry_dict.update({
                     "streamer":   e.streamer,
                     "site":       e.site,
                     "config_sha": e.config_sha,
                     "priority":   i,
                     "bypass":     e.bypass,
-                }
+                })
+                entries_data.append(entry_dict)
                 # Preserve schedule / split / notifications / LQ overrides
                 # (and any future extra fields) so reordering or toggling
                 # bypass never wipes a streamer-level override. This was
