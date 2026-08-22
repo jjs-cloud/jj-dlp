@@ -4152,41 +4152,18 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     if file_error:
                         # We couldn't even locate/read the recording file this
                         # cycle (e.g. active_file points at a filename that
-                        # doesn't exist yet — a normal, brief situation right
-                        # after a fresh start). Don't let a single occurrence
-                        # masquerade as "no growth" — that would show a false
-                        # "stalled" state on the dashboard from transient
-                        # filename-resolution timing alone.
-                        #
-                        # However, if this has now persisted for a full
-                        # stall_timeout window since the last confirmed
-                        # growth, it's no longer transient — the file was
-                        # never (or is no longer) being written at all (e.g.
-                        # yt-dlp resolved an intended filename but can never
-                        # actually create it — an unwritable filesystem/
-                        # directory). That's the same "recording has failed"
-                        # condition as a confirmed stall and must be flagged
-                        # the same way, or a broken write path that never
-                        # produces a locatable file would silently never
-                        # alert at all.
-                        dbg("[STALL] filename lookup failed this cycle", site_name=streamer)
+                        # doesn't exist). Don't let that masquerade as "no
+                        # growth" — that would show a false "stalled" state on
+                        # the dashboard. Just give up on stall detection for
+                        # this file until it resolves itself.
+                        dbg("[STALL] filename lookup failed — giving up on "
+                            "stall detection for this cycle", site_name=streamer)
                         site.clear_stall_since(streamer)
                         if not filename_error_warned:
                             site.log_line(
                                 f"Warning: stall checker could not locate file for {streamer}"
                             )
                             filename_error_warned = True
-                        _file_error_elapsed = time.time() - last_growth_time
-                        if _file_error_elapsed >= stall_timeout:
-                            site.log_line(
-                                f"Recording file for {streamer} could not be located for "
-                                f"{int(_file_error_elapsed)}s — restarting"
-                            )
-                            site.set_write_unconfirmed(streamer)
-                            _teardown_attempt(site, streamer, proc, close_logs,
-                                               clear_stall=True, clear_ad_alert=True)
-                            time.sleep(5)
-                            break
 
                     elif stall_detected:
                         site.log_line(f"Stall detected for {streamer} — restarting")
