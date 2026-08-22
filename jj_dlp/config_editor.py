@@ -667,20 +667,6 @@ class PriorityEditor:
                     "bypass":     e.bypass,
                 })
                 entries_data.append(entry_dict)
-                # Preserve schedule / split / notifications / LQ overrides
-                # (and any future extra fields) so reordering or toggling
-                # bypass never wipes a streamer-level override. This was
-                # previously only done for "schedule" and "lq_enabled",
-                # which silently dropped Split and Notifications overrides
-                # on the next reorder or bypass toggle.
-                for extra_key in ("schedule", "lq_enabled",
-                                  "split_mode", "split_after", "split_enabled",
-                                  "notifications_enabled",
-                                  "intro_delay_enabled", "intro_delay_minutes", "intro_delay_split",
-                                  "auto_suffix_mode"):
-                    if extra_key in ex:
-                        entry_dict[extra_key] = ex[extra_key]
-                entries_data.append(entry_dict)
 
             global_data["priorities"][self._config_id] = {
                 "config_files": config_paths,
