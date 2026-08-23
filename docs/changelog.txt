@@ -1,3 +1,5 @@
+v1.28.0
+
 - You can now skip recording the current stream. The streamer will be automatically re-enabled when the current stream ends. To use this feature, press D on the Dashboard tab, highlight a streamer, then press S. 
 - the progress bar will now turn yellow when there is an ad detected for the stream OR when ffmpeg errors are detected for the stream ("timestamp discontinuity", "Packet corrupt")
 - fixed a bug that garbled the screen when resizing the terminal
