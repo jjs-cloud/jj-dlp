@@ -507,7 +507,7 @@ SITE_REGISTRY = {
     'main_jjdlpdashboard_split_after_rows_rec_5': {'file': 'main.py', 'label': 'System Panel — Stalled Streamer Name', 'default_role': 'REC', 'default_bold': False},
     'main_jjdlpdashboard_split_after_rows_rec_6': {'file': 'main.py', 'label': 'System Panel — Stalled Duration', 'default_role': 'REC', 'default_bold': False},
     'main_jjdlpdashboard_split_after_rows_warn_1': {'file': 'main.py', 'label': 'System Panel — \'ads\' Section Header', 'default_role': 'WARN', 'default_bold': True},
-    'main_jjdlpdashboard_split_after_rows_warn_2': {'file': 'main.py', 'label': 'Ad detected', 'default_role': 'WARN', 'default_bold': True},
+    'main_jjdlpdashboard_split_after_rows_warn_2': {'file': 'main.py', 'label': 'Ad detected', 'default_role': 'REC', 'default_bold': False},
     'main_jjdlpdashboard_update_disk_usage_system': {'file': 'main.py', 'label': 'System Panel — \'Disk\' Section Header', 'default_role': 'SYSTEM', 'default_bold': True},
     'main_jjdlpdashboard_update_disk_usage_color': {'file': 'main.py', 'label': 'System Panel — Per-Drive Usage Line', 'default_role': 'LIVE', 'default_bold': True},
     'main_jjdlpdashboard_update_disk_usage_chrome': {'file': 'main.py', 'label': 'System Panel — Uptime Line', 'default_role': 'CHROME', 'default_bold': True},
