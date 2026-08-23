@@ -1,15 +1,13 @@
 - You can now skip recording the current stream. The streamer will be automatically re-enabled when the current stream ends. To use this feature, press D on the Dashboard tab, highlight a streamer, then press S. 
 - the progress bar will now turn yellow when there is an ad detected for the stream OR when ffmpeg errors are detected for the stream ("timestamp discontinuity", "Packet corrupt")
-    - note: the ad detection on twitch has been less reliable recently. However, there are usually ffmpeg errors during the ad also, which are still being detected successfully.
 - fixed a bug that garbled the screen when resizing the terminal
-- if jj-dlp every crashes (rare) then it will detect the zombie yt-dlp processes on re-launch, and give you the option to kill them
+- if jj-dlp ever crashes (rare) then it will detect the zombie yt-dlp processes on re-launch, and give you the option to kill them
 - when deleting/moving a file in the File Manager tab, empty subfolders will now be automatically cleaned up
 - fixed an issue with disabling and then immediately enabling a streamer (redundant calls, wrong part_suffix)
 - added "--retries 0" to tiktok-live.conf so connection retries don't overwrite the recording file.  the tradeoff is more files get created for tiktok live recordings
 - twitch and tiktok live now use "--COOKIES-FROM-BROWSER firefox" by default. Make sure you are logged into twitch and tiktok in firefox.
-- improved the editablity of the settings in the Config tab
+- when editing a value in the Config tab, left/right now moves the insertion point
 - fixed a bug that would wipe some streamer settings when re-ordering the streamer
-- did several code refactors to imporove data integrity (global.json)
 
 ====================
 ====================
