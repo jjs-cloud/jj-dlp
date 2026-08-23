@@ -50,65 +50,114 @@ class _KeyDef(NamedTuple):
     comment:  str = ""
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# _DlpFlagDef — keys that live inside a per-site config's [Checker], [Downloader],
+# or [LQ_Downloader] section (not [General]) and get translated straight into a
+# yt-dlp CLI flag when the section's command is built (see main.py's
+# _build_section_cmd). The same vocabulary is valid in all three sections —
+# yt-dlp doesn't care which of the three is invoking it.
+#
+# cli_flag : the yt-dlp flag this key maps to. "" for keys with no 1:1 flag —
+#            COOKIES_FROM_BROWSER (needs the file-global BROWSER value too, so
+#            main.py special-cases it) and EXTRA_ARGS (a raw passthrough for
+#            any flag that hasn't earned a dedicated key yet).
+# default  : value written when the key is missing.
+# preserve : True  → value is carried over from the user's file during an update
+#            False → value is reset to the value in the template config file during an update.
+# type     : "bool" → KEY = true/false, emits [cli_flag] only when true.
+#            anything else → KEY = <value>, emits [cli_flag, value] when non-empty.
+# comment  : help text shown in the edit popup.
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _DlpFlagDef(NamedTuple):
+    name:     str
+    cli_flag: str
+    default:  str
+    preserve: bool = False
+    type:     str = "str"
+    comment:  str = ""
+
+
 CONFIG_KEYS: tuple[_KeyDef, ...] = (
     # ── Global keys (global.conf) ─────────────────────────────────────────────
-    _KeyDef("DISK_DRIVES",           "global", "",      True, type="list",  comment="Comma-separated list of drives or paths to show disk info in the system panel. (e.g. C:\\, D:\\, E:\\  or  /home,/mnt/data)."),
-    _KeyDef("DEBUG_LOGS",            "global", "false", True, type="bool",  comment="Enable debug logging to a file (true/false)."),
-    _KeyDef("DEBUG_LOG_PATH",        "global", "",      True,  comment="Path for the debug log file. Can be a relative or absolute path (e.g. logs/debug.log)"),
-    _KeyDef("CHECK_FOR_UPDATES",     "global", "true",  True, type="bool",  comment="Whether to check for app updates at startup and periodically (true/false)."),
-    _KeyDef("UPDATE_INTERVAL",       "global", "30",    True, type="int",  comment="Number of minutes between app update checks."),
-    _KeyDef("ASK_FOR_BROWSER",       "global", "true",  False, type="bool",  comment="Show the browser chooser on startup (true/false)."),
-    _KeyDef("ASK_FOR_CONFIG",        "global", "true",  True, type="bool",  comment="Show the config file chooser on startup (true/false)."),
-    _KeyDef("UPDATE_BRANCH",         "global", "main",  True,  comment="Which branch of jj-dlp to update to. (main, testing, or experimental)."),
-    _KeyDef("MAX_CONCURRENT_REC",    "global", "0",     True, type="int",  comment='The maximum number of simultaneous recordings allowed to run.  Use the STREAMER SETTINGS panel in the Config tab to adjust the priority of each streamer. (0=no limit)'),
-    _KeyDef("LQ_DOWNLOADER",         "global", "false", True, type="bool",  comment="When any recording reaches the ffmpeg error threshold (FF_ERR_THRESH) lower the video quality of the lowest priority streamer, freeing up bandwidth for the remaining streamers."),
-    _KeyDef("FF_ERR_THRESH",         "global", "200",   True, type="int",  comment='Restart the download if we see this many ffmpeg errors ("timestamp discontinuity", "Packet corrupt") default: 200'),
-    _KeyDef("SUBFOLDERS",            "global", "off",   True, type="str",   comment="Save recordings in a subfolder(s) inside OUTPUT_DIR. Options: streamer-only, site-only, streamer-site, site-streamer, off."),
-    _KeyDef("GRAPH_SCALE",           "global", "300",   True, type="int",  comment="The number of seconds each bar in the graph represents. (default = 600)."),
-    _KeyDef("DESTINATIONS",          "global", "",      True, type="list",  comment="A list of destination paths where you might want to move your files.  Used in the File Manager tab. (e.g. C:\\My Recordings  OR /home/greg/twitch)"),
-    _KeyDef("NTFY_TOPIC",            "global", "",      True,  comment="The topic name to use for ntfy.sh notifications. (example: jj-dlp-fj48dh734fk) Refer to docs/ntfy-setup.md for a detailed setup guide. (blank = disabled)"),
-    _KeyDef("NOTIFY_CONFIRM_FILE",   "global", "true",  True, type="bool",  comment="Confirm the recording has actually started before sending a live notification.  Note: When enabled, the notifications will be delayed by a few seconds until the file has been confirmed."),
-    _KeyDef("NOTIFY_NO_CONFIRM_FILE", "global", "true", True, type="bool",  comment="If the recording file cannot be confirmed (does not exist or no file growth) within one STALL_TIMEOUT, send a warning notification that the file could not be confirmed (true/false)."),
-    _KeyDef("SITE_SORT",             "global", "added_first", True, comment="The order to display streamers on each site panel.   This can also be adjusted by pressing the S key on the Dashboard tab."),
-    _KeyDef("COMPACT_VIEW",          "global", "auto",  True,  comment="When streamers overflow the panel, compact view shows them in 2 columns without progress bars. (auto/true/false)"),
-    _KeyDef("WEB_UI",                "global", "false", True, type="bool",  comment="Enable the Web UI, viewable from any browser on your local network by navigating to http://your-ip-address:8765 or from the same machine at http://127.0.0.1:8765. Requires WEB_UI_USER and WEB_UI_PASS to also be set. Note: Use this tool on your local network only.  Access over the internet is not supported yet. (true/false)"),
-    _KeyDef("WEB_UI_PORT",           "global", "8765",  True, type="int",  comment="Port for the web dashboard. Default: 8765"),
-    _KeyDef("WEB_UI_USER",           "global", "",      True,  comment="Username required to log into the web dashboard (HTTP Basic Auth). Required if WEB_UI is enabled."),
-    _KeyDef("WEB_UI_PASS",           "global", "",      True,  comment="Password required to log into the web dashboard (HTTP Basic Auth). Required if WEB_UI is enabled. Choose something not easily guessed — anyone on your WiFi could otherwise try to log in."),
-    _KeyDef("RGB_MODE",              "global", "true",  True, type="bool",  comment="Pin the terminal's 8 base colors to exact RGB values (the Windows Terminal Campbell palette) so the app looks the same on every Linux terminal (may require restart) (true/false)."),
+    _KeyDef("DISK_DRIVES",              scope="global",                    default="",                           preserve=True, type="list",  comment="Comma-separated list of drives or paths to show disk info in the system panel. (e.g. C:\\, D:\\, E:\\  or  /home,/mnt/data)."),
+    _KeyDef("DEBUG_LOGS",               scope="global",                    default="false",                      preserve=True, type="bool",  comment="Enable debug logging to a file (true/false)."),
+    _KeyDef("DEBUG_LOG_PATH",           scope="global",                    default="",                           preserve=True,               comment="Path for the debug log file. Can be a relative or absolute path (e.g. logs/debug.log)"),
+    _KeyDef("CHECK_FOR_UPDATES",        scope="global",                    default="true",                       preserve=True, type="bool",  comment="Whether to check for app updates at startup and periodically (true/false)."),
+    _KeyDef("UPDATE_INTERVAL",          scope="global",                    default="30",                         preserve=True, type="int",   comment="Number of minutes between app update checks."),
+    _KeyDef("ASK_FOR_CONFIG",           scope="global",                    default="true",                       preserve=True, type="bool",  comment="Show the config file chooser on startup (true/false)."),
+    _KeyDef("UPDATE_BRANCH",            scope="global",                    default="main",                       preserve=True,               comment="Which branch of jj-dlp to update to. (main, testing, or experimental)."),
+    _KeyDef("MAX_CONCURRENT_REC",       scope="global",                    default="0",                          preserve=True, type="int",   comment='The maximum number of simultaneous recordings allowed to run.  Use the STREAMER SETTINGS panel in the Config tab to adjust the priority of each streamer. (0=no limit)'),
+    _KeyDef("LQ_DOWNLOADER",            scope="global",                    default="false",                      preserve=True, type="bool",  comment="When any recording reaches the ffmpeg error threshold (FF_ERR_THRESH) lower the video quality of the lowest priority streamer, freeing up bandwidth for the remaining streamers."),
+    _KeyDef("FF_ERR_THRESH",            scope="global",                    default="200",                        preserve=True, type="int",   comment='Restart the download if we see this many ffmpeg errors ("timestamp discontinuity", "Packet corrupt") default: 200'),
+    _KeyDef("SUBFOLDERS",               scope="global",                    default="off",                        preserve=True, type="str",   comment="Save recordings in a subfolder(s) inside OUTPUT_DIR. Options: streamer-only, site-only, streamer-site, site-streamer, off."),
+    _KeyDef("GRAPH_SCALE",              scope="global",                    default="300",                        preserve=True, type="int",   comment="The number of seconds each bar in the graph represents. (default = 600)."),
+    _KeyDef("DESTINATIONS",             scope="global",                    default="",                           preserve=True, type="list",  comment="A list of destination paths where you might want to move your files.  Used in File Manager > File Options > Move. (e.g. C:\\My Recordings  OR /home/greg/twitch)"),
+    _KeyDef("NTFY_TOPIC",               scope="global",                    default="",                           preserve=True,               comment="The topic name to use for ntfy.sh notifications. (example: jj-dlp-fj48dh734fk) Refer to docs/ntfy-setup.md for a detailed setup guide. (blank = disabled)"),
+    _KeyDef("NOTIFY_CONFIRM_FILE",      scope="global",                    default="true",                       preserve=True, type="bool",  comment="Confirm the recording has actually started before sending a live notification.  Note: When enabled, the notifications will be delayed by a few seconds until the file has been confirmed."),
+    _KeyDef("NOTIFY_NO_CONFIRM_FILE",   scope="global",                    default="true",                       preserve=True, type="bool",  comment="If the recording file cannot be confirmed (does not exist or no file growth) within one STALL_TIMEOUT, send a warning notification that the file could not be confirmed (true/false)."),
+    _KeyDef("SITE_SORT",                scope="global",                    default="added_first",                preserve=True,               comment="The order to display streamers on each site panel.   This can also be adjusted by pressing the S key on the Dashboard tab."),
+    _KeyDef("COMPACT_VIEW",             scope="global",                    default="auto",                       preserve=True,               comment="When streamers overflow the panel, compact view shows them in 2 columns without progress bars. (auto/true/false)"),
+    _KeyDef("WEB_UI",                   scope="global",                    default="false",                      preserve=True, type="bool",  comment="Enable the Web UI, viewable from any browser on your local network by navigating to http://your-ip-address:8765 or from the same machine at http://127.0.0.1:8765. Requires WEB_UI_USER and WEB_UI_PASS to also be set. Note: Use this tool on your local network only.  Access over the internet is not supported yet. (true/false)"),
+    _KeyDef("WEB_UI_PORT",              scope="global",                    default="8765",                       preserve=True, type="int",   comment="Port for the web dashboard. Default: 8765"),
+    _KeyDef("WEB_UI_USER",              scope="global",                    default="",                           preserve=True,               comment="Username required to log into the web dashboard (HTTP Basic Auth). Required if WEB_UI is enabled."),
+    _KeyDef("WEB_UI_PASS",              scope="global",                    default="",                           preserve=True,               comment="Password required to log into the web dashboard (HTTP Basic Auth). Required if WEB_UI is enabled. Choose something not easily guessed — anyone on your WiFi could otherwise try to log in."),
+    _KeyDef("RGB_MODE",                 scope="global",                    default="true",                       preserve=True, type="bool",  comment="Pin the terminal's 8 base colors to exact RGB values (the Windows Terminal Campbell palette) so the app looks the same on every Linux terminal (may require restart) (true/false)."),
+    _KeyDef("DELETE_EMPTY",             scope="global",                    default="true",                       preserve=True, type="bool",  comment="When deleting a file from the file manager, delete the parent folder if it is empty.  This only applies to subfolders within the OUTPUT_DIR. (true/false)"),
 
     # ── Site keys (per-site .conf) ────────────────────────────────────────────
-    _KeyDef("SITE_LABEL",            "site",   "",      True,  comment="The name of this site."),
-    _KeyDef("SITE_ORDER",            "site",   "999",   True,  comment="The position on the dashboard to display this site's panel (e.g. 0 for top-left, 1 for top-right, 2 for bottom-left, 3 for bottom-right, etc.)"),
-    _KeyDef("CHECK_INTERVAL",        "site",   "60",    False, comment="How often to check if streamers are live (in seconds).  (Default: 60) (note: keep this <= STALL_TIMEOUT to avoid false write-failure alerts)"),
-    _KeyDef("OUTPUT_DIR",            "site",   "recordings", True, comment='Folder where recordings will be saved.  Can be an absolute path or relative path.  example: "C:\\recordings" or "recordings"'),
-    _KeyDef("OUTPUT_TMPL",           "site",   "%(title)s [%(id)s].%(ext)s", False, comment="Template for naming the video files. (Reference: https://github.com/yt-dlp/yt-dlp#output-templates)"),
-    _KeyDef("COOLDOWN_AFTER_RECORDING", "site", "60",   False, comment="Seconds to wait after a recording ends before checking again."),
-    _KeyDef("SPLIT_AFTER",           "site",   "0",    True,  comment="When recording a stream, split the video file(s) every X minutes. (0 = no split)"),
-    _KeyDef("AUTO_SUFFIX",           "site",   "true", True,  comment="When a recording restarts for any reason while the streamer is still on the same live stream, name the new file and the original file with a _partN suffix. (Default: true)"),
-    _KeyDef("STALL_CHECK_INTERVAL",  "site",   "30",   True, comment="How often to check if the recording has stalled (in seconds).  Disable by setting this to a large number. (Default: 30)"),
-    _KeyDef("STALL_TIMEOUT",         "site",   "120",  False, comment="Time to wait before considering a recording stalled (in seconds). (Default: 120) (note: also used with NOTIFY_NO_CONFIRM_FILE) (note: keep this >= CHECK_INTERVAL to avoid false write-failure alerts)"),
-    _KeyDef("CONFIG_CHECK_INTERVAL", "site",   "3",    False, comment="How often to check for changes to the configuration file (in seconds). (Default: 3)"),
-    _KeyDef("SITE_TMPL",             "site",   "",     False, comment="URL where the live stream can be accessed. {username} will be replaced with the streamer's username."),
-    _KeyDef("PANEL_RESIZE",          "site",   "true", True,  comment="When true, site panels will expand vertically as needed to display all streamers."),
-    _KeyDef("LOGGING",               "site",   "false", True, comment="Log stdout and stderr to a per-streamer log file."),
-    _KeyDef("LOG_PATH",              "site",   "",     False,  comment="Folder to save per-streamer log files. Defaults to \"logs\"."),
-    _KeyDef("SPLIT_LOGS",            "site",   "false", True, comment="When LOGGING = true, create 2 separate log files per streamer.  One for stdout (yt-dlp) and one for stderr (ffmpeg)."),
-    _KeyDef("POPUP_NOTIFICATIONS",   "site",   "true", True,  comment="Show a popup notification when a streamer goes live."),
-    _KeyDef("NTFY_NOTIFICATIONS",    "site",   "true", True,  comment="Push a notification to your phone via ntfy.sh when a recording starts. This requires NTFY_TOPIC to be set in the GLOBAL SETTINGS panel. (true/false)"),
-    _KeyDef("AD_ALERTS",             "site",   "True", True,  comment="Show an alert in the system panel when ads are detected in a recording (true/false)."),
-    _KeyDef("POPUP_TIMEOUT",         "site",   "15",   True,  comment="Seconds to show the popup notification when a streamer goes live."),
-    _KeyDef("POPUP_COOLDOWN",        "site",   "30",   True,  comment="Minutes to wait before showing another popup notification for the same streamer."),
-    _KeyDef("YT_DLP_PATH_WINDOWS",   "site",   "",     False, comment='Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
-    _KeyDef("YT_DLP_PATH_MAC",       "site",   "",     False, comment='Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
-    _KeyDef("YT_DLP_PATH_LINUX",     "site",   "",     False, comment='Path to the yt-dlp executable.  "YT_DLP_PATH = bin/yt-dlp.exe" to use the bundled windows executable.  "YT_DLP_PATH = bin/yt-dlp" to use the bundled linux executable.  "YT_DLP_PATH = yt-dlp" to use PATH'),
-    _KeyDef("PROGRESS_BAR_MAX_HOURS","site",   "10",    True,  comment="Duration of the progress bar in the site panel of the dashboard. (in hours)"),
-    _KeyDef("PROGRESS_BAR_WIDTH",    "site",   "58",   True,  comment="Width of the progress bar in the site panel of the dashboard. (in characters)"),
-    _KeyDef("DOWNLOADER_COOKIES",    "site",   "true", False, comment="Whether to write the --cookies-from-browser flag to this config file's [Downloader] section when a browser is selected at startup."),
-    _KeyDef("CHECKER_COOKIES",       "site",   "false", False, comment="Whether to write the --cookies-from-browser flag to this config file's [Checker] section when a browser is selected at startup."),
-    _KeyDef("LAST_LIVE_HIGHLIGHT",   "site",   "0",    True,  comment='Highlight the "Last Live" timestamp when the streamer was last live within X days.'),
-    _KeyDef("UPGRADE_QUALITY",       "site",   "true", True, comment="Restart the recording when a higher quality is available. (true/false)."),
+    _KeyDef("SITE_LABEL",               scope="site",                      default="",                           preserve=True,               comment="The display name of this site."),
+    _KeyDef("SITE_ORDER",               scope="site",                      default="999",                        preserve=True,               comment="The position on the dashboard to display this site's panel (e.g. 0 for top-left, 1 for top-right, 2 for bottom-left, 3 for bottom-right, etc.)"),
+    _KeyDef("CHECK_INTERVAL",           scope="site",                      default="60",                         preserve=False,              comment="How often to check if streamers are live (in seconds).  (Default: 60) (note: keep this <= STALL_TIMEOUT to avoid false write-failure alerts)"),
+    _KeyDef("OUTPUT_DIR",               scope="site",                      default="recordings",                 preserve=True,               comment='Folder where recordings will be saved.  Can be an absolute path or relative path.  example: "C:\\recordings" or "recordings"'),
+    _KeyDef("OUTPUT_TMPL",              scope="site",                      default="%(title)s [%(id)s].%(ext)s", preserve=False,              comment="Template for naming the video files. (Reference: https://github.com/yt-dlp/yt-dlp#output-templates)"),
+    _KeyDef("COOLDOWN_AFTER_RECORDING", scope="site",                      default="60",                         preserve=False,              comment="Seconds to wait after a recording ends before checking again."),
+    _KeyDef("SPLIT_AFTER",              scope="site",                      default="0",                          preserve=True,               comment="When recording a stream, split the video file(s) every X minutes. (0 = no split)"),
+    _KeyDef("AUTO_SUFFIX",              scope="site",                      default="true",                       preserve=True,               comment="When a recording restarts for any reason while the streamer is still on the same live stream, name the new file and the original file with a _partN suffix. (Default: true)"),
+    _KeyDef("STALL_CHECK_INTERVAL",     scope="site",                      default="30",                         preserve=False,              comment="How often to check if the recording has stalled (in seconds).  Disable by setting this to a large number. (Default: 30)"),
+    _KeyDef("STALL_TIMEOUT",            scope="site",                      default="120",                        preserve=False,              comment="Time to wait before considering a recording stalled (in seconds). (Default: 120) (note: also used with NOTIFY_NO_CONFIRM_FILE) (note: keep this >= CHECK_INTERVAL to avoid false write-failure alerts)"),
+    _KeyDef("CONFIG_CHECK_INTERVAL",    scope="site",                      default="3",                          preserve=False,              comment="How often to check for changes to the configuration file (in seconds). (Default: 3)"),
+    _KeyDef("SITE_TMPL",                scope="site",                      default="",                           preserve=False,              comment="URL where the live stream can be accessed. {username} will be replaced with the streamer's username."),
+    _KeyDef("PANEL_RESIZE",             scope="site",                      default="true",                       preserve=True,               comment="When true, site panels will expand vertically as needed to display all streamers."),
+    _KeyDef("LOGGING",                  scope="site",                      default="false",                      preserve=True,               comment="Log stdout and stderr to a per-streamer log file."),
+    _KeyDef("LOG_PATH",                 scope="site",                      default="",                           preserve=True,               comment="Folder to save per-streamer log files. Defaults to \"logs\"."),
+    _KeyDef("SPLIT_LOGS",               scope="site",                      default="false",                      preserve=True,               comment="When LOGGING = true, create 2 separate log files per streamer.  One for stdout (yt-dlp) and one for stderr (ffmpeg)."),
+    _KeyDef("POPUP_NOTIFICATIONS",      scope="site",                      default="true",                       preserve=True,               comment="Show a popup notification when a streamer goes live."),
+    _KeyDef("NTFY_NOTIFICATIONS",       scope="site",                      default="true",                       preserve=True,               comment="Push a notification to your phone via ntfy.sh when a recording starts. This requires NTFY_TOPIC to be set in the GLOBAL SETTINGS panel. (true/false)"),
+    _KeyDef("AD_ALERTS",                scope="site",                      default="true",                       preserve=True,               comment="Show an alert in the system panel when ads are detected in a recording (true/false)."),
+    _KeyDef("AD_ALERT_PATTERNS",        scope="site",                      default="",                           preserve=False,              comment="Regex (case-insensitive), alternation-joined with '|', matched against yt-dlp output to detect ads."),
+    _KeyDef("POPUP_TIMEOUT",            scope="site",                      default="15",                         preserve=True,               comment="Seconds to show the popup notification when a streamer goes live."),
+    _KeyDef("POPUP_COOLDOWN",           scope="site",                      default="30",                         preserve=True,               comment="Minutes to wait before showing another popup notification for the same streamer."),
+    _KeyDef("YT_DLP_PATH_WINDOWS",      scope="site",                      default="",                           preserve=False,              comment='Path to the yt-dlp executable.  "bin/windows/yt-dlp/yt-dlp.exe" to use the bundled windows executable.  "bin/linux/yt-dlp/yt-dlp" to use the bundled linux executable.  "yt-dlp" to use your system PATH'),
+    _KeyDef("YT_DLP_PATH_MAC",          scope="site",                      default="",                           preserve=False,              comment='Path to the yt-dlp executable.  "bin/windows/yt-dlp/yt-dlp.exe" to use the bundled windows executable.  "bin/linux/yt-dlp/yt-dlp" to use the bundled linux executable.  "yt-dlp" to use your system PATH'),
+    _KeyDef("YT_DLP_PATH_LINUX",        scope="site",                      default="",                           preserve=False,              comment='Path to the yt-dlp executable.  "bin/windows/yt-dlp/yt-dlp.exe" to use the bundled windows executable.  "bin/linux/yt-dlp/yt-dlp" to use the bundled linux executable.  "yt-dlp" to use your system PATH'),
+    _KeyDef("PROGRESS_BAR_MAX_HOURS",   scope="site",                      default="10",                         preserve=True,               comment="Duration of the progress bar in the site panel of the dashboard. (in hours)"),
+    _KeyDef("PROGRESS_BAR_WIDTH",       scope="site",                      default="58",                         preserve=True,               comment="Width of the progress bar in the site panel of the dashboard. (in characters)"),
+    _KeyDef("BROWSER",                  scope="site",                      default="firefox",                    preserve=False,              comment="The browser to use for --cookies-from-browser."),
+    _KeyDef("LAST_LIVE_HIGHLIGHT",      scope="site",                      default="0",                          preserve=True,               comment='Highlight the "Last Live" timestamp when the streamer was last live within X days.'),
+    _KeyDef("UPGRADE_QUALITY",          scope="site",                      default="true",                       preserve=True,               comment="Restart the recording when a higher quality is available. (true/false)."),
 )
+
+
+# ── [Checker]/[Downloader]/[LQ_Downloader] keys (per-site .conf) ───────────────
+DOWNLOADER_FLAG_KEYS: tuple[_DlpFlagDef, ...] = (
+    _DlpFlagDef("COOKIES_FROM_BROWSER", cli_flag="--cookies-from-browser", default="true",                       preserve=False, type="bool", comment="Use cookies from the browser set in BROWSER (General section) when yt-dlp runs for this section. Set independently per [Checker]/[Downloader]/[LQ_Downloader]. Set to false to disable browser cookies for this section entirely."),
+    _DlpFlagDef("DUMP_JSON",            cli_flag="--dump-json",            default="false",                      preserve=False, type="bool", comment="Have yt-dlp dump the stream's metadata as JSON instead of downloading. Typically used in [Checker] to detect whether a streamer is live."),
+    _DlpFlagDef("NO_PART",              cli_flag="--no-part",              default="false",                      preserve=False, type="bool", comment="Do not use .part files while downloading; write directly to the final filename."),
+    _DlpFlagDef("VERBOSE",              cli_flag="--verbose",              default="false",                      preserve=False, type="bool", comment="Print verbose debugging information from yt-dlp."),
+    _DlpFlagDef("FIXUP",                cli_flag="--fixup",                default="",                           preserve=False, type="str",  comment='How yt-dlp should fix up damaged output files after download (e.g. "never" to skip the fixup pass entirely).'),
+    _DlpFlagDef("RETRIES",              cli_flag="--retries",              default="",                           preserve=False, type="int",  comment="Number of times yt-dlp retries on a download error."),
+    _DlpFlagDef("FORMAT",               cli_flag="-f",                     default="",                           preserve=False, type="str",  comment="yt-dlp format selector (e.g. 4, 720p60, best). Typically used in [LQ_Downloader] to force a lower-quality fallback format."),
+    _DlpFlagDef("DOWNLOADER_ARGS",      cli_flag="--downloader-args",      default="",                           preserve=False, type="str",  comment='Extra arguments passed straight to the external downloader, e.g. ffmpeg:"-fps_mode passthrough -copyts -avoid_negative_ts make_zero".'),
+    _DlpFlagDef("EXTRA_ARGS",           cli_flag="",                       default="",                           preserve=False, type="str",  comment="Raw passthrough for any yt-dlp flag that doesn't have a dedicated key above (e.g. --some-flag value). Split the same way a shell command line would be."),
+)
+
+# Default values keyed by name
+DOWNLOADER_FLAG_DEFAULTS: dict[str, str] = {k.name: k.default for k in DOWNLOADER_FLAG_KEYS}
+
+# Help comments keyed by name
+DOWNLOADER_FLAG_COMMENTS: dict[str, str] = {k.name: k.comment for k in DOWNLOADER_FLAG_KEYS}
+
 
 # ── Derived helpers (consumed by this module and importable by others) ─────────
 
@@ -124,11 +173,14 @@ _KEY_DEFAULTS: dict[str, str] = {k.name: k.default for k in CONFIG_KEYS}
 # Help comments keyed by name
 _KEY_COMMENTS: dict[str, str] = {k.name: k.comment for k in CONFIG_KEYS}
 
-# Keys that must be preserved across an update (both global and site)
-PRESERVED_KEYS: list[str] = [k.name for k in CONFIG_KEYS if k.preserve]
+# Keys that must be preserved across an update (both global and site, plus
+# the per-section Checker/Downloader/LQ_Downloader keys)
+PRESERVED_KEYS: list[str] = [k.name for k in CONFIG_KEYS if k.preserve] + \
+                             [k.name for k in DOWNLOADER_FLAG_KEYS if k.preserve]
 
 # Lookup: key name -> preserve flag (used to flag "managed" keys in the edit popup)
 _KEY_PRESERVE: dict[str, bool] = {k.name: k.preserve for k in CONFIG_KEYS}
+_KEY_PRESERVE.update({k.name: k.preserve for k in DOWNLOADER_FLAG_KEYS})
 
 
 # Valid SUBFOLDERS modes (new-style values only; true/false are legacy aliases).
@@ -183,8 +235,10 @@ def load_global_config(path: str) -> dict:
     parser = configparser.ConfigParser(allow_no_value=True, interpolation=None, delimiters=('=',))
     try:
         parser.read(path, encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as e:
+        # Parse failed; falling back to defaults for every key, so warn instead of hiding it.
+        # dbg() only (not print) — this can run mid-session while curses owns the screen.
+        _dbg(f"load_global_config: parse failed for {path!r}: {e}")
 
     general = parser["General"] if parser.has_section("General") else {}
 
@@ -250,7 +304,8 @@ def _compute_config_sha(config_path: str) -> str:
     try:
         with open(config_path, "rb") as f:
             return hashlib.sha256(f.read()).hexdigest()[:16]
-    except Exception:
+    except Exception as e:
+        _dbg(f"_compute_config_sha: {e}")
         return ""
 
 
@@ -281,9 +336,126 @@ def _get_site_default_cfg(dashboard, entry: "PriorityEntry") -> dict:
         for site in dashboard.sites:
             if site.config_path == entry.config_path:
                 return site.get_cached_config()
-    except Exception:
+    except Exception as e:
+        _dbg(f"_get_site_default_cfg: {e}")
         pass
     return {}
+
+
+class PriorityEntryStore:
+    """Read/write access to one streamer's record inside
+    priorities[config_id]['entries'] in global.json.
+
+    Every per-streamer settings popup (Quality, Notifications, Auto-Suffix,
+    Subfolders, Split, Intro Delay, Schedule) persists into the same
+    find-or-create record; this centralizes that lookup/creation/save cycle
+    so a new field only ever needs to be threaded through here once, instead
+    of being reimplemented (and possibly forgotten) in each popup.
+    """
+
+    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
+        self.dashboard = dashboard
+        self.entry     = entry
+        self.config_id = config_id
+
+    def load(self) -> dict:
+        """Return a copy of this streamer's saved record, or {} if none."""
+        try:
+            from .main import _global_json_lock, _load_global_json
+            with _global_json_lock:
+                gdata = _load_global_json()
+            found = self._find(self._entries(gdata))
+            return dict(found) if found else {}
+        except Exception as e:
+            _dbg(f"PriorityEntryStore.load: {e}")
+            return {}
+
+    def update(self, **fields) -> None:
+        """Set *fields* on this streamer's record, creating it if needed."""
+        self._mutate(lambda target: target.update(fields), create_if_missing=True)
+
+    def clear(self, *keys: str) -> None:
+        """Remove *keys* from this streamer's record. No-op (and no file
+        write) if the record doesn't exist — never creates one just to
+        clear it."""
+        self._mutate(lambda target: [target.pop(k, None) for k in keys],
+                     create_if_missing=False)
+
+    def mutate(self, fn) -> None:
+        """Escape hatch for a bespoke atomic read-modify-write: *fn* is
+        called with the find-or-created record dict to edit in place."""
+        self._mutate(fn, create_if_missing=True)
+
+    def reset(self, *keys: str) -> None:
+        """Like clear(), but also refreshes the PRIORITY panel's cached
+        override state immediately (used by the 'R' Reset hotkey, where the
+        popup stays open and can't rely on the usual on-close reload)."""
+        self.clear(*keys)
+        self._notify_reset()
+
+    # ── internals ────────────────────────────────────────────────────────
+
+    def _entries(self, gdata: dict) -> list:
+        return gdata.get("priorities", {}).get(self.config_id, {}).get("entries", [])
+
+    def _find(self, entries: list) -> "Optional[dict]":
+        return next(
+            (e for e in entries
+             if e.get("streamer") == self.entry.streamer and e.get("site") == self.entry.site),
+            None,
+        )
+
+    def _mutate(self, fn, create_if_missing: bool) -> None:
+        try:
+            from .main import _update_global_json
+
+            def _apply(gdata):
+                entries = self._entries(gdata)
+                target  = self._find(entries)
+                if target is None:
+                    if not create_if_missing:
+                        return False
+                    target = {
+                        "streamer":   self.entry.streamer,
+                        "site":       self.entry.site,
+                        "config_sha": self.entry.config_sha,
+                        "priority":   len(entries),
+                        "bypass":     self.entry.bypass,
+                    }
+                    entries.append(target)
+                fn(target)
+                gdata.setdefault("priorities", {}).setdefault(
+                    self.config_id, {"config_files": [], "entries": []}
+                )["entries"] = entries
+            _update_global_json(_apply)
+        except Exception as e:
+            _dbg(f"PriorityEntryStore._mutate: {e}")
+            pass
+
+    def _notify_reset(self) -> None:
+        # Invalidate the sort manager's priority cache so the "*" has_override
+        # marker in the SORT/site-list views refreshes immediately.
+        try:
+            sort_mgr = getattr(self.dashboard, "sort_manager", None)
+            if sort_mgr is not None:
+                sort_mgr._prio_cache_ts = 0.0
+        except Exception as e:
+            _dbg(f"PriorityEntryStore._notify_reset: {e}")
+            pass
+
+        # Also force the PRIORITY panel itself to reload from disk right now,
+        # rather than waiting for the settings popup stack to fully close.
+        # This makes the "*" marker beside the streamer's name disappear the
+        # moment the reset is confirmed, instead of only after pressing Esc
+        # back out to the streamer list.
+        try:
+            config_editor = getattr(self.dashboard, "config_editor", None)
+            priority_editor = getattr(config_editor, "priority_editor", None)
+            if priority_editor is not None:
+                priority_editor.force_reload()
+        except Exception as e:
+            _dbg(f"PriorityEntryStore._notify_reset: {e}")
+            pass
 
 
 # ── Per-streamer setting override keys, grouped by which popup owns them ────
@@ -305,46 +477,7 @@ def _reset_streamer_setting_keys(dashboard, config_id: str, entry: "PriorityEntr
                                   keys: "tuple[str, ...]") -> None:
     """Remove *keys* from entry's record in global.json, reverting those
     settings back to inherited / site-default behavior."""
-    try:
-        from .main import _global_json_lock, _load_global_json, _save_global_json
-        with _global_json_lock:
-            gdata   = _load_global_json()
-            entries = (gdata.get("priorities", {})
-                           .get(config_id, {})
-                           .get("entries", []))
-            for e in entries:
-                if e.get("streamer") == entry.streamer and e.get("site") == entry.site:
-                    for k in keys:
-                        e.pop(k, None)
-                    break
-            gdata.setdefault("priorities", {}).setdefault(
-                config_id, {"config_files": [], "entries": []}
-            )["entries"] = entries
-            _save_global_json(gdata)
-    except Exception:
-        pass
-
-    # Invalidate the sort manager's priority cache so the "*" has_override
-    # marker in the SORT/site-list views refreshes immediately.
-    try:
-        sort_mgr = getattr(dashboard, "sort_manager", None)
-        if sort_mgr is not None:
-            sort_mgr._prio_cache_ts = 0.0
-    except Exception:
-        pass
-
-    # Also force the PRIORITY panel itself to reload from disk right now,
-    # rather than waiting for the settings popup stack to fully close.
-    # This makes the "*" marker beside the streamer's name disappear the
-    # moment the reset is confirmed, instead of only after pressing Esc
-    # back out to the streamer list.
-    try:
-        config_editor = getattr(dashboard, "config_editor", None)
-        priority_editor = getattr(config_editor, "priority_editor", None)
-        if priority_editor is not None:
-            priority_editor.force_reload()
-    except Exception:
-        pass
+    PriorityEntryStore(dashboard, entry, config_id).reset(*keys)
 
 
 class ConfirmResetPopup:
@@ -582,16 +715,13 @@ class PriorityEditor:
         if not self._config_id:
             return
         config_paths = [site.config_path for site in self.dashboard.sites]
-        from .main import _global_json_lock, _load_global_json, _save_global_json
-        with _global_json_lock:
-            global_data = _load_global_json()
-            if "priorities" not in global_data or not isinstance(global_data["priorities"], dict):
-                global_data["priorities"] = {}
+        from .main import _update_global_json
+
+        def _mutate(gdata):
+            priorities = gdata.setdefault("priorities", {})
             # Build a lookup of any extra fields already stored (e.g. schedule)
             # so we can carry them forward rather than losing them on every save.
-            existing_entries = (global_data["priorities"]
-                                .get(self._config_id, {})
-                                .get("entries", []))
+            existing_entries = priorities.get(self._config_id, {}).get("entries", [])
             existing_map: dict = {}
             for ex in existing_entries:
                 key = (ex.get("streamer", ""), ex.get("site", ""))
@@ -599,41 +729,29 @@ class PriorityEditor:
 
             entries_data = []
             for i, e in enumerate(self._entries):
-                ex = existing_map.get((e.streamer, e.site), {})
-                entry_dict: dict = {
+                entry_dict = dict(existing_map.get((e.streamer, e.site), {}))
+                entry_dict.update({
                     "streamer":   e.streamer,
                     "site":       e.site,
                     "config_sha": e.config_sha,
                     "priority":   i,
                     "bypass":     e.bypass,
-                }
-                # Preserve schedule / split / notifications / LQ overrides
-                # (and any future extra fields) so reordering or toggling
-                # bypass never wipes a streamer-level override. This was
-                # previously only done for "schedule" and "lq_enabled",
-                # which silently dropped Split and Notifications overrides
-                # on the next reorder or bypass toggle.
-                for extra_key in ("schedule", "lq_enabled",
-                                  "split_mode", "split_after", "split_enabled",
-                                  "notifications_enabled",
-                                  "intro_delay_enabled", "intro_delay_minutes", "intro_delay_split",
-                                  "auto_suffix_mode"):
-                    if extra_key in ex:
-                        entry_dict[extra_key] = ex[extra_key]
+                })
                 entries_data.append(entry_dict)
 
-            global_data["priorities"][self._config_id] = {
+            priorities[self._config_id] = {
                 "config_files": config_paths,
                 "entries":      entries_data,
             }
-            _save_global_json(global_data)
+        _update_global_json(_mutate)
 
         # Invalidate the sort manager's priority cache so the panel re-sorts immediately.
         try:
             sort_mgr = getattr(self.dashboard, "sort_manager", None)
             if sort_mgr is not None:
                 sort_mgr._prio_cache_ts = 0.0
-        except Exception:
+        except Exception as e:
+            _dbg(f"_save: {e}")
             pass
 
     # ── Movement helpers ───────────────────────────────────────────────────────
@@ -1012,61 +1130,20 @@ class QualitySettingsPopup:
         self.dashboard = dashboard
         self.entry     = entry
         self.config_id = config_id
+        self._store    = PriorityEntryStore(dashboard, entry, config_id)
         self.lq_enabled = False
         self._confirm_reset: "Optional[ConfirmResetPopup]" = None
         self._load()
 
     def _load(self) -> None:
-        try:
-            from .main import _global_json_lock, _load_global_json
-            with _global_json_lock:
-                gdata = _load_global_json()
-            entries = (gdata.get("priorities", {})
-                           .get(self.config_id, {})
-                           .get("entries", []))
-            for e in entries:
-                if (e.get("streamer") == self.entry.streamer
-                        and e.get("site") == self.entry.site):
-                    self.lq_enabled = bool(e.get("lq_enabled", False))
-                    break
-        except Exception:
-            pass
+        self.lq_enabled = bool(self._store.load().get("lq_enabled", False))
 
     def _reset(self) -> None:
-        _reset_streamer_setting_keys(self.dashboard, self.config_id, self.entry, ("lq_enabled",))
+        self._store.reset("lq_enabled")
         self._load()
 
     def _save(self) -> None:
-        try:
-            from .main import _global_json_lock, _load_global_json, _save_global_json
-            with _global_json_lock:
-                gdata   = _load_global_json()
-                entries = (gdata.get("priorities", {})
-                               .get(self.config_id, {})
-                               .get("entries", []))
-                target = None
-                for e in entries:
-                    if (e.get("streamer") == self.entry.streamer
-                            and e.get("site") == self.entry.site):
-                        target = e
-                        break
-                if target is None:
-                    target = {
-                        "streamer":   self.entry.streamer,
-                        "site":       self.entry.site,
-                        "config_sha": self.entry.config_sha,
-                        "priority":   len(entries),
-                        "bypass":     self.entry.bypass,
-                    }
-                    entries.append(target)
-                target["lq_enabled"] = self.lq_enabled
-
-                gdata.setdefault("priorities", {}).setdefault(
-                    self.config_id, {"config_files": [], "entries": []}
-                )["entries"] = entries
-                _save_global_json(gdata)
-        except Exception:
-            pass
+        self._store.update(lq_enabled=self.lq_enabled)
 
     def handle_key(self, key) -> bool:
         if self._confirm_reset is not None:
@@ -1141,72 +1218,27 @@ class NotificationSettingsPopup:
         self.dashboard = dashboard
         self.entry     = entry
         self.config_id = config_id
+        self._store    = PriorityEntryStore(dashboard, entry, config_id)
         self.state: str = "inherit"   # "inherit" | "on" | "off"
         self._confirm_reset: "Optional[ConfirmResetPopup]" = None
         self._load()
 
     def _reset(self) -> None:
-        _reset_streamer_setting_keys(self.dashboard, self.config_id, self.entry, ("notifications_enabled",))
+        self._store.reset("notifications_enabled")
         self._load()
 
     def _load(self) -> None:
-        try:
-            from .main import _global_json_lock, _load_global_json
-            with _global_json_lock:
-                gdata = _load_global_json()
-            entries = (gdata.get("priorities", {})
-                           .get(self.config_id, {})
-                           .get("entries", []))
-            for e in entries:
-                if (e.get("streamer") == self.entry.streamer
-                        and e.get("site") == self.entry.site):
-                    raw = e.get("notifications_enabled", None)
-                    if raw is None:
-                        self.state = "inherit"
-                    else:
-                        self.state = "on" if bool(raw) else "off"
-                    break
-        except Exception:
-            pass
+        raw = self._store.load().get("notifications_enabled")
+        self.state = "inherit" if raw is None else ("on" if raw else "off")
 
     def _save(self) -> None:
-        try:
-            from .main import _global_json_lock, _load_global_json, _save_global_json
-            with _global_json_lock:
-                gdata   = _load_global_json()
-                entries = (gdata.get("priorities", {})
-                               .get(self.config_id, {})
-                               .get("entries", []))
-                target = None
-                for e in entries:
-                    if (e.get("streamer") == self.entry.streamer
-                            and e.get("site") == self.entry.site):
-                        target = e
-                        break
-                if self.state == "inherit":
-                    # Nothing to override — remove any prior explicit value
-                    # rather than writing one, so this streamer stops
-                    # showing up as having a Notifications override.
-                    if target is not None:
-                        target.pop("notifications_enabled", None)
-                else:
-                    if target is None:
-                        target = {
-                            "streamer":   self.entry.streamer,
-                            "site":       self.entry.site,
-                            "config_sha": self.entry.config_sha,
-                            "priority":   len(entries),
-                            "bypass":     self.entry.bypass,
-                        }
-                        entries.append(target)
-                    target["notifications_enabled"] = (self.state == "on")
-
-                gdata.setdefault("priorities", {}).setdefault(
-                    self.config_id, {"config_files": [], "entries": []}
-                )["entries"] = entries
-                _save_global_json(gdata)
-        except Exception:
-            pass
+        if self.state == "inherit":
+            # Nothing to override — remove any prior explicit value rather
+            # than writing one, so this streamer stops showing up as
+            # having a Notifications override.
+            self._store.clear("notifications_enabled")
+        else:
+            self._store.update(notifications_enabled=(self.state == "on"))
 
     def _site_default(self) -> bool:
         cfg = _get_site_default_cfg(self.dashboard, self.entry)
@@ -1296,72 +1328,27 @@ class AutoSuffixSettingsPopup:
         self.dashboard = dashboard
         self.entry     = entry
         self.config_id = config_id
+        self._store    = PriorityEntryStore(dashboard, entry, config_id)
         self.state: str = "inherit"   # "inherit" | "on" | "off"
         self._confirm_reset: "Optional[ConfirmResetPopup]" = None
         self._load()
 
     def _reset(self) -> None:
-        _reset_streamer_setting_keys(self.dashboard, self.config_id, self.entry, ("auto_suffix_mode",))
+        self._store.reset("auto_suffix_mode")
         self._load()
 
     def _load(self) -> None:
-        try:
-            from .main import _global_json_lock, _load_global_json
-            with _global_json_lock:
-                gdata = _load_global_json()
-            entries = (gdata.get("priorities", {})
-                           .get(self.config_id, {})
-                           .get("entries", []))
-            for e in entries:
-                if (e.get("streamer") == self.entry.streamer
-                        and e.get("site") == self.entry.site):
-                    raw = e.get("auto_suffix_mode", None)
-                    if raw not in ("on", "off"):
-                        self.state = "inherit"
-                    else:
-                        self.state = raw
-                    break
-        except Exception:
-            pass
+        raw = self._store.load().get("auto_suffix_mode")
+        self.state = raw if raw in ("on", "off") else "inherit"
 
     def _save(self) -> None:
-        try:
-            from .main import _global_json_lock, _load_global_json, _save_global_json
-            with _global_json_lock:
-                gdata   = _load_global_json()
-                entries = (gdata.get("priorities", {})
-                               .get(self.config_id, {})
-                               .get("entries", []))
-                target = None
-                for e in entries:
-                    if (e.get("streamer") == self.entry.streamer
-                            and e.get("site") == self.entry.site):
-                        target = e
-                        break
-                if self.state == "inherit":
-                    # Nothing to override — remove any prior explicit value
-                    # rather than writing one, so this streamer stops
-                    # showing up as having an Auto-Suffix override.
-                    if target is not None:
-                        target.pop("auto_suffix_mode", None)
-                else:
-                    if target is None:
-                        target = {
-                            "streamer":   self.entry.streamer,
-                            "site":       self.entry.site,
-                            "config_sha": self.entry.config_sha,
-                            "priority":   len(entries),
-                            "bypass":     self.entry.bypass,
-                        }
-                        entries.append(target)
-                    target["auto_suffix_mode"] = self.state
-
-                gdata.setdefault("priorities", {}).setdefault(
-                    self.config_id, {"config_files": [], "entries": []}
-                )["entries"] = entries
-                _save_global_json(gdata)
-        except Exception:
-            pass
+        if self.state == "inherit":
+            # Nothing to override — remove any prior explicit value rather
+            # than writing one, so this streamer stops showing up as
+            # having an Auto-Suffix override.
+            self._store.clear("auto_suffix_mode")
+        else:
+            self._store.update(auto_suffix_mode=self.state)
 
     def _site_default(self) -> bool:
         cfg = _get_site_default_cfg(self.dashboard, self.entry)
@@ -1464,6 +1451,7 @@ class OutputDirectorySettingsPopup:
         self.dashboard = dashboard
         self.entry     = entry
         self.config_id = config_id
+        self._store    = PriorityEntryStore(dashboard, entry, config_id)
 
         self.mode:           str  = "inherit"
         self.custom_enabled: bool = False
@@ -1479,72 +1467,31 @@ class OutputDirectorySettingsPopup:
     # ── Persistence ────────────────────────────────────────────────────────────
 
     def _load(self) -> None:
-        try:
-            from .main import _global_json_lock, _load_global_json
-            with _global_json_lock:
-                gdata = _load_global_json()
-            entries = (gdata.get("priorities", {})
-                           .get(self.config_id, {})
-                           .get("entries", []))
-            for e in entries:
-                if (e.get("streamer") == self.entry.streamer
-                        and e.get("site") == self.entry.site):
-                    raw = e.get("output_dir_mode")
-                    self.mode = raw if raw in SUBFOLDERS_MODES else "inherit"
-                    self.custom_enabled = bool(e.get("output_dir_custom_enabled", False))
-                    self.custom_path = str(e.get("output_dir_custom_path", "") or "")
-                    break
-        except Exception:
-            pass
+        saved = self._store.load()
+        raw = saved.get("output_dir_mode")
+        self.mode = raw if raw in SUBFOLDERS_MODES else "inherit"
+        self.custom_enabled = bool(saved.get("output_dir_custom_enabled", False))
+        self.custom_path = str(saved.get("output_dir_custom_path", "") or "")
         if not self.custom_path:
             self.custom_path = str(self._site_default_output_dir())
         self._path_cursor = len(self.custom_path)
 
     def _save(self) -> None:
-        try:
-            from .main import _global_json_lock, _load_global_json, _save_global_json
-            with _global_json_lock:
-                gdata   = _load_global_json()
-                entries = (gdata.get("priorities", {})
-                               .get(self.config_id, {})
-                               .get("entries", []))
-                target = None
-                for e in entries:
-                    if (e.get("streamer") == self.entry.streamer
-                            and e.get("site") == self.entry.site):
-                        target = e
-                        break
-                no_override = (self.mode == "inherit" and not self.custom_enabled)
-                if no_override:
-                    # Nothing to override — clear any prior explicit values
-                    # rather than writing them.
-                    if target is not None:
-                        target.pop("output_dir_mode", None)
-                        target.pop("output_dir_custom_enabled", None)
-                        target.pop("output_dir_custom_path", None)
-                else:
-                    if target is None:
-                        target = {
-                            "streamer":   self.entry.streamer,
-                            "site":       self.entry.site,
-                            "config_sha": self.entry.config_sha,
-                            "priority":   len(entries),
-                            "bypass":     self.entry.bypass,
-                        }
-                        entries.append(target)
-                    if self.mode == "inherit":
-                        target.pop("output_dir_mode", None)
-                    else:
-                        target["output_dir_mode"] = self.mode
-                    target["output_dir_custom_enabled"] = self.custom_enabled
-                    target["output_dir_custom_path"] = self.custom_path.strip() if self.custom_enabled else ""
+        if self.mode == "inherit" and not self.custom_enabled:
+            # Nothing to override — clear any prior explicit values rather
+            # than writing them.
+            self._store.clear("output_dir_mode", "output_dir_custom_enabled",
+                               "output_dir_custom_path")
+            return
 
-                gdata.setdefault("priorities", {}).setdefault(
-                    self.config_id, {"config_files": [], "entries": []}
-                )["entries"] = entries
-                _save_global_json(gdata)
-        except Exception:
-            pass
+        def _apply(target):
+            if self.mode == "inherit":
+                target.pop("output_dir_mode", None)
+            else:
+                target["output_dir_mode"] = self.mode
+            target["output_dir_custom_enabled"] = self.custom_enabled
+            target["output_dir_custom_path"] = self.custom_path.strip() if self.custom_enabled else ""
+        self._store.mutate(_apply)
 
     # ── Effective-value helpers ────────────────────────────────────────────────
 
@@ -1556,7 +1503,8 @@ class OutputDirectorySettingsPopup:
         try:
             from .main import load_global_config
             return load_global_config().get("subfolders", "off")
-        except Exception:
+        except Exception as e:
+            _dbg(f"_global_subfolders_mode: {e}")
             return "off"
 
     def _effective_mode(self) -> str:
@@ -1690,10 +1638,7 @@ class OutputDirectorySettingsPopup:
         return True, ""
 
     def _reset(self) -> None:
-        _reset_streamer_setting_keys(
-            self.dashboard, self.config_id, self.entry,
-            ("output_dir_mode", "output_dir_custom_enabled", "output_dir_custom_path"),
-        )
+        self._store.reset("output_dir_mode", "output_dir_custom_enabled", "output_dir_custom_path")
         self._sel = 0
         self._load()
 
@@ -1803,6 +1748,7 @@ class SplitSettingsPopup:
         self.dashboard = dashboard
         self.entry     = entry
         self.config_id = config_id
+        self._store    = PriorityEntryStore(dashboard, entry, config_id)
 
         self.mode:        str  = "inherit"   # "inherit" | "on" | "off"
         self.split_after: int  = 0
@@ -1816,87 +1762,43 @@ class SplitSettingsPopup:
         self._load()
 
     def _reset(self) -> None:
-        _reset_streamer_setting_keys(
-            self.dashboard, self.config_id, self.entry,
-            ("split_mode", "split_after", "split_enabled"),
-        )
+        self._store.reset("split_mode", "split_after", "split_enabled")
         self._sel = 0
         self._load()
 
     # ── Persistence ────────────────────────────────────────────────────────────
 
     def _load(self) -> None:
+        saved = self._store.load()
         try:
-            from .main import _global_json_lock, _load_global_json
-            with _global_json_lock:
-                gdata = _load_global_json()
-            entries = (gdata.get("priorities", {})
-                           .get(self.config_id, {})
-                           .get("entries", []))
-            for e in entries:
-                if (e.get("streamer") == self.entry.streamer
-                        and e.get("site") == self.entry.site):
-                    try:
-                        self.split_after = max(0, int(e.get("split_after", 0) or 0))
-                    except (TypeError, ValueError):
-                        self.split_after = 0
+            self.split_after = max(0, int(saved.get("split_after", 0) or 0))
+        except (TypeError, ValueError):
+            self.split_after = 0
 
-                    raw_mode = e.get("split_mode")
-                    if raw_mode in ("on", "off"):
-                        self.mode = raw_mode
-                    elif raw_mode is None:
-                        # Legacy data written by the old two-state popup:
-                        # enabled + minutes > 0 meant an override; anything
-                        # else meant inherit (there was no "force off").
-                        legacy_enabled = bool(e.get("split_enabled", False))
-                        self.mode = "on" if (legacy_enabled and self.split_after > 0) else "inherit"
-                    else:
-                        self.mode = "inherit"
-                    break
-        except Exception:
-            pass
+        raw_mode = saved.get("split_mode")
+        if raw_mode in ("on", "off"):
+            self.mode = raw_mode
+        elif raw_mode is None:
+            # Legacy data written by the old two-state popup: enabled +
+            # minutes > 0 meant an override; anything else meant inherit
+            # (there was no "force off").
+            legacy_enabled = bool(saved.get("split_enabled", False))
+            self.mode = "on" if (legacy_enabled and self.split_after > 0) else "inherit"
+        else:
+            self.mode = "inherit"
 
     def _save(self) -> None:
-        try:
-            from .main import _global_json_lock, _load_global_json, _save_global_json
-            with _global_json_lock:
-                gdata   = _load_global_json()
-                entries = (gdata.get("priorities", {})
-                               .get(self.config_id, {})
-                               .get("entries", []))
-                target = None
-                for e in entries:
-                    if (e.get("streamer") == self.entry.streamer
-                            and e.get("site") == self.entry.site):
-                        target = e
-                        break
-                if self.mode == "inherit":
-                    # Nothing to override — clear any prior explicit value
-                    # (new or legacy) rather than writing one.
-                    if target is not None:
-                        target.pop("split_mode", None)
-                        target.pop("split_enabled", None)
-                        target.pop("split_after", None)
-                else:
-                    if target is None:
-                        target = {
-                            "streamer":   self.entry.streamer,
-                            "site":       self.entry.site,
-                            "config_sha": self.entry.config_sha,
-                            "priority":   len(entries),
-                            "bypass":     self.entry.bypass,
-                        }
-                        entries.append(target)
-                    target["split_mode"] = self.mode
-                    target["split_after"] = self.split_after if self.mode == "on" else 0
-                    target.pop("split_enabled", None)  # fully migrated to split_mode
+        if self.mode == "inherit":
+            # Nothing to override — clear any prior explicit value (new or
+            # legacy) rather than writing one.
+            self._store.clear("split_mode", "split_enabled", "split_after")
+            return
 
-                gdata.setdefault("priorities", {}).setdefault(
-                    self.config_id, {"config_files": [], "entries": []}
-                )["entries"] = entries
-                _save_global_json(gdata)
-        except Exception:
-            pass
+        def _apply(target):
+            target["split_mode"] = self.mode
+            target["split_after"] = self.split_after if self.mode == "on" else 0
+            target.pop("split_enabled", None)  # fully migrated to split_mode
+        self._store.mutate(_apply)
 
     def _site_default_minutes(self) -> int:
         cfg = _get_site_default_cfg(self.dashboard, self.entry)
@@ -2090,6 +1992,7 @@ class IntroDelaySettingsPopup:
         self.dashboard = dashboard
         self.entry     = entry
         self.config_id = config_id
+        self._store    = PriorityEntryStore(dashboard, entry, config_id)
 
         self.enabled: bool = False
         self.minutes: int  = 0
@@ -2104,77 +2007,32 @@ class IntroDelaySettingsPopup:
         self._load()
 
     def _reset(self) -> None:
-        _reset_streamer_setting_keys(
-            self.dashboard, self.config_id, self.entry,
-            (self._FIELD_ENABLED, self._FIELD_MINUTES, self._FIELD_SPLIT),
-        )
+        self._store.reset(self._FIELD_ENABLED, self._FIELD_MINUTES, self._FIELD_SPLIT)
         self._sel = 0
         self._load()
 
     # ── Persistence ────────────────────────────────────────────────────────────
 
     def _load(self) -> None:
+        saved = self._store.load()
+        self.enabled = bool(saved.get(self._FIELD_ENABLED, False))
         try:
-            from .main import _global_json_lock, _load_global_json
-            with _global_json_lock:
-                gdata = _load_global_json()
-            entries = (gdata.get("priorities", {})
-                           .get(self.config_id, {})
-                           .get("entries", []))
-            for e in entries:
-                if (e.get("streamer") == self.entry.streamer
-                        and e.get("site") == self.entry.site):
-                    self.enabled = bool(e.get(self._FIELD_ENABLED, False))
-                    try:
-                        self.minutes = max(0, int(e.get(self._FIELD_MINUTES, 0) or 0))
-                    except (TypeError, ValueError):
-                        self.minutes = 0
-                    self.split = bool(e.get(self._FIELD_SPLIT, False))
-                    break
-        except Exception:
-            pass
+            self.minutes = max(0, int(saved.get(self._FIELD_MINUTES, 0) or 0))
+        except (TypeError, ValueError):
+            self.minutes = 0
+        self.split = bool(saved.get(self._FIELD_SPLIT, False))
 
     def _save(self) -> None:
-        try:
-            from .main import _global_json_lock, _load_global_json, _save_global_json
-            with _global_json_lock:
-                gdata   = _load_global_json()
-                entries = (gdata.get("priorities", {})
-                               .get(self.config_id, {})
-                               .get("entries", []))
-                target = None
-                for e in entries:
-                    if (e.get("streamer") == self.entry.streamer
-                            and e.get("site") == self.entry.site):
-                        target = e
-                        break
-                if not self.enabled:
-                    # Nothing to override — clear any prior explicit values
-                    # rather than writing them.
-                    if target is not None:
-                        target.pop(self._FIELD_ENABLED, None)
-                        target.pop(self._FIELD_MINUTES, None)
-                        target.pop(self._FIELD_SPLIT, None)
-                else:
-                    if target is None:
-                        target = {
-                            "streamer":   self.entry.streamer,
-                            "site":       self.entry.site,
-                            "config_sha": self.entry.config_sha,
-                            "priority":   len(entries),
-                            "bypass":     self.entry.bypass,
-                        }
-                        entries.append(target)
-                    target[self._FIELD_ENABLED] = True
-                    target[self._FIELD_MINUTES] = self.minutes
-                    target[self._FIELD_SPLIT]   = self.split
-
-                gdata.setdefault("priorities", {}).setdefault(
-                    self.config_id, {"config_files": [], "entries": []}
-                )["entries"] = entries
-                _save_global_json(gdata)
-        except Exception:
-            pass
+        if not self.enabled:
+            # Nothing to override — clear any prior explicit values rather
+            # than writing them.
+            self._store.clear(self._FIELD_ENABLED, self._FIELD_MINUTES, self._FIELD_SPLIT)
+            return
+        self._store.update(**{
+            self._FIELD_ENABLED: True,
+            self._FIELD_MINUTES: self.minutes,
+            self._FIELD_SPLIT:   self.split,
+        })
 
     # ── Validation ─────────────────────────────────────────────────────────────
 
@@ -2376,6 +2234,7 @@ class ScheduleSettingsPopup:
         self.dashboard = dashboard
         self.entry     = entry
         self.config_id = config_id
+        self._store    = PriorityEntryStore(dashboard, entry, config_id)
 
         # Working copies of schedule settings
         self.schedule_enabled: bool      = False
@@ -2400,80 +2259,36 @@ class ScheduleSettingsPopup:
 
     def _load(self) -> None:
         """Load saved schedule settings from global.json into working state."""
-        try:
-            from .main import _global_json_lock, _load_global_json
-            with _global_json_lock:
-                gdata = _load_global_json()
-            entries = (gdata.get("priorities", {})
-                           .get(self.config_id, {})
-                           .get("entries", []))
-            for e in entries:
-                if (e.get("streamer") == self.entry.streamer
-                        and e.get("site") == self.entry.site):
-                    sched = e.get("schedule", {})
-                    self.schedule_enabled = bool(sched.get("enabled", False))
-                    self.mode             = sched.get("mode", "one_off")
-                    oo  = sched.get("one_off", {})
-                    self.one_off_start    = oo.get("start", "")
-                    self.one_off_end      = oo.get("end",   "")
-                    rec = sched.get("recurring", {})
-                    days_list             = rec.get("days", [])
-                    self.recurring_days   = [(i in days_list) for i in range(7)]
-                    self.recurring_start  = rec.get("start_time", "")
-                    self.recurring_end    = rec.get("end_time",   "")
-                    break
-        except Exception:
-            pass
+        sched = self._store.load().get("schedule", {})
+        self.schedule_enabled = bool(sched.get("enabled", False))
+        self.mode             = sched.get("mode", "one_off")
+        oo  = sched.get("one_off", {})
+        self.one_off_start    = oo.get("start", "")
+        self.one_off_end      = oo.get("end",   "")
+        rec = sched.get("recurring", {})
+        days_list             = rec.get("days", [])
+        self.recurring_days   = [(i in days_list) for i in range(7)]
+        self.recurring_start  = rec.get("start_time", "")
+        self.recurring_end    = rec.get("end_time",   "")
 
     def _save(self) -> None:
         """Write current working state back to global.json under priorities[…][entries]."""
-        try:
-            from .main import _global_json_lock, _load_global_json, _save_global_json
-            with _global_json_lock:
-                gdata   = _load_global_json()
-                entries = (gdata.get("priorities", {})
-                               .get(self.config_id, {})
-                               .get("entries", []))
-                target = None
-                for e in entries:
-                    if (e.get("streamer") == self.entry.streamer
-                            and e.get("site") == self.entry.site):
-                        target = e
-                        break
-                if target is None:
-                    # No pre-existing entry (e.g. a fresh clone where the
-                    # PRIORITY panel's seed hasn't run yet, or this streamer
-                    # was added after the last seed/save). Create one rather
-                    # than silently dropping the schedule the user just set.
-                    target = {
-                        "streamer":   self.entry.streamer,
-                        "site":       self.entry.site,
-                        "config_sha": self.entry.config_sha,
-                        "priority":   len(entries),
-                        "bypass":     self.entry.bypass,
-                    }
-                    entries.append(target)
-                sched = target.setdefault("schedule", {})
-                sched["enabled"] = self.schedule_enabled
-                sched["mode"]    = self.mode
-                sched.setdefault("one_off", {}).update({
-                    "start": self.one_off_start,
-                    "end":   self.one_off_end,
-                })
-                sched.setdefault("recurring", {}).update({
-                    "days":       [i for i, v in enumerate(self.recurring_days) if v],
-                    "start_time": self.recurring_start,
-                    "end_time":   self.recurring_end,
-                })
-                # last_enable_attempt / last_disable_attempt are managed by
-                # the scheduling engine; never overwrite them here.
-
-                gdata.setdefault("priorities", {}).setdefault(
-                    self.config_id, {"config_files": [], "entries": []}
-                )["entries"] = entries
-                _save_global_json(gdata)
-        except Exception:
-            pass
+        def _apply(target):
+            sched = target.setdefault("schedule", {})
+            sched["enabled"] = self.schedule_enabled
+            sched["mode"]    = self.mode
+            sched.setdefault("one_off", {}).update({
+                "start": self.one_off_start,
+                "end":   self.one_off_end,
+            })
+            sched.setdefault("recurring", {}).update({
+                "days":       [i for i, v in enumerate(self.recurring_days) if v],
+                "start_time": self.recurring_start,
+                "end_time":   self.recurring_end,
+            })
+            # last_enable_attempt / last_disable_attempt are managed by
+            # the scheduling engine; never overwrite them here.
+        self._store.mutate(_apply)
 
     # ── Field list (dynamic based on mode) ────────────────────────────────────
 
@@ -2517,7 +2332,7 @@ class ScheduleSettingsPopup:
     # ── Validation ─────────────────────────────────────────────────────────────
 
     def _reset(self) -> None:
-        _reset_streamer_setting_keys(self.dashboard, self.config_id, self.entry, ("schedule",))
+        self._store.reset("schedule")
         self._sel = 0
         self._day_cursor = 0
         self._load()
@@ -2530,7 +2345,8 @@ class ScheduleSettingsPopup:
                                (self.one_off_end,   "End")):
                 try:
                     datetime.strptime(val, self._DATETIME_FMT)
-                except Exception:
+                except Exception as e:
+                    _dbg(f"_validate: {e}")
                     return False, f"{label} must be YYYY-MM-DD HH:MM"
         else:
             if not any(self.recurring_days):
@@ -2539,7 +2355,8 @@ class ScheduleSettingsPopup:
                                (self.recurring_end,   "End")):
                 try:
                     datetime.strptime(val, self._TIME_FMT)
-                except Exception:
+                except Exception as e:
+                    _dbg(f"_validate: {e}")
                     return False, f"{label} time must be HH:MM"
         return True, ""
 
@@ -2947,7 +2764,8 @@ class SiteSortManager:
             general = parser["General"] if parser.has_section("General") else {}
             val     = general.get("SITE_SORT", SORT_DEFAULT).strip().lower()
             return val if val in _SORT_KEYS else SORT_DEFAULT
-        except Exception:
+        except Exception as e:
+            _dbg(f"_load_sort: {e}")
             return SORT_DEFAULT
 
     def _save_sort(self, key: str) -> None:
@@ -2955,7 +2773,8 @@ class SiteSortManager:
         try:
             from .main import _write_global_conf_key
             _write_global_conf_key("SITE_SORT", key)
-        except Exception:
+        except Exception as e:
+            _dbg(f"_save_sort: {e}")
             pass
 
     # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -2991,22 +2810,23 @@ class SiteSortManager:
                 }
             self._prio_cache    = pmap
             self._prio_cache_ts = now
-        except Exception:
+        except Exception as e:
+            _dbg(f"_get_priority_map: {e}")
             pass
         return self._prio_cache
 
 
 def _validate_value(key: str, value: str) -> tuple[bool, str]:
     """Validate config values based on their expected types."""
-    bool_keys = {"DEBUG_LOGS", "CHECK_FOR_UPDATES", "ASK_FOR_BROWSER", "ASK_FOR_CONFIG",
+    bool_keys = {"DEBUG_LOGS", "CHECK_FOR_UPDATES", "ASK_FOR_CONFIG",
                  "PANEL_RESIZE", "LOGGING", "SPLIT_LOGS", "POPUP_NOTIFICATIONS",
-                 "DOWNLOADER_COOKIES", "CHECKER_COOKIES", "LQ_DOWNLOADER",
-                 "UPGRADE_QUALITY", "WEB_UI"}
+                 "LQ_DOWNLOADER",
+                 "UPGRADE_QUALITY", "WEB_UI"} | {k.name for k in DOWNLOADER_FLAG_KEYS if k.type == "bool"}
     int_keys = {"UPDATE_INTERVAL", "SITE_ORDER", "CHECK_INTERVAL", "COOLDOWN_AFTER_RECORDING",
                 "SPLIT_AFTER", "STALL_CHECK_INTERVAL", "STALL_TIMEOUT", "CONFIG_CHECK_INTERVAL",
                 "POPUP_TIMEOUT", "POPUP_COOLDOWN", "PROGRESS_BAR_MAX_HOURS", "PROGRESS_BAR_WIDTH",
                 "LAST_LIVE_HIGHLIGHT", "MAX_CONCURRENT_REC", "FF_ERR_THRESH", "WEB_UI_PORT",
-                "GRAPH_SCALE"}
+                "GRAPH_SCALE"} | {k.name for k in DOWNLOADER_FLAG_KEYS if k.type == "int"}
     if key in bool_keys:
         if value.lower() not in ("true", "false", "yes", "no", "1", "0"):
             return False, "Must be true or false"
@@ -3143,7 +2963,8 @@ class GlobalConfigEditor:
         try:
             with open(self.conf_path, "r", encoding="utf-8") as f:
                 self.lines = f.readlines()
-        except Exception:
+        except Exception as e:
+            _dbg(f"_load: {e}")
             self.lines = []
         self._parse()
 
@@ -3157,7 +2978,8 @@ class GlobalConfigEditor:
         try:
             with open(self.conf_path, "w", encoding="utf-8") as f:
                 f.writelines(lines)
-        except Exception:
+        except Exception as e:
+            _dbg(f"_create_default: {e}")
             pass
 
     def _parse(self):
@@ -3271,11 +3093,11 @@ class GlobalConfigEditor:
 
         # 2. Persist tag overrides to global.json.
         try:
-            from .main import _global_json_lock, _load_global_json, _save_global_json
-            with _global_json_lock:
-                gdata = _load_global_json()
+            from .main import _update_global_json
+
+            def _mutate(gdata):
                 gdata["debug_log_tags"] = self._debug_tags_state
-                _save_global_json(gdata)
+            _update_global_json(_mutate)
         except Exception as e:
             _dbg(f"[CONFIG] _save_debug_tags: failed to write global.json: {e}")
 
@@ -3336,12 +3158,11 @@ class GlobalConfigEditor:
     def _save_msg_filters(self) -> None:
         """Persist this tag's on/off switch and its per-message overrides."""
         try:
-            from .main import _global_json_lock, _load_global_json, _save_global_json
+            from .main import _update_global_json
         except ImportError:
-            from main import _global_json_lock, _load_global_json, _save_global_json  # type: ignore[no-redef]
+            from main import _update_global_json  # type: ignore[no-redef]
 
-        with _global_json_lock:
-            gdata = _load_global_json()
+        def _mutate(gdata):
             gdata["debug_log_tags"] = self._debug_tags_state
 
             all_filters = gdata.get("debug_log_message_filters", {})
@@ -3355,8 +3176,7 @@ class GlobalConfigEditor:
             else:
                 all_filters.pop(self._msg_filters_tag, None)
             gdata["debug_log_message_filters"] = all_filters
-
-            _save_global_json(gdata)
+        _update_global_json(_mutate)
         _dbg(f"[CONFIG] _save_msg_filters: tag={self._msg_filters_tag!r} "
              f"disabled={sorted(k for k, v in self._msg_filters_state.items() if not v)}")
 
@@ -3515,7 +3335,8 @@ class GlobalConfigEditor:
         for site in getattr(self.dashboard, "sites", []) or []:
             try:
                 od = site.get_cached_config().get("output_dir")
-            except Exception:
+            except Exception as e:
+                _dbg(f"_build: {e}")
                 od = None
             if od and od not in out_dirs:
                 out_dirs.append(od)
@@ -4015,6 +3836,7 @@ class ConfigEditor:
         self.selected_idx = 0
         self.popup_mode = False
         self.popup_buf = ""
+        self.popup_cursor = 0
         self.popup_error = ""
         self.lines = []
         self.items = []
@@ -4056,11 +3878,13 @@ class ConfigEditor:
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 self.lines = f.readlines()
-        except Exception:
+        except Exception as e:
+            _dbg(f"load_config: {e}")
             self.lines = []
 
         self.items = []
         current_section = None
+        _dlp_sections = {"Checker", "Downloader", "LQ_Downloader"}
         for i, line in enumerate(self.lines):
             s = line.strip()
             if not s:
@@ -4069,7 +3893,7 @@ class ConfigEditor:
                 continue
             if s.startswith("[") and s.endswith("]"):
                 current_section = s[1:-1]
-                if current_section == "General":
+                if current_section == "General" or current_section in _dlp_sections:
                     self.items.append(ConfigItem(i, True, current_section, "", False, line, ""))
             else:
                 if current_section == "General":
@@ -4085,6 +3909,15 @@ class ConfigEditor:
                         if s.upper() not in _GLOBAL_KEYS:
                             comment = _KEY_COMMENTS.get(s.upper(), "")
                             self.items.append(ConfigItem(i, False, s, "", False, line, comment))
+                elif current_section in _dlp_sections:
+                    if "=" in s:
+                        k, v = s.split("=", 1)
+                        k_stripped = k.strip()
+                        comment = DOWNLOADER_FLAG_COMMENTS.get(k_stripped.upper(), "")
+                        self.items.append(ConfigItem(i, False, k_stripped, v.strip(), True, line, comment))
+                    else:
+                        comment = DOWNLOADER_FLAG_COMMENTS.get(s.upper(), "")
+                        self.items.append(ConfigItem(i, False, s, "", False, line, comment))
 
         if self.items:
             self.selected_idx = min(self.selected_idx, len(self.items) - 1)
@@ -4181,7 +4014,8 @@ class ConfigEditor:
         for i, site in enumerate(self.sites):
             try:
                 lbl = site.get_cached_config().get("site_label", os.path.basename(site.config_path))
-            except Exception:
+            except Exception as e:
+                _dbg(f"draw_tab: {e}")
                 lbl = os.path.basename(site.config_path)
             label = f" {lbl} "
             attr = (theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_hilight_1")
@@ -4203,11 +4037,25 @@ class ConfigEditor:
                         
         title = " SITE SETTINGS "
         if self.items:
-            visible_rows = (y2 - site_box_y1) - 2
+            box_inner_rows = (y2 - site_box_y1) - 2
+
+            def _rows_for_range(start_idx: int, end_idx: int) -> int:
+                """Total on-screen rows for items[start_idx:end_idx+1],
+                including a blank separator row before every section header
+                except the very first item in the whole list."""
+                rows = 0
+                for idx in range(start_idx, end_idx + 1):
+                    if idx > 0 and self.items[idx].is_section:
+                        rows += 1
+                    rows += 1
+                return rows
+
             if self.selected_idx < self.scroll_offset:
                 self.scroll_offset = self.selected_idx
-            elif self.selected_idx >= self.scroll_offset + visible_rows:
-                self.scroll_offset = self.selected_idx - visible_rows + 1
+            else:
+                while (self.scroll_offset < self.selected_idx
+                       and _rows_for_range(self.scroll_offset, self.selected_idx) > box_inner_rows):
+                    self.scroll_offset += 1
 
         self.dashboard.safe_addstr(stdscr, site_box_y1, site_x1 + 2, title,
                     theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_live_2"))
@@ -4218,9 +4066,24 @@ class ConfigEditor:
                         theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_dim_3"))
         else:
             row_y = site_box_y1 + 1
-            loop_end = min(len(self.items), self.scroll_offset + visible_rows)
-            for i in range(self.scroll_offset, loop_end):
+            box_bottom = y2 - 1
+            i = self.scroll_offset
+            first_drawn_row_y = None
+            last_drawn_row_y = None
+            loop_end = self.scroll_offset
+            while i < len(self.items):
                 item = self.items[i]
+
+                # Blank separator row before every section header except the
+                # very first item in the whole list.
+                if i > 0 and item.is_section:
+                    row_y += 1
+                    if row_y > box_bottom:
+                        break
+
+                if row_y > box_bottom:
+                    break
+
                 is_selected = self._focus == "site" and (i == self.selected_idx)
 
                 if is_selected:
@@ -4253,14 +4116,20 @@ class ConfigEditor:
                         elif len(val_str) > max_val_w:
                             val_str = val_str[:max_val_w - 1] + "\u25ba"
                         self.dashboard.safe_addstr(stdscr, row_y, site_x1 + 29, val_str, val_attr)
-                
-                # --- Add Scroll Arrows ---
-                if i == self.scroll_offset and self.scroll_offset > 0:
-                    self.dashboard.safe_addstr(stdscr, row_y, site_x2 - 2, "\u25b2", theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_live_4"))
-                if i == loop_end - 1 and loop_end < len(self.items):
-                    self.dashboard.safe_addstr(stdscr, row_y, site_x2 - 2, "\u25bc", theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_live_5"))
-                    
+
+                if first_drawn_row_y is None:
+                    first_drawn_row_y = row_y
+                last_drawn_row_y = row_y
+                loop_end = i + 1
+
                 row_y += 1
+                i += 1
+
+            # --- Add Scroll Arrows ---
+            if self.scroll_offset > 0 and first_drawn_row_y is not None:
+                self.dashboard.safe_addstr(stdscr, first_drawn_row_y, site_x2 - 2, "\u25b2", theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_live_4"))
+            if loop_end < len(self.items) and last_drawn_row_y is not None:
+                self.dashboard.safe_addstr(stdscr, last_drawn_row_y, site_x2 - 2, "\u25bc", theme.attr(self.dashboard, "config_editor_configeditor_draw_tab_live_5"))
 
         # Draw popup (whichever sub-editor owns it)
         if self._focus == "global" and (
@@ -4278,7 +4147,11 @@ class ConfigEditor:
 
     def draw_popup(self, stdscr):
         h, w = stdscr.getmaxyx()
-        box_w = min(60, w - 4)
+
+        # "New Value:" label is 10 chars, value starts at bx1+13; widen the
+        # box so the full value (plus cursor) fits without truncation.
+        needed_w = 13 + len(self.popup_buf) + 1 + 2
+        box_w = min(max(60, needed_w), w - 4)
         inner_w = box_w - 4
 
         comment_lines = []
@@ -4317,12 +4190,22 @@ class ConfigEditor:
             row += 1
 
         self.dashboard.safe_addstr(stdscr, row, bx1 + 2, "New Value:", theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_warn_2"))
-        self.dashboard.safe_addstr(stdscr, row, bx1 + 13, (self.popup_buf + "_")[:box_w - 15], theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_normal_2"))
+
+        # Insertion-point cursor, like OutputDirectorySettingsPopup's "Path:" field.
+        val_x   = bx1 + 13
+        max_len = max(1, bx2 - val_x - 1)
+        buf     = self.popup_buf
+        cur     = min(self.popup_cursor, len(buf))
+        shown   = buf[:cur] + "_" + buf[cur:]
+        if len(shown) > max_len:
+            start = max(0, cur - max_len + 1)
+            shown = shown[start:start + max_len]
+        self.dashboard.safe_addstr(stdscr, row, val_x, shown[:max_len], theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_normal_2"))
 
         if self.popup_error:
             self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, f" Error: {self.popup_error} ", theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_warn_3"))
         else:
-            self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel ", theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_invhead"))
+            self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel  \u2190\u2192/Home/End:Move ", theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_invhead"))
 
     def handle_key(self, key) -> bool:
         """Returns True if the key was consumed by the editor."""
@@ -4362,15 +4245,34 @@ class ConfigEditor:
             return self.global_editor.handle_key(key)
 
         # ── Site panel focus ──────────────────────────────────────────────────
+        # Default popup for any site config key without its own custom popup
+        # (e.g. AD_ALERT_PATTERNS). Edits with an insertion-point cursor, like
+        # OutputDirectorySettingsPopup's "Path:" field, instead of append-only.
         if self.popup_mode:
+            cur = self.popup_cursor
             if key == 27:
                 self.popup_mode = False
                 self.popup_buf = ""
+                self.popup_cursor = 0
                 self.popup_error = ""
                 self.editing_item = None
             elif key in (curses.KEY_BACKSPACE, 127, 8):
-                self.popup_buf = self.popup_buf[:-1]
+                if cur > 0:
+                    self.popup_buf = self.popup_buf[:cur - 1] + self.popup_buf[cur:]
+                    self.popup_cursor = cur - 1
                 self.popup_error = ""
+            elif key in (curses.KEY_DC,):
+                if cur < len(self.popup_buf):
+                    self.popup_buf = self.popup_buf[:cur] + self.popup_buf[cur + 1:]
+                self.popup_error = ""
+            elif key == curses.KEY_LEFT:
+                self.popup_cursor = max(0, cur - 1)
+            elif key == curses.KEY_RIGHT:
+                self.popup_cursor = min(len(self.popup_buf), cur + 1)
+            elif key == curses.KEY_HOME:
+                self.popup_cursor = 0
+            elif key == curses.KEY_END:
+                self.popup_cursor = len(self.popup_buf)
             elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
                 if self.editing_item:
                     new_val = self.popup_buf.strip()
@@ -4397,10 +4299,12 @@ class ConfigEditor:
                     self.priority_editor.force_reload()
                 self.popup_mode = False
                 self.popup_buf = ""
+                self.popup_cursor = 0
                 self.popup_error = ""
                 self.editing_item = None
             elif 32 <= key < 127:
-                self.popup_buf += chr(key)
+                self.popup_buf = self.popup_buf[:cur] + chr(key) + self.popup_buf[cur:]
+                self.popup_cursor = cur + 1
                 self.popup_error = ""
             return True
 
@@ -4422,6 +4326,7 @@ class ConfigEditor:
                     self.popup_buf = self.editing_item.value
                 else:
                     self.popup_buf = self.editing_item.key
+                self.popup_cursor = len(self.popup_buf)
                 self.popup_mode = True
             return True
 

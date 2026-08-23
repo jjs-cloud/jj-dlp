@@ -116,7 +116,8 @@ def _build_status_snapshot(sites: List) -> dict:
         # from the cached config the same way the rest of the app does.
         try:
             display_label = site.get_cached_config().get("site_label", site.label)
-        except Exception:
+        except Exception as e:
+            dbg(f"[WEBUI] could not read cached config for {site.label!r}: {e}")
             display_label = site.label
 
         out_sites.append({
@@ -190,8 +191,10 @@ def _load_sessions() -> None:
     try:
         with open(path, "r", encoding="utf-8") as f:
             raw = json.load(f)
-    except Exception:
-        return
+    except FileNotFoundError:
+        return  # no session cache yet — normal on first run
+    # Anything else (corrupt file, bad JSON) propagates to the caller, which
+    # already announces load failures via _announce().
     if not isinstance(raw, dict):
         return
     now = time.time()
@@ -513,8 +516,8 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             decoded = base64.b64decode(header[6:]).decode("utf-8")
             user, _, pw = decoded.partition(":")
-        except Exception:
-            return False
+        except (ValueError, UnicodeDecodeError):
+            return False  # malformed auth header — treat as failed auth
         # Constant-time comparisons to avoid timing side-channels.
         user_ok = hmac.compare_digest(user, self.auth_user)
         pw_ok = hmac.compare_digest(pw, self.auth_pass)
@@ -663,7 +666,7 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             raw = self.rfile.read(length)
             payload = json.loads(raw.decode("utf-8"))
-        except Exception:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             self._json_error(400, "malformed JSON body")
             return
 
@@ -741,8 +744,8 @@ def start_web_server(
         if log_fn is not None:
             try:
                 log_fn(f"[WEBUI] {msg}")
-            except Exception:
-                pass
+            except Exception as e:
+                dbg(f"_announce: log_fn callback failed: {e}")
 
     if not global_cfg.get("web_ui", False):
         return None

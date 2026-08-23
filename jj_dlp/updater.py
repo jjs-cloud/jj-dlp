@@ -18,7 +18,7 @@ _API_BASE   = "https://api.github.com/repos/jjs-cloud/jj-dlp"
 # ── Updater version ───────────────────────────────────────────────────────────
 # Incremented independently of the main jj-dlp version so we can tell which
 # updater logic is actually running during an update.
-UPDATER_VERSION = "2.4.1"
+UPDATER_VERSION = "2.4.2"
 
 # ── Lazy package imports ──────────────────────────────────────────────────────
 # Relative imports are deferred to call time so this file is also safe to
@@ -53,6 +53,10 @@ def _save_global_json(data: dict) -> None:
     from .main import _save_global_json as _f
     _f(data)
 
+def _update_global_json(mutate_fn) -> dict:
+    from .main import _update_global_json as _f
+    return _f(mutate_fn)
+
 def _load_config_keys(source_dir=None):
     """Return the CONFIG_KEYS tuple.
 
@@ -80,7 +84,8 @@ def _load_config_keys(source_dir=None):
                 sys.path.insert(0, _proj_root)
             from jj_dlp.config_editor import CONFIG_KEYS as _ck
             return _ck
-        except Exception:
+        except Exception as e:
+            _logger().dbg(f"[UPDATER] _get_config_keys fallback import failed: {e}")
             return None
 
 
@@ -108,7 +113,8 @@ def _get_update_branch() -> str:
     try:
         from .main import load_global_config
         branch = load_global_config().get("update_branch", "main")
-    except Exception:
+    except Exception as e:
+        _logger().dbg(f"[UPDATER] _get_update_branch: {e}; defaulting to main")
         branch = "main"
     return branch or "main"
 
@@ -162,38 +168,38 @@ def check_for_updates_background():
             _logger().dbg("[UPDATER] check_for_updates_background: API response missing sha")
             return
 
-        global_data = _load_global_json()
-        current_sha = global_data.get('update_info', {}).get('current_sha')
-        _logger().dbg(f"[UPDATER] check_for_updates_background: current_sha={current_sha}")
+        def _mutate(global_data):
+            current_sha = global_data.get('update_info', {}).get('current_sha')
+            _logger().dbg(f"[UPDATER] check_for_updates_background: current_sha={current_sha}")
 
-        update_info = global_data.setdefault('update_info', {})
-        if current_sha:
-            update_info['update_available'] = current_sha != latest_sha
-        else:
-            # ← takes this branch on fresh clone
-            update_info['current_sha'] = latest_sha
-            update_info['update_available'] = False
+            update_info = global_data.setdefault('update_info', {})
+            if current_sha:
+                update_info['update_available'] = current_sha != latest_sha
+            else:
+                # ← takes this branch on fresh clone
+                update_info['current_sha'] = latest_sha
+                update_info['update_available'] = False
 
-        update_info['latest_sha'] = latest_sha
-        _logger().dbg(f"[UPDATER] check_for_updates_background: update_info current_sha={update_info.get('current_sha')} latest_sha={latest_sha} update_available={update_info.get('update_available')}")
-        _save_global_json(global_data)
+            update_info['latest_sha'] = latest_sha
+            _logger().dbg(f"[UPDATER] check_for_updates_background: update_info current_sha={update_info.get('current_sha')} latest_sha={latest_sha} update_available={update_info.get('update_available')}")
+        _update_global_json(_mutate)
     except Exception as e:
         _logger().dbg(f"[UPDATER] check_for_updates_background: failed during update check: {e}")
 
 
 def mark_update_completed(installed_sha: str | None = None):
-    global_data = _load_global_json()
-    update_info = global_data.setdefault('update_info', {})
-    # Prefer the freshly-fetched SHA passed in by perform_update() so that
-    # rapid back-to-back commits don't leave current_sha pointing at a stale
-    # value and cause a spurious "Update Available" on the next launch.
-    sha_to_record = installed_sha or update_info.get('latest_sha')
-    if sha_to_record:
-        update_info['current_sha'] = sha_to_record
-        update_info['latest_sha'] = sha_to_record
-    update_info['update_available'] = False
-    _logger().dbg(f"[UPDATER] mark_update_completed: current_sha={update_info.get('current_sha')} latest_sha={update_info.get('latest_sha')} update_available=False")
-    _save_global_json(global_data)
+    def _mutate(global_data):
+        update_info = global_data.setdefault('update_info', {})
+        # Prefer the freshly-fetched SHA passed in by perform_update() so that
+        # rapid back-to-back commits don't leave current_sha pointing at a stale
+        # value and cause a spurious "Update Available" on the next launch.
+        sha_to_record = installed_sha or update_info.get('latest_sha')
+        if sha_to_record:
+            update_info['current_sha'] = sha_to_record
+            update_info['latest_sha'] = sha_to_record
+        update_info['update_available'] = False
+        _logger().dbg(f"[UPDATER] mark_update_completed: current_sha={update_info.get('current_sha')} latest_sha={update_info.get('latest_sha')} update_available=False")
+    _update_global_json(_mutate)
     _logger().dbg("[UPDATER] mark_update_completed: _save_global_json() returned")
 
 
@@ -337,7 +343,11 @@ def inject_preserved_keys(new_text, old_config_path, source_dir=None):
     parser = configparser.ConfigParser(allow_no_value=True, interpolation=None)
     try:
         parser.read(old_config_path, encoding='utf-8')
-    except Exception:
+    except Exception as e:
+        # Old config unreadable — preserved keys (custom user settings) won't
+        # carry forward into the updated config.
+        _logger().dbg(f"[UPDATER] inject_preserved_keys: could not read {old_config_path!r}: {e}")
+        print(f"WARNING: could not read {old_config_path}; some settings may not carry over.", file=sys.stderr)
         return new_text
 
     for key in _get_preserved_keys(source_dir):
@@ -389,7 +399,8 @@ def _is_binary(path: str) -> bool:
     try:
         with open(path, 'rb') as f:
             return b'\x00' in f.read(8192)
-    except Exception:
+    except Exception as e:
+        _logger().dbg(f"[UPDATER] _is_binary: could not read {path!r}: {e}")
         return False
 
 
@@ -457,8 +468,8 @@ if __name__ == "__main__":
                 _ts = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
                 with open(os.path.join(_log_dir, "debug.log"), "a", encoding="utf-8") as _lf:
                     _lf.write(f"[{_ts}] [UPDATER][STAGE2-COMPAT] {msg}\n")
-            except Exception:
-                pass
+            except OSError:
+                pass  # last-resort logger; nowhere else to report a write failure
 
         # ── Standalone global.json helpers (env var path from old launcher) ──
         def _json_path() -> str:
@@ -475,15 +486,22 @@ if __name__ == "__main__":
                 with open(_json_path(), "r", encoding="utf-8") as _f:
                     _d = json.load(_f)
                 return _d if isinstance(_d, dict) else {}
-            except Exception:
+            except Exception as e:
+                _sdbg(f"_load_json failed: {e}")
                 return {}
 
         def _save_json(data: dict) -> None:
             try:
                 with open(_json_path(), "w", encoding="utf-8") as _f:
                     json.dump(data, _f, indent=2)
-            except Exception:
-                pass
+            except Exception as e:
+                _sdbg(f"_save_json failed: {e}")
+
+        def _update_json(mutate_fn) -> dict:
+            data = _load_json()
+            if mutate_fn(data) is not False:
+                _save_json(data)
+            return data
 
         def _mark_done() -> None:
             # Parity with mark_update_completed()/perform_update(): re-fetch
@@ -497,15 +515,15 @@ if __name__ == "__main__":
                 _post_sha = _fetch_latest_sha(_branch)
                 _sdbg(f"mark_done: post-install SHA fetch for branch={_branch}: {_post_sha}")
 
-            _gd = _load_json()
-            _ui = _gd.setdefault("update_info", {})
-            _ls = _post_sha or _ui.get("latest_sha")
-            if _ls:
-                _ui["current_sha"] = _ls
-                _ui["latest_sha"] = _ls
-            _ui["update_available"] = False
-            _sdbg(f"mark_done: current_sha={_ui.get('current_sha')} latest_sha={_ui.get('latest_sha')} update_available=False")
-            _save_json(_gd)
+            def _mutate(gd):
+                ui = gd.setdefault("update_info", {})
+                ls = _post_sha or ui.get("latest_sha")
+                if ls:
+                    ui["current_sha"] = ls
+                    ui["latest_sha"] = ls
+                ui["update_available"] = False
+                _sdbg(f"mark_done: current_sha={ui.get('current_sha')} latest_sha={ui.get('latest_sha')} update_available=False")
+            _update_json(_mutate)
 
         # ── PRESERVED_KEYS: read from the freshly downloaded config_editor,
         #    falling back to the installed package if unavailable ───────────
@@ -558,8 +576,8 @@ if __name__ == "__main__":
                 _parser = configparser.ConfigParser(allow_no_value=True, interpolation=None)
                 try:
                     _parser.read(_ucfg, encoding="utf-8")
-                except Exception:
-                    pass
+                except Exception as e:
+                    _sdbg(f"inline inject_preserved_keys: could not read {_ucfg!r}: {e}")
                 for _key in _PKEYS:
                     _oval = None
                     for _sec in _parser.sections():

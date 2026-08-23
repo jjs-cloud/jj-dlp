@@ -109,6 +109,7 @@ import curses
 
 from .deps import check_ffmpeg
 from . import theme
+from .logger import dbg
 
 
 def _natural_sort_key(name):
@@ -233,6 +234,7 @@ def open_file(path):
             subprocess.Popen(["xdg-open", abs_path])
         return True, None
     except Exception as exc:
+        dbg(f"open_file: {exc}")
         return False, str(exc)
 
 
@@ -248,6 +250,7 @@ def open_containing_folder(path):
             subprocess.Popen(["xdg-open", os.path.dirname(abs_path) or "."])
         return True, None
     except Exception as exc:
+        dbg(f"open_containing_folder: {exc}")
         return False, str(exc)
 
 
@@ -259,6 +262,7 @@ def move_to_trash(path):
             _send2trash(abs_path)
             return True, None
         except Exception as exc:
+            dbg(f"move_to_trash: {exc}")
             return False, str(exc)
     try:
         if IS_WINDOWS:
@@ -313,6 +317,7 @@ def move_to_trash(path):
                             "Install send2trash, or switch delete mode to "
                             "Permanent with T.")
     except Exception as exc:
+        dbg(f"move_to_trash: {exc}")
         return False, str(exc)
 
 
@@ -323,6 +328,19 @@ def permanent_delete(path):
         os.remove(abs_path)
         return True, None
     except Exception as exc:
+        dbg(f"permanent_delete: {exc}")
+        return False, str(exc)
+
+
+def permanent_delete_folder(path):
+    """Delete the (empty) folder *path* immediately, with no recycle bin
+    involved."""
+    abs_path = os.path.abspath(path)
+    try:
+        os.rmdir(abs_path)
+        return True, None
+    except Exception as exc:
+        dbg(f"permanent_delete_folder: {exc}")
         return False, str(exc)
 
 
@@ -454,22 +472,21 @@ class FileManagerTab:
             if delete_mode not in (DELETE_MODE_TRASH, DELETE_MODE_PERMANENT):
                 delete_mode = DELETE_MODE_DEFAULT
             return sort_key, delete_mode
-        except Exception:
+        except Exception as e:
+            dbg(f"_load_settings: {e}")
             return FM_SORT_DEFAULT, DELETE_MODE_DEFAULT
 
     def _save_settings(self):
         try:
-            from .main import _load_global_json, _save_global_json, _global_json_lock
-            with _global_json_lock:
-                data = _load_global_json()
-                fm = data.get("file_manager", {})
-                if not isinstance(fm, dict):
-                    fm = {}
+            from .main import _update_global_json
+
+            def _mutate(data):
+                fm = data.setdefault("file_manager", {})
                 fm["sort_key"] = self._sort_key
                 fm["delete_mode"] = self._delete_mode
-                data["file_manager"] = fm
-                _save_global_json(data)
-        except Exception:
+            _update_global_json(_mutate)
+        except Exception as e:
+            dbg(f"_save_settings: {e}")
             pass
 
     # ── OUTPUT_DIR discovery ────────────────────────────────────────────────
@@ -481,7 +498,8 @@ class FileManagerTab:
         for site in self.dashboard.sites:
             try:
                 cfg = site.get_cached_config()
-            except Exception:
+            except Exception as e:
+                dbg(f"_get_output_dirs: {e}")
                 continue
             out_dir = cfg.get("output_dir")
             if not out_dir:
@@ -609,9 +627,11 @@ class FileManagerTab:
                 for p in site.recording_output_paths_snapshot():
                     try:
                         paths.add(os.path.normcase(os.path.abspath(p)))
-                    except Exception:
+                    except Exception as e:
+                        dbg(f"_active_recording_paths: {e}")
                         continue
-        except Exception:
+        except Exception as e:
+            dbg(f"_active_recording_paths: {e}")
             pass
         return paths
 
@@ -850,6 +870,13 @@ class FileManagerTab:
         file_indices = [i for i, r in enumerate(self._rows) if r[0] == "file"]
         cur_row_idx = next((i for i in file_indices if self._rows[i][1] == path), None)
 
+        # Remember the file's parent folder and the OUTPUT_DIR root it
+        # belongs to *before* deleting, so we can check afterward whether
+        # the (sub)folder it lived in is now empty.
+        rec = self._records.get(path, {})
+        parent_dir = os.path.dirname(os.path.abspath(path))
+        output_dir_root = rec.get("group_path")
+
         if self._delete_mode == DELETE_MODE_PERMANENT:
             ok, err = permanent_delete(path)
         else:
@@ -873,9 +900,69 @@ class FileManagerTab:
             else:
                 self._selected_path = None
 
+        folder_note = self._maybe_delete_empty_folder(parent_dir, output_dir_root)
+
         self._rebuild_rows(self._get_output_dirs())
         mode_lbl = "Trash" if self._delete_mode == DELETE_MODE_TRASH else "Permanent"
-        self._set_status(f"Deleted ({mode_lbl}): {os.path.basename(path)}")
+        self._set_status(f"Deleted ({mode_lbl}): {os.path.basename(path)}{folder_note}")
+
+    @staticmethod
+    def _delete_empty_enabled() -> bool:
+        """True when the global DELETE_EMPTY key is on."""
+        try:
+            from .main import load_global_config
+            return bool(load_global_config().get("delete_empty", False))
+        except Exception as e:
+            dbg(f"_delete_empty_enabled: {e}")
+            return False
+
+    def _maybe_delete_empty_folder(self, folder, output_dir_root):
+        """After deleting a file, remove *folder* (via the current Delete
+        mode) if it is now empty of files/folders - but never the
+        OUTPUT_DIR root itself, only subfolders within it.
+
+        Returns a short human-readable suffix describing what happened
+        (empty string if nothing was removed), for appending to the
+        delete status message.
+        """
+        if not self._delete_empty_enabled():
+            return ""
+
+        if not folder or not output_dir_root:
+            return ""
+
+        folder_abs = os.path.abspath(folder)
+        root_abs = os.path.abspath(output_dir_root)
+
+        # Never touch the OUTPUT_DIR itself.
+        if folder_abs == root_abs:
+            return ""
+
+        # Only ever remove folders that are actually nested inside the
+        # OUTPUT_DIR - never anything outside of it.
+        try:
+            if os.path.commonpath([folder_abs, root_abs]) != root_abs:
+                return ""
+        except ValueError:
+            # e.g. paths on different drives on Windows.
+            return ""
+
+        try:
+            if not os.path.isdir(folder_abs) or os.listdir(folder_abs):
+                return ""
+        except OSError:
+            return ""
+
+        if self._delete_mode == DELETE_MODE_PERMANENT:
+            ok, err = permanent_delete_folder(folder_abs)
+        else:
+            ok, err = move_to_trash(folder_abs)
+
+        if not ok:
+            return (f"; could not remove empty folder "
+                    f"{os.path.basename(folder_abs)}: {err}")
+
+        return f"; removed empty folder {os.path.basename(folder_abs)}"
 
     def _set_status(self, msg):
         self._status_msg = msg
@@ -1130,7 +1217,8 @@ class FileManagerTab:
         try:
             from .main import load_global_config
             return list(load_global_config().get("destinations", []))
-        except Exception:
+        except Exception as e:
+            dbg(f"_get_destinations: {e}")
             return []
 
     def open_move_popup(self):
@@ -1193,7 +1281,8 @@ class FileManagerTab:
                     break
             ce._focus = "global"
             db.selected_tab = db.TABS.index("Config")
-        except Exception:
+        except Exception as e:
+            dbg(f"_open_configure_destination: {e}")
             pass
 
     def draw_move_popup(self, stdscr) -> None:
@@ -1376,6 +1465,11 @@ class FileManagerTab:
         if not path or not os.path.isfile(path):
             self._set_status("Move failed: file no longer exists")
             return
+        # Captured before the move, same as the delete flow, so a
+        # now-empty source subfolder can be cleaned up afterward.
+        rec = self._records.get(path, {})
+        parent_dir = os.path.dirname(os.path.abspath(path))
+        output_dir_root = rec.get("group_path")
         with self._move_lock:
             if self._move_busy:
                 self._set_status("A Move is already running - please wait")
@@ -1397,16 +1491,20 @@ class FileManagerTab:
         self._set_status(f"Move started: {os.path.basename(path)}")
         t = threading.Thread(
             target=self._move_worker,
-            args=(path, dest_root, filename, do_subfolder, do_fixup, final_path),
+            args=(path, dest_root, filename, do_subfolder, do_fixup, final_path,
+                  parent_dir, output_dir_root),
             daemon=True,
         )
         t.start()
 
-    def _move_worker(self, path, dest_root, filename, do_subfolder, do_fixup, final_path):
+    def _move_worker(self, path, dest_root, filename, do_subfolder, do_fixup, final_path,
+                      parent_dir, output_dir_root):
         try:
-            _ok, msg = self._do_move(path, dest_root, filename, do_subfolder, do_fixup, final_path)
+            _ok, msg = self._do_move(path, dest_root, filename, do_subfolder, do_fixup, final_path,
+                                      parent_dir, output_dir_root)
             self._set_status(msg)
         except Exception as exc:
+            dbg(f"_move_worker: {exc}")
             self._set_status(f"Move failed: {exc}")
         finally:
             with self._move_lock:
@@ -1415,7 +1513,8 @@ class FileManagerTab:
                 self._move_dest_path = None
                 self._moving_records.pop(final_path, None)
 
-    def _do_move(self, path, dest_root, filename, do_subfolder, do_fixup, final_path):
+    def _do_move(self, path, dest_root, filename, do_subfolder, do_fixup, final_path,
+                 parent_dir, output_dir_root):
         """Runs on a background thread. Returns (ok, status_message).
         *final_path* is the exact destination path, already computed (and
         its parent folder already created) by _compute_move_destination."""
@@ -1444,6 +1543,7 @@ class FileManagerTab:
             try:
                 result = subprocess.run(cmd, **run_kwargs)
             except Exception as exc:
+                dbg(f"_do_move: {exc}")
                 return False, f"Move failed: could not run ffmpeg ({exc})"
 
             if (result.returncode != 0 or not os.path.isfile(final_path)
@@ -1473,7 +1573,8 @@ class FileManagerTab:
             except OSError as exc:
                 return False, f"Move failed: {exc}"
 
-        return True, f"Move complete: {final_path}"
+        folder_note = self._maybe_delete_empty_folder(parent_dir, output_dir_root)
+        return True, f"Move complete: {final_path}{folder_note}"
 
     @staticmethod
     def _derive_streamer_name(path, group_path):
@@ -1515,6 +1616,7 @@ class FileManagerTab:
             _ok, msg = self._do_fixup(path, delete_original, convert_mp4)
             self._set_status(msg)
         except Exception as exc:
+            dbg(f"_fixup_worker: {exc}")
             self._set_status(f"Fixup failed: {exc}")
         finally:
             with self._fixup_lock:
@@ -1593,6 +1695,7 @@ class FileManagerTab:
         try:
             result = subprocess.run(cmd, **run_kwargs)
         except Exception as exc:
+            dbg(f"_do_fixup: {exc}")
             return False, f"Fixup failed: could not run ffmpeg ({exc})"
 
         if (result.returncode != 0 or not os.path.isfile(work_path)
@@ -1825,6 +1928,7 @@ class FileManagerTab:
             _ok, msg = self._do_trim(path, start, end, delete_original, convert_mp4)
             self._set_status(msg)
         except Exception as exc:
+            dbg(f"_trim_worker: {exc}")
             self._set_status(f"Trim failed: {exc}")
         finally:
             with self._trim_lock:
@@ -1860,6 +1964,7 @@ class FileManagerTab:
         try:
             result = subprocess.run(cmd, **run_kwargs)
         except Exception as exc:
+            dbg(f"_do_trim: {exc}")
             return False, f"Trim failed: could not run ffmpeg ({exc})"
 
         if (result.returncode != 0 or not os.path.isfile(work_path)
@@ -1948,7 +2053,8 @@ class FileManagerTab:
                     for streamer, out_path in site.recording_output_paths.items():
                         if os.path.normcase(os.path.abspath(out_path)) == key:
                             return site, streamer
-        except Exception:
+        except Exception as e:
+            dbg(f"_find_recording_owner: {e}")
             pass
         return None, None
 
@@ -2235,7 +2341,8 @@ class FileManagerTab:
         try:
             from .main import _resolve_ffprobe_path
             ffprobe_path = _resolve_ffprobe_path()
-        except Exception:
+        except Exception as e:
+            dbg(f"_probe_duration_seconds: {e}")
             ffprobe_path = None
         if not ffprobe_path:
             return None
@@ -2249,7 +2356,8 @@ class FileManagerTab:
                 **run_kwargs,
             )
             return float(result.stdout.strip())
-        except Exception:
+        except Exception as e:
+            dbg(f"_probe_duration_seconds: {e}")
             return None
 
     def _start_split(self, path, length_min, overlap_s, first_part, offset, outdir):
@@ -2298,7 +2406,8 @@ class FileManagerTab:
         if proc is not None:
             try:
                 proc.kill()  # don't wait for ffmpeg to finish
-            except Exception:
+            except Exception as e:
+                dbg(f"_stop_split: {e}")
                 pass
         self._set_status(f"Splitting job cancelled: {os.path.basename(path)}")
 

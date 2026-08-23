@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.27.9"
+__version__ = "1.28.0"
 
 import subprocess
 import textwrap
@@ -37,13 +37,8 @@ from .logger import (
     configure_debug_log as _configure_debug_log,
 )
 
-from .browser_config import (
-    _SUPPORTED_BROWSERS,
-    _read_browser_from_config,
-    _write_browser_to_config,
-    _write_ask_for_browser_to_config,
-)
 from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS, _compute_config_id, SiteSortManager, SORT_OPTIONS, _SORT_LABELS
+from .config_editor import DOWNLOADER_FLAG_KEYS
 from .config_editor import load_global_config as _load_global_config_typed
 from .file_manager import FileManagerTab
 from . import graph as _graph
@@ -82,34 +77,34 @@ _win_ctrl_handler_ref = None
 
 
 def _emergency_kill_all() -> None:
-    """Kill every yt-dlp/ffmpeg process across every loaded site.
-
-    This is the last-resort cleanup path invoked from OS-level close/kill
-    signals (X button, console close, SIGHUP/SIGTERM) where the normal
-    dashboard quit sequence never gets a chance to run. Safe to call more
-    than once and safe to call with zero sites loaded.
-    """
+    """Stop every loaded site and kill its yt-dlp/ffmpeg processes.
+    Last-resort cleanup for OS-level close/kill signals (X button, SIGHUP/SIGTERM)."""
     for _s in list(_global_sites):
         try:
-            _s.kill_all_procs()
-        except Exception:
+            _s.stop()
+        except Exception as e:
+            dbg(f"_emergency_kill_all: {e}")
             pass
+    # Best-effort: give threads a brief window to reach their finally:
+    # blocks and persist segment-continuation state before the process
+    # is torn down.
+    deadline = time.time() + 2.5
+    for _s in list(_global_sites):
+        for _t in list(_s.recording_threads):
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return
+            if _t.is_alive():
+                try:
+                    _t.join(timeout=remaining)
+                except Exception as e:
+                    dbg(f"_emergency_kill_all: join failed: {e}")
+                    pass
 
 
 def _install_windows_job_object() -> None:
-    """Put this process into a Windows Job Object with
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE so that *every* process spawned by
-    jj-dlp (yt-dlp, ffmpeg, the PyInstaller bootloaders) is force-killed by
-    Windows itself the instant this process dies — regardless of how it
-    dies (X button on the console, taskkill /F, a crash, Task Manager "End
-    task"). This is a hard OS-level guarantee and doesn't depend on any
-    Python cleanup code running first.
-
-    Child processes are automatically members of this job because Windows
-    job membership is inherited by default (we don't pass
-    CREATE_BREAKAWAY_FROM_JOB anywhere), so no per-Popen changes are needed
-    beyond this one-time setup at startup.
-    """
+    """Assign this process to a Windows Job Object so all child yt-dlp/ffmpeg
+    processes are force-killed by the OS the instant this process dies."""
     global _win_job_handle
     if sys.platform != "win32":
         return
@@ -190,13 +185,8 @@ def _install_windows_job_object() -> None:
 
 
 def _install_windows_console_ctrl_handler() -> None:
-    """Catch CTRL_CLOSE_EVENT / CTRL_LOGOFF_EVENT / CTRL_SHUTDOWN_EVENT (the
-    console X button, logging off, or system shutdown) and run our normal
-    process cleanup before the ~5s Windows grace period expires. This is a
-    fast, clean-shutdown path; the Job Object above is the guaranteed
-    fallback if this handler doesn't get to run (e.g. taskkill /F) or
-    doesn't finish in time.
-    """
+    """Catch the Windows console close/logoff/shutdown events and run cleanup
+    before the ~5s grace period expires."""
     if sys.platform != "win32":
         return
     try:
@@ -231,14 +221,8 @@ def _install_windows_console_ctrl_handler() -> None:
 
 
 def _install_posix_signal_handlers() -> None:
-    """On Linux/macOS, closing the terminal window (the 'X button' there)
-    sends SIGHUP to the foreground process group; a normal 'kill' sends
-    SIGTERM. yt-dlp/ffmpeg children are started with start_new_session=True
-    (their own process group/session, needed so killpg() can reliably reach
-    both the PyInstaller bootloader and the real worker) — which also means
-    they do NOT automatically receive that SIGHUP/SIGTERM. Catch it here and
-    kill them explicitly before jj-dlp exits.
-    """
+    """Catch SIGHUP/SIGTERM on Linux/macOS and kill child processes explicitly,
+    since they run in their own session and don't get these signals automatically."""
     if sys.platform == "win32":
         return
     import signal as _signal
@@ -276,15 +260,8 @@ def _install_shutdown_safety_net() -> None:
 
 
 def _install_thread_excepthook() -> None:
-    """Route uncaught exceptions from *any* background thread to the Log tab.
-
-    A silently-dying thread — e.g. a site's monitor loop raising on one
-    iteration — used to leave the dashboard looking normal while the site
-    stopped doing anything ("Next check" frozen, no debug output). Install a
-    global excepthook so no background thread can crash invisibly again:
-    every unhandled exception is surfaced on the Log tab and written to the
-    debug/crash logs, with the full traceback preserved for diagnosis.
-    """
+    """Route uncaught exceptions from any background thread to the Log tab
+    instead of dying silently."""
     import traceback as _tb
 
     def _hook(args: "threading.ExceptHookArgs") -> None:
@@ -303,24 +280,28 @@ def _install_thread_excepthook() -> None:
         # Always persist the full traceback to the debug/crash logs.
         try:
             _logger.log_crash(exc_val)
-        except Exception:
+        except Exception as e:
+            dbg(f"_hook: {e}")
             pass
         try:
             startup_dbg(f"THREAD CRASH: {one_line}\n{tb_text}")
-        except Exception:
+        except Exception as e:
+            dbg(f"_hook: {e}")
             pass
         # Preserve the default behaviour of printing to stderr (useful when
         # running outside the curses UI).
         try:
             print(f"Exception in thread {name}:\n{tb_text}", file=sys.stderr)
-        except Exception:
+        except Exception as e:
+            dbg(f"_hook: {e}")
             pass
 
         # Surface on the Log tab for every site — the user-visible part.
         for s in list(_global_sites):
             try:
                 s.log_line(f"ERROR: {one_line}")
-            except Exception:
+            except Exception as e:
+                dbg(f"_hook: {e}")
                 pass
 
     threading.excepthook = _hook
@@ -330,16 +311,7 @@ _install_thread_excepthook()
 
 
 def _get_config_id() -> str:
-    """Return a stable short ID for the current set of loaded config file paths.
-
-    Delegates to config_editor._compute_config_id so there is a single
-    implementation of this hashing logic.
-
-    Lock ordering note: callers that also acquire _recording_start_lock or
-    site.lock must do so *after* _get_config_id() returns; this function
-    reads _global_sites without a lock, which is safe because _global_sites
-    is written once at startup and is effectively read-only thereafter.
-    """
+    """Return a stable short ID for the current set of loaded config file paths."""
     return _compute_config_id([site.config_path for site in _global_sites])
 
 
@@ -351,18 +323,13 @@ def _safe_int(value, default):
     """Convert *value* to int, returning *default* on failure."""
     try:
         return int(value)
-    except Exception:
+    except Exception as e:
+        dbg(f"_safe_int: {e}")
         return default
 
 
 def _parse_general_section(general, config_path: str) -> dict:
-    """Read all site-scoped CONFIG_KEYS from the [General] section.
-
-    Returns a flat dict keyed by the lower-cased config key name.
-    Boolean and integer defaults are coerced automatically; string values are
-    stripped of surrounding whitespace and quotes.  ``output_dir`` is resolved
-    to an absolute path, and ``site_label`` defaults to the config filename.
-    """
+    """Read all site-scoped CONFIG_KEYS from the [General] section into a typed dict."""
     cfg_dict: dict = {}
     for kdef in CONFIG_KEYS:
         if kdef.scope != "site":
@@ -435,35 +402,66 @@ def _parse_twitch_section(parser: configparser.ConfigParser) -> dict:
     }
 
 
-def _parse_checker_and_downloader(parser: configparser.ConfigParser) -> tuple:
-    """Return (checker_cmd, downloader_cmd, lq_downloader_cmd) lists from
-    [Checker], [Downloader], and [LQ_Downloader]."""
-    checker_cmd = []
-    if parser.has_section("Checker"):
-        for key, val in parser.items("Checker"):
-            item = (val or key).strip()
-            if item:
-                checker_cmd.append(item)
+def _build_section_cmd(parser: configparser.ConfigParser, section: str) -> list:
+    """Build a yt-dlp argv list from the KEY = value pairs in *section*
+    (Checker, Downloader, or LQ_Downloader)."""
+    cmd: list = []
+    if not parser.has_section(section):
+        return cmd
 
-    downloader_cmd = []
-    if parser.has_section("Downloader"):
-        for key, val in parser.items("Downloader"):
-            item = (val or key).strip()
-            if item:
+    sect = parser[section]
+
+    for flag_def in DOWNLOADER_FLAG_KEYS:
+        key = flag_def.name
+        # Coerce the schema default ("true"/"false") into the bool used when
+        # the key is missing from this section entirely — e.g. shipped
+        # templates set COOKIES_FROM_BROWSER's default to "true", so an
+        # omitted key still enables cookies rather than silently disabling them.
+        bool_fallback = flag_def.default.strip().lower() not in ("", "false", "0", "no")
+
+        if key == "COOKIES_FROM_BROWSER":
+            if sect.getboolean(key, fallback=bool_fallback):
+                general = parser["General"] if parser.has_section("General") else {}
+                browser = (general.get("BROWSER", "") or "").strip().lower()
+                if browser and browser != "disabled":
+                    cmd.extend([flag_def.cli_flag, browser])
+            continue
+
+        if key == "EXTRA_ARGS":
+            extra_raw = sect.get(key, flag_def.default).strip()
+            if extra_raw:
+                cmd.extend(shlex.split(extra_raw, posix=True))
+            continue
+
+        if key not in sect:
+            continue
+
+        if flag_def.type == "bool":
+            if sect.getboolean(key, fallback=bool_fallback):
+                cmd.append(flag_def.cli_flag)
+        else:
+            raw = sect.get(key, "").strip()
+            if raw:
                 # NOTE: posix=True (not sys.platform-dependent) is required here.
                 # Non-posix mode does NOT merge a quoted "a b c" into one token —
                 # it still splits on whitespace and leaves stray quote chars in
                 # the pieces, which breaks any value needing embedded spaces
-                # (e.g. --downloader-args ffmpeg:"-fps_mode passthrough ...").
+                # (e.g. DOWNLOADER_ARGS = ffmpeg:"-fps_mode passthrough ...").
                 # posix=True correctly groups quoted spans and strips the quotes.
-                downloader_cmd.extend(shlex.split(item, posix=True))
+                pieces = shlex.split(raw, posix=True) or [raw]
+                cmd.append(flag_def.cli_flag)
+                cmd.extend(pieces)
 
-    lq_downloader_cmd = []
-    if parser.has_section("LQ_Downloader"):
-        for key, val in parser.items("LQ_Downloader"):
-            item = (val or key).strip()
-            if item:
-                lq_downloader_cmd.extend(shlex.split(item, posix=True))
+    return cmd
+
+
+def _parse_checker_and_downloader(parser: configparser.ConfigParser) -> tuple:
+    """Return (checker_cmd, downloader_cmd, lq_downloader_cmd) argv lists
+    built from the KEY = value pairs in [Checker], [Downloader], and
+    [LQ_Downloader]."""
+    checker_cmd        = _build_section_cmd(parser, "Checker")
+    downloader_cmd      = _build_section_cmd(parser, "Downloader")
+    lq_downloader_cmd   = _build_section_cmd(parser, "LQ_Downloader")
 
     return checker_cmd, downloader_cmd, lq_downloader_cmd
 
@@ -485,19 +483,8 @@ def _derive_username_idx(cfg_dict: dict) -> Optional[int]:
 
 
 def _resolve_yt_dlp_path(cfg_dict: dict) -> str:
-    """Determine the yt-dlp invocation string for the current platform.
-
-    Resolution order:
-    1. The platform-specific config key (YT_DLP_PATH_WINDOWS / _MAC / _LINUX).
-       Relative paths are anchored to the project root (the directory that
-       contains the jj_dlp/ package), not to CWD.
-    2. A bundled ``yt-dlp/yt_dlp`` module next to the project root.
-       When found, PYTHONPATH is updated so subprocesses can import it, and
-       ``python -m yt_dlp`` is used as the command.  On Windows, ``pythonw.exe``
-       is silently rewritten to ``python.exe`` so child processes have working
-       stdio handles.
-    3. The system ``yt-dlp`` binary as a last resort.
-    """
+    """Resolve the yt-dlp invocation for the current platform: configured
+    path, then bundled module, then system binary."""
     # 1. Pick the platform-specific raw path from config.
     platform_key_map = {
         "win32":  "yt_dlp_path_windows",
@@ -569,11 +556,10 @@ def load_config(config_path: str) -> dict:
         print(f"ERROR: Config file not found at: {config_path}", file=sys.stderr)
         sys.exit(1)
 
-    # delimiters=('=',) — Downloader/Checker/LQ_Downloader lines are raw CLI-arg
-    # strings (e.g. "--downloader-args ffmpeg:...") stored as bare keys. The
-    # default ':' delimiter would misparse the colon in "ffmpeg:..." as a
-    # key/value split, silently truncating the argument. Restricting to '='
-    # avoids that while matching how every value in these configs is written.
+    # delimiters=('=',) — some Downloader/Checker/LQ_Downloader values contain
+    # a colon (e.g. DOWNLOADER_ARGS = ffmpeg:"-fps_mode passthrough ..."). The
+    # default ':' delimiter would misparse that colon as a second key/value
+    # split, silently truncating the value. Restricting to '=' avoids that.
     # strict=False: tolerate duplicate keys/sections in hand-edited config
     # files (e.g. the same streamer accidentally added twice) instead of
     # raising DuplicateOptionError/DuplicateSectionError. The last value for
@@ -639,7 +625,8 @@ def _write_global_conf_key(key: str, value: str) -> None:
     try:
         with open(path, "r", encoding="utf-8") as f:
             lines = f.readlines()
-    except Exception:
+    except Exception as e:
+        dbg(f"_write_global_conf_key: {e}")
         lines = ["[General]\n"]
 
     section_found = False
@@ -680,7 +667,8 @@ def _write_global_conf_key(key: str, value: str) -> None:
     try:
         with open(path, "w", encoding="utf-8") as f:
             f.writelines(lines)
-    except Exception:
+    except Exception as e:
+        dbg(f"_write_global_conf_key: {e}")
         pass
 
 
@@ -745,7 +733,8 @@ def acquire_single_instance_lock() -> bool:
         f.truncate()
         f.write(f"{os.getpid()}\n")
         f.flush()
-    except Exception:
+    except Exception as e:
+        dbg(f"acquire_single_instance_lock: {e}")
         pass  # Best-effort diagnostics only; the lock itself is already held.
 
     _instance_lock_handle = f  # keep alive so the lock isn't released early
@@ -785,23 +774,36 @@ def _load_global_json() -> dict:
         # file after the fact.
         try:
             size = os.path.getsize(path)
-        except Exception:
+        except OSError as size_err:
+            dbg(f"_load_global_json: {size_err}")
             size = -1
         dbg(f"[GLOBAL_JSON][DIAG] load FAILED: path={path!r} on-disk size={size} error={e!r} — returning {{}} (THIS IS LIKELY THE BUG)")
     return {}
 
 
-def _backup_global_json_if_due(data: dict) -> None:
-    """Back up global.json into backups/ if it's due, per "_last_backup_ts".
+def _load_skip_disabled(config_path: str) -> Set[str]:
+    """Load the set of 'skip disabled' streamers (temporarily blocked for
+    this live session only) for *config_path* from global.json."""
+    gdata = _load_global_json()
+    entries = gdata.get("skip_disabled", {}).get(config_path, [])
+    if not isinstance(entries, list):
+        return set()
+    return {str(s).strip().lower() for s in entries if str(s).strip()}
 
-    "Due" means more than _GLOBAL_JSON_BACKUP_INTERVAL seconds have passed
-    since the last backup, or no backup has ever been recorded.  *data* is
-    the dict about to be written by _save_global_json; on a successful (or
-    skipped-because-the-file-doesn't-exist-yet) check, it is updated in
-    place with a fresh "_last_backup_ts" so the new timestamp gets persisted
-    along with the rest of the save.  If copying the file fails, the
-    timestamp is left untouched so the next save retries.
-    """
+
+def _save_skip_disabled(config_path: str, skip_disabled: Set[str]) -> None:
+    def _mutate(gdata):
+        all_skip = gdata.setdefault("skip_disabled", {})
+        if skip_disabled:
+            all_skip[config_path] = sorted(skip_disabled)
+        else:
+            all_skip.pop(config_path, None)
+    _update_global_json(_mutate)
+
+
+def _backup_global_json_if_due(data: dict) -> None:
+    """Back up global.json into backups/ if more than
+    _GLOBAL_JSON_BACKUP_INTERVAL seconds have passed since the last backup."""
     last_backup_ts = data.get("_last_backup_ts")
     now = time.time()
     if isinstance(last_backup_ts, (int, float)) and (now - last_backup_ts) < _GLOBAL_JSON_BACKUP_INTERVAL:
@@ -848,8 +850,41 @@ def _save_global_json(data: dict) -> None:
         dbg(f"[GLOBAL_JSON][DIAG] save FAILED: path={path!r} error={e!r}")
         try:
             os.remove(tmp_path)
-        except Exception:
+        except Exception as e:
+            dbg(f"_save_global_json: {e}")
             pass
+
+def _update_global_json(mutate_fn) -> dict:
+    """Load global.json, apply mutate_fn(gdata), and save unless it returns False."""
+    with _global_json_lock:
+        gdata = _load_global_json()
+        if mutate_fn(gdata) is not False:
+            _save_global_json(gdata)
+        return gdata
+
+
+def _site_json_bucket(gdata: dict, config_path: str) -> dict:
+    """Return gdata['sites'][site_key], creating it if needed."""
+    sites = gdata.setdefault("sites", {})
+    return sites.setdefault(os.path.basename(config_path), {})
+
+
+def _add_yt_dlp_pid(pid: int) -> None:
+    def _mutate(gdata):
+        pids = gdata.setdefault("yt_dlp_pids", [])
+        if pid in pids:
+            return False
+        pids.append(pid)
+    _update_global_json(_mutate)
+
+def _remove_yt_dlp_pid(pid: int) -> None:
+    def _mutate(gdata):
+        pids = gdata.get("yt_dlp_pids", [])
+        if pid not in pids:
+            return False
+        pids.remove(pid)
+        gdata["yt_dlp_pids"] = pids
+    _update_global_json(_mutate)
 
 
 def _load_last_live_cache(config_path: str) -> Dict[str, float]:
@@ -874,17 +909,9 @@ def _save_last_live_cache(config_path: str, last_live: Dict[str, float]) -> None
 
     Merges with any existing data so other sites' entries are preserved.
     """
-    site_key = os.path.basename(config_path)
-    with _global_json_lock:
-        global_data = _load_global_json()
-        if "sites" not in global_data or not isinstance(global_data["sites"], dict):
-            global_data["sites"] = {}
-        if site_key not in global_data["sites"] or not isinstance(global_data["sites"][site_key], dict):
-            global_data["sites"][site_key] = {}
-        global_data["sites"][site_key]["last_live"] = {
-            streamer: timestamp for streamer, timestamp in last_live.items()
-        }
-        _save_global_json(global_data)
+    def _mutate(gdata):
+        _site_json_bucket(gdata, config_path)["last_live"] = dict(last_live)
+    _update_global_json(_mutate)
 
 
 # How many of the most recent disk-rate graph bars to persist across restarts.
@@ -909,15 +936,9 @@ def _load_last_gql_backfill_ts(config_path: str) -> Optional[float]:
 
 def _save_last_gql_backfill_ts(config_path: str, ts: float) -> None:
     """Persist the epoch this site's last_live GQL backfill last fired."""
-    site_key = os.path.basename(config_path)
-    with _global_json_lock:
-        global_data = _load_global_json()
-        if "sites" not in global_data or not isinstance(global_data["sites"], dict):
-            global_data["sites"] = {}
-        if site_key not in global_data["sites"] or not isinstance(global_data["sites"][site_key], dict):
-            global_data["sites"][site_key] = {}
-        global_data["sites"][site_key]["last_gql_backfill_ts"] = ts
-        _save_global_json(global_data)
+    def _mutate(gdata):
+        _site_json_bucket(gdata, config_path)["last_gql_backfill_ts"] = ts
+    _update_global_json(_mutate)
 
 
 def _load_disk_rate_history() -> List[float]:
@@ -942,26 +963,14 @@ def _save_disk_rate_history(bars) -> None:
     Merges with any existing data so other keys are preserved. Keeps at most
     _GRAPH_PERSIST_BARS entries.
     """
-    with _global_json_lock:
-        global_data = _load_global_json()
-        global_data["disk_rate_history"] = [float(b) for b in bars][-_GRAPH_PERSIST_BARS:]
-        _save_global_json(global_data)
+    def _mutate(gdata):
+        gdata["disk_rate_history"] = [float(b) for b in bars][-_GRAPH_PERSIST_BARS:]
+    _update_global_json(_mutate)
 
 
 def _load_live_since_cache(config_path: str) -> Dict[str, float]:
-    """Return the persisted live-since timestamps for the given site from
-    global.json.
-
-    Each entry maps a streamer name to the Unix epoch at which their
-    *current* live session started. This is read at startup (to seed
-    SiteState.live_sessions so a process restart doesn't reset an
-    in-progress stream's duration back to zero) and again each time a new
-    live session is recognized (to recover the true start time rather than
-    stamping "now"). Only the epoch is persisted — the rest of a
-    LiveSession (quality_upgraded, blocked_while_live flag, enable_anchor,
-    notif_shown) is scoped to the running process and is fine to lose on
-    restart.
-    """
+    """Return the persisted live-since timestamps for the given site from global.json.
+    Maps streamer name to the epoch their current live session started."""
     site_key = os.path.basename(config_path)
     with _global_json_lock:
         global_data = _load_global_json()
@@ -979,32 +988,14 @@ def _save_live_since_cache(config_path: str, live_since: Dict[str, float]) -> No
     Called on every live/offline transition (see SiteState.mark_live /
     mark_offline), mirroring _save_last_live_cache's call pattern.
     """
-    site_key = os.path.basename(config_path)
-    with _global_json_lock:
-        global_data = _load_global_json()
-        if "sites" not in global_data or not isinstance(global_data["sites"], dict):
-            global_data["sites"] = {}
-        if site_key not in global_data["sites"] or not isinstance(global_data["sites"][site_key], dict):
-            global_data["sites"][site_key] = {}
-        global_data["sites"][site_key]["live_since"] = {
-            streamer: timestamp for streamer, timestamp in live_since.items()
-        }
-        _save_global_json(global_data)
+    def _mutate(gdata):
+        _site_json_bucket(gdata, config_path)["live_since"] = dict(live_since)
+    _update_global_json(_mutate)
 
 
 def _load_segment_continuation_cache(config_path: str) -> Dict[str, dict]:
-    """Return the persisted AUTO_SUFFIX/SPLIT_AFTER part-numbering
-    continuation state for the given site from global.json.
-
-    Each entry maps a streamer name to {"next_part": int, "unsuffixed_file":
-    str|None}. Read at startup (mirroring _load_live_since_cache) so that a
-    process restart mid-stream can still continue a part sequence rather
-    than silently resetting to part 1 — the same way live_since already
-    survives a restart. Only meaningful for a streamer that's also present
-    in the live_since cache; a stale/orphaned entry for a streamer that
-    isn't live is simply never consulted (mark_live() only seeds from this
-    cache, never reads it directly otherwise).
-    """
+    """Return the persisted AUTO_SUFFIX/SPLIT_AFTER part-numbering continuation
+    state for the given site from global.json."""
     site_key = os.path.basename(config_path)
     with _global_json_lock:
         global_data = _load_global_json()
@@ -1027,60 +1018,30 @@ def _load_segment_continuation_cache(config_path: str) -> Dict[str, dict]:
 
 
 def _save_segment_continuation_cache(config_path: str, mapping: Dict[str, dict]) -> None:
-    """Persist AUTO_SUFFIX/SPLIT_AFTER part-numbering continuation state for
-    the given site into global.json. Mirrors _save_live_since_cache's call
-    pattern — merges with any existing data so other sites' entries are
-    preserved.
-    """
-    site_key = os.path.basename(config_path)
-    with _global_json_lock:
-        global_data = _load_global_json()
-        if "sites" not in global_data or not isinstance(global_data["sites"], dict):
-            global_data["sites"] = {}
-        if site_key not in global_data["sites"] or not isinstance(global_data["sites"][site_key], dict):
-            global_data["sites"][site_key] = {}
-        global_data["sites"][site_key]["segment_continuation"] = {
+    """Persist AUTO_SUFFIX/SPLIT_AFTER part-numbering continuation state
+    for the given site into global.json."""
+    def _mutate(gdata):
+        _site_json_bucket(gdata, config_path)["segment_continuation"] = {
             streamer: {"next_part": entry.get("next_part", 1),
                        "unsuffixed_file": entry.get("unsuffixed_file")}
             for streamer, entry in mapping.items()
         }
-        _save_global_json(global_data)
+    _update_global_json(_mutate)
 
 
 @dataclass
 class LiveSession:
     """All state scoped to one continuous live session for one streamer.
-
-    Created by SiteState.mark_live() the moment a streamer is first
-    observed live, and discarded by SiteState.mark_offline() the moment
-    they're observed offline. While a streamer has an entry in
-    SiteState.live_sessions, they ARE considered live — that dict
-    membership is the single source of truth for liveness, replacing what
-    used to be five separate dicts/sets that had to be kept in sync by
-    convention (dash_live_since, quality_upgraded_streamers,
-    blocked_while_live, enable_anchor_time, notif_shown_session).
-
-    Only `since` is persisted across restarts (see _save_live_since_cache).
-    The rest resets to its default if the process restarts mid-stream.
-    """
+    Only `since` is persisted across restarts; the rest resets on restart."""
     since: float                          # epoch this live session started
     quality_upgraded: bool = False        # UPGRADE_QUALITY already fired once this session
     was_blocked_while_live: bool = False  # observed live-while-disabled at some point this session
-    enable_anchor: Optional[float] = None # set once on the blocked->enabled transition; overrides `since` as the NOTIFY_NO_CONFIRM_FILE anchor
+    enable_anchor: Optional[float] = None # set on blocked->enabled transition; overrides `since` as NOTIFY_NO_CONFIRM_FILE anchor
     notif_shown: bool = False             # a non-recording notification has already fired this session
-    last_restart_anchor: Optional[float] = None  # epoch of the most recent restart this session (stall, LQ, or quality upgrade); gives NOTIFY_NO_CONFIRM_FILE a fresh grace window on the following attempt without touching `since`/`enable_anchor`
-    evicted_for_concurrency: bool = False  # evicted to free a slot for a higher-priority streamer, restart time unknown/unbounded; consumed at actual restart to refresh last_restart_anchor then instead of at eviction time (see was_evicted_for_concurrency)
-    # ── AUTO_SUFFIX / SPLIT_AFTER restart continuity ───────────────────────
-    # Lets a *new* record_stream() attempt (a separate thread/process
-    # launched after a restart — ffmpeg-error threshold, stall recovery,
-    # eviction, etc.) continue the _partN numbering of a previous attempt
-    # for the SAME live session, instead of starting over at a fresh,
-    # unsuffixed filename. Written/read by record_stream() via
-    # SiteState.get_segment_continuation()/set_segment_continuation().
-    # Persisted across app restarts in global.json (same as `since` —
-    # see _load_segment_continuation_cache/_save_segment_continuation_cache),
-    # so a process restart mid-stream can still continue a part sequence
-    # instead of resetting to part 1.
+    last_restart_anchor: Optional[float] = None  # epoch of most recent restart this session; refreshes NOTIFY_NO_CONFIRM_FILE grace window
+    evicted_for_concurrency: bool = False  # evicted for a higher-priority streamer; refreshed at actual restart, not eviction time
+    # AUTO_SUFFIX/SPLIT_AFTER restart continuity: lets a new attempt continue
+    # _partN numbering instead of starting fresh. Persisted in global.json.
     next_segment_part: int = 1
     unsuffixed_file: Optional[str] = None
 
@@ -1110,48 +1071,29 @@ class SiteState:
         # detect when a source switches to a higher resolution mid-recording.
         # Guarded by self.lock. Cleared when the recording ends.
         self.recording_resolution: Dict[str, int] = {}
-        # Resolution (height, in px) actually measured from the on-disk
-        # recording file via ffprobe. Guarded by self.lock. Falls back to
-        # recording_resolution at display time if ffprobe is unavailable. 
-        # Cleared when the recording ends.
+        # ffprobe-measured resolution of the on-disk file; falls back to recording_resolution.
         self.display_resolution: Dict[str, int] = {}
-        # Epoch when the *current* recording attempt for a streamer began
-        # Used purely to gate the recording_resolution fallback in the
-        # dashboard renderer.
+        # Epoch the current recording attempt began; gates the recording_resolution fallback.
         self.recording_attempt_started: Dict[str, float] = {}
-        # streamer -> absolute path of the file yt-dlp is currently writing
-        # for that recording. Guarded by self.lock. Published by
-        # record_stream() once the active output file resolves (and whenever a
-        # SPLIT_AFTER segment switch happens); cleared when the recording
-        # ends. Used by the File Manager's top-bar disk-rate graph so it only
-        # counts files actually being recorded by yt-dlp, never File Manager
-        # artifacts (Move/Fixup/Trim/Split output files).
+        # streamer -> path of the file yt-dlp is currently writing; used by the disk-rate graph.
         self.recording_output_paths: Dict[str, str] = {}
-        # Streamers for which the File Manager's Split popup has requested an
-        # immediate recording restart ("Restart the recording instead"). Consumed
-        # by record_stream()'s split-timer loop, which forces the SPLIT_AFTER
-        # split to fire now (even when SPLIT_AFTER is 0). Guarded by self.lock.
+        # Streamers with a pending immediate-restart request from the Split popup.
         self.manual_split_requests:  Set[str] = set()
         self.recording_threads:   List[threading.Thread] = []
         self.known_streamers:     Set[str] = set()
         self.trigger_event        = threading.Event()
 
         # ── Live session tracking ────────────────────────────────────────
-        # Single source of truth for "how long has this streamer been
-        # live" and everything scoped to that live session.
         self.session_lock         = threading.Lock()
         self.live_sessions:       Dict[str, "LiveSession"] = {}
-        # Only the `since` epoch is persisted (see LiveSession's
-        # docstring). Loaded once here so a process restart mid-stream
-        # recovers the true start time instead of resetting it to "now" —
-        # see mark_live()'s use of this as a one-shot recovery source.
+        # Persisted `since` epochs, recovered on restart (see mark_live()).
         self._live_since_cache:   Dict[str, float] = _load_live_since_cache(config_path)
-        # Persisted AUTO_SUFFIX/SPLIT_AFTER part-numbering continuation state
-        # (see LiveSession.next_segment_part/unsuffixed_file). Loaded once
-        # here, mirroring _live_since_cache, so a process restart mid-stream
-        # recovers where a part sequence left off instead of resetting to
-        # part 1. Consulted by mark_live() when creating a fresh LiveSession.
+        # Persisted AUTO_SUFFIX/SPLIT_AFTER continuation state, recovered on restart.
         self._segment_continuation_cache: Dict[str, dict] = _load_segment_continuation_cache(config_path)
+
+        # Streamers disabled via "Skip this stream" — auto-removed from
+        # [Block] once the checker sees them go offline.
+        self.skip_disabled:       Set[str] = _load_skip_disabled(config_path)
 
         # Dashboard display state (written by monitor thread, read by renderer)
         self.dash_lock            = threading.Lock()
@@ -1159,22 +1101,11 @@ class SiteState:
         self.dash_next_check_in:  float = 0.0
         self.dash_all_streamers:  List[str] = []
         self.dash_blocked:        Set[str] = set()
-        # Activity log lines are stored in their own bounded buffer so that a
-        # noisy/high-frequency debug tag can never evict real activity lines
-        # (recording started/stopped, errors, etc.) — see dash_debug_lines.
         self.dash_log_lines:      deque = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)   # recent activity log
-        # Debug lines (from logger.dbg()) live in a separate, independently
-        # sized buffer. However chatty a debug tag is, it only ever crowds out
-        # older *debug* lines, never the activity log above.
-        self.dash_debug_lines:    deque = deque(maxlen=DEBUG_LOG_BUFFER_SIZE)      # recent debug-tag log
+        self.dash_debug_lines:    deque = deque(maxlen=DEBUG_LOG_BUFFER_SIZE)      # recent debug-tag log (separate buffer)
         self.dash_stdout_lines:   deque = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)   # recent stdout lines
         self.dash_stderr_lines:   deque = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)   # recent stderr lines
-        # Signature of the last "hard" checker-command failure we surfaced on
-        # the Log tab (see _CHECKER_HARD_ERROR_PATTERNS), or None if the
-        # checker is currently healthy. Only the monitor_site thread for this
-        # site touches this, so no lock is needed. Used to log a failure once
-        # (not every check_interval) and to log a single "recovered" line
-        # when the checker starts working again.
+        # Last "hard" checker-command failure surfaced on the Log tab, or None if healthy.
         self._last_checker_error: Optional[str] = None
         # Same lines, additionally bucketed per-streamer so the STREAMERS
         # panel on the Stdout/Stderr tabs can show one streamer's output in
@@ -1245,11 +1176,22 @@ class SiteState:
         """Register an active yt-dlp subprocess so stop() can kill it."""
         with self._procs_lock:
             self._active_procs[streamer] = proc
+        try:
+            _add_yt_dlp_pid(proc.pid)
+        except Exception as e:
+            dbg(f"register_proc: {e}")
+            pass
 
     def unregister_proc(self, streamer: str) -> None:
         """Remove a subprocess from the registry (after it exits)."""
         with self._procs_lock:
-            self._active_procs.pop(streamer, None)
+            proc = self._active_procs.pop(streamer, None)
+            if proc:
+                try:
+                    _remove_yt_dlp_pid(proc.pid)
+                except Exception as e:
+                    dbg(f"unregister_proc: {e}")
+                    pass
 
     def set_recording_output(self, streamer: str, path: str) -> None:
         """Publish the absolute path of the file *streamer*'s yt-dlp process
@@ -1283,7 +1225,8 @@ class SiteState:
         if proc:
             try:
                 kill_proc(proc)
-            except Exception:
+            except Exception as e:
+                dbg(f"kill_proc_for_streamer: {e}")
                 pass
 
     def set_ffmpeg_error_count(self, streamer: str, count: int) -> None:
@@ -1620,7 +1563,8 @@ class SiteState:
         for streamer, proc in procs.items():
             try:
                 kill_proc(proc)
-            except Exception:
+            except Exception as e:
+                dbg(f"kill_all_procs: {e}")
                 pass
 
     _CFG_CACHE_TTL: float = 2.0  # seconds between re-reads for the dashboard
@@ -1634,7 +1578,8 @@ class SiteState:
             if self._cfg_cache is None or (now - self._cfg_cache_time) >= self._CFG_CACHE_TTL:
                 try:
                     mtime = os.path.getmtime(self.config_path)
-                except Exception:
+                except Exception as e:
+                    dbg(f"get_cached_config: {e}")
                     mtime = 0.0
                 
                 if self._cfg_cache is None or getattr(self, '_cfg_last_mtime', 0.0) != mtime:
@@ -1741,6 +1686,21 @@ FFMPEG_ERROR_RESTART_THRESHOLD: int = 200
 ACTIVITY_LOG_BUFFER_SIZE: int = 200
 DEBUG_LOG_BUFFER_SIZE:    int = 1000
 
+# Activity lines that describe process-wide state (e.g. the embedded web
+# UI's listen address) rather than any single site. Kept separate from
+# each SiteState's dash_log_lines so a global event is logged once, not
+# once per loaded site, and shows up untagged in the "All" Log tab view.
+_global_log_lines: deque = deque(maxlen=ACTIVITY_LOG_BUFFER_SIZE)
+_global_log_lock:  threading.Lock = threading.Lock()
+
+
+def _log_global_line(msg: str) -> None:
+    """Append a timestamped line to the process-wide (not per-site) activity log."""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with _global_log_lock:
+        _global_log_lines.append(f"[{ts}] {msg}")
+    _logger.log_dashboard_line(msg)
+
 
 def _merge_lines_by_timestamp(a: List[str], b: List[str]) -> List[str]:
     """Merge two chronologically-ordered "[YYYY-MM-DD HH:MM:SS] ..." line
@@ -1769,9 +1729,23 @@ def _merge_lines_by_timestamp(a: List[str], b: List[str]) -> List[str]:
 
 # ── Ad detection patterns (used by _drain_pipe when AD_ALERTS is enabled) ─────
 # Any match updates the per-streamer last-seen timestamp in site.ad_alerts.
-_AD_DISCONTINUITY_RE = _re.compile(r"#EXT-X-DISCONTINUITY(?!-SEQUENCE)", _re.IGNORECASE)
-_AD_SEGMENT_URL_RE   = _re.compile(r"(amazon|twitch-ad|/ad/|admanifest|/ads/)", _re.IGNORECASE)
-_AD_TWITCH_TAG_RE    = _re.compile(r'#EXT-X-TWITCH-AD|CLASS="twitch-stitched-ad"', _re.IGNORECASE)
+# Default mirrors the previous hardcoded three-regex behavior, combined via "|".
+_AD_ALERT_PATTERNS_DEFAULT = (
+    r'#EXT-X-DISCONTINUITY(?!-SEQUENCE)|(amazon|twitch-ad|/ad/|admanifest|/ads/|/segment/Cv8)|'
+    r'#EXT-X-TWITCH-AD|CLASS="twitch-stitched-ad"'
+)
+
+
+def _compile_ad_alert_pattern(cfg: dict) -> Optional["_re.Pattern"]:
+    """Compile the site's AD_ALERT_PATTERNS regex, or None if AD_ALERTS is off/invalid."""
+    if not cfg.get("ad_alerts", False):
+        return None
+    raw = cfg.get("ad_alert_patterns") or _AD_ALERT_PATTERNS_DEFAULT
+    try:
+        return _re.compile(raw, _re.IGNORECASE)
+    except _re.error as e:
+        dbg(f"[AD] invalid AD_ALERT_PATTERNS regex {raw!r}: {e} — ad alerts disabled")
+        return None
 
 # ── LQ (low-quality) downloader bandwidth-saving state ───────────────────────
 # Maps (streamer, site_label) → epoch when an LQ_Downloader recording was last
@@ -1894,7 +1868,8 @@ def _resolve_mount_point(path: str) -> str:
 
     try:
         real = os.path.realpath(path)
-    except Exception:
+    except Exception as e:
+        dbg(f"_resolve_mount_point: {e}")
         real = path
 
     best = None
@@ -1918,8 +1893,9 @@ def _resolve_mount_point(path: str) -> str:
                         and len(mount_point) > best_len:
                     best = mount_point
                     best_len = len(mount_point)
-    except Exception:
+    except Exception as e:
         # /proc not available (non-Linux) — return the original path
+        dbg(f"_resolve_mount_point: {e}")
         return path
 
     return best if best else path
@@ -1939,8 +1915,9 @@ def _safe_disk_usage(path: str):
         free  = st.f_frsize * st.f_bfree
         used  = total - free
         return shutil._ntuple_diskusage(total, used, free)
-    except Exception:
+    except Exception as e:
         # Last resort — let shutil try the original path
+        dbg(f"_safe_disk_usage: {e}")
         return shutil.disk_usage(path)
 
 
@@ -2163,13 +2140,15 @@ def _send_ntfy_notification(streamer: str, site_label: str, is_recording: bool =
                 try:
                     res_body = response.read().decode("utf-8", errors="replace")
                 except Exception as read_e:
+                    dbg(f"_post: {read_e}")
                     res_body = f"<could not read response body: {read_e}>"
                 dbg(f"[NTFY] Notification sent successfully for {streamer}. "
                     f"Status: {res_code} response_headers={res_headers!r} body={res_body!r}")
         except urllib.error.HTTPError as e:
             try:
                 err_body = e.read().decode("utf-8", errors="replace")
-            except Exception:
+            except Exception as read_e:
+                dbg(f"_post: {read_e}")
                 err_body = "<unreadable>"
             dbg(f"[NTFY] HTTP error sending notification for {streamer}: "
                 f"status={e.code} reason={e.reason!r} body={err_body!r} url={full_url!r}")
@@ -2312,6 +2291,7 @@ def _modify_config_streamer(config_path: str, username: str, action: str) -> str
         with open(config_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
     except Exception as e:
+        dbg(f"_modify_config_streamer: {e}")
         return f"ERROR reading config: {e}"
 
     section_starts: dict = {}
@@ -2397,6 +2377,7 @@ def _modify_config_streamer(config_path: str, username: str, action: str) -> str
         with open(config_path, "w", encoding="utf-8") as f:
             f.writelines(lines)
     except Exception as e:
+        dbg(f"_add_to_section: {e}")
         return f"ERROR writing config: {e}"
 
     return "  ".join(messages)
@@ -2414,15 +2395,18 @@ def open_log_streams(cfg: dict, streamer: str):
             dir_part = os.path.dirname(out_path)
             if dir_part:
                 os.makedirs(dir_part, exist_ok=True)
-        except Exception:
+        except Exception as e:
+            dbg(f"open_log_streams: {e}")
             pass
         try:
             log_out_fp = open(out_path, "a", encoding="utf-8")
-        except Exception:
+        except Exception as e:
+            dbg(f"open_log_streams: {e}")
             pass
         try:
             log_err_fp = log_out_fp if err_path == out_path else open(err_path, "a", encoding="utf-8")
-        except Exception:
+        except Exception as e:
+            dbg(f"open_log_streams: {e}")
             pass
 
     def _close():
@@ -2430,7 +2414,8 @@ def open_log_streams(cfg: dict, streamer: str):
             try:
                 if fp is not None:
                     fp.close()
-            except Exception:
+            except Exception as e:
+                dbg(f"_close: {e}")
                 pass
 
     return subprocess.PIPE, subprocess.PIPE, _close, log_out_fp, log_err_fp
@@ -2439,7 +2424,7 @@ def open_log_streams(cfg: dict, streamer: str):
 def _drain_pipe(pipe, log_fp, pipe_type: str,
                 ffmpeg_error_counter=None, ffmpeg_error_event=None,
                 streamer: str = "", site: Optional[SiteState] = None,
-                ad_alerts_enabled: bool = False) -> None:
+                ad_alert_pattern=None) -> None:
     """Drain one pipe (stdout or stderr) from a yt-dlp subprocess."""
     dbg(f"[DRAIN] thread started pipe_type={pipe_type!r} streamer={streamer!r} pipe={pipe!r}")
     line_count = 0
@@ -2505,7 +2490,8 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
                     try:
                         log_fp.write(line + "\n")
                         log_fp.flush()
-                    except Exception:
+                    except Exception as e:
+                        dbg(f"_read_chunk: {e}")
                         pass
                 if site is not None:
                     if pipe_type == "stdout":
@@ -2524,10 +2510,8 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
                                 ffmpeg_error_event.set()
                             break
 
-                if ad_alerts_enabled and site is not None and streamer:
-                    if (_AD_DISCONTINUITY_RE.search(line) or
-                            _AD_SEGMENT_URL_RE.search(line) or
-                            _AD_TWITCH_TAG_RE.search(line)):
+                if ad_alert_pattern is not None and site is not None and streamer:
+                    if ad_alert_pattern.search(line):
                         site.update_ad_alert(streamer)
                         dbg(f"[AD] signal detected streamer={streamer!r} "
                             f"pipe={pipe_type!r}: {line[:120]!r}",
@@ -2542,7 +2526,8 @@ def _drain_pipe(pipe, log_fp, pipe_type: str,
                     try:
                         log_fp.write(line + "\n")
                         log_fp.flush()
-                    except Exception:
+                    except Exception as e:
+                        dbg(f"_read_chunk: {e}")
                         pass
                 if site is not None:
                     if pipe_type == "stdout":
@@ -2625,16 +2610,18 @@ def get_live_streamers(streamers: List[str], cfg: dict,
                     f"[!] CHECKER FAILED — liveness checks are not working: {_err_first_line}"
                 )
                 if "cookies database" in _err_lower or "could not find" in _err_lower:
-                    browser = _read_browser_from_config(site.config_path)
+                    browser = str(load_config(site.config_path).get("browser", "firefox")).strip().lower()
                     if browser and browser != "disabled":
                         site.log_line(
                             f"[!] Fix: open {browser} & ensure you are logged in to the site(s), or "
-                            "restart jj-dlp and select a different browser (or "
-                            '"disabled <- remove cookies option") from the browser menu.'
+                            f"edit {os.path.basename(site.config_path)} and set BROWSER to a different "
+                            'browser (or set COOKIES_FROM_BROWSER = false in [Checker]/[Downloader] to '
+                            "disable cookies entirely)."
                         )
                     else:
                         site.log_line(
-                            "[!] Fix: restart jj-dlp and select a different browser from the browser menu."
+                            f"[!] Fix: edit {os.path.basename(site.config_path)} and set BROWSER to a "
+                            "valid browser."
                         )
         elif site._last_checker_error is not None:
             site._last_checker_error = None
@@ -2649,7 +2636,8 @@ def get_live_streamers(streamers: List[str], cfg: dict,
                     os.makedirs(dir_part, exist_ok=True)
                 with open(checker_path, "a", encoding="utf-8") as _lf:
                     _lf.write(result.stdout)
-        except Exception:
+        except Exception as e:
+            dbg(f"get_live_streamers: {e}")
             pass
     # Feed checker stdout/stderr into the site's pipe buffers (tagged so the
     # tabs can filter them based on the "Show All" toggle).
@@ -2669,11 +2657,13 @@ def get_live_streamers(streamers: List[str], cfg: dict,
                 ui = cfg.get("username_idx")
                 try:
                     streamer = url.rstrip("/").split("/")[ui if ui is not None else -1].lstrip("@").lower().strip()
-                except Exception:
+                except Exception as e:
+                    dbg(f"get_live_streamers: {e}")
                     streamer = url.rstrip("/").split("/")[-1].lstrip("@").lower().strip()
                 if streamer:
                     live[streamer] = _extract_resolution_height(info)
-        except Exception:
+        except Exception as e:
+            dbg(f"get_live_streamers: {e}")
             pass
     return live
 
@@ -2769,6 +2759,12 @@ known_filename=None):
         size = os.path.getsize(filename) if filename else 0
         size = _simulation.maybe_freeze_stall_size(
             filename, size, last_growth_time, stall_timeout, streamer)
+        # last_growth_time is only passed non-None by the caller once
+        # growth_seen has flipped true (see the call site's comment), so it
+        # doubles as the "has this file shown real growth yet" signal the
+        # collapse simulation needs — no separate growth_seen param required.
+        size = _simulation.maybe_collapse_stall_size(
+            filename, size, last_growth_time is not None, streamer)
         stall_detected = False
         if last_growth_time is not None and stall_timeout is not None:
             time_now = time.time()
@@ -2945,7 +2941,8 @@ def _maybe_trigger_lq(triggering_site: "SiteState", triggering_streamer: str) ->
     for s in _global_sites:
         try:
             s_cfg = s.get_cached_config()
-        except Exception:
+        except Exception as e:
+            dbg(f"_maybe_trigger_lq: {e}")
             continue
         # Site must have an LQ_Downloader section configured.
         if not s_cfg.get("lq_downloader_cmd"):
@@ -3159,15 +3156,21 @@ def _resolve_intro_delay(cfg: dict, entry_info: dict) -> dict:
     return overridden
 
 
-def record_stream(streamer: str, cfg: dict, site: "SiteState",
-                  use_lq: bool = False, show_popup: bool = True,
-                  eviction_warning: str = "") -> None:
-    channel_url = cfg["site_tmpl"].format(username=streamer)
-    output_dir  = cfg["output_dir"]
+# ══════════════════════════════════════════════════════════════════════════
+# record_stream() helpers
+#
+# record_stream() used to be a single ~1230-line function. The pieces below
+# are straight-line "extract method" splits of that function: each one is a
+# self-contained step (attempt setup, process launch, teardown, ...) with no
+# behavior changes. The two nested loops that actually drive an attempt
+# (retry/restart, and the per-second stall/split check) are left in
+# record_stream() itself, since their break/continue/return statements are
+# what make them loops in the first place.
+# ══════════════════════════════════════════════════════════════════════════
 
-    # Nest recordings under a subfolder per SUBFOLDERS mode in global.conf,
-    # unless this streamer has a per-streamer Output Directory override
-    # (set via the Output Directory settings popup / _resolve_output_dir()).
+def _resolve_recording_output_dir(cfg: dict, streamer: str) -> str:
+    """Apply the SUBFOLDERS mode (or per-streamer override) to OUTPUT_DIR and create it."""
+    output_dir = cfg["output_dir"]
     _global_cfg_rs = load_global_config()
     _subfolders_mode = cfg.get("subfolders_mode_override") or _global_cfg_rs.get("subfolders", "off")
     _site_label = cfg.get("site_label", "")
@@ -3180,74 +3183,41 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
     elif _subfolders_mode == "site-streamer":
         output_dir = os.path.join(output_dir, _site_label, streamer)
     # "off" (or any unrecognized value) leaves output_dir unchanged.
-
     os.makedirs(output_dir, exist_ok=True)
+    return output_dir
 
+
+def _init_continuity_settings(cfg: dict) -> tuple:
+    """Resolve SPLIT_AFTER/AUTO_SUFFIX into (split_after_minutes, split_after_seconds, auto_suffix_enabled, continuity_active)."""
     split_after_minutes = max(0, cfg.get("split_after", 0))
     split_after_seconds = split_after_minutes * 60
-
-    # ── AUTO_SUFFIX / SPLIT_AFTER restart continuity ───────────────────────
-    # Whenever this is True, any restart of the recording for this streamer
-    # — whether an in-thread restart (ffmpeg-error threshold, stall
-    # recovery, normal yt-dlp exit while still live) or a brand-new
-    # record_stream() call for the same live session (e.g. after eviction)
-    # — continues _partN numbering instead of starting a fresh, separately
-    # named file. SPLIT_AFTER>0 already implies this (fixes a prior bug
-    # where in-thread restarts silently dropped the _partN suffix);
-    # AUTO_SUFFIX extends the same behavior to restarts even when
-    # SPLIT_AFTER is 0/off. Neither setting causes AUTO_SUFFIX by itself to
-    # trigger a *periodic* split — that's still governed purely by
-    # SPLIT_AFTER's timer loop further down.
     auto_suffix_enabled = bool(cfg.get("auto_suffix", True))
-    continuity_active   = (split_after_minutes > 0) or auto_suffix_enabled
+    continuity_active = (split_after_minutes > 0) or auto_suffix_enabled
+    return split_after_minutes, split_after_seconds, auto_suffix_enabled, continuity_active
 
-    _global_cfg_nc = load_global_config()
-    notify_confirm_file = _global_cfg_nc.get("notify_confirm_file", True)
-    notify_no_confirm_file = _global_cfg_nc.get("notify_no_confirm_file", False)
-    initial_notification_sent = not notify_confirm_file
-    dbg(f"[NOTIFY] NOTIFY_CONFIRM_FILE={notify_confirm_file} NOTIFY_NO_CONFIRM_FILE={notify_no_confirm_file} "
-        f"for streamer={streamer!r} — "
-        f"initial_notification_sent={initial_notification_sent} "
-        f"({'live notification already fired, nothing held back' if initial_notification_sent else 'live notification held until file growth is confirmed'})",
-        site_name=streamer)
 
-    # ── Intro Delay ──────────────────────────────────────────────────────────
-    # Notifications for "streamer is live" already fired in
-    # start_recording_if_needed() before this thread was started, so holding
-    # things up here only ever delays the *recording*, never the notification.
+def _apply_intro_delay(streamer: str, cfg: dict, site: "SiteState",
+                        show_popup: bool, eviction_warning: str,
+                        notify_confirm_file: bool,
+                        split_after_minutes: int, split_after_seconds: int):
+    """Block for INTRO_DELAY if configured. Returns None if the streamer was
+    stopped/evicted during the wait (caller must return immediately without
+    touching the finally-block bookkeeping, matching the original inline
+    behavior), otherwise (split_after_minutes, split_after_seconds,
+    intro_delay_disable_after_split, no_confirm_grace_seconds)."""
     intro_delay_enabled = bool(cfg.get("intro_delay_enabled", False))
     intro_delay_minutes = max(0, cfg.get("intro_delay_minutes", 0))
-    intro_delay_split   = bool(cfg.get("intro_delay_split", False))
-    # Set once the intro-delay-driven split segment is confirmed, so the
-    # SPLIT_AFTER loop below is told to stop splitting for the rest of the
-    # stream instead of continuing to split every intro_delay_minutes.
-    _intro_delay_disable_after_split = False
-    # NOTIFY_NO_CONFIRM_FILE grace period (seconds): when Intro Delay holds
-    # the recording start, the file is *intentionally* not written for the
-    # first intro_delay_minutes. The no-confirm deadline below is anchored
-    # to the streamer's live-since time, not to when record_stream actually
-    # starts writing — so without this extra allowance, streamers using
-    # Intro Delay would trip the write-failure alert as a false positive
-    # every time. Only applies to the "hold" branch below (not
-    # intro_delay_split, which doesn't delay the write).
-    _no_confirm_grace_seconds = 0.0
+    intro_delay_split = bool(cfg.get("intro_delay_split", False))
+    intro_delay_disable_after_split = False
+    no_confirm_grace_seconds = 0.0
 
     if intro_delay_enabled and intro_delay_minutes > 0 and intro_delay_split:
-        # Reuse the SPLIT_AFTER machinery as-is: force the *first* split to
-        # land at the intro-delay boundary, then disable further splitting
-        # once that split is confirmed (see the split_success branch below).
         split_after_minutes = intro_delay_minutes
         split_after_seconds = split_after_minutes * 60
-        _intro_delay_disable_after_split = True
+        intro_delay_disable_after_split = True
         dbg(f"[INTRO_DELAY] streamer={streamer!r} split mode: first split forced "
             f"at {intro_delay_minutes}m, further splitting disabled afterward")
     elif intro_delay_enabled and intro_delay_minutes > 0:
-        # Anchor the hold to when the streamer actually went live, not to
-        # time.time() at thread-start. This means elapsed live time counts
-        # toward the delay: e.g. if a streamer was live for 10m before
-        # being enabled and intro_delay is 5m, the delay window has
-        # already passed and recording starts immediately instead of
-        # waiting a further 5m from the enable.
         _intro_delay_anchor = site.get_live_since(streamer) or time.time()
         _delay_deadline = _intro_delay_anchor + intro_delay_minutes * 60
         _delay_remaining = max(0.0, _delay_deadline - time.time())
@@ -3263,26 +3233,484 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 with site.lock:
                     site.currently_recording.discard(streamer)
                     site.intro_delay_pending.discard(streamer)
-                return
+                return None
             site._stop_event.wait(timeout=min(1.0, _delay_deadline - time.time()))
         with site.lock:
             site.intro_delay_pending.discard(streamer)
-        # Extend the NOTIFY_NO_CONFIRM_FILE deadline by the hold duration so
-        # the write-failure alert doesn't fire on the file that was
-        # intentionally never written during the delay window.
-        _no_confirm_grace_seconds = intro_delay_minutes * 60
+        no_confirm_grace_seconds = intro_delay_minutes * 60
         dbg(f"[INTRO_DELAY] streamer={streamer!r} delay elapsed — starting recording")
-        # The initial "is live" notification was sent as "Not recording /
-        # Reason: Intro Delay" back in start_recording_if_needed(). Now that
-        # the hold is over and the download is about to actually start, send
-        # the real "recording" notification. Reset the cooldown timer first
-        # so a short Intro Delay (less than POPUP_COOLDOWN) can't suppress
-        # this second, distinct notification.
         site.notif_last_shown[streamer] = 0
         if not notify_confirm_file:
             _maybe_show_live_popup(streamer, cfg, site, show_popup=show_popup,
                                    source="intro_delay", is_recording=True,
                                    warning=eviction_warning)
+
+    return split_after_minutes, split_after_seconds, intro_delay_disable_after_split, no_confirm_grace_seconds
+
+
+def _record_lq_attempt(streamer: str, cfg: dict, site: "SiteState", use_lq: bool) -> None:
+    """Record an LQ attempt immediately so a re-entrant LQ trigger can't target this streamer again."""
+    if not use_lq:
+        return
+    _lq_site_label = cfg.get("site_label", os.path.basename(site.config_path))
+    with _lq_attempted_lock:
+        _lq_attempted[(streamer, _lq_site_label)] = time.time()
+    dbg(f"[LQ] LQ attempt recorded for {streamer} on {_lq_site_label}")
+
+
+def _resume_segment_continuity(site: "SiteState", streamer: str, continuity_active: bool,
+                                segment_num: int, pending_rename_file):
+    """Pick up cross-thread AUTO_SUFFIX/SPLIT_AFTER continuity, if any."""
+    if continuity_active:
+        _cont = site.get_segment_continuation(streamer)
+        if _cont and _cont[0] > 1:
+            segment_num, pending_rename_file = _cont
+            dbg(f"[SPLIT][record_stream] resuming cross-thread continuity for "
+                f"streamer={streamer!r}: segment_num={segment_num} "
+                f"pending_rename={pending_rename_file!r}")
+    return segment_num, pending_rename_file
+
+
+def _bump_segment_for_inplace_restart(site: "SiteState", streamer: str,
+                                       segment_num: int, active_file):
+    """Advance segment_num for an in-thread restart (ffmpeg-error/stall/normal-exit) and persist it."""
+    _prev_segment_num = segment_num
+    segment_num = _prev_segment_num + 1
+    pending_rename_file = active_file if (_prev_segment_num == 1 and active_file) else None
+    dbg(f"[SPLIT][record_stream] in-thread restart continuity for "
+        f"streamer={streamer!r}: segment_num {_prev_segment_num} -> "
+        f"{segment_num} pending_rename={pending_rename_file!r}")
+    site.set_segment_continuation(streamer, segment_num, pending_rename_file)
+    return segment_num, pending_rename_file
+
+
+def _build_segment_output_paths(cfg: dict, output_dir: str, continuity_active: bool, segment_num: int):
+    """Resolve this attempt's output template/path, adding the _partN suffix if applicable."""
+    current_output_tmpl = cfg["output_tmpl"]
+    # For segment 1 we intentionally omit the _part1 suffix — it will be
+    # retroactively added (via rename) only if a second part is ever created.
+    if continuity_active and segment_num > 1:
+        current_output_tmpl = add_segment_suffix_to_tmpl(current_output_tmpl, segment_num)
+    output_path = _simulation.get_write_failure_output_path(output_dir, current_output_tmpl)
+    return current_output_tmpl, output_path
+
+
+def _select_downloader_cmd(cfg: dict, use_lq: bool, streamer: str) -> list:
+    """Pick the LQ downloader command when requested, falling back to the normal one."""
+    active_dl_cmd = cfg["downloader_cmd"]
+    if use_lq:
+        _lq_cmd = cfg.get("lq_downloader_cmd", [])
+        if _lq_cmd:
+            active_dl_cmd = _lq_cmd
+        else:
+            dbg(f"[LQ] use_lq=True but lq_downloader_cmd is empty — falling back to normal downloader for {streamer}")
+    return active_dl_cmd
+
+
+def _build_sidecar_path(output_dir: str, streamer: str) -> str:
+    """Build a unique per-attempt path for yt-dlp's --print-to-file resolved-filename sidecar."""
+    _sidecar_token = _re.sub(r"[^A-Za-z0-9_.-]", "_", streamer) or "streamer"
+    return os.path.join(output_dir, f".jjdlp_filename_{_sidecar_token}_{uuid.uuid4().hex}.tmp")
+
+
+def _launch_yt_dlp_attempt(cmd: list, out_target, err_target, close_logs,
+                            log_out_fp, log_err_fp,
+                            cfg: dict, site: "SiteState", streamer: str):
+    """Popen the downloader and start its stdout/stderr drain threads.
+    Returns None on failure (already logged and close_logs() called), else
+    (proc, proc_start_time, ffmpeg_error_counter, ffmpeg_error_event)."""
+    try:
+        _popen_kwargs: dict = dict(stdout=out_target, stderr=err_target)
+        if sys.platform == "win32":
+            _popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        else:
+            # Put the child in its own process group so we can kill both
+            # the PyInstaller bootloader and the real yt-dlp process at once.
+            _popen_kwargs["start_new_session"] = True
+        dbg(f"[POPEN] streamer={streamer!r} cmd={cmd_display_str(cmd)!r}")
+        dbg(f"[POPEN] Windows CREATE_NO_WINDOW={'yes' if sys.platform == 'win32' else 'n/a'}")
+        dbg(f"[POPEN] PYTHONPATH={os.environ.get('PYTHONPATH', '<not set>')!r}")
+        proc = subprocess.Popen(cmd, **_popen_kwargs)
+        proc_start_time = time.time()
+        dbg(f"[POPEN] launched pid={proc.pid}")
+
+        site.register_proc(streamer, proc)
+
+        ffmpeg_error_counter = [0]
+        ffmpeg_error_event = threading.Event()
+        site.clear_ffmpeg_error_count(streamer)
+        site.clear_stall_since(streamer)
+
+        threading.Thread(
+            target=_drain_pipe,
+            args=(proc.stdout, log_out_fp, "stdout"),
+            kwargs={
+                "ffmpeg_error_counter": ffmpeg_error_counter,
+                "ffmpeg_error_event": ffmpeg_error_event,
+                "streamer": streamer,
+                "site": site,
+                "ad_alert_pattern": _compile_ad_alert_pattern(cfg),
+            },
+            daemon=True
+        ).start()
+
+        threading.Thread(
+            target=_drain_pipe,
+            args=(proc.stderr, log_err_fp, "stderr"),
+            kwargs={
+                "ffmpeg_error_counter": ffmpeg_error_counter,
+                "ffmpeg_error_event": ffmpeg_error_event,
+                "streamer": streamer,
+                "site": site,
+                "ad_alert_pattern": _compile_ad_alert_pattern(cfg),
+            },
+            daemon=True
+        ).start()
+
+        return proc, proc_start_time, ffmpeg_error_counter, ffmpeg_error_event
+
+    except Exception as e:
+        site.log_line(f"Failed to start yt-dlp for {streamer}: {e}")
+        try:
+            close_logs()
+        except Exception as e2:
+            dbg(f"_launch_yt_dlp_attempt: close_logs() failed for {streamer!r}: {e2}")
+        return None
+
+
+def _resolve_active_recording_file(proc, sidecar_path: str, output_dir: str, streamer: str):
+    """3-tier fallback to find the file yt-dlp is actually writing to:
+    1. the --print-to-file sidecar (UTF-8, avoids console encoding issues),
+    2. (handled live elsewhere via _drain_pipe), 3. left to the caller.
+    Waits up to 15s for the sidecar, then up to 5s for the resolved file to
+    appear on disk. Returns the path, or None if it couldn't be resolved."""
+    _FILENAME_WAIT_TIMEOUT = 15.0
+    active_file = None
+    _sidecar_deadline = time.time() + _FILENAME_WAIT_TIMEOUT
+    while time.time() < _sidecar_deadline:
+        if os.path.isfile(sidecar_path):
+            try:
+                with open(sidecar_path, "r", encoding="utf-8") as _sf:
+                    # --print-to-file appends rather than overwrites, so
+                    # the sidecar may have multiple lines (retries,
+                    # format re-selection, and/or multiple timings).
+                    # Scan from bottom to top, preferring absolute
+                    # paths (%(filepath)s result) over relative ones
+                    # (raw output-template result).
+                    _sc_lines = [ln.strip() for ln in _sf.read().splitlines() if ln.strip()]
+                raw_abs = None
+                raw_rel = ""
+                for ln in reversed(_sc_lines):
+                    if not ln or ln == "NA":
+                        continue
+                    if os.path.isabs(ln):
+                        raw_abs = ln  # prefer absolute (%(filepath)s)
+                    else:
+                        if not raw_rel:
+                            raw_rel = ln  # keep first (last) relative
+                raw_dest = raw_abs if raw_abs is not None else raw_rel
+            except Exception as _sc_read_err:
+                dbg(f"[STALL] error reading filename sidecar {sidecar_path!r}: "
+                    f"{_sc_read_err!r}", site_name=streamer)
+                raw_dest = ""
+            # The sidecar has served its purpose the moment we've read
+            # it — remove it right away rather than waiting for
+            # end-of-recording cleanup.
+            try:
+                os.remove(sidecar_path)
+            except OSError:
+                pass
+
+            if raw_dest:
+                if os.path.isabs(raw_dest):
+                    candidate = raw_dest
+                else:
+                    # This is the raw output template result (e.g.
+                    # from "%(uploader)s %(title)s ...").  yt-dlp
+                    # resolves the template but does NOT apply
+                    # filesystem sanitization — that happens later
+                    # when the file is created.  Replicate the
+                    # Windows sanitization here so the candidate
+                    # path matches the actual file on disk.
+                    _sanitized = _re.sub(r'[<>:"/\\|?*]', '_', raw_dest)
+                    _sanitized = _re.sub(r'[\x00-\x1f\x7f]', '', _sanitized)
+                    _sanitized = _sanitized.strip(' .')
+                    candidate = os.path.join(output_dir, _sanitized)
+                # The sidecar is written at before_dl, but the actual
+                # output file may not exist yet (yt-dlp opens it
+                # slightly after the hook fires).  Wait a few seconds
+                # for the file to appear before giving up.
+                _file_deadline = time.time() + 5.0
+                while time.time() < _file_deadline:
+                    if os.path.exists(candidate):
+                        active_file = candidate
+                        dbg(f"[STALL] resolved active_file from filename sidecar: "
+                            f"{active_file!r}", site_name=streamer)
+                        break
+                    if proc.poll() is not None:
+                        break
+                    time.sleep(0.25)
+                if not active_file:
+                    dbg(f"[STALL] sidecar candidate {candidate!r} (from {raw_dest!r}) "
+                        f"does not exist after 5s, discarding.", site_name=streamer)
+            break
+
+        if proc.poll() is not None:
+            # Process already exited without ever writing the sidecar —
+            # no point waiting out the rest of the timeout.
+            dbg(f"[STALL] proc exited before writing filename sidecar "
+                f"(returncode={proc.returncode})", site_name=streamer)
+            break
+
+        time.sleep(0.25)
+    else:
+        dbg(f"[STALL] timed out after {_FILENAME_WAIT_TIMEOUT}s waiting for "
+            f"filename sidecar {sidecar_path!r}", site_name=streamer)
+
+    # Best-effort cleanup: if we broke out early (timeout / proc exit)
+    # before the sidecar ever appeared, make sure nothing is left behind.
+    if not active_file:
+        try:
+            if os.path.isfile(sidecar_path):
+                os.remove(sidecar_path)
+        except OSError:
+            pass
+
+    return active_file
+
+
+def _publish_active_file_and_finalize_rename(site: "SiteState", streamer: str, active_file,
+                                              pending_rename_file, segment_num: int):
+    """Publish active_file for the disk-rate graph and, if a prior attempt's
+    file is still waiting on a retroactive _partN rename, apply it now that
+    this attempt's file has resolved. Returns the (possibly cleared)
+    pending_rename_file."""
+    if not active_file:
+        return pending_rename_file
+
+    site.set_recording_output(streamer, active_file)
+
+    if (pending_rename_file and pending_rename_file != active_file
+            and os.path.isfile(pending_rename_file)):
+        _prev_part_path = add_segment_suffix_to_tmpl(pending_rename_file, segment_num - 1)
+        try:
+            os.rename(pending_rename_file, _prev_part_path)
+            site.log_line(f"Renamed previous segment to: {os.path.basename(_prev_part_path)}")
+            dbg(f"[SPLIT][record_stream] renamed continuation segment: "
+                f"{pending_rename_file!r} -> {_prev_part_path!r}")
+        except Exception as _ren_err:
+            dbg(f"[SPLIT][record_stream] rename of continuation segment "
+                f"FAILED: {_ren_err!r}")
+        pending_rename_file = None
+
+    return pending_rename_file
+
+
+def _compute_no_confirm_deadline(site: "SiteState", streamer: str, stall_timeout: float,
+                                  no_confirm_grace_seconds: float) -> float:
+    """Compute the NOTIFY_NO_CONFIRM_FILE deadline for this attempt (see original
+    comment: anchored to live-since/enable-anchor/last-restart-anchor, floored
+    at this process's own start time, plus any Intro Delay grace period)."""
+    _no_confirm_anchor_val = site.get_enable_anchor(streamer)
+    _no_confirm_anchor_src = "enable_anchor"
+    if _no_confirm_anchor_val is None:
+        _no_confirm_anchor_val = site.get_live_since(streamer) or time.time()
+        _no_confirm_anchor_src = "live_since"
+    _last_restart_anchor = site.get_last_restart_anchor(streamer)
+    if _last_restart_anchor is not None and _last_restart_anchor > _no_confirm_anchor_val:
+        _no_confirm_anchor_val = _last_restart_anchor
+        _no_confirm_anchor_src = "last_restart_anchor"
+    if _no_confirm_anchor_val < _SCRIPT_START_TIME:
+        dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: {_no_confirm_anchor_src} "
+            f"({_no_confirm_anchor_val:.2f}) predates this process's start "
+            f"({_SCRIPT_START_TIME:.2f}) — flooring anchor at process start "
+            f"for streamer={streamer!r}",
+            site_name=streamer)
+        _no_confirm_anchor_val = _SCRIPT_START_TIME
+        _no_confirm_anchor_src += "+floored_at_process_start"
+    _no_confirm_deadline = _no_confirm_anchor_val + stall_timeout + no_confirm_grace_seconds
+    dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: confirmation deadline for "
+        f"streamer={streamer!r} = {_no_confirm_anchor_src}+{stall_timeout}s"
+        f"{f'+{no_confirm_grace_seconds:.0f}s intro-delay grace' if no_confirm_grace_seconds else ''} "
+        f"({_no_confirm_deadline:.2f}), live_since={site.get_live_since(streamer)}, "
+        f"enable_anchor={site.get_enable_anchor(streamer)}",
+        site_name=streamer)
+    return _no_confirm_deadline
+
+
+def _teardown_attempt(site: "SiteState", streamer: str, proc, close_logs, *,
+                       kill: bool = True, wait_after_kill: bool = False,
+                       clear_stall: bool = False, clear_ffmpeg_error: bool = False,
+                       clear_ad_alert: bool = False) -> None:
+    """End a recording attempt: optionally kill+wait the process, unregister
+    it, clear the requested per-streamer flags, and close the log files.
+    Every normal-path recording teardown in record_stream funnels through
+    here so the cleanup can't drift between call sites."""
+    if kill and proc is not None:
+        kill_proc(proc)
+        if wait_after_kill:
+            proc.wait()
+    site.unregister_proc(streamer)
+    if clear_stall:
+        site.clear_stall_since(streamer)
+    if clear_ffmpeg_error:
+        site.clear_ffmpeg_error_count(streamer)
+    if clear_ad_alert:
+        site.clear_ad_alert(streamer)
+    try:
+        close_logs()
+    except Exception as e:
+        dbg(f"_teardown_attempt: close_logs() failed for {streamer!r}: {e}")
+
+
+def _update_measured_quality(site: "SiteState", streamer: str, active_file, file_error: bool) -> None:
+    """Measure the on-disk resolution via ffprobe and publish it for the dashboard."""
+    if file_error:
+        with site.lock:
+            site.display_resolution.pop(streamer, None)
+        dbg(f"[QUALITY] file_error={file_error!r} - clearing measured resolution", site_name=streamer)
+        return
+    _measured_height = probe_file_height(active_file)
+    with site.lock:
+        _prev_measured = site.display_resolution.get(streamer)
+        if _measured_height is not None:
+            site.display_resolution[streamer] = _measured_height
+        else:
+            site.display_resolution.pop(streamer, None)
+    dbg(f"[QUALITY] measured_height={_measured_height!r}p "
+        f"(prev={_prev_measured!r}p) recording_resolution_baseline={site.recording_resolution.get(streamer)!r}p "
+        f"file={active_file!r}", site_name=streamer)
+
+
+def _spawn_and_verify_split_segment(next_cmd: list, cfg: dict, next_out_target, next_err_target,
+                                     next_log_out_fp, next_log_err_fp,
+                                     output_dir: str, streamer: str, site: "SiteState", part_suffix: str):
+    """Launch the next segment's yt-dlp process, wait for its exact output
+    file to appear, then confirm it's growing. Returns
+    (next_proc, next_proc_start_time, next_file, split_success)."""
+    _next_popen_kwargs: dict = dict(stdout=next_out_target, stderr=next_err_target)
+    if sys.platform != "win32":
+        # Same process-group isolation as the primary Popen.
+        _next_popen_kwargs["start_new_session"] = True
+    dbg(f"[POPEN] streamer={streamer!r} split cmd={cmd_display_str(next_cmd)!r}")
+    next_proc = subprocess.Popen(next_cmd, **_next_popen_kwargs)
+
+    next_proc_start_time = time.time()
+    dbg(f"[SPLIT][record_stream] next_proc started pid={next_proc.pid} "
+        f"next_proc_start_time={next_proc_start_time:.3f}")
+
+    threading.Thread(
+        target=_drain_pipe,
+        args=(next_proc.stdout, next_log_out_fp, "stdout"),
+        kwargs={
+            "streamer": streamer,
+            "site": site,
+            "ad_alert_pattern": _compile_ad_alert_pattern(cfg),
+        },
+        daemon=True
+    ).start()
+
+    threading.Thread(
+        target=_drain_pipe,
+        args=(next_proc.stderr, next_log_err_fp, "stderr"),
+        kwargs={
+            "streamer": streamer,
+            "site": site,
+            "ad_alert_pattern": _compile_ad_alert_pattern(cfg),
+        },
+        daemon=True
+    ).start()
+
+    # Wait for the exact new segment file.
+    # Do NOT use wait_for_streamer_file here — it does a
+    # fuzzy mtime search and can return the *previous*
+    # segment's file if the old proc is still writing to it
+    # and bumps its mtime past next_proc_start_time.
+    # Instead, search by the exact _partN suffix so we only
+    # accept the file that belongs to this new segment.
+    next_file = None
+    _nf_deadline = time.time() + 30.0
+    dbg(f"[SPLIT][record_stream] waiting for exact segment file "
+        f"part_suffix={part_suffix!r} pid={next_proc.pid} "
+        f"next_proc_start_time={next_proc_start_time:.3f} timeout=30s")
+    while time.time() < _nf_deadline:
+        if os.path.isdir(output_dir):
+            for _f in os.listdir(output_dir):
+                _fp = os.path.join(output_dir, _f)
+                if (os.path.isfile(_fp)
+                        and streamer.lower() in _f.lower()
+                        and part_suffix.lower() in _f.lower()
+                        and os.path.getmtime(_fp) >= next_proc_start_time):
+                    next_file = _fp
+                    break
+        if next_file:
+            dbg(f"[SPLIT][record_stream] exact segment file found: "
+                f"{next_file!r} elapsed={30.0-(_nf_deadline-time.time()):.1f}s")
+            break
+        dbg(f"[SPLIT][record_stream] still waiting for {part_suffix!r} file "
+            f"remaining={_nf_deadline-time.time():.1f}s")
+        time.sleep(0.5)
+
+    if next_file is None:
+        dbg(f"[SPLIT][record_stream] TIMEOUT — exact segment file not found "
+            f"part_suffix={part_suffix!r} pid={next_proc.pid}")
+    dbg(f"[SPLIT][record_stream] segment file search result: {next_file!r}")
+
+    split_success = (
+        next_file is not None and
+        wait_for_new_file_growth(next_file, timeout=15.0)
+    )
+    dbg(f"[SPLIT][record_stream] split_success={split_success} "
+        f"next_file={next_file!r}")
+
+    return next_proc, next_proc_start_time, next_file, split_success
+
+
+def _clear_lq_attempt_on_offline(streamer: str, cfg: dict, site: "SiteState") -> None:
+    """Clear the LQ-attempted marker once a streamer goes offline, so the
+    next live session is eligible for the normal downloader again."""
+    _offline_site_label = cfg.get("site_label", os.path.basename(site.config_path))
+    with _lq_attempted_lock:
+        _lq_attempted.pop((streamer, _offline_site_label), None)
+
+
+def _update_last_live_cache(site: "SiteState", streamer: str) -> None:
+    """Record that this streamer just finished a live session, for the last-live cache."""
+    with site.dash_lock:
+        site.dash_last_live[streamer] = time.time()
+        _last_live_snapshot = dict(site.dash_last_live)
+    _save_last_live_cache(site.config_path, _last_live_snapshot)
+
+
+def record_stream(streamer: str, cfg: dict, site: "SiteState",
+                  use_lq: bool = False, show_popup: bool = True,
+                  eviction_warning: str = "") -> None:
+    channel_url = cfg["site_tmpl"].format(username=streamer)
+    output_dir = _resolve_recording_output_dir(cfg, streamer)
+
+    split_after_minutes, split_after_seconds, auto_suffix_enabled, continuity_active = \
+        _init_continuity_settings(cfg)
+
+    _global_cfg_nc = load_global_config()
+    notify_confirm_file = _global_cfg_nc.get("notify_confirm_file", True)
+    notify_no_confirm_file = _global_cfg_nc.get("notify_no_confirm_file", False)
+    initial_notification_sent = not notify_confirm_file
+    dbg(f"[NOTIFY] NOTIFY_CONFIRM_FILE={notify_confirm_file} NOTIFY_NO_CONFIRM_FILE={notify_no_confirm_file} "
+        f"for streamer={streamer!r} — "
+        f"initial_notification_sent={initial_notification_sent} "
+        f"({'live notification already fired, nothing held back' if initial_notification_sent else 'live notification held until file growth is confirmed'})",
+        site_name=streamer)
+
+    # Intro Delay may block for a while, and returns None if the streamer
+    # was stopped/evicted during the wait — mirrors the original inline
+    # `return` (before the try/finally below), so the finally-block
+    # bookkeeping is deliberately skipped here too, same as before.
+    _intro_result = _apply_intro_delay(
+        streamer, cfg, site, show_popup, eviction_warning, notify_confirm_file,
+        split_after_minutes, split_after_seconds)
+    if _intro_result is None:
+        return
+    split_after_minutes, split_after_seconds, _intro_delay_disable_after_split, _no_confirm_grace_seconds = _intro_result
 
     dbg(f"[SPLIT][record_stream] ENTER streamer={streamer!r} "
         f"split_after_minutes={split_after_minutes} split_after_seconds={split_after_seconds} "
@@ -3290,14 +3718,9 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
     site.log_line(f"Recording started: {streamer}" + (" [LQ]" if use_lq else ""))
 
-    # ── LQ attempt bookkeeping ────────────────────────────────────────────────
     # Record the attempt immediately so that re-entrant LQ triggers during this
     # session cannot target this streamer again (even if the proc hasn't opened yet).
-    if use_lq:
-        _lq_site_label = cfg.get("site_label", os.path.basename(site.config_path))
-        with _lq_attempted_lock:
-            _lq_attempted[(_lq_site_label_key := (streamer, _lq_site_label))] = time.time()
-        dbg(f"[LQ] LQ attempt recorded for {streamer} on {_lq_site_label}")
+    _record_lq_attempt(streamer, cfg, site, use_lq)
 
     proc = None
     close_logs = lambda: None
@@ -3312,19 +3735,13 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
     _split_retry_cooldown_seconds = 60.0
     next_split_retry_time = 0.0
 
-    # ── Resume cross-thread continuity, if any ──────────────────────────────
     # If a previous record_stream() attempt for this same live session (a
     # different thread call — e.g. before an eviction) left off mid-way
     # through a part sequence, pick up where it left off instead of
     # starting back at part 1. See SiteState.get_segment_continuation().
     _pending_rename_file = None
-    if continuity_active:
-        _cont = site.get_segment_continuation(streamer)
-        if _cont and _cont[0] > 1:
-            segment_num, _pending_rename_file = _cont
-            dbg(f"[SPLIT][record_stream] resuming cross-thread continuity for "
-                f"streamer={streamer!r}: segment_num={segment_num} "
-                f"pending_rename={_pending_rename_file!r}")
+    segment_num, _pending_rename_file = _resume_segment_continuity(
+        site, streamer, continuity_active, segment_num, _pending_rename_file)
 
     _outer_iteration = 0
 
@@ -3338,55 +3755,21 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 # Restarting within this same thread (ffmpeg-error threshold,
                 # stall recovery, or a normal yt-dlp exit while still live) —
                 # this new attempt is another part of the same recording.
-                _prev_segment_num = segment_num
-                segment_num = _prev_segment_num + 1
-                _pending_rename_file = (
-                    active_file if (_prev_segment_num == 1 and active_file) else None
-                )
-                dbg(f"[SPLIT][record_stream] in-thread restart continuity for "
-                    f"streamer={streamer!r}: segment_num {_prev_segment_num} -> "
-                    f"{segment_num} pending_rename={_pending_rename_file!r}")
+                segment_num, _pending_rename_file = _bump_segment_for_inplace_restart(
+                    site, streamer, segment_num, active_file)
 
-            current_output_tmpl = cfg["output_tmpl"]
-            # For segment 1 we intentionally omit the _part1 suffix — it will be
-            # retroactively added (via rename) only if a second part is ever created.
-            if continuity_active and segment_num > 1:
-                current_output_tmpl = add_segment_suffix_to_tmpl(
-                    current_output_tmpl,
-                    segment_num
-                )
+            current_output_tmpl, output_path = _build_segment_output_paths(
+                cfg, output_dir, continuity_active, segment_num)
 
-            output_path = _simulation.get_write_failure_output_path(
-                output_dir, current_output_tmpl)
-
-            # ── Select downloader command (normal vs LQ) ──────────────────
-            _active_dl_cmd = cfg["downloader_cmd"]
-            if use_lq:
-                _lq_cmd = cfg.get("lq_downloader_cmd", [])
-                if _lq_cmd:
-                    _active_dl_cmd = _lq_cmd
-                else:
-                    dbg(f"[LQ] use_lq=True but lq_downloader_cmd is empty — falling back to normal downloader for {streamer}")
+            _active_dl_cmd = _select_downloader_cmd(cfg, use_lq, streamer)
 
             # yt-dlp writes the resolved filename into this sidecar file (in
             # UTF-8) via --print-to-file, so we never have to reconstruct the
             # filename from possibly-mangled stdout text (e.g. emoji/CJK
             # characters getting corrupted by console code-page issues on
-            # Windows).  One unique file per attempt, written to OUTPUT_DIR,
+            # Windows). One unique file per attempt, written to OUTPUT_DIR,
             # deleted as soon as we've read it.
-            #
-            # Two templates are written:
-            #   1. %(filepath)s  → full path (some extractors return "NA")
-            #   2. the raw output template → filename-only (works for
-            #      extractors like TikTok live where %(filepath)s is "NA"
-            #      but individual fields like %(title)s are resolvable).
-            # The sidecar reading code below picks the last non-"NA" line and
-            # applies Windows filename sanitisation when the value is a plain
-            # filename (not an absolute path).
-            _sidecar_token = _re.sub(r"[^A-Za-z0-9_.-]", "_", streamer) or "streamer"
-            _sidecar_path = os.path.join(
-                output_dir, f".jjdlp_filename_{_sidecar_token}_{uuid.uuid4().hex}.tmp"
-            )
+            _sidecar_path = _build_sidecar_path(output_dir, streamer)
 
             cmd = build_yt_dlp_command(
                 cfg["yt_dlp_path"],
@@ -3400,201 +3783,18 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
             out_target, err_target, close_logs, log_out_fp, log_err_fp = open_log_streams(cfg, streamer)
 
-            try:
-                _popen_kwargs: dict = dict(stdout=out_target, stderr=err_target)
-                if sys.platform == "win32":
-                    _popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-                else:
-                    # Put the child in its own process group so we can kill both
-                    # the PyInstaller bootloader and the real yt-dlp process at once.
-                    _popen_kwargs["start_new_session"] = True
-                dbg(f"[POPEN] streamer={streamer!r} cmd={cmd_display_str(cmd)!r}")
-                dbg(f"[POPEN] Windows CREATE_NO_WINDOW={'yes' if sys.platform == 'win32' else 'n/a'}")
-                dbg(f"[POPEN] PYTHONPATH={os.environ.get('PYTHONPATH', '<not set>')!r}")
-                proc = subprocess.Popen(cmd, **_popen_kwargs)
-                proc_start_time = time.time()
-                dbg(f"[POPEN] launched pid={proc.pid}")
-
-                site.register_proc(streamer, proc)
-
-                ffmpeg_error_counter = [0]
-                ffmpeg_error_event   = threading.Event()
-                site.clear_ffmpeg_error_count(streamer)
-                site.clear_stall_since(streamer)
-
-                threading.Thread(
-                    target=_drain_pipe,
-                    args=(proc.stdout, log_out_fp, "stdout"),
-                    kwargs={
-                        "ffmpeg_error_counter": ffmpeg_error_counter,
-                        "ffmpeg_error_event": ffmpeg_error_event,
-                        "streamer": streamer,
-                        "site": site,
-                        "ad_alerts_enabled": cfg.get("ad_alerts", False),
-                    },
-                    daemon=True
-                ).start()
-
-                threading.Thread(
-                    target=_drain_pipe,
-                    args=(proc.stderr, log_err_fp, "stderr"),
-                    kwargs={
-                        "ffmpeg_error_counter": ffmpeg_error_counter,
-                        "ffmpeg_error_event": ffmpeg_error_event,
-                        "streamer": streamer,
-                        "site": site,
-                        "ad_alerts_enabled": cfg.get("ad_alerts", False),
-                    },
-                    daemon=True
-                ).start()
-
-            except Exception as e:
-                site.log_line(f"Failed to start yt-dlp for {streamer}: {e}")
-                try:
-                    close_logs()
-                except Exception:
-                    pass
+            _launch_result = _launch_yt_dlp_attempt(
+                cmd, out_target, err_target, close_logs, log_out_fp, log_err_fp,
+                cfg, site, streamer)
+            if _launch_result is None:
                 break
+            proc, proc_start_time, ffmpeg_error_counter, ffmpeg_error_event = _launch_result
 
-            # ── Resolve active output file ────────────────────────────────
-            # 3-tier fallback chain:
-            #   1. Sidecar file written by yt-dlp itself (--print-to-file on
-            #      "before_dl"), read in UTF-8 — avoids any console/stdout
-            #      encoding issues (e.g. mangled emoji/CJK titles on Windows).
-            #   2. yt-dlp's "[download] Destination: ..." stdout/stderr line,
-            #      parsed live by _drain_pipe — covers extractors where
-            #      %(filepath)s isn't resolvable yet at "before_dl", 
-            #      which writes "NA" to the sidecar).
-            #   3. Re-running yt-dlp with --dump-json to ask it directly for
-            #      the filename it would use — slowest, and can, in principle,
-            #      compute a slightly different name if anything in the
-            #      template is time-sensitive, but is the most tolerant of
-            #      extractor quirks.
-            _FILENAME_WAIT_TIMEOUT = 15.0
-            active_file = None
-            _sidecar_deadline = time.time() + _FILENAME_WAIT_TIMEOUT
-            while time.time() < _sidecar_deadline:
-                if os.path.isfile(_sidecar_path):
-                    try:
-                        with open(_sidecar_path, "r", encoding="utf-8") as _sf:
-                            # --print-to-file appends rather than overwrites, so
-                            # the sidecar may have multiple lines (retries,
-                            # format re-selection, and/or multiple timings).
-                            # Scan from bottom to top, preferring absolute
-                            # paths (%(filepath)s result) over relative ones
-                            # (raw output-template result).
-                            _sc_lines = [ln.strip() for ln in _sf.read().splitlines() if ln.strip()]
-                        raw_abs = None
-                        raw_rel = ""
-                        for ln in reversed(_sc_lines):
-                            if not ln or ln == "NA":
-                                continue
-                            if os.path.isabs(ln):
-                                raw_abs = ln  # prefer absolute (%(filepath)s)
-                            else:
-                                if not raw_rel:
-                                    raw_rel = ln  # keep first (last) relative
-                        raw_dest = raw_abs if raw_abs is not None else raw_rel
-                    except Exception as _sc_read_err:
-                        dbg(f"[STALL] error reading filename sidecar {_sidecar_path!r}: "
-                            f"{_sc_read_err!r}", site_name=streamer)
-                        raw_dest = ""
-                    # The sidecar has served its purpose the moment we've read
-                    # it — remove it right away rather than waiting for
-                    # end-of-recording cleanup.
-                    try:
-                        os.remove(_sidecar_path)
-                    except OSError:
-                        pass
-
-                    if raw_dest:
-                        if os.path.isabs(raw_dest):
-                            candidate = raw_dest
-                        else:
-                            # This is the raw output template result (e.g.
-                            # from "%(uploader)s %(title)s ...").  yt-dlp
-                            # resolves the template but does NOT apply
-                            # filesystem sanitization — that happens later
-                            # when the file is created.  Replicate the
-                            # Windows sanitization here so the candidate
-                            # path matches the actual file on disk.
-                            _sanitized = _re.sub(r'[<>:"/\\|?*]', '_', raw_dest)
-                            _sanitized = _re.sub(r'[\x00-\x1f\x7f]', '', _sanitized)
-                            _sanitized = _sanitized.strip(' .')
-                            candidate = os.path.join(output_dir, _sanitized)
-                        # The sidecar is written at before_dl, but the actual
-                        # output file may not exist yet (yt-dlp opens it
-                        # slightly after the hook fires).  Wait a few seconds
-                        # for the file to appear before giving up.
-                        _file_deadline = time.time() + 5.0
-                        while time.time() < _file_deadline:
-                            if os.path.exists(candidate):
-                                active_file = candidate
-                                dbg(f"[STALL] resolved active_file from filename sidecar: "
-                                    f"{active_file!r}", site_name=streamer)
-                                break
-                            if proc.poll() is not None:
-                                break
-                            time.sleep(0.25)
-                        if not active_file:
-                            dbg(f"[STALL] sidecar candidate {candidate!r} (from {raw_dest!r}) "
-                                f"does not exist after 5s, discarding.", site_name=streamer)
-                    break
-
-                if proc.poll() is not None:
-                    # Process already exited without ever writing the sidecar —
-                    # no point waiting out the rest of the timeout.
-                    dbg(f"[STALL] proc exited before writing filename sidecar "
-                        f"(returncode={proc.returncode})", site_name=streamer)
-                    break
-
-                time.sleep(0.25)
-            else:
-                dbg(f"[STALL] timed out after {_FILENAME_WAIT_TIMEOUT}s waiting for "
-                    f"filename sidecar {_sidecar_path!r}", site_name=streamer)
-
-            # Best-effort cleanup: if we broke out early (timeout / proc exit)
-            # before the sidecar ever appeared, make sure nothing is left behind.
-            if not active_file:
-                try:
-                    if os.path.isfile(_sidecar_path):
-                        os.remove(_sidecar_path)
-                except OSError:
-                    pass
-
-            # Publish the resolved output file so the top-bar disk-rate graph
-            # can count exactly which file(s) yt-dlp is actively recording
-            # (and only those — never File Manager Move/Fixup/Trim/Split
-            # output). If resolution failed, nothing is published and the
-            # graph reads zero until the file resolves.
-            if active_file:
-                site.set_recording_output(streamer, active_file)
-
-                # Continuation from a prior attempt (this thread's own
-                # in-thread restart, or a separate earlier record_stream()
-                # call for the same live session) is confirmed now that this
-                # attempt's file resolved — retroactively rename that prior
-                # attempt's unsuffixed file to _partN now that we know a
-                # later part exists. Mirrors the SPLIT_AFTER mid-recording
-                # rename-of-part1 logic further below, just triggered at a
-                # different point (attempt start vs. confirmed mid-recording
-                # split).
-                if (_pending_rename_file and _pending_rename_file != active_file
-                        and os.path.isfile(_pending_rename_file)):
-                    _prev_part_path = add_segment_suffix_to_tmpl(
-                        _pending_rename_file, segment_num - 1
-                    )
-                    try:
-                        os.rename(_pending_rename_file, _prev_part_path)
-                        site.log_line(
-                            f"Renamed previous segment to: {os.path.basename(_prev_part_path)}"
-                        )
-                        dbg(f"[SPLIT][record_stream] renamed continuation segment: "
-                            f"{_pending_rename_file!r} -> {_prev_part_path!r}")
-                    except Exception as _ren_err:
-                        dbg(f"[SPLIT][record_stream] rename of continuation segment "
-                            f"FAILED: {_ren_err!r}")
-                    _pending_rename_file = None
+            # Resolve the file this attempt is actually writing to (sidecar-based,
+            # with a bounded wait) and publish/finalize any pending rename.
+            active_file = _resolve_active_recording_file(proc, _sidecar_path, output_dir, streamer)
+            _pending_rename_file = _publish_active_file_and_finalize_rename(
+                site, streamer, active_file, _pending_rename_file, segment_num)
 
             last_size, _, _, _ = get_streamer_file_size(
                 output_dir,
@@ -3608,57 +3808,11 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             recording_start_time = time.time()
             stall_check_interval = cfg["stall_check_interval"]
             stall_timeout        = cfg["stall_timeout"]
-            # NOTIFY_NO_CONFIRM_FILE tracking: if the recording file has not been
-            # confirmed within one STALL_TIMEOUT window (anchored to when the
-            # streamer went live), fire a warning notification. yt-dlp can exit
-            # 'normally' during a failure, so this deadline is the backstop —
-            # and because of that, the anchor must be a persistent, session-
-            # long value (the streamer's live-since time), not something reset
-            # per attempt, since a retry after a failed attempt should still
-            # measure from the same start point.
-            #
-            # live-since is correct and is never reset — it's the source of
-            # truth for how long the streamer has actually been live. But if
-            # this streamer was ever live-while-disabled during the current
-            # session, get_enable_anchor() holds a separate, persistent
-            # anchor set once at the moment of enabling, and reused for
-            # every attempt/retry afterward — otherwise a retry following a
-            # fast failure would fall back to the stale live-since time and
-            # fire a false-positive alert almost immediately, exactly as
-            # live-since predates the enable.
-            _no_confirm_anchor_val = site.get_enable_anchor(streamer)
-            _no_confirm_anchor_src = "enable_anchor"
-            if _no_confirm_anchor_val is None:
-                _no_confirm_anchor_val = site.get_live_since(streamer) or time.time()
-                _no_confirm_anchor_src = "live_since"
-            # If this attempt follows a restart (stall, LQ, or quality
-            # upgrade), take the more recent of the two anchors to avoid
-            # firing the write-failure alert
-            _last_restart_anchor = site.get_last_restart_anchor(streamer)
-            if _last_restart_anchor is not None and _last_restart_anchor > _no_confirm_anchor_val:
-                _no_confirm_anchor_val = _last_restart_anchor
-                _no_confirm_anchor_src = "last_restart_anchor"
-            # Floor the anchor at this process's own start time.  If the
-            # streamer had been live for longer than stall_timeout already,
-            # using the raw persisted anchor would put _no_confirm_deadline
-            # in the past before this attempt even starts, firing the
-            # write-failure alert immediately on every launch. 
-            if _no_confirm_anchor_val < _SCRIPT_START_TIME:
-                dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: {_no_confirm_anchor_src} "
-                    f"({_no_confirm_anchor_val:.2f}) predates this process's start "
-                    f"({_SCRIPT_START_TIME:.2f}) — flooring anchor at process start "
-                    f"for streamer={streamer!r}",
-                    site_name=streamer)
-                _no_confirm_anchor_val = _SCRIPT_START_TIME
-                _no_confirm_anchor_src += "+floored_at_process_start"
-            _no_confirm_deadline = _no_confirm_anchor_val + stall_timeout + _no_confirm_grace_seconds
-            _no_confirm_warned   = False
-            dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: confirmation deadline for "
-                f"streamer={streamer!r} = {_no_confirm_anchor_src}+{stall_timeout}s"
-                f"{f'+{_no_confirm_grace_seconds:.0f}s intro-delay grace' if _no_confirm_grace_seconds else ''} "
-                f"({_no_confirm_deadline:.2f}), live_since={site.get_live_since(streamer)}, "
-                f"enable_anchor={site.get_enable_anchor(streamer)}",
-                site_name=streamer)
+            # NOTIFY_NO_CONFIRM_FILE tracking: see _compute_no_confirm_deadline()
+            # for the anchor-selection reasoning.
+            _no_confirm_deadline = _compute_no_confirm_deadline(
+                site, streamer, stall_timeout, _no_confirm_grace_seconds)
+            _no_confirm_warned = False
 
             def _check_no_confirm_deadline():
                 # Fires the NOTIFY_NO_CONFIRM_FILE warning as soon as the
@@ -3691,10 +3845,6 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: file not confirmed for "
                         f"streamer={streamer!r} within {int(stall_timeout)}s "
                         f"(deadline={_no_confirm_deadline:.2f}) — sending warning; "
-                        f"anchor_src={_no_confirm_anchor_src} "
-                        f"anchor_val={_no_confirm_anchor_val:.2f} "
-                        f"live_since={site.get_live_since(streamer)} "
-                        f"enable_anchor={site.get_enable_anchor(streamer)} "
                         f"attempt_age={time.time() - recording_start_time:.1f}s "
                         f"active_file={active_file!r} last_size={last_size} "
                         f"cur_size={_nc_size} file_error={_nc_file_error} "
@@ -3734,13 +3884,7 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             while proc.poll() is None:
 
                 if site._stop_event.is_set() or streamer in site.evicted_streamers:
-                    kill_proc(proc)
-                    proc.wait()
-                    site.unregister_proc(streamer)
-                    try:
-                        close_logs()
-                    except Exception:
-                        pass
+                    _teardown_attempt(site, streamer, proc, close_logs, wait_after_kill=True)
                     return
 
                 _t0 = time.time()
@@ -3750,33 +3894,21 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     dbg(f"[PERF][record_stream/inner] get_cached_config took {_load_cfg_ms:.2f}ms streamer={streamer!r}")
 
                 if streamer in current_cfg["blocked"]:
-                    kill_proc(proc)
+                    # NOTE: deliberately mirrors the stop_event/evicted branch
+                    # above — kill and return immediately, and let the shared
+                    # `finally` block below do currently_recording.discard(),
+                    # the AUTO_SUFFIX/SPLIT_AFTER set_segment_continuation()
+                    # write, and the single cooldown wait, in that order.
                     site.log_line(f"Recording STOPPED (blocked) -> {streamer}")
-                    site.unregister_proc(streamer)
-                    site.clear_ffmpeg_error_count(streamer)
-                    site.clear_stall_since(streamer)
-                    site.clear_ad_alert(streamer)
-
-                    try:
-                        close_logs()
-                    except Exception:
-                        pass
-
-                    with site.lock:
-                        site.currently_recording.discard(streamer)
-
-                    # Interruptible: wake immediately on shutdown instead of
-                    # blocking the thread (and thus main()'s shutdown join)
-                    # for the full cooldown period.
-                    site._stop_event.wait(timeout=cfg["cooldown_after_recording"])
+                    _teardown_attempt(site, streamer, proc, close_logs,
+                                       clear_stall=True, clear_ffmpeg_error=True)
                     return
 
-                # ── LQ-restart simulation (DEBUG) ──────────────────────────
-                # Injects simulated ffmpeg-error counts so the real LQ
-                # machinery can be exercised without a genuinely degraded
-                # stream. See _SIMULATE_LQ_RESTART up top. Placed just before
-                # the event check below so a simulated threshold hit is caught
-                # on the very next loop iteration.
+                # LQ-restart simulation (DEBUG): injects simulated ffmpeg-error
+                # counts so the real LQ machinery can be exercised without a
+                # genuinely degraded stream. See _SIMULATE_LQ_RESTART up top.
+                # Placed just before the event check below so a simulated
+                # threshold hit is caught on the very next loop iteration.
                 _simulation._maybe_simulate_lq_errors(
                     streamer, site, use_lq, growth_seen,
                     ffmpeg_error_counter, ffmpeg_error_event,
@@ -3791,17 +3923,10 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                     _refresh_restart_anchor_if_growing(
                         site, streamer, growth_seen, reason="ffmpeg_error_threshold")
 
-                    kill_proc(proc)
-                    site.unregister_proc(streamer)
-                    site.clear_ad_alert(streamer)
+                    _teardown_attempt(site, streamer, proc, close_logs, clear_ad_alert=True)
 
-                    try:
-                        close_logs()
-                    except Exception:
-                        pass
-
-                    # ── LQ bandwidth-saving trigger (non-LQ recordings only) ──
-                    # Only trigger LQ for normal recordings; if a LQ recording
+                    # LQ bandwidth-saving trigger (non-LQ recordings only):
+                    # only trigger LQ for normal recordings; if a LQ recording
                     # itself hits the threshold we just let it restart normally.
                     if not use_lq:
                         _maybe_trigger_lq(site, streamer)
@@ -3857,84 +3982,11 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         next_out_target, next_err_target, next_close_logs, next_log_out_fp, next_log_err_fp = open_log_streams(cfg, streamer)
 
                         try:
-                            _next_popen_kwargs: dict = dict(
-                                stdout=next_out_target,
-                                stderr=next_err_target,
-                            )
-                            if sys.platform != "win32":
-                                # Same process-group isolation as the primary Popen above.
-                                _next_popen_kwargs["start_new_session"] = True
-                            dbg(f"[POPEN] streamer={streamer!r} split cmd={cmd_display_str(next_cmd)!r}")
-                            next_proc = subprocess.Popen(next_cmd, **_next_popen_kwargs)
-
-                            next_proc_start_time = time.time()
-                            dbg(f"[SPLIT][record_stream] next_proc started pid={next_proc.pid} "
-                                f"next_proc_start_time={next_proc_start_time:.3f}")
-
-                            threading.Thread(
-                                target=_drain_pipe,
-                                args=(next_proc.stdout, next_log_out_fp, "stdout"),
-                                kwargs={
-                                    "streamer": streamer,
-                                    "site": site,
-                                    "ad_alerts_enabled": cfg.get("ad_alerts", False),
-                                },
-                                daemon=True
-                            ).start()
-
-                            threading.Thread(
-                                target=_drain_pipe,
-                                args=(next_proc.stderr, next_log_err_fp, "stderr"),
-                                kwargs={
-                                    "streamer": streamer,
-                                    "site": site,
-                                    "ad_alerts_enabled": cfg.get("ad_alerts", False),
-                                },
-                                daemon=True
-                            ).start()
-
-                            # Wait for the exact new segment file.
-                            # Do NOT use wait_for_streamer_file here — it does a
-                            # fuzzy mtime search and can return the *previous*
-                            # segment's file if the old proc is still writing to it
-                            # and bumps its mtime past next_proc_start_time.
-                            # Instead, search by the exact _partN suffix so we only
-                            # accept the file that belongs to this new segment.
                             part_suffix = f"_part{next_segment_num}"
-                            next_file = None
-                            _nf_deadline = time.time() + 30.0
-                            dbg(f"[SPLIT][record_stream] waiting for exact segment file "
-                                f"part_suffix={part_suffix!r} pid={next_proc.pid} "
-                                f"next_proc_start_time={next_proc_start_time:.3f} timeout=30s")
-                            while time.time() < _nf_deadline:
-                                if os.path.isdir(output_dir):
-                                    for _f in os.listdir(output_dir):
-                                        _fp = os.path.join(output_dir, _f)
-                                        if (os.path.isfile(_fp)
-                                                and streamer.lower() in _f.lower()
-                                                and part_suffix.lower() in _f.lower()
-                                                and os.path.getmtime(_fp) >= next_proc_start_time):
-                                            next_file = _fp
-                                            break
-                                if next_file:
-                                    dbg(f"[SPLIT][record_stream] exact segment file found: "
-                                        f"{next_file!r} elapsed={30.0-(_nf_deadline-time.time()):.1f}s")
-                                    break
-                                dbg(f"[SPLIT][record_stream] still waiting for {part_suffix!r} file "
-                                    f"remaining={_nf_deadline-time.time():.1f}s")
-                                time.sleep(0.5)
-
-                            if next_file is None:
-                                dbg(f"[SPLIT][record_stream] TIMEOUT — exact segment file not found "
-                                    f"part_suffix={part_suffix!r} pid={next_proc.pid}")
-                            dbg(f"[SPLIT][record_stream] segment file search result: {next_file!r}")
-
-                            split_success = (
-                                next_file is not None and
-                                wait_for_new_file_growth(next_file, timeout=15.0)
-                            )
-                            dbg(f"[SPLIT][record_stream] split_success={split_success} "
-                                f"next_file={next_file!r}")
+                            next_proc, next_proc_start_time, next_file, split_success = _spawn_and_verify_split_segment(
+                                next_cmd, cfg, next_out_target, next_err_target,
+                                next_log_out_fp, next_log_err_fp,
+                                output_dir, streamer, site, part_suffix)
 
                             if split_success:
                                 site.log_line(
@@ -3967,8 +4019,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                                 site.unregister_proc(streamer)
                                 try:
                                     close_logs()
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    dbg(f"record_stream: close_logs() failed for {streamer!r} during split switch: {e}")
 
                                 proc = next_proc
                                 close_logs = next_close_logs
@@ -3986,6 +4038,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                                 # silently overrun SPLIT_AFTER by the verification delay.
                                 recording_start_time = next_proc_start_time
                                 segment_num = next_segment_num
+                                # Persist immediately rather than waiting for this thread's finally: block.
+                                site.set_segment_continuation(streamer, segment_num, None)
 
                                 if _intro_delay_disable_after_split:
                                     split_after_seconds = 0
@@ -4030,8 +4084,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
 
                             try:
                                 next_close_logs()
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                dbg(f"record_stream: next_close_logs() failed for {streamer!r} after failed split: {e}")
 
                         except Exception as e:
                             dbg(f"[SPLIT][record_stream] EXCEPTION launching next proc: "
@@ -4072,76 +4126,25 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         known_filename=active_file,
                     )
 
-                    # ── Dashboard quality display (independent of stall logic) ──
-                    # Measure the actual on-disk resolution via ffprobe, reusing
+                    # Dashboard quality display (independent of stall logic):
+                    # measure the actual on-disk resolution via ffprobe, reusing
                     # the same active_file the stall checker just used above.
-                    #
-                    # If the file can't be located this cycle (file_error),
-                    # clear the measured value.  If ffprobe
-                    # itself is unavailable, also clear it. 
-                    if file_error:
-                        with site.lock:
-                            site.display_resolution.pop(streamer, None)
-                        dbg(f"[QUALITY] file_error={file_error!r} - clearing measured resolution", site_name=streamer)
-                    else:
-                        _measured_height = probe_file_height(active_file)
-                        with site.lock:
-                            _prev_measured = site.display_resolution.get(streamer)
-                            if _measured_height is not None:
-                                site.display_resolution[streamer] = _measured_height
-                            else:
-                                site.display_resolution.pop(streamer, None)
-                        dbg(f"[QUALITY] measured_height={_measured_height!r}p "
-                            f"(prev={_prev_measured!r}p) recording_resolution_baseline={site.recording_resolution.get(streamer)!r}p "
-                            f"file={active_file!r}", site_name=streamer)
+                    _update_measured_quality(site, streamer, active_file, file_error)
 
                     if file_error:
                         # We couldn't even locate/read the recording file this
                         # cycle (e.g. active_file points at a filename that
-                        # doesn't exist yet — a normal, brief situation right
-                        # after a fresh start). Don't let a single occurrence
-                        # masquerade as "no growth" — that would show a false
-                        # "stalled" state on the dashboard from transient
-                        # filename-resolution timing alone.
-                        #
-                        # However, if this has now persisted for a full
-                        # stall_timeout window since the last confirmed
-                        # growth, it's no longer transient — the file was
-                        # never (or is no longer) being written at all (e.g.
-                        # yt-dlp resolved an intended filename but can never
-                        # actually create it — an unwritable filesystem/
-                        # directory). That's the same "recording has failed"
-                        # condition as a confirmed stall and must be flagged
-                        # the same way, or a broken write path that never
-                        # produces a locatable file would silently never
-                        # alert at all.
-                        dbg("[STALL] filename lookup failed this cycle", site_name=streamer)
+                        # doesn't exist). Note: This only fires if yt-dlp stays alive
+                        # for the duration of STALL_TIMEOUT without producing a
+                        # file.
+                        dbg("[STALL] filename lookup failed — giving up on "
+                            "stall detection for this cycle", site_name=streamer)
                         site.clear_stall_since(streamer)
                         if not filename_error_warned:
                             site.log_line(
                                 f"Warning: stall checker could not locate file for {streamer}"
                             )
                             filename_error_warned = True
-                        _file_error_elapsed = time.time() - last_growth_time
-                        if _file_error_elapsed >= stall_timeout:
-                            site.log_line(
-                                f"Recording file for {streamer} could not be located for "
-                                f"{int(_file_error_elapsed)}s — restarting"
-                            )
-                            site.set_write_unconfirmed(streamer)
-
-                            kill_proc(proc)
-                            site.unregister_proc(streamer)
-                            site.clear_stall_since(streamer)
-                            site.clear_ad_alert(streamer)
-
-                            try:
-                                close_logs()
-                            except Exception:
-                                pass
-
-                            time.sleep(5)
-                            break
 
                     elif stall_detected:
                         site.log_line(f"Stall detected for {streamer} — restarting")
@@ -4152,18 +4155,36 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         _refresh_restart_anchor_if_growing(
                             site, streamer, growth_seen, reason="stall_detected")
 
-                        kill_proc(proc)
-                        site.unregister_proc(streamer)
-                        site.clear_stall_since(streamer)
-                        site.clear_ad_alert(streamer)
-
-                        try:
-                            close_logs()
-                        except Exception:
-                            pass
-
+                        _teardown_attempt(site, streamer, proc, close_logs,
+                                           clear_stall=True, clear_ad_alert=True)
                         time.sleep(5)
                         break
+
+                    elif current_size < last_size and growth_seen:
+                        # File size went BACKWARDS since the last poll — the
+                        # file was truncated/reopened (e.g. yt-dlp reopening
+                        # the output file from byte 0 after a live-stream
+                        # reconnect instead of resuming/appending).
+                        dbg(f"[STALL] COLLAPSE DETECTED: size dropped "
+                            f"{last_size} -> {current_size} "
+                            f"(-{last_size - current_size} bytes) — file was "
+                            f"likely truncated/reopened on reconnect",
+                            site_name=streamer)
+                        site.log_line(
+                            f"Warning: recording file for {streamer} shrank "
+                            f"from {last_size} to {current_size} bytes "
+                            f"(likely truncated on reconnect) — some footage "
+                            f"may have been lost"
+                        )
+                        # Re-sync the comparison baseline to this poll's size
+                        # so the next poll compares against reality. Leave
+                        # last_growth_time / stall_since untouched — a shrink
+                        # isn't a stall, so it shouldn't affect the genuine
+                        # stall timer; if the file also stops growing after
+                        # this, the existing NO GROWTH branch will catch that
+                        # on its own on a later poll.
+                        filename_error_warned = False
+                        last_size = current_size
 
                     elif current_size > last_size:
                         filename_error_warned = False
@@ -4229,14 +4250,8 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 # bookkeeping, no safety-net check) instead of treating it
                 # like a normal end-of-attempt.
                 if site._stop_event.is_set() or streamer in site.evicted_streamers:
-                    site.unregister_proc(streamer)
-                    site.clear_stall_since(streamer)
-                    site.clear_ffmpeg_error_count(streamer)
-                    site.clear_ad_alert(streamer)
-                    try:
-                        close_logs()
-                    except Exception:
-                        pass
+                    _teardown_attempt(site, streamer, proc, close_logs, kill=False,
+                                       clear_stall=True, clear_ffmpeg_error=True, clear_ad_alert=True)
                     return
 
                 # Normal yt-dlp exit (return code 0) is a valid restart
@@ -4266,27 +4281,15 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                 # chance here before we report the attempt as finished.
                 _check_no_confirm_deadline()
 
-                site.unregister_proc(streamer)
-                site.clear_stall_since(streamer)
-                site.clear_ffmpeg_error_count(streamer)
-                site.clear_ad_alert(streamer)
+                _teardown_attempt(site, streamer, proc, close_logs, kill=False,
+                                   clear_stall=True, clear_ffmpeg_error=True, clear_ad_alert=True)
 
-                try:
-                    close_logs()
-                except Exception:
-                    pass
+                # Clear LQ tracking when streamer goes offline: this ensures
+                # the next time they go live the normal downloader is used
+                # (LQ is only attempted once per online session).
+                _clear_lq_attempt_on_offline(streamer, cfg, site)
 
-                # ── Clear LQ tracking when streamer goes offline ──────────
-                # This ensures the next time they go live the normal downloader
-                # is used (LQ is only attempted once per online session).
-                _offline_site_label = cfg.get("site_label", os.path.basename(site.config_path))
-                with _lq_attempted_lock:
-                    _lq_attempted.pop((streamer, _offline_site_label), None)
-
-                with site.dash_lock:
-                    site.dash_last_live[streamer] = time.time()
-                    _last_live_snapshot = dict(site.dash_last_live)
-                _save_last_live_cache(site.config_path, _last_live_snapshot)
+                _update_last_live_cache(site, streamer)
 
                 site.log_line(f"Recording finished: {streamer}")
                 break
@@ -4295,16 +4298,16 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
         if proc is not None:
             try:
                 kill_proc(proc)
-            except Exception:
-                pass
+            except Exception as e:
+                dbg(f"record_stream: kill_proc() failed for {streamer!r} during KeyboardInterrupt: {e}")
 
         site.unregister_proc(streamer)
         site.clear_ad_alert(streamer)
 
         try:
             close_logs()
-        except Exception:
-            pass
+        except Exception as e:
+            dbg(f"record_stream: close_logs() failed for {streamer!r} during KeyboardInterrupt: {e}")
 
     finally:
         with site.lock:
@@ -4328,16 +4331,16 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
             # stopped (normal end, eviction, or crash).
             site.evicted_streamers.discard(streamer)
 
-        # ── AUTO_SUFFIX / SPLIT_AFTER restart continuity ────────────────────
-        # Persist enough state for a *future* record_stream() attempt (a
-        # separate thread call for this same live session — e.g. after an
-        # eviction) to continue this part sequence instead of starting back
-        # at part 1. A no-op if the live session already ended (streamer
-        # went offline) — see SiteState.set_segment_continuation().
-        # segment_num==1 means this attempt's file was never suffixed, so
-        # it's the one that would need a retroactive rename if a
-        # continuation attempt follows; segment_num>1 means it was already
-        # suffixed at creation, so there's nothing pending.
+        # AUTO_SUFFIX / SPLIT_AFTER restart continuity: persist enough state
+        # for a *future* record_stream() attempt (a separate thread call for
+        # this same live session — e.g. after an eviction) to continue this
+        # part sequence instead of starting back at part 1. A no-op if the
+        # live session already ended (streamer went offline) — see
+        # SiteState.set_segment_continuation(). segment_num==1 means this
+        # attempt's file was never suffixed, so it's the one that would need
+        # a retroactive rename if a continuation attempt follows;
+        # segment_num>1 means it was already suffixed at creation, so
+        # there's nothing pending.
         _unsuffixed_for_continuation = (
             active_file if (active_file and segment_num == 1) else None
         )
@@ -4564,7 +4567,8 @@ def config_watcher(site: "SiteState", poll_interval: int = 3) -> None:
                         site.known_streamers.update(curr_streamers)
                     site.trigger_event.set()
                 prev_streamers = curr_streamers
-        except Exception:
+        except Exception as e:
+            dbg(f"config_watcher: {e}")
             pass
         site._stop_event.wait(timeout=poll_interval)
 
@@ -4609,7 +4613,8 @@ def _process_streamer_schedules(site: "SiteState") -> None:
         current_site_label = normalize_label(site.get_cached_config().get(
             "site_label", os.path.basename(site.config_path)
         ))
-    except Exception:
+    except Exception as e:
+        dbg(f"normalize_label: {e}")
         current_site_label = normalize_label(os.path.basename(site.config_path))
     
     # Collect actions: list of (streamer, site_label, conf_action, log_label)
@@ -4646,7 +4651,8 @@ def _process_streamer_schedules(site: "SiteState") -> None:
                 return None
             try:
                 return datetime.fromisoformat(s)
-            except Exception:
+            except Exception as e:
+                dbg(f"_parse_attempt: {e}")
                 return None
 
         last_enable  = _parse_attempt(sched.get("last_enable_attempt"))
@@ -4846,8 +4852,7 @@ def _process_streamer_schedules(site: "SiteState") -> None:
         dbg(f"[CHECKER] schedule {log_label} {streamer}: {result.strip()}", site.config_path)
 
     # Persist attempt timestamps (re-read to avoid racing with other writers).
-    with _global_json_lock:
-        gdata   = _load_global_json()
+    def _mutate(gdata):
         entries = (gdata.get("priorities", {})
                        .get(config_id, {})
                        .get("entries", []))
@@ -4862,7 +4867,7 @@ def _process_streamer_schedules(site: "SiteState") -> None:
                     break
         if "priorities" in gdata and config_id in gdata["priorities"]:
             gdata["priorities"][config_id]["entries"] = entries
-        _save_global_json(gdata)
+    _update_global_json(_mutate)
 
     # Trigger an immediate liveness recheck so the new enable/disable state is
     # picked up without waiting for the full check_interval.
@@ -5026,6 +5031,30 @@ def monitor_site(site: "SiteState") -> None:
                     site.mark_offline(s)
                 else:
                     site.mark_live(s)
+
+            # "Skip this stream" auto re-enable: any skip-disabled streamer
+            # that's currently reported offline gets un-blocked, so the
+            # disable only lasted for the stream it was applied during.
+            #
+            # Deliberately NOT gated on having observed a live->offline
+            # transition in this process
+            # If the streamer was also removed from [Streamers] entirely
+            # in the meantime (rather than just left in [Block]), leave it
+            # alone — it's a real removal now, not a pending skip.
+            with site.dash_lock:
+                to_unblock = [s for s in streamers if s not in live_set and s in site.skip_disabled]
+            if to_unblock:
+                still_in_streamers = set(load_config(site.config_path)["streamers"])
+                remaining_skip = set(site.skip_disabled)
+                for s in to_unblock:
+                    remaining_skip.discard(s)
+                    if s in still_in_streamers:
+                        _modify_config_streamer(site.config_path, s, "add")
+                        site.log_line(f"'{s}' went offline — auto re-enabled (skip-this-stream expired).")
+                with site.dash_lock:
+                    site.skip_disabled = remaining_skip
+                _save_skip_disabled(site.config_path, remaining_skip)
+                site.invalidate_config_cache()
 
             if live_now:
                 start_recording_if_needed(live_now, cfg, site, resolution_map=live_info)
@@ -5430,7 +5459,8 @@ class JJDlpDashboard:
                 cfg = site.get_cached_config()
                 site_label = cfg.get("site_label", os.path.basename(site.config_path))
                 site_setting_values.append((site_label, cfg))
-            except Exception:
+            except Exception as e:
+                dbg(f"draw_system_panel: {e}")
                 pass
             total_streamers += len(all_s)
             live_cnt += sum(1 for s in all_s if s in live_since)
@@ -5466,7 +5496,8 @@ class JJDlpDashboard:
             for site_label, cfg in site_setting_values:
                 try:
                     split_after = int(cfg.get("split_after", 0) or 0)
-                except Exception:
+                except Exception as e:
+                    dbg(f"_split_after_rows: {e}")
                     split_after = 0
                 if split_after > 0:
                     values.append((site_label, f"{split_after}m", self.C_CHROME))
@@ -5535,12 +5566,12 @@ class JJDlpDashboard:
                         break
                     _label = _streamer[:label_w].ljust(label_w)
                     _val   = str(_count)
+                    # Same color as "ad detected" counter
+                    _ffmpeg_attr = theme.attr(self, "main_jjdlpdashboard_split_after_rows_warn_2")
                     self.safe_addstr(self.stdscr, ffmpeg_row_y, x1 + 2,
-                                _label,
-                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_rec_2"))
+                                _label, _ffmpeg_attr)
                     self.safe_addstr(self.stdscr, ffmpeg_row_y, x1 + 2 + label_w + 1,
-                                _val[:inner_w - label_w - 1],
-                                theme.attr(self, "main_jjdlpdashboard_split_after_rows_rec_3"))
+                                _val[:inner_w - label_w - 1], _ffmpeg_attr)
                     ffmpeg_row_y += 1
                 disk_row_y = ffmpeg_row_y + 1
         except Exception as _ffmpeg_err_exc:
@@ -5624,7 +5655,8 @@ class JJDlpDashboard:
                     # so a typo'd/missing path doesn't silently merge with an unrelated one.
                     try:
                         return f"dev:{os.stat(path).st_dev}"
-                    except Exception:
+                    except Exception as e:
+                        dbg(f"_dedupe_key: {e}")
                         return f"path:{os.path.normcase(path)}"
 
                 # 1. Global drives (from global.conf) — shown first if configured
@@ -5738,6 +5770,9 @@ class JJDlpDashboard:
             blocked      = set(site.dash_blocked)
             next_in      = site.dash_next_check_in
         live_since   = site.snapshot_live_since()
+        with site.dash_lock:
+            ad_alert_streamers = set(site.ad_alerts.keys())
+            ffmpeg_error_streamers = {s for s, c in site.ffmpeg_error_counts.items() if c > 0}
         with site.lock:
             recording     = set(site.currently_recording)
             intro_delay_pending = set(site.intro_delay_pending)
@@ -5758,7 +5793,8 @@ class JJDlpDashboard:
             _bar_max_secs = _panel_cfg.get("progress_bar_max_hours", 6) * 3600
             _bar_cfg_w    = max(4, _panel_cfg.get("progress_bar_width", 14))
             _last_live_highlight_days = _panel_cfg.get("last_live_highlight", 0)
-        except Exception:
+        except Exception as e:
+            dbg(f"draw: bad panel config, using defaults: {e}")
             _bar_max_secs = 6 * 3600
             _bar_cfg_w    = 14
             _last_live_highlight_days = 0
@@ -5971,7 +6007,9 @@ class JJDlpDashboard:
                     bar_str     = (_live_bar_dashed(elapsed, bar_w, _bar_max_secs)
                                    if recording_res.get(s) is None
                                    else _live_bar(elapsed, bar_w, _bar_max_secs))
-                    bar_attr    = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_9")
+                    bar_attr    = (theme.attr(self, "main_jjdlpdashboard_split_after_rows_warn_2")
+                                   if s in ad_alert_streamers or s in ffmpeg_error_streamers
+                                   else theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_9"))
                     dur_str     = _fmt_duration(elapsed)
                     if not (is_rec and recording_res.get(s) is not None):
                         last_live_str = ""  # currently live, no "last live"
@@ -6208,9 +6246,13 @@ class JJDlpDashboard:
 
         if is_all_sites:
             # Merge activity/debug lines from every site, tagged with the
-            # site's label so lines can still be told apart.
+            # site's label so lines can still be told apart, plus the
+            # process-wide lines (e.g. web UI startup), which aren't tied
+            # to any one site and so appear once here, untagged.
             raw_lines: List[str] = []
             raw_debug: List[str] = []
+            with _global_log_lock:
+                raw_lines.extend(_global_log_lines)
             for site in self.sites:
                 lbl = site.get_cached_config().get(
                     "site_label", os.path.basename(site.config_path))
@@ -6562,7 +6604,10 @@ class JJDlpDashboard:
         if self._mgmt_mode:
             action, site_idx = self._mgmt_mode
             site_lbl = os.path.basename(self.sites[site_idx].config_path)
-            if action in ("disable", "remove"):
+            if action == "disable":
+                hints = (f"  [{action.upper()} streamer on {site_lbl}]  "
+                         f"\u2191\u2193: select  Enter: confirm  S: Skip this stream  Esc: Go back  ")
+            elif action == "remove":
                 hints = (f"  [{action.upper()} streamer on {site_lbl}]  "
                          f"\u2191\u2193: select  Enter: confirm  Esc: Go back  ")
             else:
@@ -6665,7 +6710,10 @@ class JJDlpDashboard:
         site_lbl = site.get_cached_config().get("site_label",
                                                 os.path.basename(site.config_path))
 
-        box_h, box_w = min(20, h - 4), min(60, w - 4)
+        # DISABLE gets a wider box than ADD/REMOVE to fit its longer legend
+        # (" ...  S: Skip this stream  Esc: Go back ").
+        max_box_w = 68 if action == "disable" else 60
+        box_h, box_w = min(20, h - 4), min(max_box_w, w - 4)
         by1 = (h - box_h) // 2
         bx1 = (w - box_w) // 2
         by2 = by1 + box_h
@@ -6736,8 +6784,11 @@ class JJDlpDashboard:
                 self.safe_addstr(self.stdscr, row_y, bx1 + 2,
                             (prefix + s + suffix)[:box_w - 4], attr)
 
-            self.safe_addstr(self.stdscr, by2, bx1 + 2,
-                        " \u2191\u2193: select  Enter: confirm  Esc: Go back ",
+            if action == "disable":
+                legend = " \u2191\u2193: select  Enter: confirm  S: Skip this stream  Esc: Go back "
+            else:
+                legend = " \u2191\u2193: select  Enter: confirm  Esc: Go back "
+            self.safe_addstr(self.stdscr, by2, bx1 + 2, legend,
                         theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_invhead_2"))
 
         else:
@@ -6787,8 +6838,9 @@ class JJDlpDashboard:
                     prefix = "> " if is_sel else "  "
                     attr   = (theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_hilight_2")
                               if is_sel else theme.attr(self, "main_jjdlpdashboard_draw_mgmt_overlay_dim_3"))
+                    suffix = "  (skipping this stream)" if s in site.skip_disabled else ""
                     self.safe_addstr(self.stdscr, row_y, bx1 + 2,
-                                (prefix + s)[:box_w - 4], attr)
+                                (prefix + s + suffix)[:box_w - 4], attr)
             else:
                 self.safe_addstr(self.stdscr, list_top, bx1 + 2,
                             "No disabled streamers.",
@@ -7371,6 +7423,21 @@ class JJDlpDashboard:
         self._mgmt_sel    = -1 if action == "add" else 0
         self._mgmt_scroll = 0
 
+    def _clear_skip_disabled(self, site, username: str) -> None:
+        """Drop *username* from site.skip_disabled (and persist), if present.
+
+        Called whenever a streamer is manually re-enabled or removed, so a
+        stale skip_disabled entry can't later cause the checker to auto
+        un-block a streamer the user has since dealt with some other way.
+        """
+        username = username.strip().lower()
+        with site.dash_lock:
+            if username not in site.skip_disabled:
+                return
+            site.skip_disabled.discard(username)
+            skip_snapshot = set(site.skip_disabled)
+        _save_skip_disabled(site.config_path, skip_snapshot)
+
     def _handle_mgmt_key(self, key) -> bool:
         action, site_idx = self._mgmt_mode
         site = self.sites[site_idx]
@@ -7392,6 +7459,12 @@ class JJDlpDashboard:
                 if enabled:
                     username = enabled[self._mgmt_sel]
                     result   = _modify_config_streamer(site.config_path, username, action)
+                    if action == "remove":
+                        # Removed from [Streamers] entirely — no longer a
+                        # "skip this stream" situation even if it was one;
+                        # the checker's offline-triggered auto-unblock must
+                        # not resurrect it.
+                        self._clear_skip_disabled(site, username)
                     site.invalidate_config_cache()
                     self.config_editor.load_config(site.config_path)
                     self.config_editor.priority_editor.force_reload()
@@ -7404,6 +7477,29 @@ class JJDlpDashboard:
                     self._mgmt_mode   = None
                     self._mgmt_buf    = ""
                     self._mgmt_result = ""
+            elif action == "disable" and key in (ord('s'), ord('S')):
+                # "Skip this stream" — disable for the remainder of the
+                # current live session only. Only makes sense for a
+                # streamer that's actually live right now.
+                if enabled:
+                    username = enabled[self._mgmt_sel]
+                    if not site.is_live(username):
+                        self._mgmt_result = "Error: user is not currently live"
+                    else:
+                        result = _modify_config_streamer(site.config_path, username, "disable")
+                        if result == f"Disabled '{username}'.":
+                            result = f"Skipped '{username}'."
+                        with site.dash_lock:
+                            site.skip_disabled.add(username)
+                            skip_snapshot = set(site.skip_disabled)
+                        _save_skip_disabled(site.config_path, skip_snapshot)
+                        site.invalidate_config_cache()
+                        self.config_editor.load_config(site.config_path)
+                        self.config_editor.priority_editor.force_reload()
+                        site.trigger_event.set()
+                        self._mgmt_result = result
+                        new_enabled = list_fn(site)
+                        self._mgmt_sel = min(self._mgmt_sel, max(0, len(new_enabled) - 1))
         else:
             # ── ADD mode: select a disabled streamer OR type a new name ────────
             disabled = self._mgmt_disabled_streamers(site)
@@ -7428,8 +7524,10 @@ class JJDlpDashboard:
             elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
                 if self._mgmt_buf.strip():
                     # Text input takes priority when it has content
+                    username = self._mgmt_buf.strip().lower()
                     result = _modify_config_streamer(site.config_path,
                                                      self._mgmt_buf.strip(), "add")
+                    self._clear_skip_disabled(site, username)
                     site.invalidate_config_cache()
                     self.config_editor.load_config(site.config_path)
                     self.config_editor.priority_editor.force_reload()
@@ -7440,6 +7538,7 @@ class JJDlpDashboard:
                     # Re-enable the selected disabled streamer
                     username = disabled[self._mgmt_sel]
                     result   = _modify_config_streamer(site.config_path, username, "add")
+                    self._clear_skip_disabled(site, username)
                     site.invalidate_config_cache()
                     self.config_editor.load_config(site.config_path)
                     self.config_editor.priority_editor.force_reload()
@@ -7566,10 +7665,9 @@ class JJDlpDashboard:
 
     def _mark_changelog_shown(self) -> None:
         """Persist changelog_shown=True immediately when the popup opens."""
-        with _global_json_lock:
-            gd = _load_global_json()
-            gd["changelog_shown"] = True
-            _save_global_json(gd)
+        def _mutate(gdata):
+            gdata["changelog_shown"] = True
+        _update_global_json(_mutate)
         dbg("[CHANGELOG] changelog_shown marked True")
 
     def _load_changelog_lines(self) -> List[str]:
@@ -7585,6 +7683,7 @@ class JJDlpDashboard:
         except FileNotFoundError:
             return [f"Changelog not found at:", changelog_path]
         except Exception as e:
+            dbg(f"_load_changelog_lines: {e}")
             return [f"Error reading changelog: {e}"]
 
     def open_changelog_popup(self) -> None:
@@ -7889,17 +7988,46 @@ class JJDlpDashboard:
         except Exception as _e:
             dbg(f"[GRAPH] _persist_graph_history failed: {_e!r}")
 
+    def _handle_possible_resize(self) -> None:
+        """Detect a terminal resize and force curses to fully repaint.
+        """
+        try:
+            curses.update_lines_cols()
+        except Exception as e:
+            dbg(f"_handle_possible_resize: {e}")
+            pass
+        size = self.stdscr.getmaxyx()
+        if size != getattr(self, "_last_term_size", size):
+            self._last_term_size = size
+            try:
+                curses.resizeterm(*size)
+            except Exception as e:
+                dbg(f"_handle_possible_resize: {e}")
+                pass
+            # touchwin() marks every cell as "changed" so the next
+            # refresh() is forced to resend the whole screen instead of
+            # diffing against curses' now-stale physical-screen cache.
+            self.stdscr.touchwin()
+        else:
+            self._last_term_size = size
+
     def run(self):
         curses.curs_set(0)
         self.stdscr.nodelay(True)
         self.stdscr.keypad(True)
         self.setup_colors()
 
+        # Track terminal size so we can detect resizes even on platforms
+        # (notably windows-curses / cmd.exe) where KEY_RESIZE isn't
+        # reliably delivered through getch(). See _handle_possible_resize().
+        self._last_term_size = self.stdscr.getmaxyx()
+
         _perf_frame_count = 0
         _perf_next_report = time.time() + 10.0  # report every 10 seconds
 
         while True:
             _t_frame_start = time.time()
+            self._handle_possible_resize()
             self._update_write_failure_alert()
             self.refresh_screen()
             _t_after_refresh = time.time()
@@ -7921,6 +8049,13 @@ class JJDlpDashboard:
                 key = self.stdscr.getch()
                 if key == -1:
                     break
+                if key == curses.KEY_RESIZE:
+                    # Some curses backends do deliver this. Handle it the
+                    # same way as our own polling-based detection and skip
+                    # passing it into handle_key() (it's not a real
+                    # keypress the app's key handling should act on).
+                    self._handle_possible_resize()
+                    continue
                 if not self.handle_key(key):
                     should_quit = True
                     break
@@ -8053,141 +8188,18 @@ def _curses_choose_config(stdscr, found: List[str]) -> List[str]:
         elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
             if selected:
                 chosen_files = [found[i] for i in sorted(selected)]
-                
+
                 # Save chosen config files to global.json
-                global_data = _load_global_json()
-                global_data["startup_configs"] = chosen_files
-                _save_global_json(global_data)
-                
+                def _mutate(gdata):
+                    gdata["startup_configs"] = chosen_files
+                _update_global_json(_mutate)
+
                 if do_not_show_config:
                     _write_global_conf_key("ASK_FOR_CONFIG", "false")
                 
                 return chosen_files
         elif key in (ord('q'), ord('Q'), 27):
             sys.exit(0)
-
-def _curses_choose_browser(stdscr, chosen_files: List[str]) -> List[str]:
-    """
-    Browser-cookie picker.
-    ↑/↓ navigate, Enter = confirm, Q = quit.
-    Writes the chosen browser back into each selected config file.
-    Returns chosen_files unmodified.
-    """
-    curses.start_color()
-    curses.use_default_colors()
-    theme.apply_palette(None)   # pairs 1-13 follow the active theme, like the dashboard
-
-    curses.curs_set(0)
-    stdscr.keypad(True)
-
-    # Build a per-file config map for all selected files (used for flag checks).
-    file_cfgs = {
-        fname: load_config(os.path.join(os.getcwd(), fname))
-        for fname in chosen_files
-    }
-
-    first_fpath = os.path.join(os.getcwd(), chosen_files[0])
-
-    # Read the current browser from the first selected config file so we can
-    # pre-select it.  All selected configs will be updated with the same choice.
-    browsers     = _SUPPORTED_BROWSERS          # e.g. ['brave', 'chrome', ..., 'other']
-    nb           = len(browsers)
-    current_br   = _read_browser_from_config(first_fpath)
-    try:
-        br_cursor = browsers.index(current_br)
-    except ValueError:
-        br_cursor = browsers.index("firefox")
-
-    # "Do not show again" toggle state (starts unchecked)
-    do_not_show = False
-
-    while True:
-        stdscr.erase()
-        h, w = stdscr.getmaxyx()
-        stdscr.bkgd(" ", theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum0"))
-
-        # Logo
-        for i, line in enumerate(ASCII_LOGO):
-            JJDlpDashboard.safe_addstr(stdscr, 1 + i, 2, line, theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum6"))
-
-        ts = time.strftime("%Y-%m-%d  %H:%M:%S")
-        JJDlpDashboard.safe_addstr(stdscr, 1, w - len(ts) - 3, ts, theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum1_1"))
-        JJDlpDashboard.safe_addstr(stdscr, 7, 2, "-" * (w - 4), theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum1_2"))
-
-        # Browser sub-title
-        br_title_row = 9
-        JJDlpDashboard.safe_addstr(stdscr, br_title_row, 2,
-                    "SELECT BROWSER",
-                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum5_1"))
-        JJDlpDashboard.safe_addstr(stdscr, br_title_row + 1, 2,
-                    "Select your browser for the yt-dlp --cookies-from-browser option.",
-                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_1"))
-        JJDlpDashboard.safe_addstr(stdscr, br_title_row + 2, 2,
-                    "Note: Chrome based browsers are not supported. Firefox is recommended.",
-                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_2"))
-        applies_to_labels = [
-            file_cfgs[fname].get("site_label")
-            for fname in chosen_files
-            if file_cfgs[fname].get("downloader_cookies", True) or file_cfgs[fname].get("checker_cookies", False)
-        ]
-        JJDlpDashboard.safe_addstr(stdscr, br_title_row + 4, 2,
-                    f"Applies to: {', '.join(applies_to_labels)}",
-                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum4"))
-
-        # Browser list (single-select radio buttons)
-        list_start_row = br_title_row + 6
-        for i, br in enumerate(browsers):
-            row    = list_start_row + i
-            dot    = "(*)" if i == br_cursor else "( )"
-            is_cur = i == br_cursor
-            if is_cur:
-                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum2")
-            else:
-                attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum1_3")
-            label = f"  {dot}  {br}" + ("  ← remove cookies option" if br == "disabled" else "")
-            JJDlpDashboard.safe_addstr(stdscr, row, 4, label, attr)
-
-        # "Do not show again" checkbox (below the browser list)
-        dna_row  = list_start_row + nb + 1
-        dna_box  = "[x]" if do_not_show else "[ ]"
-        dna_attr = theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_3") if do_not_show else theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum3_4")
-        JJDlpDashboard.safe_addstr(stdscr, dna_row, 4,
-                    f"  {dna_box}  Do not show again (press D to toggle)",
-                    dna_attr)
-
-        # Footer
-        footer = "  ↑/↓ navigate  Enter = confirm  D = do not show again  Q = quit  "
-        JJDlpDashboard.safe_addstr(stdscr, h - 1, 0,
-                    footer.ljust(w - 1)[:w - 1],
-                    theme.attr(None, "main_jjdlpdashboard_curses_choose_browse_pairnum5_2"))
-
-        stdscr.refresh()
-        key = stdscr.getch()
-
-        if key in (curses.KEY_UP, ord('k')):
-            br_cursor = (br_cursor - 1) % nb
-        elif key in (curses.KEY_DOWN, ord('j')):
-            br_cursor = (br_cursor + 1) % nb
-        elif key in (ord('d'), ord('D')):
-            do_not_show = not do_not_show
-        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
-            chosen_browser = browsers[br_cursor]
-            for fname in chosen_files:
-                fpath = os.path.join(os.getcwd(), fname)
-                # DOWNLOADER_COOKIES and CHECKER_COOKIES are per-file.
-                write_dl = file_cfgs[fname].get("downloader_cookies", True)
-                write_ck = file_cfgs[fname].get("checker_cookies", False)
-                if write_dl or write_ck:
-                    _write_browser_to_config(fpath, chosen_browser, write_downloader=write_dl, write_checker=write_ck)
-                # If "Do not show again" was checked, persist ASK_FOR_BROWSER = False
-                if do_not_show:
-                    _write_global_conf_key("ASK_FOR_BROWSER", "false")
-            return chosen_files
-        elif key in (ord('q'), ord('Q'), 27):
-            sys.exit(0)
-
-    return chosen_files  # unreachable, satisfies type checker
-
 
 def _input_with_timeout(prompt: str, timeout_seconds: int = 10) -> Optional[str]:
     """Prompt the user for a single keypress (y/n) with a timeout.
@@ -8255,6 +8267,60 @@ def _input_with_timeout(prompt: str, timeout_seconds: int = 10) -> Optional[str]
     return result[0].strip()[:1].lower() if result and result[0] is not None else None
 
 
+def _check_and_kill_zombie_yt_dlps() -> None:
+    with _global_json_lock:
+        gdata = _load_global_json()
+        pids = gdata.get("yt_dlp_pids", [])
+    
+    if not pids:
+        return
+
+    running_pids = []
+    for pid in pids:
+        try:
+            if sys.platform == "win32":
+                try:
+                    out = subprocess.check_output(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"], text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                    if str(pid) in out:
+                        running_pids.append(pid)
+                except Exception as e:
+                    dbg(f"_check_and_kill_zombie_yt_dlps: {e}")
+                    pass
+            else:
+                os.kill(pid, 0)
+                try:
+                    with open(f"/proc/{pid}/cmdline", "r", encoding="utf-8", errors="replace") as _f:
+                        cmd = _f.read()
+                    if "yt_dlp" in cmd or "yt-dlp" in cmd:
+                        running_pids.append(pid)
+                except Exception as e:
+                    # process might have died or no permission, assume running
+                    dbg(f"_check_and_kill_zombie_yt_dlps: {e}")
+                    running_pids.append(pid)
+        except OSError:
+            pass
+
+    if running_pids:
+        ans = input(f"Warning: There are {len(running_pids)} child yt-dlp processes still running from a previous instance. Kill them now? [Y/n] ")
+        if ans.lower() in ("", "y", "yes"):
+            for pid in running_pids:
+                if sys.platform == "win32":
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
+                else:
+                    import signal
+                    try:
+                        pgid = os.getpgid(pid)
+                        os.killpg(pgid, signal.SIGKILL)
+                    except OSError:
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except OSError:
+                            pass
+
+    def _mutate(gdata):
+        gdata["yt_dlp_pids"] = []
+    _update_global_json(_mutate)
+
 # ══════════════════════════════════════════════════════════════════════════════
 # main()
 # ══════════════════════════════════════════════════════════════════════════════
@@ -8302,6 +8368,9 @@ def main() -> None:
         sys.exit(0)
 
     # ── Refuse to start a second instance ─────────────────────────────────────
+    # Must run before _check_and_kill_zombie_yt_dlps(): otherwise a second
+    # instance launched while the first is still recording would see the
+    # first instance's live yt-dlp children and misreport them as orphaned.
     if not acquire_single_instance_lock():
         print(
             f"\njj-dlp v{__version__}  ·  Another instance of jj-dlp appears to be running.\n"
@@ -8310,6 +8379,8 @@ def main() -> None:
         )
         input("\nPress Enter to close...")
         sys.exit(1)
+
+    _check_and_kill_zombie_yt_dlps()
 
     # ── Config discovery / selection ──────────────────────────────────────────
     if args.config is not None:
@@ -8371,19 +8442,6 @@ def main() -> None:
                 chosen = curses.wrapper(_curses_choose_config, found)
 
         config_paths = [os.path.join(cwd, f) for f in chosen]
-
-    # ASK_FOR_BROWSER logic
-    _global_cfg = load_global_config()
-    ask_for_browser = _global_cfg.get("ask_for_browser", None)
-    if ask_for_browser is None:
-        # Fall back to per-site values for backwards compatibility
-        ask_for_browser = any(
-            load_config(p).get("ask_for_browser", True)
-            for p in config_paths
-        )
-
-    if ask_for_browser:
-        curses.wrapper(_curses_choose_browser, config_paths)
 
     # Load global.conf — app-wide settings, independent of any site config.
     global_cfg = load_global_config()
@@ -8467,8 +8525,10 @@ def main() -> None:
         sites.append(site)
 
     def _dash_log(msg: str):
-        for s in sites:
-            s.log_line(msg)
+        # Global (not per-site) events — e.g. web UI startup/bind-failure
+        # announcements and debug-log write errors — so log once, not once
+        # per loaded site. See _log_global_line.
+        _log_global_line(msg)
 
     def _dash_dbg(msg: str):
         """Route a dbg() line to every site's *debug* log buffer.
@@ -8477,10 +8537,22 @@ def main() -> None:
         matter how frequently a debug tag fires, it can only evict older debug
         lines — it can never push real activity lines (recording
         started/stopped, errors, etc.) out of the Log tab's history.
+
+        Untagged messages (no leading "[TAG]") are unexpected-exception guards
+        that should be impossible in normal operation; when they do fire, also
+        append them to dash_log_lines so they surface in the Log tab without
+        requiring the user to have the debug buffer visible.
         """
+        # msg is always "[YYYY-MM-DD HH:MM:SS] <original>" (22-char timestamp
+        # prefix added by dbg() in logger.py).  A tagged message has another
+        # "[TAG]" immediately after that prefix; untagged messages don't.
+        after_ts = msg[22:] if len(msg) > 22 else ""
+        is_tagged = after_ts.startswith("[")
         for s in sites:
             with s.dash_lock:
                 s.dash_debug_lines.append(msg)   # deque(maxlen=...) evicts automatically
+                if not is_tagged:
+                    s.dash_log_lines.append(msg)
 
     _logger.configure(_dash_log, _dash_dbg)
 
@@ -8543,7 +8615,8 @@ def main() -> None:
         if dashboard is not None:
             try:
                 dashboard._persist_graph_history()
-            except Exception:
+            except Exception as e:
+                dbg(f"_run_dashboard: {e}")
                 pass
 
         for site in sites:
@@ -8551,7 +8624,8 @@ def main() -> None:
             if site.eventsub is not None:
                 try:
                     site.eventsub.stop(timeout=5)
-                except Exception:
+                except Exception as e:
+                    dbg(f"_run_dashboard: {e}")
                     pass
 
         print(f"\njj-dlp v{__version__}  ·  Shutting down...")

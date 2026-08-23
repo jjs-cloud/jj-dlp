@@ -65,6 +65,8 @@ import re
 import sys
 import time
 
+from .logger import dbg
+
 # ─────────────────────────────────────────────────────────────────────────
 # The 13 named roles, in display order, matching JJDlpDashboard.C_* constants.
 # ─────────────────────────────────────────────────────────────────────────
@@ -505,7 +507,7 @@ SITE_REGISTRY = {
     'main_jjdlpdashboard_split_after_rows_rec_5': {'file': 'main.py', 'label': 'System Panel — Stalled Streamer Name', 'default_role': 'REC', 'default_bold': False},
     'main_jjdlpdashboard_split_after_rows_rec_6': {'file': 'main.py', 'label': 'System Panel — Stalled Duration', 'default_role': 'REC', 'default_bold': False},
     'main_jjdlpdashboard_split_after_rows_warn_1': {'file': 'main.py', 'label': 'System Panel — \'ads\' Section Header', 'default_role': 'WARN', 'default_bold': True},
-    'main_jjdlpdashboard_split_after_rows_warn_2': {'file': 'main.py', 'label': 'Ad detected', 'default_role': 'WARN', 'default_bold': True},
+    'main_jjdlpdashboard_split_after_rows_warn_2': {'file': 'main.py', 'label': 'Ad detected', 'default_role': 'REC', 'default_bold': False},
     'main_jjdlpdashboard_update_disk_usage_system': {'file': 'main.py', 'label': 'System Panel — \'Disk\' Section Header', 'default_role': 'SYSTEM', 'default_bold': True},
     'main_jjdlpdashboard_update_disk_usage_color': {'file': 'main.py', 'label': 'System Panel — Per-Drive Usage Line', 'default_role': 'LIVE', 'default_bold': True},
     'main_jjdlpdashboard_update_disk_usage_chrome': {'file': 'main.py', 'label': 'System Panel — Uptime Line', 'default_role': 'CHROME', 'default_bold': True},
@@ -689,8 +691,9 @@ def load_theme():
         default['theme_pushed'] = THEME_PUSH
         save_theme(default)
         return default
-    except Exception:
+    except Exception as e:
         # Torn/corrupt write — don't crash startup, just fall back to defaults.
+        dbg(f"_load_theme: {path!r} failed to parse: {e}")
         return default
 
 
@@ -705,10 +708,11 @@ def save_theme(data):
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
-    except Exception:
+    except Exception as e:
+        dbg(f"save_theme: write to {path!r} failed: {e}")
         try:
             os.remove(tmp_path)
-        except Exception:
+        except OSError:
             pass
 
 
@@ -872,8 +876,8 @@ def _rgb_mode_enabled() -> bool:
             raw = parser["General"].get("RGB_MODE", "").strip().lower()
             if raw:
                 return raw not in ("false", "0", "no")
-    except Exception:
-        pass
+    except Exception as e:
+        dbg(f"_rgb_mode_enabled: could not read global.conf: {e}")
     return False
 
 
@@ -900,8 +904,8 @@ def _restore_palette():
     for idx, (r, g, b) in _ORIG_PALETTE.items():
         try:
             _osc4_set(idx, r, g, b)
-        except Exception:
-            pass
+        except Exception as e:
+            dbg(f"_restore_palette: OSC4 restore failed for color {idx}: {e}")
     _PALETTE_NORMALIZED = False
 
 
@@ -992,7 +996,8 @@ def _read_source_file(name):
     try:
         with open(_source_file_path(name), 'r', encoding='utf-8', newline='') as f:
             return f.read()
-    except Exception:
+    except Exception as e:
+        dbg(f"_read_source_file: could not read {name!r}: {e}")
         return None
 
 
@@ -1006,10 +1011,11 @@ def _atomic_write_text(path, text):
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
         return True
-    except Exception:
+    except Exception as e:
+        dbg(f"_atomic_write_text: write to {path!r} failed: {e}")
         try:
             os.remove(tmp_path)
-        except Exception:
+        except OSError:
             pass
         return False
 
