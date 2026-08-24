@@ -1,5 +1,5 @@
 - made it easier to edit the number/date fields in various STREAMER SETTINGS menus. (split, intro delay, schedule)
-- subfolders are now collapsable on the File Manager tab by pressing enter while the subfolder is selected. (enable GLOBAL SETTINGS > SUBFOLDERS to take advantage of this feature)
+- subfolders are now collapsable on the File Manager tab by pressing enter while the subfolder is selected. (you may wish to enable GLOBAL SETTINGS > SUBFOLDERS to take advantage of this feature)
 
 ====================
 ====================
