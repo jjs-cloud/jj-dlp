@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.28.2"
+__version__ = "1.28.3"
 
 import subprocess
 import textwrap
@@ -3864,6 +3864,12 @@ def record_stream(streamer: str, cfg: dict, site: "SiteState",
                         warning=(f"The recording file could not be confirmed within "
                                  f"{int(stall_timeout)}s — the start may have failed."),
                         confirmed=False)
+                    # Surface the same warning in the dashboard Log tab.
+                    _log_filename = os.path.basename(active_file) if active_file else "<unknown>"
+                    site.log_line(
+                        f"Warning: {_log_filename} could not be confirmed within "
+                        f"{int(stall_timeout)} seconds."
+                    )
                     # Also drives the dashboard's full-screen recording-
                     # failure alert (see App.draw_write_failure_alert).
                     site.flag_write_failure(streamer)
