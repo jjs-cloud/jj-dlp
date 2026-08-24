@@ -734,76 +734,119 @@ class FileManagerTab:
         reverse = self._sort_key in _FM_SORT_REVERSE
         rows = []
         multi = len(dirs) > 1
-        # Only group into collapsible folders (both subfolders and OUTPUT_DIRs)
-        # when the global setting is on AND the sort order is by Name.
-        collapsible = self._collapsible_folders_enabled() and self._sort_key in ("name_asc", "name_desc")
+
+        # OUTPUT_DIR rows: always collapsible (not gated by global setting)
+        collapsible_output_dirs = True
+        # Subfolder grouping: only when global setting is on AND sort is by Name
+        collapsible_subfolders = self._collapsible_folders_enabled() and self._sort_key in ("name_asc", "name_desc")
 
         for label, folder in dirs:
             folder_abs = os.path.abspath(folder)
             files = [p for p, r in self._records.items() if r.get("group_path") == folder_abs]
 
-            if collapsible:
-                # Always show an OUTPUT_DIR folder row, selectable and collapsible.
-                collapsed = folder_abs in self._collapsed
-                # Display name: include label+path only if multiple dirs; otherwise just label.
-                display_name = f"{label}  \u2014  {folder_abs}" if multi else label
-                rows.append(("folder", folder_abs,
-                             {"name": display_name,
-                              "count": len(files),
-                              "collapsed": collapsed,
-                              "is_output_dir": True}))
-                if not collapsed:
-                    # Add subfolder groups (if any) and files inside this OUTPUT_DIR
-                    groups = {}
-                    root_files = []
+            # Always add the OUTPUT_DIR row
+            collapsed = folder_abs in self._collapsed
+            display_name = f"{label}  \u2014  {folder_abs}" if multi else label
+            rows.append(("folder", folder_abs,
+                         {"name": display_name,
+                          "count": len(files),
+                          "collapsed": collapsed,
+                          "is_output_dir": True,
+                          "depth": 0}))   # root depth = 0
+
+            if not collapsed:
+                if collapsible_subfolders:
+                    # Build a tree of subfolders
+                    # We'll map each file's relative path components to a nested dict
+                    tree = {}  # folder_name -> {'files': [], 'subfolders': {}}
+                    root_files = []   # files directly under OUTPUT_DIR
+
                     for p in files:
                         rel = os.path.relpath(p, folder_abs)
                         parts = rel.split(os.sep)
-                        if len(parts) > 1:
-                            groups.setdefault(parts[0], []).append(p)
-                        else:
+                        if len(parts) == 1:
                             root_files.append(p)
+                        else:
+                            # Navigate/create tree
+                            current = tree
+                            for part in parts[:-1]:
+                                current = current.setdefault(part, {"files": [], "subfolders": {}})
+                            current["files"].append(p)   # the file belongs to the deepest folder
 
-                    for name in sorted(groups.keys(), key=_natural_sort_key):
-                        group_files = sorted(groups[name], key=self._sort_key_fn, reverse=reverse)
-                        abs_subfolder = os.path.join(folder_abs, name)
-                        collapsed_sub = abs_subfolder in self._collapsed
-                        rows.append(("folder", abs_subfolder,
-                                     {"name": name, "count": len(group_files),
-                                      "collapsed": collapsed_sub,
-                                      "is_output_dir": False}))
-                        if not collapsed_sub:
-                            for p in group_files:
-                                rows.append(("file", p, self._records[p]))
+                    # Define a recursive function to emit folder rows
+                    def emit_folder_node(node, name, depth, parent_path):
+                        # node is a dict with 'files' and 'subfolders'
+                        subfolder_names = sorted(node["subfolders"].keys(), key=_natural_sort_key)
+                        node_files = sorted(node["files"], key=self._sort_key_fn, reverse=reverse)
 
-                    root_files.sort(key=self._sort_key_fn, reverse=reverse)
-                    for p in root_files:
+                        abs_subfolder = os.path.join(parent_path, name) if parent_path else name
+
+                    folder_map = {}  # abs_path -> [file_paths]
+                    # First, collect all files by their immediate parent folder (absolute)
+                    for p in files:
+                        parent = os.path.dirname(p)
+                        folder_map.setdefault(parent, []).append(p)
+
+                    def process_folder(dir_path, depth):
+                        # Get all files directly in this folder
+                        file_list = folder_map.get(dir_path, [])
+                        # Sort files
+                        file_list.sort(key=self._sort_key_fn, reverse=reverse)
+                        # Get immediate subfolders (directories that contain files)
+                        subdirs = {}
+                        for p in file_list:  # this only gives files, not subfolders
+                            pass
+                        children = set()
+                        for fpath in files:
+                            parent = os.path.dirname(fpath)
+                            if parent != dir_path and parent.startswith(dir_path + os.sep):
+                                # This file is in a deeper subfolder; we need to find the immediate child.
+                                rel = os.path.relpath(parent, dir_path)
+                                first_part = rel.split(os.sep)[0]
+                                child_path = os.path.join(dir_path, first_part)
+                                children.add(child_path)
+
+                        # Process each child subfolder recursively
+                        for child_path in sorted(children, key=lambda x: os.path.basename(x)):
+                            # Check if child is collapsed
+                            collapsed_child = child_path in self._collapsed
+                            child_name = os.path.basename(child_path)
+                            # Count files inside this child subtree (recursively)
+                            # We can count from folder_map or by scanning, but we already have all files.
+                            count = sum(1 for f in files if f.startswith(child_path + os.sep))
+                            rows.append(("folder", child_path,
+                                         {"name": child_name,
+                                          "count": count,
+                                          "collapsed": collapsed_child,
+                                          "is_output_dir": False,
+                                          "depth": depth + 1}))
+                            if not collapsed_child:
+                                process_folder(child_path, depth + 1)
+
+                        # After subfolders, add files directly in this folder
+                        for p in file_list:
+                            rows.append(("file", p, self._records[p]))
+
+                    # Now start processing from the OUTPUT_DIR root
+                    process_folder(folder_abs, 0)
+
+                else:
+                    # Flat listing: just sort all files directly under this OUTPUT_DIR
+                    files.sort(key=self._sort_key_fn, reverse=reverse)
+                    for p in files:
                         rows.append(("file", p, self._records[p]))
-            else:
-                # Not collapsible: show plain header only if multiple dirs, then flat files.
-                if multi:
-                    rows.append(("header", f"{label}  \u2014  {folder_abs}", None))
-                files.sort(key=self._sort_key_fn, reverse=reverse)
-                for p in files:
-                    rows.append(("file", p, self._records[p]))
 
-            # "(no files)" row: only if we have a folder/header and the folder is not collapsed.
-            if not files and (multi or collapsible) and not (collapsible and folder_abs in self._collapsed):
+            # Add "(no files)" row if appropriate
+            if not files and not collapsed:
                 rows.append(("empty", "  (no files)", None))
 
-        # Transient "Moving" section: only present while a Move is actively
-        # writing its output file. Always shown as its own section (with a
-        # header), independent of how many OUTPUT_DIRs are configured, and
-        # disappears the instant the move finishes.
+        # Transient "Moving" section...
         if self._moving_records:
             rows.append(("header", "Moving", None))
             for p, rec in self._moving_records.items():
                 rows.append(("file", p, rec))
 
-        # Remember where the current selection sat among the *old* selectable
-        # (file/folder) rows, so that if it vanishes (fixup/move/trim
-        # finishing, deleted externally, collapsed away, etc.) we can land on
-        # its neighbor instead of jumping back to the top of the list.
+        # --- Keep selection valid (unchanged) ---
         old_keys = [("folder", r[1]) if r[0] == "folder" else ("file", r[1])
                     for r in self._rows if r[0] in ("folder", "file")]
         cur_key = (self._selected_kind,
@@ -812,13 +855,10 @@ class FileManagerTab:
 
         self._rows = rows
 
-        # Keep selection valid.
         new_keys = [("folder", r[1]) if r[0] == "folder" else ("file", r[1])
                     for r in rows if r[0] in ("folder", "file")]
         if cur_key not in new_keys:
             if old_pos is not None and new_keys:
-                # Land on whatever now occupies the same (or nearest lower)
-                # position, mirroring how the list "shifts up" underneath us.
                 new_pos = min(old_pos, len(new_keys) - 1)
                 kind, ident = new_keys[new_pos]
             elif new_keys:
@@ -2688,27 +2728,27 @@ class FileManagerTab:
                     label += f"  ({rec['count']})"
                 row_attr = (theme.attr(db, "file_manager_filemanagertab_draw_hilight") if is_sel
                             else theme.attr(db, "file_manager_filemanagertab_draw_system_1"))
-                # Indent subfolder rows (non-output_dir) by 2 spaces
-                indent = 2 if not rec.get("is_output_dir", False) else 0
+                # Indent based on depth, but only for subfolders (not OUTPUT_DIR)
+                depth = rec.get("depth", 0)
+                indent = 2 * depth if not rec.get("is_output_dir", False) else 0
                 db.safe_addstr(stdscr, row_y, x1 + 2 + indent,
                                label.ljust(name_w - indent)[:name_w - indent], row_attr)
             else:
                 path = payload
                 group_path = rec.get("group_path")
-                indented = False
+                # Compute depth for file indentation
+                depth = 0
                 if group_path and os.path.dirname(os.path.abspath(path)) != os.path.abspath(group_path):
                     rel_parts = os.path.relpath(path, group_path).replace(os.sep, "/").split("/")
-                    if self._collapsible_folders_enabled() and len(rel_parts) > 1:
-                        # Already shown under its folder row — indent and
-                        # show only the remainder of the path.
-                        name = "/".join(rel_parts[1:])
-                        indented = True
-                    else:
-                        name = "/".join(rel_parts)
+                    depth = len(rel_parts) - 1          # number of subfolder levels
+                    name = "/".join(rel_parts)          # full relative path (without OUTPUT_DIR root)
                 else:
+                    depth = 0
                     name = os.path.basename(path)
-                if indented:
-                    name = "  " + name
+
+                # Indent by two spaces per depth level
+                if depth > 0:
+                    name = "  " * depth + name
                 if path in self._split_jobs:
                     name = "*" + name  # a Split job is running for this file
                 status = rec.get("status", "IDLE")
