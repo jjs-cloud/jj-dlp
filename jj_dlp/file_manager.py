@@ -39,8 +39,10 @@ Keybinds (active only while the "File Manager" tab is selected)
 
 When the global COLLAPSIBLE_FOLDERS key is on (default), files are grouped
 by their first-level subfolder (e.g. the per-streamer folders created by
-SUBFOLDERS) into collapsible/expandable folder rows. Collapse state is
-in-memory for the session only.
+SUBFOLDERS) into collapsible/expandable folder rows. This grouping is
+only active when the sort order is "Name (A-Z)" or "Name (Z-A)"; for any
+other sort key, files are shown flat without collapsible folders.
+Collapse state is in-memory for the session only.
 
 File Options
 ---------------------
@@ -728,7 +730,9 @@ class FileManagerTab:
         reverse = self._sort_key in _FM_SORT_REVERSE
         rows = []
         multi = len(dirs) > 1
-        collapsible = self._collapsible_folders_enabled()
+        # Only group into collapsible folders when the global setting is on
+        # AND the sort order is by Name (A-Z or Z-A).
+        collapsible = self._collapsible_folders_enabled() and self._sort_key in ("name_asc", "name_desc")
 
         for label, folder in dirs:
             folder_abs = os.path.abspath(folder)
