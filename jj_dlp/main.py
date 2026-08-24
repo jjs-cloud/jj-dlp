@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.28.1"
+__version__ = "1.28.2"
 
 import subprocess
 import textwrap
@@ -1055,6 +1055,14 @@ class SiteState:
         
         # Load the configuration once during init to retrieve things like site_order
         cfg = load_config(config_path)
+        # Initialize the configured OUTPUT_DIR
+        try:
+            os.makedirs(cfg["output_dir"], exist_ok=True)
+        except Exception as e:
+            startup_dbg(
+                f"[OUTPUT_DIR] failed to initialize {cfg.get('output_dir')!r}: "
+                f"{type(e).__name__}: {e}"
+            )
         self.site_order           = cfg.get("site_order", 999)
         
         self.lock                 = threading.Lock()

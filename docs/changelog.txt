@@ -1,3 +1,8 @@
+- made it easier to edit the number/date fields in various STREAMER SETTINGS menus. (split, intro delay, schedule)
+
+====================
+====================
+
 v1.28.0
 
 - You can now skip recording the current stream. The streamer will be automatically re-enabled when the current stream ends. To use this feature, press D on the Dashboard tab, highlight a streamer, then press S. 
