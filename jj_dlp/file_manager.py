@@ -42,6 +42,10 @@ by their first-level subfolder (e.g. the per-streamer folders created by
 SUBFOLDERS) into collapsible/expandable folder rows. This grouping is
 only active when the sort order is "Name (A-Z)" or "Name (Z-A)"; for any
 other sort key, files are shown flat without collapsible folders.
+
+Additionally, when multiple OUTPUT_DIRs exist and the same conditions
+apply, the OUTPUT_DIR headers themselves become collapsible folder rows,
+hiding all files under that directory when collapsed.
 Collapse state is in-memory for the session only.
 
 File Options
@@ -379,16 +383,16 @@ class FileManagerTab:
         # Flattened, already-sorted rows ready to draw:
         #   ("header", label_text, None)
         #   ("empty",  text,       None)
-        #   ("folder", abs_subfolder_path, {"name": ..., "count": N, "collapsed": bool})
+        #   ("folder", abs_path,   {"name": ..., "count": N, "collapsed": bool, "is_output_dir": bool})
         #   ("file",   path,       record_dict)
         self._rows = []
 
         self._selected_path = None
         # "file" or "folder" — which kind of row is currently selected.
         self._selected_kind = "file"
-        # Absolute subfolder path when _selected_kind == "folder".
+        # Absolute path when _selected_kind == "folder" (could be OUTPUT_DIR or subfolder).
         self._selected_folder = None
-        # Absolute subfolder paths collapsed by the user this session
+        # Absolute paths (OUTPUT_DIRs and subfolders) collapsed by the user this session
         # (gated by the COLLAPSIBLE_FOLDERS global key; never persisted).
         self._collapsed = set()
         self._scroll = 0
@@ -730,46 +734,61 @@ class FileManagerTab:
         reverse = self._sort_key in _FM_SORT_REVERSE
         rows = []
         multi = len(dirs) > 1
-        # Only group into collapsible folders when the global setting is on
-        # AND the sort order is by Name (A-Z or Z-A).
+        # Only group into collapsible folders (both subfolders and OUTPUT_DIRs)
+        # when the global setting is on AND the sort order is by Name.
         collapsible = self._collapsible_folders_enabled() and self._sort_key in ("name_asc", "name_desc")
 
         for label, folder in dirs:
             folder_abs = os.path.abspath(folder)
             files = [p for p, r in self._records.items() if r.get("group_path") == folder_abs]
-            if multi:
-                rows.append(("header", f"{label}  \u2014  {folder_abs}", None))
 
             if collapsible:
-                groups: dict = {}
-                root_files = []
-                for p in files:
-                    rel = os.path.relpath(p, folder_abs)
-                    parts = rel.split(os.sep)
-                    if len(parts) > 1:
-                        groups.setdefault(parts[0], []).append(p)
-                    else:
-                        root_files.append(p)
+                # Always show an OUTPUT_DIR folder row, selectable and collapsible.
+                collapsed = folder_abs in self._collapsed
+                # Display name: include label+path only if multiple dirs; otherwise just label.
+                display_name = f"{label}  \u2014  {folder_abs}" if multi else label
+                rows.append(("folder", folder_abs,
+                             {"name": display_name,
+                              "count": len(files),
+                              "collapsed": collapsed,
+                              "is_output_dir": True}))
+                if not collapsed:
+                    # Add subfolder groups (if any) and files inside this OUTPUT_DIR
+                    groups = {}
+                    root_files = []
+                    for p in files:
+                        rel = os.path.relpath(p, folder_abs)
+                        parts = rel.split(os.sep)
+                        if len(parts) > 1:
+                            groups.setdefault(parts[0], []).append(p)
+                        else:
+                            root_files.append(p)
 
-                for name in sorted(groups.keys(), key=_natural_sort_key):
-                    group_files = sorted(groups[name], key=self._sort_key_fn, reverse=reverse)
-                    abs_subfolder = os.path.join(folder_abs, name)
-                    collapsed = abs_subfolder in self._collapsed
-                    rows.append(("folder", abs_subfolder,
-                                 {"name": name, "count": len(group_files), "collapsed": collapsed}))
-                    if not collapsed:
-                        for p in group_files:
-                            rows.append(("file", p, self._records[p]))
+                    for name in sorted(groups.keys(), key=_natural_sort_key):
+                        group_files = sorted(groups[name], key=self._sort_key_fn, reverse=reverse)
+                        abs_subfolder = os.path.join(folder_abs, name)
+                        collapsed_sub = abs_subfolder in self._collapsed
+                        rows.append(("folder", abs_subfolder,
+                                     {"name": name, "count": len(group_files),
+                                      "collapsed": collapsed_sub,
+                                      "is_output_dir": False}))
+                        if not collapsed_sub:
+                            for p in group_files:
+                                rows.append(("file", p, self._records[p]))
 
-                root_files.sort(key=self._sort_key_fn, reverse=reverse)
-                for p in root_files:
-                    rows.append(("file", p, self._records[p]))
+                    root_files.sort(key=self._sort_key_fn, reverse=reverse)
+                    for p in root_files:
+                        rows.append(("file", p, self._records[p]))
             else:
+                # Not collapsible: show plain header only if multiple dirs, then flat files.
+                if multi:
+                    rows.append(("header", f"{label}  \u2014  {folder_abs}", None))
                 files.sort(key=self._sort_key_fn, reverse=reverse)
                 for p in files:
                     rows.append(("file", p, self._records[p]))
 
-            if multi and not files:
+            # "(no files)" row: only if we have a folder/header and the folder is not collapsed.
+            if not files and (multi or collapsible) and not (collapsible and folder_abs in self._collapsed):
                 rows.append(("empty", "  (no files)", None))
 
         # Transient "Moving" section: only present while a Move is actively
@@ -814,12 +833,12 @@ class FileManagerTab:
                 self._selected_folder = ident
                 self._selected_path = None
 
-    def _toggle_folder_collapsed(self, abs_subfolder: str) -> None:
-        """Toggle collapse/expand for one subfolder group (session-only)."""
-        if abs_subfolder in self._collapsed:
-            self._collapsed.discard(abs_subfolder)
+    def _toggle_folder_collapsed(self, abs_path: str) -> None:
+        """Toggle collapse/expand for a folder row (OUTPUT_DIR or subfolder)."""
+        if abs_path in self._collapsed:
+            self._collapsed.discard(abs_path)
         else:
-            self._collapsed.add(abs_subfolder)
+            self._collapsed.add(abs_path)
         self._rebuild_rows(self._get_output_dirs())
 
     # ── Selection movement ──────────────────────────────────────────────────
@@ -2661,15 +2680,18 @@ class FileManagerTab:
                 db.safe_addstr(stdscr, row_y, x1 + 3, payload[:avail_w],
                                theme.attr(db, "file_manager_filemanagertab_draw_dim_2"))
             elif kind == "folder":
-                abs_subfolder = payload
-                is_sel = (self._selected_kind == "folder" and self._selected_folder == abs_subfolder)
+                abs_path = payload
+                is_sel = (self._selected_kind == "folder" and self._selected_folder == abs_path)
                 arrow = "\u25ba" if rec["collapsed"] else "\u25bc"
                 label = f"{arrow} {rec['name']}"
                 if rec["collapsed"]:
                     label += f"  ({rec['count']})"
                 row_attr = (theme.attr(db, "file_manager_filemanagertab_draw_hilight") if is_sel
                             else theme.attr(db, "file_manager_filemanagertab_draw_system_1"))
-                db.safe_addstr(stdscr, row_y, x1 + 2, label.ljust(name_w)[:name_w], row_attr)
+                # Indent subfolder rows (non-output_dir) by 2 spaces
+                indent = 2 if not rec.get("is_output_dir", False) else 0
+                db.safe_addstr(stdscr, row_y, x1 + 2 + indent,
+                               label.ljust(name_w - indent)[:name_w - indent], row_attr)
             else:
                 path = payload
                 group_path = rec.get("group_path")
