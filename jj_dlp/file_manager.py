@@ -23,16 +23,24 @@ so it's clear which streamer's subfolder they live in.
 
 Keybinds (active only while the "File Manager" tab is selected)
 -----------------------------------------------------------------
-    UP / DOWN     - move the file selection
-    ENTER         - open the selected file with the OS default app
-    SPACE         - open the file's containing folder, with the file
+    UP / DOWN     - move the selection (over both folder and file rows)
+    ENTER         - on a file: open it with the OS default app
+                    on a folder row: toggle collapse/expand
+    SPACE         - on a file: open its containing folder, with the file
                     pre-selected/highlighted
+                    on a folder row: open that folder
     DELETE        - remove the selected file (Trash or permanent delete,
-                    see "Delete mode" below)
+                    see "Delete mode" below); no-op on a folder row
     S             - open the sort-order popup (persisted to global.json)
     T             - toggle delete mode between Trash and Permanent Delete
                     (persisted to global.json)
-    M             - open the "File Options" popup for the selected file
+    M             - open the "File Options" popup for the selected file;
+                    no-op on a folder row
+
+When the global COLLAPSIBLE_FOLDERS key is on (default), files are grouped
+by their first-level subfolder (e.g. the per-streamer folders created by
+SUBFOLDERS) into collapsible/expandable folder rows. Collapse state is
+in-memory for the session only.
 
 File Options
 ---------------------
@@ -369,10 +377,18 @@ class FileManagerTab:
         # Flattened, already-sorted rows ready to draw:
         #   ("header", label_text, None)
         #   ("empty",  text,       None)
+        #   ("folder", abs_subfolder_path, {"name": ..., "count": N, "collapsed": bool})
         #   ("file",   path,       record_dict)
         self._rows = []
 
         self._selected_path = None
+        # "file" or "folder" — which kind of row is currently selected.
+        self._selected_kind = "file"
+        # Absolute subfolder path when _selected_kind == "folder".
+        self._selected_folder = None
+        # Absolute subfolder paths collapsed by the user this session
+        # (gated by the COLLAPSIBLE_FOLDERS global key; never persisted).
+        self._collapsed = set()
         self._scroll = 0
         self._at_top = False
         self._last_visible = 1  # rows visible in the list viewport, updated on draw
@@ -698,18 +714,57 @@ class FileManagerTab:
             return rec.get("rate", 0.0)
         return _natural_sort_key(os.path.basename(path))
 
+    @staticmethod
+    def _collapsible_folders_enabled() -> bool:
+        """True when the global COLLAPSIBLE_FOLDERS key is on."""
+        try:
+            from .main import load_global_config
+            return bool(load_global_config().get("collapsible_folders", True))
+        except Exception as e:
+            dbg(f"_collapsible_folders_enabled: {e}")
+            return True
+
     def _rebuild_rows(self, dirs):
         reverse = self._sort_key in _FM_SORT_REVERSE
         rows = []
         multi = len(dirs) > 1
+        collapsible = self._collapsible_folders_enabled()
+
         for label, folder in dirs:
             folder_abs = os.path.abspath(folder)
             files = [p for p, r in self._records.items() if r.get("group_path") == folder_abs]
-            files.sort(key=self._sort_key_fn, reverse=reverse)
             if multi:
                 rows.append(("header", f"{label}  \u2014  {folder_abs}", None))
-            for p in files:
-                rows.append(("file", p, self._records[p]))
+
+            if collapsible:
+                groups: dict = {}
+                root_files = []
+                for p in files:
+                    rel = os.path.relpath(p, folder_abs)
+                    parts = rel.split(os.sep)
+                    if len(parts) > 1:
+                        groups.setdefault(parts[0], []).append(p)
+                    else:
+                        root_files.append(p)
+
+                for name in sorted(groups.keys(), key=_natural_sort_key):
+                    group_files = sorted(groups[name], key=self._sort_key_fn, reverse=reverse)
+                    abs_subfolder = os.path.join(folder_abs, name)
+                    collapsed = abs_subfolder in self._collapsed
+                    rows.append(("folder", abs_subfolder,
+                                 {"name": name, "count": len(group_files), "collapsed": collapsed}))
+                    if not collapsed:
+                        for p in group_files:
+                            rows.append(("file", p, self._records[p]))
+
+                root_files.sort(key=self._sort_key_fn, reverse=reverse)
+                for p in root_files:
+                    rows.append(("file", p, self._records[p]))
+            else:
+                files.sort(key=self._sort_key_fn, reverse=reverse)
+                for p in files:
+                    rows.append(("file", p, self._records[p]))
+
             if multi and not files:
                 rows.append(("empty", "  (no files)", None))
 
@@ -722,44 +777,85 @@ class FileManagerTab:
             for p, rec in self._moving_records.items():
                 rows.append(("file", p, rec))
 
-        # Remember where the current selection sat among the *old* file rows,
-        # so that if it vanishes (fixup/move/trim finishing, deleted
-        # externally, etc.) we can land on its neighbor instead of jumping
-        # back to the top of the list.
-        old_file_paths = [r[1] for r in self._rows if r[0] == "file"]
-        old_pos = None
-        if self._selected_path in old_file_paths:
-            old_pos = old_file_paths.index(self._selected_path)
+        # Remember where the current selection sat among the *old* selectable
+        # (file/folder) rows, so that if it vanishes (fixup/move/trim
+        # finishing, deleted externally, collapsed away, etc.) we can land on
+        # its neighbor instead of jumping back to the top of the list.
+        old_keys = [("folder", r[1]) if r[0] == "folder" else ("file", r[1])
+                    for r in self._rows if r[0] in ("folder", "file")]
+        cur_key = (self._selected_kind,
+                   self._selected_folder if self._selected_kind == "folder" else self._selected_path)
+        old_pos = old_keys.index(cur_key) if cur_key in old_keys else None
 
         self._rows = rows
 
         # Keep selection valid.
-        file_paths = [r[1] for r in rows if r[0] == "file"]
-        if self._selected_path not in file_paths:
-            if old_pos is not None and file_paths:
+        new_keys = [("folder", r[1]) if r[0] == "folder" else ("file", r[1])
+                    for r in rows if r[0] in ("folder", "file")]
+        if cur_key not in new_keys:
+            if old_pos is not None and new_keys:
                 # Land on whatever now occupies the same (or nearest lower)
                 # position, mirroring how the list "shifts up" underneath us.
-                new_pos = min(old_pos, len(file_paths) - 1)
-                self._selected_path = file_paths[new_pos]
+                new_pos = min(old_pos, len(new_keys) - 1)
+                kind, ident = new_keys[new_pos]
+            elif new_keys:
+                kind, ident = new_keys[0]
             else:
-                self._selected_path = file_paths[0] if file_paths else None
+                kind, ident = "file", None
+            self._selected_kind = kind
+            if kind == "file":
+                self._selected_path = ident
+                self._selected_folder = None
+            else:
+                self._selected_folder = ident
+                self._selected_path = None
+
+    def _toggle_folder_collapsed(self, abs_subfolder: str) -> None:
+        """Toggle collapse/expand for one subfolder group (session-only)."""
+        if abs_subfolder in self._collapsed:
+            self._collapsed.discard(abs_subfolder)
+        else:
+            self._collapsed.add(abs_subfolder)
+        self._rebuild_rows(self._get_output_dirs())
 
     # ── Selection movement ──────────────────────────────────────────────────
 
-    def move_selection(self, delta):
-        file_indices = [i for i, r in enumerate(self._rows) if r[0] == "file"]
-        if not file_indices:
-            self._selected_path = None
-            return
-        cur_row_idx = next(
-            (i for i in file_indices if self._rows[i][1] == self._selected_path), None
-        )
-        if cur_row_idx is None:
-            pos = 0 if delta >= 0 else len(file_indices) - 1
+    def _select_row(self, row_idx) -> None:
+        """Set selection state (_selected_kind/_selected_path/_selected_folder)
+        from a row index into self._rows."""
+        kind, ident = self._rows[row_idx][0], self._rows[row_idx][1]
+        self._selected_kind = kind
+        if kind == "file":
+            self._selected_path = ident
+            self._selected_folder = None
         else:
-            pos = file_indices.index(cur_row_idx) + delta
-            pos = max(0, min(len(file_indices) - 1, pos))
-        self._selected_path = self._rows[file_indices[pos]][1]
+            self._selected_folder = ident
+            self._selected_path = None
+
+    def _cur_selectable_row_idx(self):
+        """Index into self._rows of the currently selected folder/file row, or None."""
+        cur_key = (self._selected_kind,
+                   self._selected_folder if self._selected_kind == "folder" else self._selected_path)
+        for i, r in enumerate(self._rows):
+            if r[0] in ("folder", "file"):
+                key = ("folder", r[1]) if r[0] == "folder" else ("file", r[1])
+                if key == cur_key:
+                    return i
+        return None
+
+    def move_selection(self, delta):
+        sel_indices = [i for i, r in enumerate(self._rows) if r[0] in ("folder", "file")]
+        if not sel_indices:
+            self._selected_path = None
+            self._selected_folder = None
+            return
+        cur_row_idx = self._cur_selectable_row_idx()
+        if cur_row_idx is None:
+            pos = 0 if delta >= 0 else len(sel_indices) - 1
+        else:
+            pos = sel_indices.index(cur_row_idx) + delta
+            pos = max(0, min(len(sel_indices) - 1, pos))
+        self._select_row(sel_indices[pos])
 
     def move_selection_page(self, direction):
         """Move the selection by a page (PageUp/PageDown), rather than jumping
@@ -767,20 +863,18 @@ class FileManagerTab:
         page = max(1, self._last_visible - 1)
         delta = -page if direction == "up" else page
         self.move_selection(delta)
-        file_indices = [i for i, r in enumerate(self._rows) if r[0] == "file"]
-        if file_indices and self._selected_path == self._rows[file_indices[0]][1]:
-            self._at_top = True
-        else:
-            self._at_top = False
+        sel_indices = [i for i, r in enumerate(self._rows) if r[0] in ("folder", "file")]
+        self._at_top = bool(sel_indices) and self._cur_selectable_row_idx() == sel_indices[0]
 
     def move_selection_edge(self, edge):
         """Move the selection straight to the first/last row (Home/End)."""
-        file_indices = [i for i, r in enumerate(self._rows) if r[0] == "file"]
-        if not file_indices:
+        sel_indices = [i for i, r in enumerate(self._rows) if r[0] in ("folder", "file")]
+        if not sel_indices:
             self._selected_path = None
+            self._selected_folder = None
             return
-        target = file_indices[0] if edge == "home" else file_indices[-1]
-        self._selected_path = self._rows[target][1]
+        target = sel_indices[0] if edge == "home" else sel_indices[-1]
+        self._select_row(target)
         self._at_top = (edge == "home")
 
     # ── Key handling ─────────────────────────────────────────────────────────
@@ -812,9 +906,8 @@ class FileManagerTab:
             return True
         if key in (curses.KEY_UP,):
             self.move_selection(-1)
-            file_indices = [i for i, r in enumerate(self._rows) if r[0] == "file"]
-            if file_indices and self._selected_path == self._rows[file_indices[0]][1]:
-                self._at_top = True
+            sel_indices = [i for i, r in enumerate(self._rows) if r[0] in ("folder", "file")]
+            self._at_top = bool(sel_indices) and self._cur_selectable_row_idx() == sel_indices[0]
             return True
         if key in (curses.KEY_DOWN,):
             self.move_selection(1)
@@ -827,19 +920,26 @@ class FileManagerTab:
             self.move_selection_edge("end")
             return True
         if key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
-            if self._selected_path:
+            if self._selected_kind == "folder" and self._selected_folder:
+                self._toggle_folder_collapsed(self._selected_folder)
+            elif self._selected_path:
                 ok, err = open_file(self._selected_path)
                 if not ok:
                     self._set_status(f"Could not open file: {err}")
             return True
         if key == ord(' '):
-            if self._selected_path:
+            if self._selected_kind == "folder" and self._selected_folder:
+                ok, err = open_file(self._selected_folder)
+                if not ok:
+                    self._set_status(f"Could not open folder: {err}")
+            elif self._selected_path:
                 ok, err = open_containing_folder(self._selected_path)
                 if not ok:
                     self._set_status(f"Could not open folder: {err}")
             return True
         if key in (curses.KEY_DC, curses.KEY_BACKSPACE, 127):
-            self._delete_selected()
+            if self._selected_kind == "file":
+                self._delete_selected()
             return True
         if key in (ord('s'), ord('S')):
             self.open_popup()
@@ -848,7 +948,7 @@ class FileManagerTab:
             self._toggle_delete_mode()
             return True
         if key in (ord('m'), ord('M')):
-            if self._selected_path:
+            if self._selected_kind == "file" and self._selected_path:
                 self.open_menu_popup()
             return True
         return False
@@ -2529,11 +2629,7 @@ class FileManagerTab:
         visible = max(1, list_y2 - list_y1)
         self._last_visible = visible
 
-        sel_row = None
-        for i, r in enumerate(self._rows):
-            if r[0] == "file" and r[1] == self._selected_path:
-                sel_row = i
-                break
+        sel_row = self._cur_selectable_row_idx()
         if sel_row is not None:
             if sel_row < self._scroll:
                 self._scroll = sel_row
@@ -2560,16 +2656,33 @@ class FileManagerTab:
             elif kind == "empty":
                 db.safe_addstr(stdscr, row_y, x1 + 3, payload[:avail_w],
                                theme.attr(db, "file_manager_filemanagertab_draw_dim_2"))
+            elif kind == "folder":
+                abs_subfolder = payload
+                is_sel = (self._selected_kind == "folder" and self._selected_folder == abs_subfolder)
+                arrow = "\u25ba" if rec["collapsed"] else "\u25bc"
+                label = f"{arrow} {rec['name']}"
+                if rec["collapsed"]:
+                    label += f"  ({rec['count']})"
+                row_attr = (theme.attr(db, "file_manager_filemanagertab_draw_hilight") if is_sel
+                            else theme.attr(db, "file_manager_filemanagertab_draw_system_1"))
+                db.safe_addstr(stdscr, row_y, x1 + 2, label.ljust(name_w)[:name_w], row_attr)
             else:
                 path = payload
                 group_path = rec.get("group_path")
+                indented = False
                 if group_path and os.path.dirname(os.path.abspath(path)) != os.path.abspath(group_path):
-                    # Nested inside a subfolder (e.g. a per-streamer folder
-                    # created by SUBFOLDERS) - show the subfolder-relative
-                    # path so it's clear where the file lives.
-                    name = os.path.relpath(path, group_path).replace(os.sep, "/")
+                    rel_parts = os.path.relpath(path, group_path).replace(os.sep, "/").split("/")
+                    if self._collapsible_folders_enabled() and len(rel_parts) > 1:
+                        # Already shown under its folder row — indent and
+                        # show only the remainder of the path.
+                        name = "/".join(rel_parts[1:])
+                        indented = True
+                    else:
+                        name = "/".join(rel_parts)
                 else:
                     name = os.path.basename(path)
+                if indented:
+                    name = "  " + name
                 if path in self._split_jobs:
                     name = "*" + name  # a Split job is running for this file
                 status = rec.get("status", "IDLE")
