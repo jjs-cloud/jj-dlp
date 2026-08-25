@@ -146,6 +146,8 @@ IS_MAC = platform.system() == "Darwin"
 POLL_INTERVAL_S = 1.0      # how often we re-scan OUTPUT_DIRs
 IDLE_THRESHOLD_S = 3.0     # size unchanged for this long => IDLE
 STATUS_MSG_TTL_S = 4.0     # how long an inline status/error message lingers
+# How long the sort‑mode transient popup stays visible after cycling
+SORT_TRANSIENT_TTL_S = 2.0
 
 DELETE_MODE_TRASH = "trash"
 DELETE_MODE_PERMANENT = "permanent"
@@ -153,8 +155,8 @@ DELETE_MODE_DEFAULT = DELETE_MODE_TRASH
 
 # ── Sort options for the File Manager tab (mirrors the Dashboard's "S" sort popup) ──
 SORT_OPTIONS_FM = [
-    ("name_asc",       "Name (A-Z)"),
-    ("name_desc",      "Name (Z-A)"),
+    ("name_asc",       "Name (A-Z) (grouped)"),
+    ("name_desc",      "Name (Z-A) (grouped)"),
     ("status_writing", "Status (Writing first)"),
     ("status_idle",    "Status (Idle first)"),
     ("modified_new",   "Date Modified (Newest first)"),
@@ -404,12 +406,7 @@ class FileManagerTab:
         self._status_msg_ts = 0.0
 
         self._sort_key, self._delete_mode = self._load_settings()
-
-        self.popup_open = False
-        self._popup_sel = self._sort_idx(self._sort_key)
-        self._popup_scroll = 0
-
-        # "File Options" menu popup (M key)
+        self._sort_popup_until = 0.0          # epoch when transient sort popup expires
         self._menu_open = False
         self._menu_sel = 0
 
@@ -926,8 +923,6 @@ class FileManagerTab:
 
     def handle_key(self, key) -> bool:
         """Returns True if the key was consumed by the File Manager tab."""
-        if self.popup_open:
-            return self._handle_popup_key(key)
         if self._fixup_open:
             return self._handle_fixup_popup_key(key)
         if self._move_filename_open:
@@ -982,12 +977,13 @@ class FileManagerTab:
                 if not ok:
                     self._set_status(f"Could not open folder: {err}")
             return True
-        if key in (curses.KEY_DC, curses.KEY_BACKSPACE, 127):
-            if self._selected_kind == "file":
-                self._delete_selected()
-            return True
-        if key in (ord('s'), ord('S')):
-            self.open_popup()
+        if key in (ord('s'), ord('S')) and not self.any_popup_open():
+            # If the timer is already active, cycle to the next mode.
+            # Otherwise, just show the current sort options without changing.
+            if time.time() < self._sort_popup_until:
+                self._cycle_sort(cycle=True)
+            else:
+                self._cycle_sort(cycle=False)
             return True
         if key in (ord('t'), ord('T')):
             self._toggle_delete_mode()
@@ -997,6 +993,16 @@ class FileManagerTab:
                 self.open_menu_popup()
             return True
         return False
+
+    def _cycle_sort(self, cycle=True):
+        """Show the sort popup; if cycle=True, advance to the next sort mode."""
+        if cycle:
+            idx = _FM_SORT_KEYS.index(self._sort_key)
+            idx = (idx + 1) % len(_FM_SORT_KEYS)
+            self._sort_key = _FM_SORT_KEYS[idx]
+            self._save_settings()
+            self._rebuild_rows(self._get_output_dirs())
+        self._sort_popup_until = time.time() + SORT_TRANSIENT_TTL_S
 
     def _toggle_delete_mode(self):
         self._delete_mode = (
@@ -1113,99 +1119,17 @@ class FileManagerTab:
         self._status_msg = msg
         self._status_msg_ts = time.time()
 
-    # ── Sort popup ───────────────────────────────────────────────────────────
-
-    def open_popup(self):
-        self._popup_sel = self._sort_idx(self._sort_key)
-        self._popup_scroll = 0
-        self.popup_open = True
-
-    def close_popup(self):
-        self.popup_open = False
-
-    def _handle_popup_key(self, key) -> bool:
-        n = len(SORT_OPTIONS_FM)
-        if key == 27:  # Esc -> cancel
-            self.close_popup()
-        elif key == curses.KEY_UP:
-            self._popup_sel = max(0, self._popup_sel - 1)
-        elif key == curses.KEY_DOWN:
-            self._popup_sel = min(n - 1, self._popup_sel + 1)
-        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459, ord(' ')):
-            new_key = _FM_SORT_KEYS[self._popup_sel]
-            if new_key != self._sort_key:
-                self._sort_key = new_key
-                self._save_settings()
-                self._rebuild_rows(self._get_output_dirs())
-            self.close_popup()
-        # All other keys are consumed so nothing leaks to the dashboard.
-        return True
-
-    @staticmethod
-    def _sort_idx(sort_key: str) -> int:
-        try:
-            return _FM_SORT_KEYS.index(sort_key)
-        except ValueError:
-            return 0
-
-    def draw_popup(self, stdscr) -> None:
-        db = self.dashboard
-        h, w = stdscr.getmaxyx()
-        n = len(SORT_OPTIONS_FM)
-
-        box_w = min(53, w - 4)
-        box_h = min(n + 4, h - 4)
-        by1 = (h - box_h) // 2
-        bx1 = (w - box_w) // 2
-        by2 = by1 + box_h
-        bx2 = bx1 + box_w
-
-        for y in range(by1, by2 + 1):
-            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1),
-                           theme.attr(db, "file_manager_filemanagertab_draw_popup_normal_1"))
-
-        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_CHROME)
-        db.safe_addstr(stdscr, by1, bx1 + 2, " SORT FILES ",
-                       theme.attr(db, "file_manager_filemanagertab_draw_popup_chrome"))
-        db.safe_addstr(stdscr, by2, bx1 + 2,
-                       " Enter: Select  Esc: Cancel ",
-                       theme.attr(db, "file_manager_filemanagertab_draw_popup_invhead"))
-
-        visible = box_h - 3
-
-        if self._popup_sel < self._popup_scroll:
-            self._popup_scroll = self._popup_sel
-        elif self._popup_sel >= self._popup_scroll + visible:
-            self._popup_scroll = self._popup_sel - visible + 1
-
-        for i in range(self._popup_scroll, min(n, self._popup_scroll + visible)):
-            sort_key, label = SORT_OPTIONS_FM[i]
-            row_y = by1 + 1 + (i - self._popup_scroll)
-            is_sel = (i == self._popup_sel)
-            is_cur = (sort_key == self._sort_key)
-            prefix = "> " if is_sel else ("* " if is_cur else "  ")
-            if is_sel:
-                attr = theme.attr(db, "file_manager_filemanagertab_draw_popup_hilight")
-            elif is_cur:
-                attr = theme.attr(db, "file_manager_filemanagertab_draw_popup_live")
-            else:
-                attr = theme.attr(db, "file_manager_filemanagertab_draw_popup_normal_2")
-            db.safe_addstr(stdscr, row_y, bx1 + 2,
-                           (prefix + label)[:box_w - 4], attr)
-
     # ── "File Options" popup (M key) ────────────────────────────────────────
 
     def any_popup_open(self) -> bool:
         """True if any of this tab's popups (sort / menu / fixup / move) is open."""
-        return (self.popup_open or self._menu_open or self._fixup_open
+        return (self._menu_open or self._fixup_open
                 or self._move_open or self._move_filename_open
                 or self._trim_open or self._split_open or self._split_confirm_open)
 
     def draw_popups(self, stdscr) -> None:
         """Draw whichever of this tab's popups is currently open."""
-        if self.popup_open:
-            self.draw_popup(stdscr)
-        elif self._menu_open:
+        if self._menu_open:
             self.draw_menu_popup(stdscr)
         elif self._fixup_open:
             self.draw_fixup_popup(stdscr)
@@ -1219,6 +1143,54 @@ class FileManagerTab:
             self.draw_split_confirm_popup(stdscr)
         elif self._split_open:
             self.draw_split_popup(stdscr)
+        # Transient sort popup (display only, no interaction)
+        if time.time() < self._sort_popup_until:
+            self._draw_sort_transient_popup(stdscr)
+
+    def _draw_sort_transient_popup(self, stdscr):
+        """Draw a styled list popup showing all sort options,
+        with the current mode highlighted – exactly like the color‑schemes popup.
+        """
+        db = self.dashboard
+        h, w = stdscr.getmaxyx()
+
+        options = SORT_OPTIONS_FM
+        n = len(options)
+
+        # Compute box dimensions (matching the color‑schemes popup style)
+        label_width = max(len(label) for _, label in options) + 4
+        title = " SORT FILES "
+        footer = " S: next sort "
+        box_w = min(max(len(title), label_width + 4, len(footer) + 4) + 4, w - 4)
+        box_h = min(n + 4, h - 4)          # title row + n rows + footer row + borders
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        # Fill background
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1),
+                           theme.attr(db, "main_jjdlpdashboard_draw_scheme_popup_normal_1"))
+
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_CHROME)
+        db.safe_addstr(stdscr, by1, bx1 + 2, title,
+                       theme.attr(db, "main_jjdlpdashboard_draw_scheme_popup_hilight"))
+        db.safe_addstr(stdscr, by2, bx1 + 2, footer,
+                       theme.attr(db, "main_jjdlpdashboard_draw_scheme_popup_invhead"))
+
+        # List each sort option
+        for i, (sort_key, label) in enumerate(options):
+            row_y = by1 + 2 + i
+            if row_y >= by2:
+                break
+            is_current = (sort_key == self._sort_key)
+            prefix = "* " if is_current else "  "
+            attr = (theme.attr(db, "main_jjdlpdashboard_draw_scheme_popup_live")
+                    if is_current
+                    else theme.attr(db, "main_jjdlpdashboard_draw_scheme_popup_normal_2"))
+            db.safe_addstr(stdscr, row_y, bx1 + 2,
+                           (prefix + label)[:box_w - 4], attr)
 
     def open_menu_popup(self):
         self._menu_sel = 0
