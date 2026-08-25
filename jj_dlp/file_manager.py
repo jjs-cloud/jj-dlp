@@ -110,6 +110,7 @@ Controlled by the ``file_manager.delete_mode`` key in global.json, one of:
 Press T inside the File Manager tab to flip between the two at any time.
 """
 
+from ast import Return
 import os
 import re
 import shutil
@@ -2153,13 +2154,11 @@ class FileManagerTab:
 
     def _split_max_row(self):
         """Highest selectable row index in the split popup. The "Restart the
-        recording now" row only exists for files jj-dlp is actively recording
-        right now; otherwise the popup ends at the Stop Job row."""
-        site, _streamer = self._find_recording_owner(self._split_target or "")
-        if site is not None:
-            return SPLIT_ROW_RESTART
-        return SPLIT_ROW_STOP
-
+        recording now" row is always shown, but selecting it without an
+        active recording will result in an error message."""
+        # Always show the restart row
+        return SPLIT_ROW_RESTART
+        
     def _find_recording_owner(self, path):
         """Return (site, streamer) whose yt-dlp process is currently writing
         *path*, or (None, None) when no site is recording that exact file
@@ -2183,13 +2182,15 @@ class FileManagerTab:
         """"Restart the recording instead": force the SPLIT_AFTER split for the
         streamer currently recording *path*, so the current file is renamed
         to _partN and recording continues into the next part. Only valid for
-        files jj-dlp is actively recording."""
+        files jj-dlp is actively recording. Returns True on success, False if
+        no active recording is found (and sets an error status)."""        
         site, streamer = self._find_recording_owner(path)
         if site is None or not streamer:
-            self._set_status("Restart failed: this file is not being recorded")
-            return
+            self._set_status("Restart failed: this file is not currently being recorded.")
+            return False
         site.request_manual_split(streamer)
         self._set_status(f"Recording restart requested: {streamer}")
+        return True
 
     def _handle_split_popup_key(self, key) -> bool:
         path = self._split_target
@@ -2223,8 +2224,10 @@ class FileManagerTab:
                 self.close_split_popup()
                 self.open_split_confirm_popup(path)
             elif self._split_cursor == SPLIT_ROW_RESTART:
-                self.close_split_popup()
-                self._restart_recording_now(path)
+                # Attempt restart; only close the popup if it succeeds
+                if self._restart_recording_now(path):
+                    self.close_split_popup()
+                # If restart failed, an error status is already set and the popup stays open
             return True
 
         buf, attr_name = self._split_active_buf()
@@ -2333,9 +2336,8 @@ class FileManagerTab:
                            theme.attr(db, "file_manager_filemanagertab_draw_split_popup_hilight_1"))
             return
 
-        restart_shown = (self._split_max_row() == SPLIT_ROW_RESTART)
         box_w = min(75, w - 4)
-        box_h = min(14 + (1 if restart_shown else 0), h - 4)
+        box_h = min(15, h - 4)   # enough room for all rows (including restart)
         by1 = (h - box_h) // 2
         bx1 = (w - box_w) // 2
         by2 = by1 + box_h
@@ -2395,14 +2397,14 @@ class FileManagerTab:
         db.safe_addstr(stdscr, stop_row_y, bx1 + 2,
                        f"{prefix}Stop Job"[:box_w - 4], attr)
 
-        if restart_shown:
-            restart_row_y = stop_row_y + 2
-            is_sel = (self._split_cursor == SPLIT_ROW_RESTART)
-            prefix = "> " if is_sel else "  "
-            attr = (theme.attr(db, "file_manager_filemanagertab_draw_split_popup_hilight_5")) if is_sel \
-                else theme.attr(db, "file_manager_filemanagertab_draw_split_popup_normal_6")
-            db.safe_addstr(stdscr, restart_row_y, bx1 + 2,
-                           f"{prefix}Restart the recording instead"[:box_w - 4], attr)
+        # Always draw the restart row
+        restart_row_y = stop_row_y + 2
+        is_sel = (self._split_cursor == SPLIT_ROW_RESTART)
+        prefix = "> " if is_sel else "  "
+        attr = (theme.attr(db, "file_manager_filemanagertab_draw_split_popup_hilight_5")) if is_sel \
+            else theme.attr(db, "file_manager_filemanagertab_draw_split_popup_normal_6")
+        db.safe_addstr(stdscr, restart_row_y, bx1 + 2,
+                       f"{prefix}Restart the recording instead"[:box_w - 4], attr)
 
     # ── "Split" stop confirmation popup ─────────────────────────────────────
 
