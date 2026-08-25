@@ -985,6 +985,10 @@ class FileManagerTab:
             else:
                 self._cycle_sort(cycle=False)
             return True
+        if key in (curses.KEY_DC,):
+            if self._selected_kind == "file" and self._selected_path:
+                self._delete_selected()
+            return True
         if key in (ord('t'), ord('T')):
             self._toggle_delete_mode()
             return True
