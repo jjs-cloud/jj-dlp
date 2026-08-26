@@ -1101,6 +1101,13 @@ class SiteState:
         
         # Load the configuration once during init to retrieve things like site_order
         cfg = load_config(config_path)
+        try:
+            os.makedirs(cfg["output_dir"], exist_ok=True)
+        except Exception as e:
+            startup_dbg(
+                f"[OUTPUT_DIR] failed to initialize {cfg.get('output_dir')!r}: "
+                f"{type(e).__name__}: {e}"
+            )
         self.site_order           = cfg.get("site_order", 999)
         
         self.lock                 = threading.Lock()
@@ -3874,6 +3881,11 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
                         warning=(f"The recording file could not be confirmed within "
                                  f"{int(stall_timeout)}s — the start may have failed."),
                         confirmed=False)
+                    _log_filename = os.path.basename(active_file) if active_file else "<unknown>"
+                    site.log_line(
+                        f"Warning: {_log_filename} could not be confirmed within "
+                        f"{int(stall_timeout)} seconds."
+                    )
                     # Also drives the dashboard's full-screen recording-
                     # failure alert (see App.draw_write_failure_alert).
                     site.flag_write_failure(streamer)
