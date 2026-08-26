@@ -733,6 +733,10 @@ class FileManagerTab:
                     def emit_folder(dir_path, depth):
                         direct_files = sorted(folder_map.get(dir_path, []),
                                               key=self._sort_key_fn, reverse=reverse)
+                        for path in direct_files:
+                            file_rec = dict(self._records[path])
+                            file_rec["_tree_depth"] = depth + 1
+                            rows.append(("file", path, file_rec))
                         child_paths = set()
                         for path in files:
                             parent = os.path.dirname(path)
@@ -749,8 +753,6 @@ class FileManagerTab:
                                           "depth": depth + 1}))
                             if not child_collapsed:
                                 emit_folder(child_path, depth + 1)
-                        for path in direct_files:
-                            rows.append(("file", path, self._records[path]))
 
                     emit_folder(folder_abs, 0)
                 else:
@@ -2605,7 +2607,7 @@ class FileManagerTab:
                 label = f"{arrow} {rec['name']}"
                 if rec["collapsed"]:
                     label += f"  ({rec['count']})"
-                indent = 2 if not rec.get("is_output_dir", False) else 0
+                indent = 2 * rec.get("depth", 0)
                 row_attr = (theme.attr(db, "file_manager_filemanagertab_draw_hilight")
                             if is_sel else theme.attr(db, "file_manager_filemanagertab_draw_system_1"))
                 db.safe_addstr(stdscr, row_y, x1 + 2 + indent,
@@ -2613,7 +2615,13 @@ class FileManagerTab:
             else:
                 path = payload
                 group_path = rec.get("group_path")
-                if group_path and os.path.dirname(os.path.abspath(path)) != os.path.abspath(group_path):
+                tree_depth = rec.get("_tree_depth")
+                indent = 2 * tree_depth if tree_depth is not None else 0
+                if tree_depth is not None:
+                    # Already nested under its folder row in the tree - no
+                    # need to repeat the subfolder path in the name.
+                    name = os.path.basename(path)
+                elif group_path and os.path.dirname(os.path.abspath(path)) != os.path.abspath(group_path):
                     # Nested inside a subfolder (e.g. a per-streamer folder
                     # created by SUBFOLDERS) - show the subfolder-relative
                     # path so it's clear where the file lives.
@@ -2639,23 +2647,25 @@ class FileManagerTab:
 
                 # Subfolder-relative paths (e.g. "StreamerName/file.mp4") get
                 # their directory part drawn in a distinct color so nested
-                # files stand out. Skipped on the highlighted row so the
-                # subfolder text keeps the selection background.
+                # files stand out. Skipped on the highlighted row (so the
+                # subfolder text keeps the selection background) and inside
+                # the collapsible tree (the folder row already shows it).
                 sub_prefix = None
-                if not is_sel and "/" in name:
+                if not is_sel and tree_depth is None and "/" in name:
                     sub_prefix = name.rpartition("/")[0] + "/"
 
                 is_moving = self._move_busy and self._move_busy_path == path
                 name_lbl = name if not is_moving else name + " Moving..."
-                name_col = name_lbl.ljust(name_w)[:name_w]
+                avail_w = max(1, name_w - indent)
+                name_col = name_lbl.ljust(avail_w)[:avail_w]
                 if sub_prefix:
                     pf = name_col[:len(sub_prefix)]
                     rest = name_col[len(sub_prefix):]
-                    db.safe_addstr(stdscr, row_y, x1 + 2, pf,
+                    db.safe_addstr(stdscr, row_y, x1 + 2 + indent, pf,
                                    theme.attr(db, "file_manager_filemanagertab_draw_system_2"))
-                    db.safe_addstr(stdscr, row_y, x1 + 2 + len(pf), rest, row_attr)
+                    db.safe_addstr(stdscr, row_y, x1 + 2 + indent + len(pf), rest, row_attr)
                 else:
-                    db.safe_addstr(stdscr, row_y, x1 + 2, name_col, row_attr)
+                    db.safe_addstr(stdscr, row_y, x1 + 2 + indent, name_col, row_attr)
                 db.safe_addstr(stdscr, row_y, col_status_x, status.ljust(status_w)[:status_w], row_attr)
                 db.safe_addstr(stdscr, row_y, col_mod_x, mod_txt.ljust(mod_w)[:mod_w], row_attr)
                 db.safe_addstr(stdscr, row_y, col_size_x, size_txt.rjust(size_w)[:size_w], row_attr)
