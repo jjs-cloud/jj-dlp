@@ -3802,7 +3802,7 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
             out_target, err_target, close_logs, log_out_fp, log_err_fp = open_log_streams(cfg, streamer)
 
             _launch_result = _launch_yt_dlp_attempt(
-                cmd, out_target, err_target, close_logs, log_out_fp, log_err_fp,
+                app, cmd, out_target, err_target, close_logs, log_out_fp, log_err_fp,
                 cfg, site, streamer)
             if _launch_result is None:
                 break
