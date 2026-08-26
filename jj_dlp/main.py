@@ -4014,7 +4014,7 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
                         try:
                             part_suffix = f"_part{next_segment_num}"
                             next_proc, next_proc_start_time, next_file, split_success = _spawn_and_verify_split_segment(
-                                next_cmd, cfg, next_out_target, next_err_target,
+                                app, next_cmd, cfg, next_out_target, next_err_target,
                                 next_log_out_fp, next_log_err_fp,
                                 output_dir, streamer, site, part_suffix)
 
