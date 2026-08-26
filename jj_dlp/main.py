@@ -5285,7 +5285,7 @@ class JJDlpDashboard:
         # Bars persisted to global.json on the previous run are restored here
         # so the graph comes back with its recent history instead of starting
         # empty.
-        self.graph.disk_rate_history.extend(_load_disk_rate_history())
+        self.graph.disk_rate_history.extend(_load_disk_rate_history(self.app))
 
         from .config_editor import ConfigEditor
         self.config_editor = ConfigEditor(self)
