@@ -6687,7 +6687,7 @@ class JJDlpDashboard:
                          f"  G: Changelog"
                          f"  C: Colors  N: Theme Manager  Q: quit  ")
             elif current_tab == "File Manager":
-                hints = (f"  \u2191\u2193: select  Enter: open  Space: show folder"
+                hints = (f"  \u2191\u2193: select  Enter: open/expand  Space: show folder"
                          f"  DEL: delete  S: sort  T: toggle trash  M: File Options"
                          f"  C: Colors  Q: quit  ")
             else:
