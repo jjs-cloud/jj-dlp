@@ -4159,7 +4159,7 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
                     # Dashboard quality display (independent of stall logic):
                     # measure the actual on-disk resolution via ffprobe, reusing
                     # the same active_file the stall checker just used above.
-                    _update_measured_quality(site, streamer, active_file, file_error)
+                    _update_measured_quality(app, site, streamer, active_file, file_error)
 
                     if file_error:
                         # We couldn't even locate/read the recording file this
