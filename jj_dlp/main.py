@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.28.5"
+__version__ = "1.28.6"
 
 import subprocess
 import textwrap
@@ -2864,7 +2864,61 @@ def wait_for_new_file_growth(filepath: str, timeout: float = 15.0,
     return False
 
 
-
+def _scan_directory_for_active_file(output_dir: str, streamer: str,
+                                    proc_start_time: Optional[float] = None,
+                                    growth_wait: float = 2.0) -> Optional[str]:
+    """Last-ditch scan for the file yt-dlp is writing, used when the filename
+    sidecar never resolved a path. Matches by streamer name only (not an
+    exact filename), then confirms the match is actively growing before
+    returning it."""
+    if not os.path.isdir(output_dir):
+        return None
+    candidates = []
+    for root, _dirs, files in os.walk(output_dir):
+        for fname in files:
+            if streamer.lower() not in fname.lower():
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                mtime = os.path.getmtime(fpath)
+            except OSError:
+                continue
+            if proc_start_time is not None and mtime < proc_start_time - 5:
+                continue
+            candidates.append(fpath)
+    if not candidates:
+        return None
+    dbg(f"[STALL] directory scan: {len(candidates)} candidate(s) match "
+        f"streamer={streamer!r}", site_name=streamer)
+    # Cap and prioritize by recency so a huge/ambiguous match set (a busy
+    # shared OUTPUT_DIR, an overlapping name substring) doesn't turn into an
+    # unbounded scan or an arbitrary pick — the real file is always among
+    # the most recently touched.
+    candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    candidates = candidates[:50]
+    sizes_before = {}
+    for fpath in candidates:
+        try:
+            sizes_before[fpath] = os.path.getsize(fpath)
+        except OSError:
+            pass
+    time.sleep(growth_wait)
+    grown = []
+    for fpath in candidates:
+        try:
+            size_after = os.path.getsize(fpath)
+        except OSError:
+            continue
+        if size_after > sizes_before.get(fpath, -1):
+            grown.append(fpath)
+    if not grown:
+        return None
+    if len(grown) > 1:
+        dbg(f"[STALL] directory scan: {len(grown)} candidates are all growing "
+            f"for streamer={streamer!r} — picking the most recently modified",
+            site_name=streamer)
+    # Already sorted newest-first, so the first growing entry is the best pick.
+    return grown[0]
 
 def _launch_lq_recording(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
                           site_label: str) -> None:
@@ -3805,6 +3859,7 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
                  "--print-to-file", current_output_tmpl, _sidecar_path,
                  channel_url]
             )
+            cmd = _simulation.maybe_strip_sidecar_args(cmd, _sidecar_path, streamer)
 
             out_target, err_target, close_logs, log_out_fp, log_err_fp = open_log_streams(cfg, streamer)
 
@@ -3848,7 +3903,7 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
                 # (and real write failures) can make yt-dlp exit in well
                 # under stall_check_interval on every retry, which previously
                 # meant this check was never reached at all.
-                nonlocal _no_confirm_warned
+                nonlocal _no_confirm_warned, active_file
                 # FIX: guard so this function never fires for a streamer that's
                 # being evicted or the app is shutting down, no matter which
                 # call site invokes it.
@@ -3859,6 +3914,21 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
                         and not growth_seen
                         and time.time() >= _no_confirm_deadline):
                     _no_confirm_warned = True
+
+                    if not active_file:
+                        _scanned_file = _scan_directory_for_active_file(
+                            output_dir, streamer, proc_start_time)
+                        if _scanned_file:
+                            active_file = _scanned_file
+                            site.set_recording_output(streamer, active_file)
+                            site.log_line(
+                                f"Info: located recording file for {streamer} via "
+                                f"directory scan: {os.path.basename(active_file)}"
+                            )
+                            dbg(f"[STALL] directory scan recovered active_file="
+                                f"{active_file!r}", site_name=streamer)
+                            return
+
                     if active_file:
                         _nc_size, _, _, _nc_file_error = get_streamer_file_size(
                             output_dir, streamer, cfg=cfg,
@@ -6368,9 +6438,9 @@ class JJDlpDashboard:
             attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_dim_3")
             if "Live now" in line or "Recording started" in line:
                 attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_live")
-            elif "ERROR" in line or "Stall" in line or "STOPPED" in line:
+            elif "ERROR" in line or "Stall" in line or "STOPPED" in line or "Warning" in line:
                 attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_rec")
-            elif "Warning" in line:
+            elif "Info" in line:
                 attr = theme.attr(self, "main_jjdlpdashboard_draw_log_tab_warn_1")
             self.safe_addstr(self.stdscr, y1 + 2 + i, x1, line, attr)
             if is_debug and highlighting_patterns:
@@ -7468,7 +7538,7 @@ class JJDlpDashboard:
                 return
             site.skip_disabled.discard(username)
             skip_snapshot = set(site.skip_disabled)
-        _save_skip_disabled(self.app, site.config_path, skip_snapshot)
+        _save_skip_disabled(site.config_path, skip_snapshot)
 
     def _handle_mgmt_key(self, key) -> bool:
         action, site_idx = self._mgmt_mode
