@@ -1509,6 +1509,9 @@ class FileManagerTab:
         if not path or not os.path.isfile(path):
             self._set_status("Move failed: file no longer exists")
             return
+        rec = self._records.get(path, {})
+        parent_dir = os.path.dirname(os.path.abspath(path))
+        output_dir_root = rec.get("group_path")
         with self._move_lock:
             if self._move_busy:
                 self._set_status("A Move is already running - please wait")
@@ -1530,14 +1533,17 @@ class FileManagerTab:
         self._set_status(f"Move started: {os.path.basename(path)}")
         t = threading.Thread(
             target=self._move_worker,
-            args=(path, dest_root, filename, do_subfolder, do_fixup, final_path),
+            args=(path, dest_root, filename, do_subfolder, do_fixup, final_path,
+                  parent_dir, output_dir_root),
             daemon=True,
         )
         t.start()
 
-    def _move_worker(self, path, dest_root, filename, do_subfolder, do_fixup, final_path):
+    def _move_worker(self, path, dest_root, filename, do_subfolder, do_fixup, final_path,
+                     parent_dir, output_dir_root):
         try:
-            _ok, msg = self._do_move(path, dest_root, filename, do_subfolder, do_fixup, final_path)
+            _ok, msg = self._do_move(path, dest_root, filename, do_subfolder, do_fixup,
+                                     final_path, parent_dir, output_dir_root)
             self._set_status(msg)
         except Exception as exc:
             dbg(f"_move_worker: {exc}")
@@ -1549,7 +1555,8 @@ class FileManagerTab:
                 self._move_dest_path = None
                 self._moving_records.pop(final_path, None)
 
-    def _do_move(self, path, dest_root, filename, do_subfolder, do_fixup, final_path):
+    def _do_move(self, path, dest_root, filename, do_subfolder, do_fixup, final_path,
+                 parent_dir, output_dir_root):
         """Runs on a background thread. Returns (ok, status_message).
         *final_path* is the exact destination path, already computed (and
         its parent folder already created) by _compute_move_destination."""
@@ -1608,7 +1615,8 @@ class FileManagerTab:
             except OSError as exc:
                 return False, f"Move failed: {exc}"
 
-        return True, f"Move complete: {final_path}"
+        folder_note = self._maybe_delete_empty_folder(parent_dir, output_dir_root)
+        return True, f"Move complete: {final_path}{folder_note}"
 
     @staticmethod
     def _derive_streamer_name(path, group_path):
