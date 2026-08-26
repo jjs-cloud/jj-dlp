@@ -104,7 +104,6 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("WEB_UI_PASS",              scope="global",                    default="",                           preserve=True,               comment="Password required to log into the web dashboard (HTTP Basic Auth). Required if WEB_UI is enabled. Choose something not easily guessed — anyone on your WiFi could otherwise try to log in."),
     _KeyDef("RGB_MODE",                 scope="global",                    default="true",                       preserve=True, type="bool",  comment="Pin the terminal's 8 base colors to exact RGB values (the Windows Terminal Campbell palette) so the app looks the same on every Linux terminal (may require restart) (true/false)."),
     _KeyDef("DELETE_EMPTY",             scope="global",                    default="true",                       preserve=True, type="bool",  comment="When deleting a file from the file manager, delete the parent folder if it is empty.  This only applies to subfolders within the OUTPUT_DIR. (true/false)"),
-    _KeyDef("COLLAPSIBLE_FOLDERS",      scope="global",                    default="true",                       preserve=True, type="bool",  comment="Group files in the File Manager by their subfolder (if present) and make them collapsible/expandable. (true/false)"),
 
     # ── Site keys (per-site .conf) ────────────────────────────────────────────
     _KeyDef("SITE_LABEL",               scope="site",                      default="",                           preserve=True,               comment="The display name of this site."),
@@ -362,9 +361,9 @@ class PriorityEntryStore:
     def load(self) -> dict:
         """Return a copy of this streamer's saved record, or {} if none."""
         try:
-            from .main import _global_json_lock, _load_global_json
-            with _global_json_lock:
-                gdata = _load_global_json()
+            app = self.dashboard.app
+            with app.global_json_lock:
+                gdata = app.load_global_json()
             found = self._find(self._entries(gdata))
             return dict(found) if found else {}
         except Exception as e:
@@ -408,8 +407,6 @@ class PriorityEntryStore:
 
     def _mutate(self, fn, create_if_missing: bool) -> None:
         try:
-            from .main import _update_global_json
-
             def _apply(gdata):
                 entries = self._entries(gdata)
                 target  = self._find(entries)
@@ -428,7 +425,7 @@ class PriorityEntryStore:
                 gdata.setdefault("priorities", {}).setdefault(
                     self.config_id, {"config_files": [], "entries": []}
                 )["entries"] = entries
-            _update_global_json(_apply)
+            self.dashboard.app.update_global_json(_apply)
         except Exception as e:
             _dbg(f"PriorityEntryStore._mutate: {e}")
             pass
@@ -585,12 +582,9 @@ class PriorityEditor:
         self._config_id = _compute_config_id(config_paths)
 
         # Load saved priority data for this config_id.
-        # Deferred import avoids a circular dependency (main imports config_editor
-        # at module scope); by the time _refresh() is ever called both modules are
-        # fully initialised.
-        from .main import _global_json_lock, _load_global_json
-        with _global_json_lock:
-            global_data = _load_global_json()
+        app = self.dashboard.app
+        with app.global_json_lock:
+            global_data = app.load_global_json()
         priorities_block = global_data.get("priorities", {})
         # First time we've ever seen this config_id (e.g. fresh clone, no
         # priority/bypass action has been taken yet) → there is no saved
@@ -716,7 +710,6 @@ class PriorityEditor:
         if not self._config_id:
             return
         config_paths = [site.config_path for site in self.dashboard.sites]
-        from .main import _update_global_json
 
         def _mutate(gdata):
             priorities = gdata.setdefault("priorities", {})
@@ -744,7 +737,7 @@ class PriorityEditor:
                 "config_files": config_paths,
                 "entries":      entries_data,
             }
-        _update_global_json(_mutate)
+        self.dashboard.app.update_global_json(_mutate)
 
         # Invalidate the sort manager's priority cache so the panel re-sorts immediately.
         try:
@@ -2554,11 +2547,11 @@ class SiteSortManager:
         if now - self._prio_cache_ts < 2.0:
             return self._prio_cache
         try:
-            from .main import _global_json_lock, _load_global_json
+            app = self.dashboard.app
             sites     = self.dashboard.sites
             config_id = _compute_config_id([s.config_path for s in sites])
-            with _global_json_lock:
-                global_data = _load_global_json()
+            with app.global_json_lock:
+                global_data = app.load_global_json()
             entries = (global_data.get("priorities", {})
                                   .get(config_id, {})
                                   .get("entries", []))
@@ -2854,11 +2847,9 @@ class GlobalConfigEditor:
 
         # 2. Persist tag overrides to global.json.
         try:
-            from .main import _update_global_json
-
             def _mutate(gdata):
                 gdata["debug_log_tags"] = self._debug_tags_state
-            _update_global_json(_mutate)
+            self.dashboard.app.update_global_json(_mutate)
         except Exception as e:
             _dbg(f"[CONFIG] _save_debug_tags: failed to write global.json: {e}")
 
@@ -2918,11 +2909,6 @@ class GlobalConfigEditor:
 
     def _save_msg_filters(self) -> None:
         """Persist this tag's on/off switch and its per-message overrides."""
-        try:
-            from .main import _update_global_json
-        except ImportError:
-            from main import _update_global_json  # type: ignore[no-redef]
-
         def _mutate(gdata):
             gdata["debug_log_tags"] = self._debug_tags_state
 
@@ -2937,7 +2923,7 @@ class GlobalConfigEditor:
             else:
                 all_filters.pop(self._msg_filters_tag, None)
             gdata["debug_log_message_filters"] = all_filters
-        _update_global_json(_mutate)
+        self.dashboard.app.update_global_json(_mutate)
         _dbg(f"[CONFIG] _save_msg_filters: tag={self._msg_filters_tag!r} "
              f"disabled={sorted(k for k, v in self._msg_filters_state.items() if not v)}")
 

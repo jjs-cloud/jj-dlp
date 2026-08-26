@@ -23,30 +23,16 @@ so it's clear which streamer's subfolder they live in.
 
 Keybinds (active only while the "File Manager" tab is selected)
 -----------------------------------------------------------------
-    UP / DOWN     - move the selection (over both folder and file rows)
-    ENTER         - on a file: open it with the OS default app
-                    on a folder row: toggle collapse/expand
-    SPACE         - on a file: open its containing folder, with the file
+    UP / DOWN     - move the file selection
+    ENTER         - open the selected file with the OS default app
+    SPACE         - open the file's containing folder, with the file
                     pre-selected/highlighted
-                    on a folder row: open that folder
     DELETE        - remove the selected file (Trash or permanent delete,
-                    see "Delete mode" below); no-op on a folder row
+                    see "Delete mode" below)
     S             - open the sort-order popup (persisted to global.json)
     T             - toggle delete mode between Trash and Permanent Delete
                     (persisted to global.json)
-    M             - open the "File Options" popup for the selected file;
-                    no-op on a folder row
-
-When the global COLLAPSIBLE_FOLDERS key is on (default), files are grouped
-by their first-level subfolder (e.g. the per-streamer folders created by
-SUBFOLDERS) into collapsible/expandable folder rows. This grouping is
-only active when the sort order is "Name (A-Z)" or "Name (Z-A)"; for any
-other sort key, files are shown flat without collapsible folders.
-
-Additionally, when multiple OUTPUT_DIRs exist and the same conditions
-apply, the OUTPUT_DIR headers themselves become collapsible folder rows,
-hiding all files under that directory when collapsed.
-Collapse state is in-memory for the session only.
+    M             - open the "File Options" popup for the selected file
 
 File Options
 ---------------------
@@ -110,7 +96,6 @@ Controlled by the ``file_manager.delete_mode`` key in global.json, one of:
 Press T inside the File Manager tab to flip between the two at any time.
 """
 
-from ast import Return
 import os
 import re
 import shutil
@@ -147,8 +132,6 @@ IS_MAC = platform.system() == "Darwin"
 POLL_INTERVAL_S = 1.0      # how often we re-scan OUTPUT_DIRs
 IDLE_THRESHOLD_S = 3.0     # size unchanged for this long => IDLE
 STATUS_MSG_TTL_S = 4.0     # how long an inline status/error message lingers
-# How long the sort‑mode transient popup stays visible after cycling
-SORT_TRANSIENT_TTL_S = 2.0
 
 DELETE_MODE_TRASH = "trash"
 DELETE_MODE_PERMANENT = "permanent"
@@ -156,8 +139,8 @@ DELETE_MODE_DEFAULT = DELETE_MODE_TRASH
 
 # ── Sort options for the File Manager tab (mirrors the Dashboard's "S" sort popup) ──
 SORT_OPTIONS_FM = [
-    ("name_asc",       "Name (A-Z) (grouped)"),
-    ("name_desc",      "Name (Z-A) (grouped)"),
+    ("name_asc",       "Name (A-Z)"),
+    ("name_desc",      "Name (Z-A)"),
     ("status_writing", "Status (Writing first)"),
     ("status_idle",    "Status (Idle first)"),
     ("modified_new",   "Date Modified (Newest first)"),
@@ -386,18 +369,10 @@ class FileManagerTab:
         # Flattened, already-sorted rows ready to draw:
         #   ("header", label_text, None)
         #   ("empty",  text,       None)
-        #   ("folder", abs_path,   {"name": ..., "count": N, "collapsed": bool, "is_output_dir": bool})
         #   ("file",   path,       record_dict)
         self._rows = []
 
         self._selected_path = None
-        # "file" or "folder" — which kind of row is currently selected.
-        self._selected_kind = "file"
-        # Absolute path when _selected_kind == "folder" (could be OUTPUT_DIR or subfolder).
-        self._selected_folder = None
-        # Absolute paths (OUTPUT_DIRs and subfolders) collapsed by the user this session
-        # (gated by the COLLAPSIBLE_FOLDERS global key; never persisted).
-        self._collapsed = set()
         self._scroll = 0
         self._at_top = False
         self._last_visible = 1  # rows visible in the list viewport, updated on draw
@@ -407,7 +382,12 @@ class FileManagerTab:
         self._status_msg_ts = 0.0
 
         self._sort_key, self._delete_mode = self._load_settings()
-        self._sort_popup_until = 0.0          # epoch when transient sort popup expires
+
+        self.popup_open = False
+        self._popup_sel = self._sort_idx(self._sort_key)
+        self._popup_scroll = 0
+
+        # "File Options" menu popup (M key)
         self._menu_open = False
         self._menu_sel = 0
 
@@ -478,12 +458,11 @@ class FileManagerTab:
 
     # ── Settings persistence (global.json) ─────────────────────────────────
 
-    @staticmethod
-    def _load_settings():
+    def _load_settings(self):
         try:
-            from .main import _load_global_json, _global_json_lock
-            with _global_json_lock:
-                data = _load_global_json()
+            app = self.dashboard.app
+            with app.global_json_lock:
+                data = app.load_global_json()
             fm = data.get("file_manager", {}) if isinstance(data, dict) else {}
             sort_key = fm.get("sort_key", FM_SORT_DEFAULT)
             if sort_key not in _FM_SORT_KEYS:
@@ -498,13 +477,11 @@ class FileManagerTab:
 
     def _save_settings(self):
         try:
-            from .main import _update_global_json
-
             def _mutate(data):
                 fm = data.setdefault("file_manager", {})
                 fm["sort_key"] = self._sort_key
                 fm["delete_mode"] = self._delete_mode
-            _update_global_json(_mutate)
+            self.dashboard.app.update_global_json(_mutate)
         except Exception as e:
             dbg(f"_save_settings: {e}")
             pass
@@ -718,187 +695,68 @@ class FileManagerTab:
             return rec.get("rate", 0.0)
         return _natural_sort_key(os.path.basename(path))
 
-    @staticmethod
-    def _collapsible_folders_enabled() -> bool:
-        """True when the global COLLAPSIBLE_FOLDERS key is on."""
-        try:
-            from .main import load_global_config
-            return bool(load_global_config().get("collapsible_folders", True))
-        except Exception as e:
-            dbg(f"_collapsible_folders_enabled: {e}")
-            return True
-
     def _rebuild_rows(self, dirs):
         reverse = self._sort_key in _FM_SORT_REVERSE
         rows = []
         multi = len(dirs) > 1
-
-        # OUTPUT_DIR rows: always collapsible but only shown when multiple dirs
-        collapsible_output_dirs = True
-        # Subfolder grouping: only when global setting is on AND sort is by Name
-        collapsible_subfolders = self._collapsible_folders_enabled() and self._sort_key in ("name_asc", "name_desc")
-
         for label, folder in dirs:
             folder_abs = os.path.abspath(folder)
             files = [p for p, r in self._records.items() if r.get("group_path") == folder_abs]
+            files.sort(key=self._sort_key_fn, reverse=reverse)
+            if multi:
+                rows.append(("header", f"{label}  \u2014  {folder_abs}", None))
+            for p in files:
+                rows.append(("file", p, self._records[p]))
+            if multi and not files:
+                rows.append(("empty", "  (no files)", None))
 
-            # Determine if we show a folder row for this OUTPUT_DIR (only if >1)
-            show_output_dir_row = multi and collapsible_output_dirs
-
-            if show_output_dir_row:
-                collapsed = folder_abs in self._collapsed
-                display_name = f"{label}  \u2014  {folder_abs}"
-                rows.append(("folder", folder_abs,
-                             {"name": display_name,
-                              "count": len(files),
-                              "collapsed": collapsed,
-                              "is_output_dir": True,
-                              "depth": 0}))
-                if collapsed:
-                    # Skip all contents under this OUTPUT_DIR
-                    continue
-
-            # --- Now display the files inside this OUTPUT_DIR ---
-            if collapsible_subfolders:
-                # Build a recursive folder structure
-                # We'll create a map: full_abs_path -> list of files directly in that folder
-                folder_map = {}
-                for p in files:
-                    parent = os.path.dirname(p)
-                    folder_map.setdefault(parent, []).append(p)
-
-                def process_folder(dir_path, depth):
-                    # Get files directly in this folder
-                    file_list = folder_map.get(dir_path, [])
-                    file_list.sort(key=self._sort_key_fn, reverse=reverse)
-
-                    # Find immediate subfolders (directories that contain files)
-                    children = set()
-                    for fpath in files:
-                        parent = os.path.dirname(fpath)
-                        if parent != dir_path and parent.startswith(dir_path + os.sep):
-                            rel = os.path.relpath(parent, dir_path)
-                            first_part = rel.split(os.sep)[0]
-                            child_path = os.path.join(dir_path, first_part)
-                            children.add(child_path)
-
-                    # Process each child subfolder recursively
-                    for child_path in sorted(children, key=lambda x: os.path.basename(x)):
-                        collapsed_child = child_path in self._collapsed
-                        child_name = os.path.basename(child_path)
-                        # Count files inside this child subtree
-                        count = sum(1 for f in files if f.startswith(child_path + os.sep))
-                        rows.append(("folder", child_path,
-                                     {"name": child_name,
-                                      "count": count,
-                                      "collapsed": collapsed_child,
-                                      "is_output_dir": False,
-                                      "depth": depth + 1}))
-                        if not collapsed_child:
-                            process_folder(child_path, depth + 1)
-
-                    # Now add files directly in this folder (after subfolders)
-                    for p in file_list:
-                        rows.append(("file", p, self._records[p]))
-
-                # Start processing from the OUTPUT_DIR root (depth=0)
-                process_folder(folder_abs, 0)
-
-            else:
-                # Flat listing: just sort all files directly
-                files.sort(key=self._sort_key_fn, reverse=reverse)
-                for p in files:
-                    rows.append(("file", p, self._records[p]))
-
-            # Add "(no files)" row if appropriate
-            if not files:
-                if show_output_dir_row:
-                    rows.append(("empty", "  (no files)", None))
-                elif multi:
-                    pass
-                else:
-                    # Single OUTPUT_DIR, no folder row – show "(no files)" directly
-                    rows.append(("empty", "  (no files)", None))
-
-        # Transient "Moving" section...
+        # Transient "Moving" section: only present while a Move is actively
+        # writing its output file. Always shown as its own section (with a
+        # header), independent of how many OUTPUT_DIRs are configured, and
+        # disappears the instant the move finishes.
         if self._moving_records:
             rows.append(("header", "Moving", None))
             for p, rec in self._moving_records.items():
                 rows.append(("file", p, rec))
 
-        # --- Keep selection valid (unchanged) ---
-        old_keys = [("folder", r[1]) if r[0] == "folder" else ("file", r[1])
-                    for r in self._rows if r[0] in ("folder", "file")]
-        cur_key = (self._selected_kind,
-                   self._selected_folder if self._selected_kind == "folder" else self._selected_path)
-        old_pos = old_keys.index(cur_key) if cur_key in old_keys else None
+        # Remember where the current selection sat among the *old* file rows,
+        # so that if it vanishes (fixup/move/trim finishing, deleted
+        # externally, etc.) we can land on its neighbor instead of jumping
+        # back to the top of the list.
+        old_file_paths = [r[1] for r in self._rows if r[0] == "file"]
+        old_pos = None
+        if self._selected_path in old_file_paths:
+            old_pos = old_file_paths.index(self._selected_path)
 
         self._rows = rows
 
-        new_keys = [("folder", r[1]) if r[0] == "folder" else ("file", r[1])
-                    for r in rows if r[0] in ("folder", "file")]
-        if cur_key not in new_keys:
-            if old_pos is not None and new_keys:
-                new_pos = min(old_pos, len(new_keys) - 1)
-                kind, ident = new_keys[new_pos]
-            elif new_keys:
-                kind, ident = new_keys[0]
+        # Keep selection valid.
+        file_paths = [r[1] for r in rows if r[0] == "file"]
+        if self._selected_path not in file_paths:
+            if old_pos is not None and file_paths:
+                # Land on whatever now occupies the same (or nearest lower)
+                # position, mirroring how the list "shifts up" underneath us.
+                new_pos = min(old_pos, len(file_paths) - 1)
+                self._selected_path = file_paths[new_pos]
             else:
-                kind, ident = "file", None
-            self._selected_kind = kind
-            if kind == "file":
-                self._selected_path = ident
-                self._selected_folder = None
-            else:
-                self._selected_folder = ident
-                self._selected_path = None
-
-    def _toggle_folder_collapsed(self, abs_path: str) -> None:
-        """Toggle collapse/expand for a folder row (OUTPUT_DIR or subfolder)."""
-        if abs_path in self._collapsed:
-            self._collapsed.discard(abs_path)
-        else:
-            self._collapsed.add(abs_path)
-        self._rebuild_rows(self._get_output_dirs())
+                self._selected_path = file_paths[0] if file_paths else None
 
     # ── Selection movement ──────────────────────────────────────────────────
 
-    def _select_row(self, row_idx) -> None:
-        """Set selection state (_selected_kind/_selected_path/_selected_folder)
-        from a row index into self._rows."""
-        kind, ident = self._rows[row_idx][0], self._rows[row_idx][1]
-        self._selected_kind = kind
-        if kind == "file":
-            self._selected_path = ident
-            self._selected_folder = None
-        else:
-            self._selected_folder = ident
-            self._selected_path = None
-
-    def _cur_selectable_row_idx(self):
-        """Index into self._rows of the currently selected folder/file row, or None."""
-        cur_key = (self._selected_kind,
-                   self._selected_folder if self._selected_kind == "folder" else self._selected_path)
-        for i, r in enumerate(self._rows):
-            if r[0] in ("folder", "file"):
-                key = ("folder", r[1]) if r[0] == "folder" else ("file", r[1])
-                if key == cur_key:
-                    return i
-        return None
-
     def move_selection(self, delta):
-        sel_indices = [i for i, r in enumerate(self._rows) if r[0] in ("folder", "file")]
-        if not sel_indices:
+        file_indices = [i for i, r in enumerate(self._rows) if r[0] == "file"]
+        if not file_indices:
             self._selected_path = None
-            self._selected_folder = None
             return
-        cur_row_idx = self._cur_selectable_row_idx()
+        cur_row_idx = next(
+            (i for i in file_indices if self._rows[i][1] == self._selected_path), None
+        )
         if cur_row_idx is None:
-            pos = 0 if delta >= 0 else len(sel_indices) - 1
+            pos = 0 if delta >= 0 else len(file_indices) - 1
         else:
-            pos = sel_indices.index(cur_row_idx) + delta
-            pos = max(0, min(len(sel_indices) - 1, pos))
-        self._select_row(sel_indices[pos])
+            pos = file_indices.index(cur_row_idx) + delta
+            pos = max(0, min(len(file_indices) - 1, pos))
+        self._selected_path = self._rows[file_indices[pos]][1]
 
     def move_selection_page(self, direction):
         """Move the selection by a page (PageUp/PageDown), rather than jumping
@@ -906,24 +764,28 @@ class FileManagerTab:
         page = max(1, self._last_visible - 1)
         delta = -page if direction == "up" else page
         self.move_selection(delta)
-        sel_indices = [i for i, r in enumerate(self._rows) if r[0] in ("folder", "file")]
-        self._at_top = bool(sel_indices) and self._cur_selectable_row_idx() == sel_indices[0]
+        file_indices = [i for i, r in enumerate(self._rows) if r[0] == "file"]
+        if file_indices and self._selected_path == self._rows[file_indices[0]][1]:
+            self._at_top = True
+        else:
+            self._at_top = False
 
     def move_selection_edge(self, edge):
         """Move the selection straight to the first/last row (Home/End)."""
-        sel_indices = [i for i, r in enumerate(self._rows) if r[0] in ("folder", "file")]
-        if not sel_indices:
+        file_indices = [i for i, r in enumerate(self._rows) if r[0] == "file"]
+        if not file_indices:
             self._selected_path = None
-            self._selected_folder = None
             return
-        target = sel_indices[0] if edge == "home" else sel_indices[-1]
-        self._select_row(target)
+        target = file_indices[0] if edge == "home" else file_indices[-1]
+        self._selected_path = self._rows[target][1]
         self._at_top = (edge == "home")
 
     # ── Key handling ─────────────────────────────────────────────────────────
 
     def handle_key(self, key) -> bool:
         """Returns True if the key was consumed by the File Manager tab."""
+        if self.popup_open:
+            return self._handle_popup_key(key)
         if self._fixup_open:
             return self._handle_fixup_popup_key(key)
         if self._move_filename_open:
@@ -947,8 +809,9 @@ class FileManagerTab:
             return True
         if key in (curses.KEY_UP,):
             self.move_selection(-1)
-            sel_indices = [i for i, r in enumerate(self._rows) if r[0] in ("folder", "file")]
-            self._at_top = bool(sel_indices) and self._cur_selectable_row_idx() == sel_indices[0]
+            file_indices = [i for i, r in enumerate(self._rows) if r[0] == "file"]
+            if file_indices and self._selected_path == self._rows[file_indices[0]][1]:
+                self._at_top = True
             return True
         if key in (curses.KEY_DOWN,):
             self.move_selection(1)
@@ -961,53 +824,31 @@ class FileManagerTab:
             self.move_selection_edge("end")
             return True
         if key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
-            if self._selected_kind == "folder" and self._selected_folder:
-                self._toggle_folder_collapsed(self._selected_folder)
-            elif self._selected_path:
+            if self._selected_path:
                 ok, err = open_file(self._selected_path)
                 if not ok:
                     self._set_status(f"Could not open file: {err}")
             return True
         if key == ord(' '):
-            if self._selected_kind == "folder" and self._selected_folder:
-                ok, err = open_file(self._selected_folder)
-                if not ok:
-                    self._set_status(f"Could not open folder: {err}")
-            elif self._selected_path:
+            if self._selected_path:
                 ok, err = open_containing_folder(self._selected_path)
                 if not ok:
                     self._set_status(f"Could not open folder: {err}")
             return True
-        if key in (ord('s'), ord('S')) and not self.any_popup_open():
-            # If the timer is already active, cycle to the next mode.
-            # Otherwise, just show the current sort options without changing.
-            if time.time() < self._sort_popup_until:
-                self._cycle_sort(cycle=True)
-            else:
-                self._cycle_sort(cycle=False)
+        if key in (curses.KEY_DC, curses.KEY_BACKSPACE, 127):
+            self._delete_selected()
             return True
-        if key in (curses.KEY_DC,):
-            if self._selected_kind == "file" and self._selected_path:
-                self._delete_selected()
+        if key in (ord('s'), ord('S')):
+            self.open_popup()
             return True
         if key in (ord('t'), ord('T')):
             self._toggle_delete_mode()
             return True
         if key in (ord('m'), ord('M')):
-            if self._selected_kind == "file" and self._selected_path:
+            if self._selected_path:
                 self.open_menu_popup()
             return True
         return False
-
-    def _cycle_sort(self, cycle=True):
-        """Show the sort popup; if cycle=True, advance to the next sort mode."""
-        if cycle:
-            idx = _FM_SORT_KEYS.index(self._sort_key)
-            idx = (idx + 1) % len(_FM_SORT_KEYS)
-            self._sort_key = _FM_SORT_KEYS[idx]
-            self._save_settings()
-            self._rebuild_rows(self._get_output_dirs())
-        self._sort_popup_until = time.time() + SORT_TRANSIENT_TTL_S
 
     def _toggle_delete_mode(self):
         self._delete_mode = (
@@ -1124,17 +965,99 @@ class FileManagerTab:
         self._status_msg = msg
         self._status_msg_ts = time.time()
 
+    # ── Sort popup ───────────────────────────────────────────────────────────
+
+    def open_popup(self):
+        self._popup_sel = self._sort_idx(self._sort_key)
+        self._popup_scroll = 0
+        self.popup_open = True
+
+    def close_popup(self):
+        self.popup_open = False
+
+    def _handle_popup_key(self, key) -> bool:
+        n = len(SORT_OPTIONS_FM)
+        if key == 27:  # Esc -> cancel
+            self.close_popup()
+        elif key == curses.KEY_UP:
+            self._popup_sel = max(0, self._popup_sel - 1)
+        elif key == curses.KEY_DOWN:
+            self._popup_sel = min(n - 1, self._popup_sel + 1)
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459, ord(' ')):
+            new_key = _FM_SORT_KEYS[self._popup_sel]
+            if new_key != self._sort_key:
+                self._sort_key = new_key
+                self._save_settings()
+                self._rebuild_rows(self._get_output_dirs())
+            self.close_popup()
+        # All other keys are consumed so nothing leaks to the dashboard.
+        return True
+
+    @staticmethod
+    def _sort_idx(sort_key: str) -> int:
+        try:
+            return _FM_SORT_KEYS.index(sort_key)
+        except ValueError:
+            return 0
+
+    def draw_popup(self, stdscr) -> None:
+        db = self.dashboard
+        h, w = stdscr.getmaxyx()
+        n = len(SORT_OPTIONS_FM)
+
+        box_w = min(53, w - 4)
+        box_h = min(n + 4, h - 4)
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1),
+                           theme.attr(db, "file_manager_filemanagertab_draw_popup_normal_1"))
+
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_CHROME)
+        db.safe_addstr(stdscr, by1, bx1 + 2, " SORT FILES ",
+                       theme.attr(db, "file_manager_filemanagertab_draw_popup_chrome"))
+        db.safe_addstr(stdscr, by2, bx1 + 2,
+                       " Enter: Select  Esc: Cancel ",
+                       theme.attr(db, "file_manager_filemanagertab_draw_popup_invhead"))
+
+        visible = box_h - 3
+
+        if self._popup_sel < self._popup_scroll:
+            self._popup_scroll = self._popup_sel
+        elif self._popup_sel >= self._popup_scroll + visible:
+            self._popup_scroll = self._popup_sel - visible + 1
+
+        for i in range(self._popup_scroll, min(n, self._popup_scroll + visible)):
+            sort_key, label = SORT_OPTIONS_FM[i]
+            row_y = by1 + 1 + (i - self._popup_scroll)
+            is_sel = (i == self._popup_sel)
+            is_cur = (sort_key == self._sort_key)
+            prefix = "> " if is_sel else ("* " if is_cur else "  ")
+            if is_sel:
+                attr = theme.attr(db, "file_manager_filemanagertab_draw_popup_hilight")
+            elif is_cur:
+                attr = theme.attr(db, "file_manager_filemanagertab_draw_popup_live")
+            else:
+                attr = theme.attr(db, "file_manager_filemanagertab_draw_popup_normal_2")
+            db.safe_addstr(stdscr, row_y, bx1 + 2,
+                           (prefix + label)[:box_w - 4], attr)
+
     # ── "File Options" popup (M key) ────────────────────────────────────────
 
     def any_popup_open(self) -> bool:
         """True if any of this tab's popups (sort / menu / fixup / move) is open."""
-        return (self._menu_open or self._fixup_open
+        return (self.popup_open or self._menu_open or self._fixup_open
                 or self._move_open or self._move_filename_open
                 or self._trim_open or self._split_open or self._split_confirm_open)
 
     def draw_popups(self, stdscr) -> None:
         """Draw whichever of this tab's popups is currently open."""
-        if self._menu_open:
+        if self.popup_open:
+            self.draw_popup(stdscr)
+        elif self._menu_open:
             self.draw_menu_popup(stdscr)
         elif self._fixup_open:
             self.draw_fixup_popup(stdscr)
@@ -1148,54 +1071,6 @@ class FileManagerTab:
             self.draw_split_confirm_popup(stdscr)
         elif self._split_open:
             self.draw_split_popup(stdscr)
-        # Transient sort popup (display only, no interaction)
-        if time.time() < self._sort_popup_until:
-            self._draw_sort_transient_popup(stdscr)
-
-    def _draw_sort_transient_popup(self, stdscr):
-        """Draw a styled list popup showing all sort options,
-        with the current mode highlighted – exactly like the color‑schemes popup.
-        """
-        db = self.dashboard
-        h, w = stdscr.getmaxyx()
-
-        options = SORT_OPTIONS_FM
-        n = len(options)
-
-        # Compute box dimensions (matching the color‑schemes popup style)
-        label_width = max(len(label) for _, label in options) + 4
-        title = " SORT FILES "
-        footer = " S: next sort "
-        box_w = min(max(len(title), label_width + 4, len(footer) + 4) + 4, w - 4)
-        box_h = min(n + 4, h - 4)          # title row + n rows + footer row + borders
-        by1 = (h - box_h) // 2
-        bx1 = (w - box_w) // 2
-        by2 = by1 + box_h
-        bx2 = bx1 + box_w
-
-        # Fill background
-        for y in range(by1, by2 + 1):
-            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1),
-                           theme.attr(db, "main_jjdlpdashboard_draw_scheme_popup_normal_1"))
-
-        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_CHROME)
-        db.safe_addstr(stdscr, by1, bx1 + 2, title,
-                       theme.attr(db, "main_jjdlpdashboard_draw_scheme_popup_hilight"))
-        db.safe_addstr(stdscr, by2, bx1 + 2, footer,
-                       theme.attr(db, "main_jjdlpdashboard_draw_scheme_popup_invhead"))
-
-        # List each sort option
-        for i, (sort_key, label) in enumerate(options):
-            row_y = by1 + 2 + i
-            if row_y >= by2:
-                break
-            is_current = (sort_key == self._sort_key)
-            prefix = "* " if is_current else "  "
-            attr = (theme.attr(db, "main_jjdlpdashboard_draw_scheme_popup_live")
-                    if is_current
-                    else theme.attr(db, "main_jjdlpdashboard_draw_scheme_popup_normal_2"))
-            db.safe_addstr(stdscr, row_y, bx1 + 2,
-                           (prefix + label)[:box_w - 4], attr)
 
     def open_menu_popup(self):
         self._menu_sel = 0
@@ -1587,11 +1462,6 @@ class FileManagerTab:
         if not path or not os.path.isfile(path):
             self._set_status("Move failed: file no longer exists")
             return
-        # Captured before the move, same as the delete flow, so a
-        # now-empty source subfolder can be cleaned up afterward.
-        rec = self._records.get(path, {})
-        parent_dir = os.path.dirname(os.path.abspath(path))
-        output_dir_root = rec.get("group_path")
         with self._move_lock:
             if self._move_busy:
                 self._set_status("A Move is already running - please wait")
@@ -1613,17 +1483,14 @@ class FileManagerTab:
         self._set_status(f"Move started: {os.path.basename(path)}")
         t = threading.Thread(
             target=self._move_worker,
-            args=(path, dest_root, filename, do_subfolder, do_fixup, final_path,
-                  parent_dir, output_dir_root),
+            args=(path, dest_root, filename, do_subfolder, do_fixup, final_path),
             daemon=True,
         )
         t.start()
 
-    def _move_worker(self, path, dest_root, filename, do_subfolder, do_fixup, final_path,
-                      parent_dir, output_dir_root):
+    def _move_worker(self, path, dest_root, filename, do_subfolder, do_fixup, final_path):
         try:
-            _ok, msg = self._do_move(path, dest_root, filename, do_subfolder, do_fixup, final_path,
-                                      parent_dir, output_dir_root)
+            _ok, msg = self._do_move(path, dest_root, filename, do_subfolder, do_fixup, final_path)
             self._set_status(msg)
         except Exception as exc:
             dbg(f"_move_worker: {exc}")
@@ -1635,8 +1502,7 @@ class FileManagerTab:
                 self._move_dest_path = None
                 self._moving_records.pop(final_path, None)
 
-    def _do_move(self, path, dest_root, filename, do_subfolder, do_fixup, final_path,
-                 parent_dir, output_dir_root):
+    def _do_move(self, path, dest_root, filename, do_subfolder, do_fixup, final_path):
         """Runs on a background thread. Returns (ok, status_message).
         *final_path* is the exact destination path, already computed (and
         its parent folder already created) by _compute_move_destination."""
@@ -1695,8 +1561,7 @@ class FileManagerTab:
             except OSError as exc:
                 return False, f"Move failed: {exc}"
 
-        folder_note = self._maybe_delete_empty_folder(parent_dir, output_dir_root)
-        return True, f"Move complete: {final_path}{folder_note}"
+        return True, f"Move complete: {final_path}"
 
     @staticmethod
     def _derive_streamer_name(path, group_path):
@@ -2154,11 +2019,13 @@ class FileManagerTab:
 
     def _split_max_row(self):
         """Highest selectable row index in the split popup. The "Restart the
-        recording now" row is always shown, but selecting it without an
-        active recording will result in an error message."""
-        # Always show the restart row
-        return SPLIT_ROW_RESTART
-        
+        recording now" row only exists for files jj-dlp is actively recording
+        right now; otherwise the popup ends at the Stop Job row."""
+        site, _streamer = self._find_recording_owner(self._split_target or "")
+        if site is not None:
+            return SPLIT_ROW_RESTART
+        return SPLIT_ROW_STOP
+
     def _find_recording_owner(self, path):
         """Return (site, streamer) whose yt-dlp process is currently writing
         *path*, or (None, None) when no site is recording that exact file
@@ -2182,15 +2049,13 @@ class FileManagerTab:
         """"Restart the recording instead": force the SPLIT_AFTER split for the
         streamer currently recording *path*, so the current file is renamed
         to _partN and recording continues into the next part. Only valid for
-        files jj-dlp is actively recording. Returns True on success, False if
-        no active recording is found (and sets an error status)."""        
+        files jj-dlp is actively recording."""
         site, streamer = self._find_recording_owner(path)
         if site is None or not streamer:
-            self._set_status("Restart failed: this file is not currently being recorded.")
-            return False
+            self._set_status("Restart failed: this file is not being recorded")
+            return
         site.request_manual_split(streamer)
         self._set_status(f"Recording restart requested: {streamer}")
-        return True
 
     def _handle_split_popup_key(self, key) -> bool:
         path = self._split_target
@@ -2224,10 +2089,8 @@ class FileManagerTab:
                 self.close_split_popup()
                 self.open_split_confirm_popup(path)
             elif self._split_cursor == SPLIT_ROW_RESTART:
-                # Attempt restart; only close the popup if it succeeds
-                if self._restart_recording_now(path):
-                    self.close_split_popup()
-                # If restart failed, an error status is already set and the popup stays open
+                self.close_split_popup()
+                self._restart_recording_now(path)
             return True
 
         buf, attr_name = self._split_active_buf()
@@ -2336,8 +2199,9 @@ class FileManagerTab:
                            theme.attr(db, "file_manager_filemanagertab_draw_split_popup_hilight_1"))
             return
 
+        restart_shown = (self._split_max_row() == SPLIT_ROW_RESTART)
         box_w = min(75, w - 4)
-        box_h = min(15, h - 4)   # enough room for all rows (including restart)
+        box_h = min(14 + (1 if restart_shown else 0), h - 4)
         by1 = (h - box_h) // 2
         bx1 = (w - box_w) // 2
         by2 = by1 + box_h
@@ -2397,14 +2261,14 @@ class FileManagerTab:
         db.safe_addstr(stdscr, stop_row_y, bx1 + 2,
                        f"{prefix}Stop Job"[:box_w - 4], attr)
 
-        # Always draw the restart row
-        restart_row_y = stop_row_y + 2
-        is_sel = (self._split_cursor == SPLIT_ROW_RESTART)
-        prefix = "> " if is_sel else "  "
-        attr = (theme.attr(db, "file_manager_filemanagertab_draw_split_popup_hilight_5")) if is_sel \
-            else theme.attr(db, "file_manager_filemanagertab_draw_split_popup_normal_6")
-        db.safe_addstr(stdscr, restart_row_y, bx1 + 2,
-                       f"{prefix}Restart the recording instead"[:box_w - 4], attr)
+        if restart_shown:
+            restart_row_y = stop_row_y + 2
+            is_sel = (self._split_cursor == SPLIT_ROW_RESTART)
+            prefix = "> " if is_sel else "  "
+            attr = (theme.attr(db, "file_manager_filemanagertab_draw_split_popup_hilight_5")) if is_sel \
+                else theme.attr(db, "file_manager_filemanagertab_draw_split_popup_normal_6")
+            db.safe_addstr(stdscr, restart_row_y, bx1 + 2,
+                           f"{prefix}Restart the recording instead"[:box_w - 4], attr)
 
     # ── "Split" stop confirmation popup ─────────────────────────────────────
 
@@ -2458,12 +2322,11 @@ class FileManagerTab:
     # ── Split job (runs ffmpeg on a background thread; killed, not waited,
     #    on Stop Job) ───────────────────────────────────────────────────────
 
-    @staticmethod
-    def _probe_duration_seconds(path):
+    def _probe_duration_seconds(self, path):
         """Return the media duration of *path* in seconds (float), or None."""
         try:
             from .main import _resolve_ffprobe_path
-            ffprobe_path = _resolve_ffprobe_path()
+            ffprobe_path = _resolve_ffprobe_path(self.dashboard.app)
         except Exception as e:
             dbg(f"_probe_duration_seconds: {e}")
             ffprobe_path = None
@@ -2652,7 +2515,11 @@ class FileManagerTab:
         visible = max(1, list_y2 - list_y1)
         self._last_visible = visible
 
-        sel_row = self._cur_selectable_row_idx()
+        sel_row = None
+        for i, r in enumerate(self._rows):
+            if r[0] == "file" and r[1] == self._selected_path:
+                sel_row = i
+                break
         if sel_row is not None:
             if sel_row < self._scroll:
                 self._scroll = sel_row
@@ -2679,36 +2546,16 @@ class FileManagerTab:
             elif kind == "empty":
                 db.safe_addstr(stdscr, row_y, x1 + 3, payload[:avail_w],
                                theme.attr(db, "file_manager_filemanagertab_draw_dim_2"))
-            elif kind == "folder":
-                abs_path = payload
-                is_sel = (self._selected_kind == "folder" and self._selected_folder == abs_path)
-                arrow = "\u25ba" if rec["collapsed"] else "\u25bc"
-                label = f"{arrow} {rec['name']}"
-                if rec["collapsed"]:
-                    label += f"  ({rec['count']})"
-                row_attr = (theme.attr(db, "file_manager_filemanagertab_draw_hilight") if is_sel
-                            else theme.attr(db, "file_manager_filemanagertab_draw_system_1"))
-                # Indent based on depth, but only for subfolders (not OUTPUT_DIR)
-                depth = rec.get("depth", 0)
-                indent = 2 * depth if not rec.get("is_output_dir", False) else 0
-                db.safe_addstr(stdscr, row_y, x1 + 2 + indent,
-                               label.ljust(name_w - indent)[:name_w - indent], row_attr)
             else:
                 path = payload
                 group_path = rec.get("group_path")
-                # Compute depth for file indentation
-                depth = 0
                 if group_path and os.path.dirname(os.path.abspath(path)) != os.path.abspath(group_path):
-                    rel_parts = os.path.relpath(path, group_path).replace(os.sep, "/").split("/")
-                    depth = len(rel_parts) - 1          # number of subfolder levels
-                    name = "/".join(rel_parts)          # full relative path (without OUTPUT_DIR root)
+                    # Nested inside a subfolder (e.g. a per-streamer folder
+                    # created by SUBFOLDERS) - show the subfolder-relative
+                    # path so it's clear where the file lives.
+                    name = os.path.relpath(path, group_path).replace(os.sep, "/")
                 else:
-                    depth = 0
                     name = os.path.basename(path)
-
-                # Indent by two spaces per depth level
-                if depth > 0:
-                    name = "  " * depth + name
                 if path in self._split_jobs:
                     name = "*" + name  # a Split job is running for this file
                 status = rec.get("status", "IDLE")

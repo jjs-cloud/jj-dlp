@@ -434,7 +434,7 @@ class Graph:
         self.disk_rate_history.clear()
         try:
             from . import main as _main
-            _main._save_disk_rate_history([])
+            _main._save_disk_rate_history(self.dashboard.app, [])
             self.popup_status = "graph bars cleared"
         except Exception as _e:
             self.popup_status = f"clear failed: {_e}"
@@ -459,7 +459,7 @@ class Graph:
         self.disk_rate_history = deque(bars, maxlen=self.disk_rate_history.maxlen)
         try:
             from . import main as _main
-            _main._save_disk_rate_history(bars)
+            _main._save_disk_rate_history(self.dashboard.app, bars)
             self.popup_status = f"tallest bar cleared ({human_rate(removed)})"
         except Exception as _e:
             self.popup_status = f"clear tallest failed: {_e}"
