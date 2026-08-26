@@ -717,11 +717,13 @@ class FileManagerTab:
         for label, folder in dirs:
             folder_abs = os.path.abspath(folder)
             files = [p for p, r in self._records.items() if r.get("group_path") == folder_abs]
-            collapsed = folder_abs in self._collapsed
-            display_name = f"{label}  \u2014  {folder_abs}" if multi else label
-            rows.append(("folder", folder_abs, {"name": display_name, "count": len(files),
-                                                  "collapsed": collapsed, "is_output_dir": True,
-                                                  "depth": 0}))
+            show_output_dir_row = multi
+            collapsed = show_output_dir_row and folder_abs in self._collapsed
+            if show_output_dir_row:
+                display_name = f"{label}  \u2014  {folder_abs}"
+                rows.append(("folder", folder_abs, {"name": display_name, "count": len(files),
+                                                      "collapsed": collapsed, "is_output_dir": True,
+                                                      "depth": 0}))
             if not collapsed:
                 if collapsible_subfolders:
                     folder_map = {}
@@ -755,7 +757,7 @@ class FileManagerTab:
                     files.sort(key=self._sort_key_fn, reverse=reverse)
                     for path in files:
                         rows.append(("file", path, self._records[path]))
-            if not files and (multi or not collapsible_subfolders) and not collapsed:
+            if not files and not collapsed:
                 rows.append(("empty", "  (no files)", None))
 
         # Transient "Moving" section: only present while a Move is actively
