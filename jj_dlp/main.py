@@ -7468,7 +7468,7 @@ class JJDlpDashboard:
                 return
             site.skip_disabled.discard(username)
             skip_snapshot = set(site.skip_disabled)
-        _save_skip_disabled(site.config_path, skip_snapshot)
+        _save_skip_disabled(self.app, site.config_path, skip_snapshot)
 
     def _handle_mgmt_key(self, key) -> bool:
         action, site_idx = self._mgmt_mode
@@ -7524,7 +7524,7 @@ class JJDlpDashboard:
                         with site.dash_lock:
                             site.skip_disabled.add(username)
                             skip_snapshot = set(site.skip_disabled)
-                        _save_skip_disabled(site.config_path, skip_snapshot)
+                        _save_skip_disabled(self.app, site.config_path, skip_snapshot)
                         site.invalidate_config_cache()
                         self.config_editor.load_config(site.config_path)
                         self.config_editor.priority_editor.force_reload()
