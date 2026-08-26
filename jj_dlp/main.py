@@ -2871,6 +2871,7 @@ def _scan_directory_for_active_file(output_dir: str, streamer: str,
     sidecar never resolved a path. Matches by streamer name only (not an
     exact filename), then confirms the match is actively growing before
     returning it."""
+    dbg(f"[STALL] directory scan: checking {output_dir!r} for streamer={streamer!r}")
     if not os.path.isdir(output_dir):
         return None
     candidates = []
