@@ -33,9 +33,12 @@ Keybinds (active only while the "File Manager" tab is selected)
     T             - toggle delete mode between Trash and Permanent Delete
                     (persisted to global.json)
     M             - open the "File Options" popup for the selected file
+    O             - toggle grouping files by folder/subfolder
+                    (persisted to global.json)
 
-When COLLAPSIBLE_FOLDERS is on (default) and sorting by name, files are grouped
-under collapsible folder rows. Collapse state lasts for the current session.
+When COLLAPSIBLE_FOLDERS is on (default) and grouping is enabled (O key),
+files are grouped under collapsible folder rows. Collapse state lasts for
+the current session.
 
 File Options
 ---------------------
@@ -144,10 +147,8 @@ DELETE_MODE_DEFAULT = DELETE_MODE_TRASH
 
 # ── Sort options for the File Manager tab (mirrors the Dashboard's "S" sort popup) ──
 SORT_OPTIONS_FM = [
-    ("name_asc",       "Name (A-Z) (grouped)"),
-    ("name_desc",      "Name (Z-A) (grouped)"),
-    ("status_writing", "Status (Writing first)"),
-    ("status_idle",    "Status (Idle first)"),
+    ("name_asc",       "Name (A-Z)"),
+    ("name_desc",      "Name (Z-A)"),
     ("modified_new",   "Date Modified (Newest first)"),
     ("modified_old",   "Date Modified (Oldest first)"),
     ("size_desc",      "Size (Largest first)"),
@@ -195,7 +196,7 @@ MOVE_CHECK_ITEMS = [
 # Sort keys for which the underlying comparison needs to be reversed to
 # achieve the labeled order (e.g. "Newest first" means reverse=True on mtime).
 _FM_SORT_REVERSE = {
-    "name_desc", "status_idle", "modified_new", "size_desc", "rate_desc",
+    "name_desc", "modified_new", "size_desc", "rate_desc",
 }
 
 
@@ -390,7 +391,7 @@ class FileManagerTab:
         self._status_msg = ""
         self._status_msg_ts = 0.0
 
-        self._sort_key, self._delete_mode = self._load_settings()
+        self._sort_key, self._delete_mode, self._group_by_folder = self._load_settings()
         self._sort_popup_until = 0.0          # epoch when transient sort popup expires
         self._menu_open = False
         self._menu_sel = 0
@@ -474,10 +475,11 @@ class FileManagerTab:
             delete_mode = fm.get("delete_mode", DELETE_MODE_DEFAULT)
             if delete_mode not in (DELETE_MODE_TRASH, DELETE_MODE_PERMANENT):
                 delete_mode = DELETE_MODE_DEFAULT
-            return sort_key, delete_mode
+            group_by_folder = bool(fm.get("group_by_folder", False))
+            return sort_key, delete_mode, group_by_folder
         except Exception as e:
             dbg(f"_load_settings: {e}")
-            return FM_SORT_DEFAULT, DELETE_MODE_DEFAULT
+            return FM_SORT_DEFAULT, DELETE_MODE_DEFAULT, False
 
     def _save_settings(self):
         try:
@@ -485,6 +487,7 @@ class FileManagerTab:
                 fm = data.setdefault("file_manager", {})
                 fm["sort_key"] = self._sort_key
                 fm["delete_mode"] = self._delete_mode
+                fm["group_by_folder"] = self._group_by_folder
             self.dashboard.app.update_global_json(_mutate)
         except Exception as e:
             dbg(f"_save_settings: {e}")
@@ -698,8 +701,6 @@ class FileManagerTab:
         key = self._sort_key
         if key in ("name_asc", "name_desc"):
             return _natural_sort_key(os.path.basename(path))
-        if key in ("status_writing", "status_idle"):
-            return 0 if rec.get("status") == "WRITING" else 1
         if key in ("modified_new", "modified_old"):
             return int(rec.get("mtime", 0)) // 60 * 60
         if key in ("size_desc", "size_asc"):
@@ -712,8 +713,7 @@ class FileManagerTab:
         reverse = self._sort_key in _FM_SORT_REVERSE
         rows = []
         multi = len(dirs) > 1
-        collapsible_subfolders = (self._collapsible_folders_enabled()
-                                  and self._sort_key in ("name_asc", "name_desc"))
+        collapsible_subfolders = self._collapsible_folders_enabled() and self._group_by_folder
         for label, folder in dirs:
             folder_abs = os.path.abspath(folder)
             files = [p for p, r in self._records.items() if r.get("group_path") == folder_abs]
@@ -923,7 +923,17 @@ class FileManagerTab:
             if self._selected_kind == "file" and self._selected_path:
                 self.open_menu_popup()
             return True
+        if key in (ord('o'), ord('O')):
+            self._toggle_grouping()
+            return True
         return False
+
+    def _toggle_grouping(self):
+        self._group_by_folder = not self._group_by_folder
+        self._save_settings()
+        self._rebuild_rows(self._get_output_dirs())
+        label = "on" if self._group_by_folder else "off"
+        self._set_status(f"Folder grouping turned {label}")
 
     def _cycle_sort(self, cycle=True):
         """Show the sort popup; if cycle=True, advance to the next sort mode."""
@@ -2532,7 +2542,8 @@ class FileManagerTab:
     def draw(self, stdscr, y1, x1, y2, x2) -> None:
         db = self.dashboard
         db.draw_box(stdscr, y1, x1, y2, x2, db.C_CHROME)
-        db.safe_addstr(stdscr, y1, x1 + 2, " FILE MANAGER \u2014 (Press M for File Options) ",
+        db.safe_addstr(stdscr, y1, x1 + 2,
+                       " FILE MANAGER \u2014 (Press M for File Options) (Press O to toggle grouping) ",
                        theme.attr(db, "file_manager_filemanagertab_draw_chrome"))
 
         dirs = self._get_output_dirs()
