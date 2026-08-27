@@ -20,7 +20,7 @@ except ImportError:
 
 
 class ConfigItem:
-    def __init__(self, line_idx: int, is_section: bool, key: str, value: str, has_equals: bool, raw_line: str, comment: str = ""):
+    def __init__(self, line_idx: int, is_section: bool, key: str, value: str, has_equals: bool, raw_line: str, comment: str = "", section: str = ""):
         self.line_idx = line_idx
         self.is_section = is_section
         self.key = key
@@ -28,6 +28,7 @@ class ConfigItem:
         self.has_equals = has_equals
         self.raw_line = raw_line
         self.comment = comment  # Help text parsed from the # line(s) above this key
+        self.section = section  # Section this key lives under (e.g. "General", "Checker")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -38,6 +39,63 @@ class ConfigItem:
 #            False → value is reset to the value in the template config file during an update.
 # comment  : help text shown in the edit popup
 # ══════════════════════════════════════════════════════════════════════════════
+
+# Shared per-file lock: every writer to a site .conf file must hold this,
+# or a stale in-memory copy can silently overwrite a concurrent edit.
+_config_file_locks: dict = {}
+_config_file_locks_guard = threading.Lock()
+
+
+def get_config_file_lock(path: str) -> threading.Lock:
+    """Return the shared write lock for one config file path."""
+    norm = os.path.normcase(os.path.abspath(path))
+    with _config_file_locks_guard:
+        lock = _config_file_locks.get(norm)
+        if lock is None:
+            lock = threading.Lock()
+            _config_file_locks[norm] = lock
+        return lock
+
+
+def _find_key_line(lines: list, section: str, key: str, has_equals: bool) -> Optional[int]:
+    """Return the line index of key within section, or None if not found."""
+    current = None
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if not s or s.startswith("#") or s.startswith(";"):
+            continue
+        if s.startswith("[") and s.endswith("]"):
+            current = s[1:-1]
+            continue
+        if current != section:
+            continue
+        if has_equals:
+            if "=" in s and s.split("=", 1)[0].strip() == key:
+                return i
+        elif s == key:
+            return i
+    return None
+
+
+def _append_line_to_section(lines: list, section: str, new_line: str) -> list:
+    """Append new_line at the end of section, creating it if it's missing."""
+    lines = list(lines)
+    start = next((i for i, line in enumerate(lines) if line.strip() == f"[{section}]"), None)
+    if start is None:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append(f"\n[{section}]\n")
+        lines.append(new_line)
+        return lines
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        s = lines[i].strip()
+        if s.startswith("[") and s.endswith("]"):
+            end = i
+            break
+    lines.insert(end, new_line)
+    return lines
+
 
 class _KeyDef(NamedTuple):
     name:     str
@@ -3642,7 +3700,7 @@ class ConfigEditor:
             if s.startswith("[") and s.endswith("]"):
                 current_section = s[1:-1]
                 if current_section == "General" or current_section in _dlp_sections:
-                    self.items.append(ConfigItem(i, True, current_section, "", False, line, ""))
+                    self.items.append(ConfigItem(i, True, current_section, "", False, line, "", section=current_section))
             else:
                 if current_section == "General":
                     if "=" in s:
@@ -3652,69 +3710,75 @@ class ConfigEditor:
                         if k_stripped.upper() in _GLOBAL_KEYS:
                             continue
                         comment = _KEY_COMMENTS.get(k_stripped.upper(), "")
-                        self.items.append(ConfigItem(i, False, k_stripped, v.strip(), True, line, comment))
+                        self.items.append(ConfigItem(i, False, k_stripped, v.strip(), True, line, comment, section=current_section))
                     else:
                         if s.upper() not in _GLOBAL_KEYS:
                             comment = _KEY_COMMENTS.get(s.upper(), "")
-                            self.items.append(ConfigItem(i, False, s, "", False, line, comment))
+                            self.items.append(ConfigItem(i, False, s, "", False, line, comment, section=current_section))
                 elif current_section in _dlp_sections:
                     if "=" in s:
                         k, v = s.split("=", 1)
                         k_stripped = k.strip()
                         comment = DOWNLOADER_FLAG_COMMENTS.get(k_stripped.upper(), "")
-                        self.items.append(ConfigItem(i, False, k_stripped, v.strip(), True, line, comment))
+                        self.items.append(ConfigItem(i, False, k_stripped, v.strip(), True, line, comment, section=current_section))
                     else:
                         comment = DOWNLOADER_FLAG_COMMENTS.get(s.upper(), "")
-                        self.items.append(ConfigItem(i, False, s, "", False, line, comment))
+                        self.items.append(ConfigItem(i, False, s, "", False, line, comment, section=current_section))
 
         if self.items:
             self.selected_idx = min(self.selected_idx, len(self.items) - 1)
         else:
             self.selected_idx = 0
 
-    def save_file(self):
-        if not self.current_site_path or not self.lines:
-            _dbg(f"[CONFIG] save_file() aborted — site_path={self.current_site_path!r}, lines={len(self.lines) if self.lines else 0}")
-            return
+    def apply_edit(self, item: "ConfigItem", new_val: str) -> "tuple[bool, str]":
+        """Write new_val for item straight to disk, re-reading first.
+        Prevents a concurrent Streamers/Block edit from being silently discarded."""
+        if not self.current_site_path:
+            return False, "Internal error: no config file loaded"
 
-        _dbg(f"[CONFIG] ConfigEditor.save_file() called — site_path={self.current_site_path!r}")
+        _dbg(f"[CONFIG] ConfigEditor.apply_edit() called — site_path={self.current_site_path!r} key={item.key!r}")
 
-        # Create backup
-        backup_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(self.current_site_path))), "backups")
-        _dbg(f"[CONFIG] backup_dir resolved to {backup_dir!r}")
-        try:
-            os.makedirs(backup_dir, exist_ok=True)
-            _dbg(f"[CONFIG] backup_dir created/confirmed OK")
-        except Exception as e:
-            _dbg(f"[CONFIG] ERROR creating backup_dir: {e}")
-        base = os.path.basename(self.current_site_path)
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        backup_path = os.path.join(backup_dir, f"{base}.{timestamp}.bak")
-        _dbg(f"[CONFIG] backup_path={backup_path!r}, source exists={os.path.isfile(self.current_site_path)}")
-        try:
-            shutil.copy2(self.current_site_path, backup_path)
-            _dbg(f"[CONFIG] backup written OK")
-        except Exception as e:
-            _dbg(f"[CONFIG] ERROR writing backup: {e}")
-            self.dashboard.sites[self.selected_site_idx].log_line(f"Failed to backup config: {e}")
+        new_line = f"{item.key} = {new_val}\n" if item.has_equals else f"{new_val}\n"
 
-        # Write new config
-        try:
-            with open(self.current_site_path, "w", encoding="utf-8") as f:
-                f.writelines(self.lines)
-            _dbg(f"[CONFIG] site config written OK ({len(self.lines)} lines)")
-        except Exception as e:
-            _dbg(f"[CONFIG] ERROR writing site config: {e}")
-            self.dashboard.sites[self.selected_site_idx].log_line(f"Failed to save config: {e}")
+        with get_config_file_lock(self.current_site_path):
+            try:
+                with open(self.current_site_path, "r", encoding="utf-8") as f:
+                    fresh_lines = f.readlines()
+            except Exception as e:
+                _dbg(f"[CONFIG] apply_edit: read failed: {e}")
+                return False, f"Could not read config: {e}"
 
-        # Reload
+            idx = _find_key_line(fresh_lines, item.section, item.key, item.has_equals)
+            if idx is not None:
+                fresh_lines[idx] = new_line
+            else:
+                fresh_lines = _append_line_to_section(fresh_lines, item.section, new_line)
+
+            backup_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(self.current_site_path))), "backups")
+            try:
+                os.makedirs(backup_dir, exist_ok=True)
+                base = os.path.basename(self.current_site_path)
+                timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+                shutil.copy2(self.current_site_path, os.path.join(backup_dir, f"{base}.{timestamp}.bak"))
+                _dbg(f"[CONFIG] backup written OK")
+            except Exception as e:
+                _dbg(f"[CONFIG] ERROR writing backup: {e}")
+
+            try:
+                with open(self.current_site_path, "w", encoding="utf-8") as f:
+                    f.writelines(fresh_lines)
+                _dbg(f"[CONFIG] site config written OK ({len(fresh_lines)} lines)")
+            except Exception as e:
+                _dbg(f"[CONFIG] ERROR writing site config: {e}")
+                return False, f"Could not write config: {e}"
+
         try:
             self.load_config(self.current_site_path)
-            _dbg(f"[CONFIG] ConfigEditor.save_file() reload completed items={len(self.items)}")
+            _dbg(f"[CONFIG] ConfigEditor.apply_edit() reload completed items={len(self.items)}")
         except Exception as e:
-            _dbg(f"[CONFIG] ConfigEditor.save_file() reload failed: {e}")
-            if self.current_site_path and self.current_site_path in {site.config_path for site in self.dashboard.sites}:
-                self.dashboard.sites[self.selected_site_idx].log_line(f"Failed to reload config after save: {e}")
+            _dbg(f"[CONFIG] ConfigEditor.apply_edit() reload failed: {e}")
+
+        return True, ""
 
     def draw_tab(self, stdscr, y1, x1, y2, x2):
         # Ensure an initial load if the editor has never loaded a config yet
@@ -4028,18 +4092,9 @@ class ConfigEditor:
                     if not is_valid:
                         self.popup_error = err_msg
                         return True
-                    if 0 <= self.editing_item.line_idx < len(self.lines):
-                        if self.editing_item.has_equals:
-                            self.lines[self.editing_item.line_idx] = f"{self.editing_item.key} = {new_val}\n"
-                        else:
-                            self.lines[self.editing_item.line_idx] = f"{new_val}\n"
-                    else:
-                        self.popup_error = "Internal error: invalid config line"
-                        return True
-                    try:
-                        self.save_file()
-                    except Exception as e:
-                        self.popup_error = f"Save failed: {e}"
+                    ok, err = self.apply_edit(self.editing_item, new_val)
+                    if not ok:
+                        self.popup_error = err
                         return True
                     site = self.sites[self.selected_site_idx]
                     site.trigger_event.set()

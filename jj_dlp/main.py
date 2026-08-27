@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.28.6"
+__version__ = "1.28.7"
 
 import subprocess
 import textwrap
@@ -37,7 +37,7 @@ from .logger import (
     configure_debug_log as _configure_debug_log,
 )
 
-from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS, _compute_config_id, SiteSortManager, SORT_OPTIONS, _SORT_LABELS
+from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS, _compute_config_id, SiteSortManager, SORT_OPTIONS, _SORT_LABELS, get_config_file_lock
 from .config_editor import DOWNLOADER_FLAG_KEYS
 from .config_editor import load_global_config as _load_global_config_typed
 from .file_manager import FileManagerTab
@@ -2318,100 +2318,103 @@ def _modify_config_streamer(config_path: str, username: str, action: str) -> str
     if not username:
         return "No username provided."
 
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-    except Exception as e:
-        dbg(f"_modify_config_streamer: {e}")
-        return f"ERROR reading config: {e}"
+    # Locked so the scheduler, web UI, and management overlay can't race
+    # each other's read-modify-write of this file.
+    with get_config_file_lock(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except Exception as e:
+            dbg(f"_modify_config_streamer: {e}")
+            return f"ERROR reading config: {e}"
 
-    section_starts: dict = {}
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            section_starts[stripped[1:-1]] = i
+        section_starts: dict = {}
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                section_starts[stripped[1:-1]] = i
 
-    def _remove_from_section(sec: str, name: str) -> bool:
-        if sec not in section_starts:
-            return False
-        removed = False
-        sec_line = section_starts[sec]
-        next_sec_line = len(lines)
-        for other_sec, other_line in section_starts.items():
-            if other_line > sec_line:
-                next_sec_line = min(next_sec_line, other_line)
-        to_delete = []
-        for i in range(sec_line + 1, next_sec_line):
-            key = lines[i].strip().split("=")[0].strip().lower()
-            if key == name:
-                to_delete.append(i)
-                removed = True
-        for i in reversed(to_delete):
-            del lines[i]
-            for sec_name in list(section_starts.keys()):
-                if section_starts[sec_name] > i:
-                    section_starts[sec_name] -= 1
-        return removed
+        def _remove_from_section(sec: str, name: str) -> bool:
+            if sec not in section_starts:
+                return False
+            removed = False
+            sec_line = section_starts[sec]
+            next_sec_line = len(lines)
+            for other_sec, other_line in section_starts.items():
+                if other_line > sec_line:
+                    next_sec_line = min(next_sec_line, other_line)
+            to_delete = []
+            for i in range(sec_line + 1, next_sec_line):
+                key = lines[i].strip().split("=")[0].strip().lower()
+                if key == name:
+                    to_delete.append(i)
+                    removed = True
+            for i in reversed(to_delete):
+                del lines[i]
+                for sec_name in list(section_starts.keys()):
+                    if section_starts[sec_name] > i:
+                        section_starts[sec_name] -= 1
+            return removed
 
-    def _add_to_section(sec: str, name: str) -> None:
-        if sec not in section_starts:
-            lines.append(f"\n[{sec}]\n")
-            section_starts[sec] = len(lines) - 1
-        sec_line = section_starts[sec]
-        next_sec_line = len(lines)
-        for other_sec, other_line in section_starts.items():
-            if other_line > sec_line:
-                next_sec_line = min(next_sec_line, other_line)
-        for i in range(sec_line + 1, next_sec_line):
-            key = lines[i].strip().split("=")[0].strip().lower()
-            if key == name:
-                return
-        insert_at = next_sec_line
-        while insert_at > sec_line + 1 and lines[insert_at - 1].strip() == "":
-            insert_at -= 1
-        lines.insert(insert_at, f"{name}\n")
-        for sec_name in list(section_starts.keys()):
-            if section_starts[sec_name] >= insert_at:
-                section_starts[sec_name] += 1
-
-    messages = []
-    if action == "add":
-        removed_from_block = _remove_from_section("Block", username)
-        if removed_from_block:
-            messages.append(f"Unblocked '{username}'.")
-        _add_to_section("Streamers", username)
-        messages.append(f"Added '{username}' to [Streamers].")
-    elif action == "remove":
-        removed = _remove_from_section("Streamers", username)
-        messages.append(f"Removed '{username}' from [Streamers]." if removed else f"'{username}' not found.")
-        _add_to_section("Block", username)
-    elif action == "disable":
-        in_streamers = False
-        if "Streamers" in section_starts:
-            sec_line = section_starts["Streamers"]
+        def _add_to_section(sec: str, name: str) -> None:
+            if sec not in section_starts:
+                lines.append(f"\n[{sec}]\n")
+                section_starts[sec] = len(lines) - 1
+            sec_line = section_starts[sec]
             next_sec_line = len(lines)
             for other_sec, other_line in section_starts.items():
                 if other_line > sec_line:
                     next_sec_line = min(next_sec_line, other_line)
             for i in range(sec_line + 1, next_sec_line):
                 key = lines[i].strip().split("=")[0].strip().lower()
-                if key == username:
-                    in_streamers = True
-                    break
-        if in_streamers:
+                if key == name:
+                    return
+            insert_at = next_sec_line
+            while insert_at > sec_line + 1 and lines[insert_at - 1].strip() == "":
+                insert_at -= 1
+            lines.insert(insert_at, f"{name}\n")
+            for sec_name in list(section_starts.keys()):
+                if section_starts[sec_name] >= insert_at:
+                    section_starts[sec_name] += 1
+
+        messages = []
+        if action == "add":
+            removed_from_block = _remove_from_section("Block", username)
+            if removed_from_block:
+                messages.append(f"Unblocked '{username}'.")
+            _add_to_section("Streamers", username)
+            messages.append(f"Added '{username}' to [Streamers].")
+        elif action == "remove":
+            removed = _remove_from_section("Streamers", username)
+            messages.append(f"Removed '{username}' from [Streamers]." if removed else f"'{username}' not found.")
             _add_to_section("Block", username)
-            messages.append(f"Disabled '{username}'.")
-        else:
-            messages.append(f"'{username}' not found in [Streamers].")
+        elif action == "disable":
+            in_streamers = False
+            if "Streamers" in section_starts:
+                sec_line = section_starts["Streamers"]
+                next_sec_line = len(lines)
+                for other_sec, other_line in section_starts.items():
+                    if other_line > sec_line:
+                        next_sec_line = min(next_sec_line, other_line)
+                for i in range(sec_line + 1, next_sec_line):
+                    key = lines[i].strip().split("=")[0].strip().lower()
+                    if key == username:
+                        in_streamers = True
+                        break
+            if in_streamers:
+                _add_to_section("Block", username)
+                messages.append(f"Disabled '{username}'.")
+            else:
+                messages.append(f"'{username}' not found in [Streamers].")
 
-    try:
-        with open(config_path, "w", encoding="utf-8") as f:
-            f.writelines(lines)
-    except Exception as e:
-        dbg(f"_add_to_section: {e}")
-        return f"ERROR writing config: {e}"
+        try:
+            with open(config_path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+        except Exception as e:
+            dbg(f"_add_to_section: {e}")
+            return f"ERROR writing config: {e}"
 
-    return "  ".join(messages)
+        return "  ".join(messages)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
