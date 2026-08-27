@@ -1,0 +1,105 @@
+nodes:
+  - id: start
+    type: start
+    label: "Start jj-dlp"
+    next: parse_args
+
+  - id: parse_args
+    type: action
+    label: "Parse command-line arguments"
+    ref_num: 1
+    next: check_update_flag
+
+  - id: check_update_flag
+    type: decision
+    label: "--update flag present?"
+    ref_num: 2
+    branches:
+      - condition: true
+        next: update_and_exit
+      - condition: false
+        next: acquire_lock
+
+  - id: update_and_exit
+    type: action
+    label: "Perform update and exit"
+    ref_num: 3
+    next: end
+
+  - id: acquire_lock
+    type: decision
+    label: "Acquire single-instance lock?"
+    ref_num: 4
+    branches:
+      - condition: success
+        next: check_zombies
+      - condition: failure
+        next: lock_failed
+
+  - id: lock_failed
+    type: action
+    label: "Print error and exit"
+    ref_num: 5
+    next: end
+
+  - id: check_zombies
+    type: action
+    label: "Check and kill zombie yt-dlp processes"
+    ref_num: 6
+    next: resolve_configs
+
+  - id: resolve_configs
+    type: decision
+    label: "--config provided?"
+    ref_num: 7
+    branches:
+      - condition: yes
+        next: use_provided_configs
+      - condition: no
+        next: auto_discover_configs
+
+  - id: use_provided_configs
+    type: action
+    label: "Use provided config paths"
+    ref_num: 8
+    next: load_global_config
+
+  - id: auto_discover_configs
+    type: action
+    label: "Auto‑discover configs from configs/ folder"
+    ref_num: 9
+    next: load_global_config
+
+  - id: load_global_config
+    type: action
+    label: "Load global.conf"
+    ref_num: 10
+    next: setup_debug
+
+  - id: setup_debug
+    type: action
+    label: "Set up debug logging (DEBUG_LOGS)"
+    ref_num: 11
+    next: create_sites
+
+  - id: create_sites
+    type: action
+    label: "Create SiteState for each config"
+    ref_num: 12
+    next: start_monitors
+
+  - id: start_monitors
+    type: action
+    label: "Start monitor threads for each site"
+    ref_num: 13
+    next: start_dashboard
+
+  - id: start_dashboard
+    type: action
+    label: "Start curses dashboard (run loop)"
+    ref_num: 14
+    next: end
+
+  - id: end
+    type: end
+    label: "Exit / shutdown"

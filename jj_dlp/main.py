@@ -8468,31 +8468,31 @@ def main() -> None:
     parser.add_argument("--config", nargs="+", default=None,
                         help="Path(s) to config file(s). Omit to auto-discover.")
     parser.add_argument("--update", action="store_true", help="Update jj-dlp to the latest version")
-    args = parser.parse_args()
+    args = parser.parse_args() # REF:1
 
-    if args.update:
+    if args.update: # REF:2
         from .updater import perform_update
-        perform_update()
+        perform_update() # REF:3
         sys.exit(0)
 
     # ── Refuse to start a second instance ─────────────────────────────────────
     # Must run before _check_and_kill_zombie_yt_dlps(): otherwise a second
     # instance launched while the first is still recording would see the
     # first instance's live yt-dlp children and misreport them as orphaned.
-    if not acquire_single_instance_lock(app):
+    if not acquire_single_instance_lock(app): # REF:4
         print(
-            f"\njj-dlp v{__version__}  ·  Another instance of jj-dlp appears to be running.\n"
+            f"\njj-dlp v{__version__}  ·  Another instance of jj-dlp appears to be running.\n" # REF:5
             f"\n"
             f"If this is in error, delete 'jj-dlp.instance.lock' (located in the jj_dlp folder) and try again."
         )
         input("\nPress Enter to close...")
         sys.exit(1)
 
-    _check_and_kill_zombie_yt_dlps(app)
+    _check_and_kill_zombie_yt_dlps(app) # REF:6
 
     # ── Config discovery / selection ──────────────────────────────────────────
-    if args.config is not None:
-        config_paths = []
+    if args.config is not None: # REF:7
+        config_paths = [] # REF:8
         for p in args.config:
             ap = os.path.abspath(p)
             if os.path.basename(ap) == _GLOBAL_CONF_NAME:
@@ -8515,7 +8515,7 @@ def main() -> None:
             sys.exit(1)
 
         found = []
-        for f in os.listdir(configs_dir):
+        for f in os.listdir(configs_dir): # REF:9
             if f.endswith(".conf") and os.path.isfile(os.path.join(configs_dir, f)):
                 # global.conf is always loaded silently; never shown in the chooser
                 if f == _GLOBAL_CONF_NAME:
@@ -8536,7 +8536,7 @@ def main() -> None:
             chosen = [found[0]]
         else:
             # Load global.conf to check if we should show the UI
-            global_cfg = load_global_config()
+            global_cfg = load_global_config() # REF:10
             ask_for_config = global_cfg.get("ask_for_config", True)
 
             # Load global.json to see if we have saved configs
@@ -8614,7 +8614,7 @@ def main() -> None:
     if any_debug:
         raw_path = global_cfg.get("debug_log_path", "")
         debug_path = raw_path if raw_path else get_debug_log_path(load_config(config_paths[0]))
-    _configure_debug_log(enabled=any_debug, path=debug_path)
+    _configure_debug_log(enabled=any_debug, path=debug_path) # REF:11
 
     # ── Apply FF_ERR_THRESH from global config ────────────────────────────────
     _startup_thresh = global_cfg.get("ff_err_thresh", 200)
@@ -8624,7 +8624,7 @@ def main() -> None:
     # ── Launch per-site state + threads ──────────────────────────────────────
     sites: List[SiteState] = app.sites
     for cp in config_paths:
-        site = SiteState(cp, app)
+        site = SiteState(cp, app) # REF:12
         sites.append(site)
 
     def _dash_log(msg: str):
@@ -8664,7 +8664,7 @@ def main() -> None:
 
     for site in sites:
         # Monitor thread (liveness check loop)
-        mt = threading.Thread(target=monitor_site, args=(app, site), daemon=True,
+        mt = threading.Thread(target=monitor_site, args=(app, site), daemon=True, # REF:13
                               name=f"monitor:{site.label}")
         mt.start()
         site.monitor_thread = mt
@@ -8708,7 +8708,7 @@ def main() -> None:
             dash.run()
             return dash
 
-        dashboard = curses.wrapper(_run_dashboard)
+        dashboard = curses.wrapper(_run_dashboard) # REF:14
 
     except KeyboardInterrupt:
         pass
