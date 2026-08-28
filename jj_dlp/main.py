@@ -5867,6 +5867,11 @@ class JJDlpDashboard:
 
         # ── Panel header ──
         _panel_cfg = site.get_cached_config()
+        _normal_w = None
+
+        # Width of the live-duration column (enough for "999h 59m 59s" without truncation)
+        DURATION_WIDTH = 12
+
         with site.dash_lock:
             cfg_label    = _panel_cfg.get("site_label",
                                        os.path.basename(site.config_path))
@@ -6048,8 +6053,8 @@ class JJDlpDashboard:
             # Row layout: [name_w] 1 [status=8] 1 [bar_w] 1 [dur=9] 1 [last_live_w]
             # So the actual space available for the bar is what's left after the fixed columns.
             name_w      = max(10, min(18, panel_width // 4))
-            last_live_w = 12   # "Last Live" column
-            _fixed_cols = name_w + 1 + 8 + 1 + 1 + 9 + 1 + last_live_w  # everything except bar
+            last_live_w = 12
+            _fixed_cols = name_w + 1 + 8 + 1 + 1 + DURATION_WIDTH + 1 + last_live_w  # everything except bar
             bar_w       = max(4, min(_bar_cfg_w, panel_width - _fixed_cols))
 
             for i, s in enumerate(all_s):
@@ -6137,10 +6142,10 @@ class JJDlpDashboard:
                 col += bar_w + 1
                 if dur_str:
                     self.safe_addstr(self.stdscr, row_y, col,
-                                dur_str[:9].ljust(9), theme.attr(self, "main_jjdlpdashboard_draw_site_panel_chrome_3"))
+                                dur_str[:DURATION_WIDTH].ljust(DURATION_WIDTH), theme.attr(self, "main_jjdlpdashboard_draw_site_panel_chrome_3"))
                 else:
-                    self.safe_addstr(self.stdscr, row_y, col, " " * 9, 0)
-                col += 10
+                    self.safe_addstr(self.stdscr, row_y, col, " " * DURATION_WIDTH, 0)
+                col += DURATION_WIDTH + 1
                 if last_live_str:
                     if (ll_ts is not None
                             and _last_live_highlight_days > 0
