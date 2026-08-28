@@ -709,14 +709,44 @@ class FileManagerTab:
             return rec.get("rate", 0.0)
         return _natural_sort_key(os.path.basename(path))
 
+    def _group_extreme_key(self, paths):
+        """Return the extreme (min/max, matching sort direction) sort key
+        among paths, or None if paths is empty."""
+        if not paths:
+            return None
+        reverse = self._sort_key in _FM_SORT_REVERSE
+        keys = [self._sort_key_fn(p) for p in paths]
+        return max(keys) if reverse else min(keys)
+
+    def _order_groups_by_extreme(self, items, files_of):
+        """Order items (each a group) by the extreme sort key among the
+        files files_of(item) returns, matching the current sort direction.
+        Groups with no files sort last."""
+        reverse = self._sort_key in _FM_SORT_REVERSE
+        scored = [(item, self._group_extreme_key(files_of(item))) for item in items]
+        with_value = [(item, val) for item, val in scored if val is not None]
+        without_value = [item for item, val in scored if val is None]
+        with_value.sort(key=lambda t: t[1], reverse=reverse)
+        return [item for item, _ in with_value] + without_value
+
     def _rebuild_rows(self, dirs):
         reverse = self._sort_key in _FM_SORT_REVERSE
         rows = []
         multi = len(dirs) > 1
         collapsible_subfolders = self._collapsible_folders_enabled() and self._group_by_folder
+
+        # Groups are ordered by the extreme (min/max, matching sort
+        # direction) value among their own files, so e.g. "oldest first"
+        # shows the group containing the single oldest file first.
+        dir_files = {}
         for label, folder in dirs:
             folder_abs = os.path.abspath(folder)
-            files = [p for p, r in self._records.items() if r.get("group_path") == folder_abs]
+            dir_files[folder_abs] = [p for p, r in self._records.items() if r.get("group_path") == folder_abs]
+        ordered_dirs = self._order_groups_by_extreme(dirs, lambda d: dir_files[os.path.abspath(d[1])])
+
+        for label, folder in ordered_dirs:
+            folder_abs = os.path.abspath(folder)
+            files = dir_files[folder_abs]
             show_output_dir_row = multi
             collapsed = show_output_dir_row and folder_abs in self._collapsed
             if show_output_dir_row:
@@ -743,9 +773,10 @@ class FileManagerTab:
                             if parent != dir_path and parent.startswith(dir_path + os.sep):
                                 child_paths.add(os.path.join(dir_path,
                                                               os.path.relpath(parent, dir_path).split(os.sep)[0]))
-                        for child_path in sorted(child_paths,
-                                                 key=lambda p: _natural_sort_key(os.path.basename(p))):
-                            child_files = [p for p in files if p.startswith(child_path + os.sep)]
+                        child_groups = [(child_path, [p for p in files if p.startswith(child_path + os.sep)])
+                                        for child_path in child_paths]
+                        ordered_children = self._order_groups_by_extreme(child_groups, lambda t: t[1])
+                        for child_path, child_files in ordered_children:
                             child_collapsed = child_path in self._collapsed
                             rows.append(("folder", child_path,
                                          {"name": os.path.basename(child_path), "count": len(child_files),
