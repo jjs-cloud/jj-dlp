@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder with MenuWorks-style curses dashboard
 """
-__version__ = "1.28.8"
+__version__ = "1.28.9"
 
 import subprocess
 import textwrap
@@ -1144,6 +1144,12 @@ class SiteState:
         # Persisted AUTO_SUFFIX/SPLIT_AFTER continuation state, recovered on restart.
         self._segment_continuation_cache: Dict[str, dict] = _load_segment_continuation_cache(app, config_path)
 
+        # Diagnostic: identifies each monitor reconciliation cycle so live-session
+        # transitions can be correlated across checker cycles.
+        self._live_check_generation = 0
+
+        self._last_seen_live: Dict[str, float] = {}
+
         # Streamers disabled via "Skip this stream" — auto-removed from
         # [Block] once the checker sees them go offline.
         self.skip_disabled:       Set[str] = _load_skip_disabled(app, config_path)
@@ -1342,8 +1348,28 @@ class SiteState:
         """
         with self.session_lock:
             if streamer in self.live_sessions:
+                session = self.live_sessions[streamer]
+                self._last_seen_live[streamer] = time.time()
+                dbg(
+                    f"[SESSION] mark_live NO-OP streamer={streamer!r} "
+                    f"already_live=True since={session.since:.2f} "
+                    f"since_age={time.time() - session.since:.1f}s",
+                    site_name=streamer,
+                )
                 return
-            since = self._live_since_cache.get(streamer, time.time())
+
+            _cached_since = self._live_since_cache.get(streamer)
+            _since_source = "CACHE" if _cached_since is not None else "NOW"
+            since = _cached_since if _cached_since is not None else time.time()
+
+            dbg(
+                f"[SESSION] mark_live ENTER streamer={streamer!r} "
+                f"since={since:.2f} since_source={_since_source} "
+                f"cache_present={_cached_since is not None} "
+                f"check_generation={self._live_check_generation}",
+                site_name=streamer,
+            )
+
             _cont = self._segment_continuation_cache.get(streamer)
             if _cont:
                 self.live_sessions[streamer] = LiveSession(
@@ -1354,8 +1380,19 @@ class SiteState:
             else:
                 self.live_sessions[streamer] = LiveSession(since=since)
             snapshot = {s: sess.since for s, sess in self.live_sessions.items()}
+
+            self._last_seen_live[streamer] = time.time()
+
         with self.lock:
             _still_recording = streamer in self.currently_recording
+
+        dbg(
+            f"[SESSION] mark_live COMPLETE streamer={streamer!r} "
+            f"since={since:.2f} since_source={_since_source} "
+            f"check_generation={self._live_check_generation}",
+            site_name=streamer,
+        )
+
         if _still_recording:
             dbg(f"[UPGRADE_QUALITY] mark_live() created a fresh LiveSession "
                 f"(quality_upgraded reset to False) while a recording is already "
@@ -1370,17 +1407,48 @@ class SiteState:
         Also updates dash_last_live (the existing "recording ended" cache),
         matching the previous behavior of clearing both together.
         """
+        dbg(
+            f"[SESSION] mark_offline ENTER streamer={streamer!r} "
+            f"check_generation={self._live_check_generation}",
+            site_name=streamer,
+        )
+
         with self.session_lock:
             if streamer not in self.live_sessions:
+                dbg(
+                    f"[SESSION] mark_offline NO-OP streamer={streamer!r} "
+                    f"reason=not_in_live_sessions "
+                    f"live_since_cache_present={streamer in self._live_since_cache} "
+                    f"check_generation={self._live_check_generation}",
+                    site_name=streamer,
+                )
                 return
+
             _session = self.live_sessions[streamer]
+            _had_live_since_cache = streamer in self._live_since_cache
             del self.live_sessions[streamer]
             self._live_since_cache.pop(streamer, None)
             self._segment_continuation_cache.pop(streamer, None)
+            self._last_seen_live.pop(streamer, None)
             snapshot = {s: sess.since for s, sess in self.live_sessions.items()}
             segment_snapshot = dict(self._segment_continuation_cache)
+
+            _live_session_present_after = streamer in self.live_sessions
+            _live_since_cache_present_after = streamer in self._live_since_cache
+
+            dbg(
+                f"[SESSION] mark_offline STATE_CLEARED streamer={streamer!r} "
+                f"old_since={_session.since:.2f} "
+                f"had_live_since_cache={_had_live_since_cache} "
+                f"live_session_present_after={_live_session_present_after} "
+                f"live_since_cache_present_after={_live_since_cache_present_after} "
+                f"check_generation={self._live_check_generation}",
+                site_name=streamer,
+            )
+
         with self.lock:
             _still_recording = streamer in self.currently_recording
+
         if _still_recording:
             # A recording is still actively in progress for this streamer
             # while the checker reported it as not-live this cycle (a
@@ -1393,6 +1461,15 @@ class SiteState:
                 f"recording — quality_upgraded={_session.quality_upgraded!r} "
                 f"live_since={_session.since!r} (this resets the once-per-session guard)",
                 site_name=streamer)
+
+        dbg(
+            f"[SESSION] mark_offline COMPLETE streamer={streamer!r} "
+            f"live_session_present={streamer in self.live_sessions} "
+            f"live_since_cache_present={streamer in self._live_since_cache} "
+            f"check_generation={self._live_check_generation}",
+            site_name=streamer,
+        )
+
         _save_live_since_cache(self.app, self.config_path, snapshot)
         _save_segment_continuation_cache(self.app, self.config_path, segment_snapshot)
         with self.dash_lock:
@@ -5101,6 +5178,12 @@ def monitor_site(app: "AppState", site: "SiteState") -> None:
         if not streamers:
             site.log_line("ERROR: No streamers configured.")
         else:
+            # Diagnostic generation for this reconciliation cycle. Increment
+            # before obtaining live_info so every subsequent session log can
+            # be tied to one specific checker cycle.
+            site._live_check_generation += 1
+            _check_generation = site._live_check_generation
+
             live_info = get_live_streamers(streamers, cfg, site=site)
             live_now  = list(live_info.keys())
             cfg = load_config(site.config_path)
@@ -5130,10 +5213,46 @@ def monitor_site(app: "AppState", site: "SiteState") -> None:
             # enable_anchor, notif_shown all reset together as a unit),
             # and mark_live() is a no-op if already tracked.
             live_set = set(live_now)
+
+            dbg(
+                f"[SESSION] RECONCILE cycle={_check_generation} "
+                f"streamers={len(streamers)} live_now={len(live_set)} "
+                f"tracked_live={len(site.live_sessions)}",
+                site_name=site.label,
+            )
+
             for s in streamers:
                 if s not in live_set:
+                    _was_tracked = s in site.live_sessions
+                    _cache_present = s in site._live_since_cache
+                    _last_seen = site._last_seen_live.get(s)
+
+                    dbg(
+                        f"[SESSION] RECONCILE cycle={_check_generation} "
+                        f"streamer={s!r} result=OFFLINE "
+                        f"live_session_present={_was_tracked} "
+                        f"live_since_cache_present={_cache_present} "
+                        f"last_seen_live={_last_seen!r} "
+                        f"last_seen_age={time.time() - _last_seen:.1f}s"
+                        if _last_seen is not None
+                        else
+                        f"[SESSION] RECONCILE cycle={_check_generation} "
+                        f"streamer={s!r} result=OFFLINE "
+                        f"live_session_present={_was_tracked} "
+                        f"live_since_cache_present={_cache_present} "
+                        f"last_seen_live=None",
+                        site_name=s,
+                    )
+
                     site.mark_offline(s)
                 else:
+                    dbg(
+                        f"[SESSION] RECONCILE cycle={_check_generation} "
+                        f"streamer={s!r} result=LIVE "
+                        f"live_session_present={s in site.live_sessions} "
+                        f"live_since_cache_present={s in site._live_since_cache}",
+                        site_name=s,
+                    )
                     site.mark_live(s)
 
             # "Skip this stream" auto re-enable: any skip-disabled streamer

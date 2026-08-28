@@ -164,6 +164,7 @@ def configure(dashboard_log_fn=None, dashboard_dbg_fn=None) -> None:
 #   JOBOBJECT — Windows Job Object setup and inheritance diagnostics
 #   CTRLHANDLER — Windows console control-handler diagnostics
 #   SIGHANDLER — POSIX signal-handler diagnostics
+#   SESSION — identifies each monitor reconciliation cycle so live-session transitions can be correlated across checker cycles
 #
 DBG_TAGS: list[str] = [
     "DRAIN",
@@ -203,6 +204,7 @@ DBG_TAGS: list[str] = [
     "JOBOBJECT",
     "CTRLHANDLER",
     "SIGHANDLER",
+    "SESSION",
 ]
 
 import json
