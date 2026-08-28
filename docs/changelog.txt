@@ -1,6 +1,8 @@
 - made it easier to edit the number/date fields in various STREAMER SETTINGS menus. (split, intro delay, schedule)
-- On the File Manager tab, subfolders (if you have them enabled in GLOBAL SETTINGS > SUBFOLDERS) are now collapsable by pressing enter while the subfolder is selected. This only works when the files are sorted by name.
-- you can now cycle through the sort modes in the File Manager by pressing s
+- added subfolder grouping on the File Manager tab
+    - press o to toggle grouping on/off
+    - press enter while a subfolder is selected to collapse/expand it
+    - press s to cycle through sort modes
 
 ====================
 ====================
