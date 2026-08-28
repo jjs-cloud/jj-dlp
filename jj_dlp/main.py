@@ -7837,7 +7837,7 @@ class JJDlpDashboard:
         alert_attr = theme.attr(self, "main_jjdlpdashboard_draw_write_failure_a_delete")
 
         title = " ‼ RECORDING FAILURE ‼ "
-        message = "The following streamer(s) are NOT being recorded:"
+        message = "The recording may have failed for the following streamer(s):"
         names_lines = [f"    {name}" for name in failing[: max(1, h - 12)]]
         legend = " Press Enter / X / Esc / Q to dismiss "
 
