@@ -2650,8 +2650,22 @@ class FileManagerTab:
                 if rec["collapsed"]:
                     label += f"  ({rec['count']})"
                 indent = 2 * rec.get("depth", 0)
+                
+                # Check if any file inside this collapsed folder is currently WRITING
+                has_writing = False
+                if rec["collapsed"]:
+                    folder_path = payload
+                    for p, r in self._records.items():
+                        # p is a file path; check if it lies under this folder
+                        if p.startswith(folder_path + os.sep) and r.get("status") == "WRITING":
+                            has_writing = True
+                            break
+                        
                 row_attr = (theme.attr(db, "file_manager_filemanagertab_draw_hilight")
-                            if is_sel else theme.attr(db, "file_manager_filemanagertab_draw_system_1"))
+                            if is_sel
+                            else (theme.attr(db, "file_manager_filemanagertab_draw_live") if has_writing
+                                else theme.attr(db, "file_manager_filemanagertab_draw_system_1")))
+                                
                 db.safe_addstr(stdscr, row_y, x1 + 2 + indent,
                                label.ljust(max(1, name_w - indent))[:max(1, name_w - indent)], row_attr)
             else:
