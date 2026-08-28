@@ -597,7 +597,8 @@ if __name__ == "__main__":
                 else:
                     if dst.endswith(".pyc") or os.path.basename(dst) == "global.json":
                         return
-                    if os.path.exists(dst) and not _is_binary(dst) and not dst.endswith(".conf"):
+                    # Exclude .log files from diff generation
+                    if os.path.exists(dst) and not _is_binary(dst) and not dst.endswith(".conf") and not dst.lower().endswith(".log"):
                         with open(dst, "r", encoding="utf-8", errors="ignore") as _f:
                             _oc = _f.read()
                         with open(src, "r", encoding="utf-8", errors="ignore") as _f:
