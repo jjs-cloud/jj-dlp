@@ -20,7 +20,7 @@ except ImportError:
 
 
 class ConfigItem:
-    def __init__(self, line_idx: int, is_section: bool, key: str, value: str, has_equals: bool, raw_line: str, comment: str = ""):
+    def __init__(self, line_idx: int, is_section: bool, key: str, value: str, has_equals: bool, raw_line: str, comment: str = "", section: str = ""):
         self.line_idx = line_idx
         self.is_section = is_section
         self.key = key
@@ -28,6 +28,7 @@ class ConfigItem:
         self.has_equals = has_equals
         self.raw_line = raw_line
         self.comment = comment  # Help text parsed from the # line(s) above this key
+        self.section = section  # Section this key lives under (e.g. "General", "Checker")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -38,6 +39,63 @@ class ConfigItem:
 #            False → value is reset to the value in the template config file during an update.
 # comment  : help text shown in the edit popup
 # ══════════════════════════════════════════════════════════════════════════════
+
+# Shared per-file lock: every writer to a site .conf file must hold this,
+# or a stale in-memory copy can silently overwrite a concurrent edit.
+_config_file_locks: dict = {}
+_config_file_locks_guard = threading.Lock()
+
+
+def get_config_file_lock(path: str) -> threading.Lock:
+    """Return the shared write lock for one config file path."""
+    norm = os.path.normcase(os.path.abspath(path))
+    with _config_file_locks_guard:
+        lock = _config_file_locks.get(norm)
+        if lock is None:
+            lock = threading.Lock()
+            _config_file_locks[norm] = lock
+        return lock
+
+
+def _find_key_line(lines: list, section: str, key: str, has_equals: bool) -> Optional[int]:
+    """Return the line index of key within section, or None if not found."""
+    current = None
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if not s or s.startswith("#") or s.startswith(";"):
+            continue
+        if s.startswith("[") and s.endswith("]"):
+            current = s[1:-1]
+            continue
+        if current != section:
+            continue
+        if has_equals:
+            if "=" in s and s.split("=", 1)[0].strip() == key:
+                return i
+        elif s == key:
+            return i
+    return None
+
+
+def _append_line_to_section(lines: list, section: str, new_line: str) -> list:
+    """Append new_line at the end of section, creating it if it's missing."""
+    lines = list(lines)
+    start = next((i for i, line in enumerate(lines) if line.strip() == f"[{section}]"), None)
+    if start is None:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append(f"\n[{section}]\n")
+        lines.append(new_line)
+        return lines
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        s = lines[i].strip()
+        if s.startswith("[") and s.endswith("]"):
+            end = i
+            break
+    lines.insert(end, new_line)
+    return lines
+
 
 class _KeyDef(NamedTuple):
     name:     str
@@ -104,6 +162,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("WEB_UI_PASS",              scope="global",                    default="",                           preserve=True,               comment="Password required to log into the web dashboard (HTTP Basic Auth). Required if WEB_UI is enabled. Choose something not easily guessed — anyone on your WiFi could otherwise try to log in."),
     _KeyDef("RGB_MODE",                 scope="global",                    default="true",                       preserve=True, type="bool",  comment="Pin the terminal's 8 base colors to exact RGB values (the Windows Terminal Campbell palette) so the app looks the same on every Linux terminal (may require restart) (true/false)."),
     _KeyDef("DELETE_EMPTY",             scope="global",                    default="true",                       preserve=True, type="bool",  comment="When deleting a file from the file manager, delete the parent folder if it is empty.  This only applies to subfolders within the OUTPUT_DIR. (true/false)"),
+    _KeyDef("COLLAPSIBLE_FOLDERS",      scope="global",                    default="true",                       preserve=True, type="bool",  comment="Group files in the File Manager by their subfolder (if present) and make them collapsible/expandable. (true/false)"),
 
     # ── Site keys (per-site .conf) ────────────────────────────────────────────
     _KeyDef("SITE_LABEL",               scope="site",                      default="",                           preserve=True,               comment="The display name of this site."),
@@ -361,9 +420,9 @@ class PriorityEntryStore:
     def load(self) -> dict:
         """Return a copy of this streamer's saved record, or {} if none."""
         try:
-            from .main import _global_json_lock, _load_global_json
-            with _global_json_lock:
-                gdata = _load_global_json()
+            app = self.dashboard.app
+            with app.global_json_lock:
+                gdata = app.load_global_json()
             found = self._find(self._entries(gdata))
             return dict(found) if found else {}
         except Exception as e:
@@ -407,8 +466,6 @@ class PriorityEntryStore:
 
     def _mutate(self, fn, create_if_missing: bool) -> None:
         try:
-            from .main import _update_global_json
-
             def _apply(gdata):
                 entries = self._entries(gdata)
                 target  = self._find(entries)
@@ -427,7 +484,7 @@ class PriorityEntryStore:
                 gdata.setdefault("priorities", {}).setdefault(
                     self.config_id, {"config_files": [], "entries": []}
                 )["entries"] = entries
-            _update_global_json(_apply)
+            self.dashboard.app.update_global_json(_apply)
         except Exception as e:
             _dbg(f"PriorityEntryStore._mutate: {e}")
             pass
@@ -584,12 +641,9 @@ class PriorityEditor:
         self._config_id = _compute_config_id(config_paths)
 
         # Load saved priority data for this config_id.
-        # Deferred import avoids a circular dependency (main imports config_editor
-        # at module scope); by the time _refresh() is ever called both modules are
-        # fully initialised.
-        from .main import _global_json_lock, _load_global_json
-        with _global_json_lock:
-            global_data = _load_global_json()
+        app = self.dashboard.app
+        with app.global_json_lock:
+            global_data = app.load_global_json()
         priorities_block = global_data.get("priorities", {})
         # First time we've ever seen this config_id (e.g. fresh clone, no
         # priority/bypass action has been taken yet) → there is no saved
@@ -715,7 +769,6 @@ class PriorityEditor:
         if not self._config_id:
             return
         config_paths = [site.config_path for site in self.dashboard.sites]
-        from .main import _update_global_json
 
         def _mutate(gdata):
             priorities = gdata.setdefault("priorities", {})
@@ -743,7 +796,7 @@ class PriorityEditor:
                 "config_files": config_paths,
                 "entries":      entries_data,
             }
-        _update_global_json(_mutate)
+        self.dashboard.app.update_global_json(_mutate)
 
         # Invalidate the sort manager's priority cache so the panel re-sorts immediately.
         try:
@@ -1125,27 +1178,38 @@ class StreamerSettingsPopup:
             self._confirm_reset.draw(stdscr)
 
 
-class QualitySettingsPopup:
+class SettingsPopupBase:
+    """Shared reset-confirmation dispatch, popup-frame drawing, and
+    field-list navigation for the per-streamer settings popups (Quality,
+    Split, Intro Delay, Notifications, Auto-Suffix, Subfolders, Schedule).
+    """
+
+    LABEL: str = ""
+    RESET_KEYS: "tuple[str, ...]" = ()
+    TAG_NORMAL: str = ""
+    TAG_SYSTEM: str = ""
+    TEXT_FIELDS: "tuple[str, ...]" = ()
+
     def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
         self.dashboard = dashboard
         self.entry     = entry
         self.config_id = config_id
         self._store    = PriorityEntryStore(dashboard, entry, config_id)
-        self.lq_enabled = False
         self._confirm_reset: "Optional[ConfirmResetPopup]" = None
         self._load()
 
-    def _load(self) -> None:
-        self.lq_enabled = bool(self._store.load().get("lq_enabled", False))
-
     def _reset(self) -> None:
-        self._store.reset("lq_enabled")
+        self._store.reset(*self.RESET_KEYS)
         self._load()
 
-    def _save(self) -> None:
-        self._store.update(lq_enabled=self.lq_enabled)
+    def _open_confirm_reset(self) -> None:
+        self._confirm_reset = ConfirmResetPopup(
+            self.dashboard,
+            f"Are you sure you want to reset the {self.LABEL} settings for {self.entry.streamer}?",
+        )
 
     def handle_key(self, key) -> bool:
+        """Route to the confirm-reset popup if open, else to the subclass."""
         if self._confirm_reset is not None:
             result = self._confirm_reset.handle_key(key)
             if result == "yes":
@@ -1154,14 +1218,235 @@ class QualitySettingsPopup:
             elif result == "no":
                 self._confirm_reset = None
             return False
+        return self._own_handle_key(key)
+
+    def _draw_frame(self, stdscr, box_h: int, box_w: int):
+        """Fill background, draw the border + title. box_w is capped to
+        the terminal width; box_h is used as given. Returns
+        (by1, bx1, by2, bx2, box_w)."""
+        db = self.dashboard
+        h, w = stdscr.getmaxyx()
+        box_w = min(box_w, w - 6)
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, self.TAG_NORMAL))
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
+        db.safe_addstr(stdscr, by1, bx1 + 2, f" {self.entry.streamer.upper()} SETTINGS ",
+                       theme.attr(db, self.TAG_SYSTEM))
+        return by1, bx1, by2, bx2, box_w
+
+    def draw(self, stdscr) -> None:
+        self._draw_body(stdscr)
+        if self._confirm_reset is not None:
+            self._confirm_reset.draw(stdscr)
+
+    # ── Field-list navigation (Split, Intro Delay, Schedule) ─────────────
+    # Subclasses list rows via _get_fields() -> [(label, display_value,
+    # field_key), ...]. A row whose field_key is in TEXT_FIELDS is a plain
+    # text input: once selected, typed characters edit it directly (no
+    # separate "start editing" step) via _get_text()/_set_text(). Every
+    # other row goes through _handle_field_key().
+
+    def _get_fields(self) -> "list[tuple[str, str, str]]":
+        return []
+
+    def _get_text(self, field_key: str) -> str:
+        return ""
+
+    def _set_text(self, field_key: str, value: str) -> None:
+        pass
+
+    def _text_charset(self, field_key: str):
+        """Predicate(key:int)->bool for characters a text field accepts."""
+        return lambda key: 32 <= key < 127
+
+    def _handle_field_key(self, key, field_key: str) -> None:
+        """Handle a key for the selected non-text row (checkbox, dropdown,
+        sub-cursor, ...). No-op by default."""
+        pass
+
+    def _validate(self) -> "tuple[bool, str]":
+        return True, ""
+
+    @staticmethod
+    def _edit_text(key: int, value: str, cursor: int, charset) -> "tuple[str, int, bool]":
+        """Cursor movement + direct character insertion for a text field.
+        Returns (new_value, new_cursor, consumed); consumed is False for
+        keys this doesn't own (Esc, Enter, row navigation, ...)."""
+        if key in (curses.KEY_BACKSPACE, 127, 8):
+            if cursor > 0:
+                value = value[:cursor - 1] + value[cursor:]
+                cursor -= 1
+        elif key == curses.KEY_DC:
+            if cursor < len(value):
+                value = value[:cursor] + value[cursor + 1:]
+        elif key == curses.KEY_LEFT:
+            cursor = max(0, cursor - 1)
+        elif key == curses.KEY_RIGHT:
+            cursor = min(len(value), cursor + 1)
+        elif key == curses.KEY_HOME:
+            cursor = 0
+        elif key == curses.KEY_END:
+            cursor = len(value)
+        elif charset(key):
+            value = value[:cursor] + chr(key) + value[cursor:]
+            cursor += 1
+        else:
+            return value, cursor, False
+        return value, cursor, True
+
+    def _sync_text_cursor(self, fields) -> None:
+        """Put the cursor at the end of the row _sel now points to, if
+        that row is a TEXT_FIELDS row."""
+        if not fields:
+            return
+        field_key = fields[self._sel][2]
+        if field_key in self.TEXT_FIELDS:
+            self._text_cursor = len(self._get_text(field_key))
+
+    def _own_handle_key(self, key) -> bool:
+        """Default field-list navigation: Esc closes, Up/Down move rows,
+        a selected TEXT_FIELDS row edits directly, Enter validates+saves.
+        Single-field subclasses (Quality, the tri-state popups) override
+        this instead."""
+        fields = self._get_fields()
+        self._sel = min(self._sel, max(0, len(fields) - 1))
+        _, _, field_key = fields[self._sel] if fields else ("", "", "")
+        is_text = field_key in self.TEXT_FIELDS
+
+        if is_text:
+            value, self._text_cursor, consumed = self._edit_text(
+                key, self._get_text(field_key), self._text_cursor,
+                self._text_charset(field_key))
+            if consumed:
+                self._set_text(field_key, value)
+                self._error = ""
+                return False
 
         if key == 27:
             return True
+        elif key == curses.KEY_UP:
+            self._sel = max(0, self._sel - 1)
+            self._error = ""
+            self._sync_text_cursor(fields)
+        elif key == curses.KEY_DOWN:
+            self._sel = min(len(fields) - 1, self._sel + 1)
+            self._error = ""
+            self._sync_text_cursor(fields)
+        elif key in (10, 13, curses.KEY_ENTER, 459):
+            valid, err = self._validate()
+            if valid:
+                self._save()
+                return True
+            self._error = err
+        elif not is_text and key in (ord('r'), ord('R')):
+            self._open_confirm_reset()
+        elif not is_text:
+            self._handle_field_key(key, field_key)
+            self._sel = min(self._sel, max(0, len(self._get_fields()) - 1))
+        # else: an unrecognized key while a text row has focus is dropped.
+        return False
+
+    # Subclasses implement:
+    #   _load(self) -> None
+    #   _save(self) -> None                  (field-list popups)
+    #   _own_handle_key(self, key) -> bool    (single-field popups)
+    #   _draw_body(self, stdscr) -> None
+
+
+class TriStateOverridePopup(SettingsPopupBase):
+    """Base for single-field inherit/on/off per-streamer override popups
+    (Notifications, Auto-Suffix)."""
+
+    _STATES = ("inherit", "on", "off")
+    STORE_KEY: str = ""
+    STORAGE: str = "bool"   # "bool" -> True/False under STORE_KEY; "str" -> "on"/"off"
+    TAG_HILIGHT_1: str = ""
+    TAG_HILIGHT_2: str = ""
+    TAG_NORMAL_2: str = ""
+    TAG_WARN: str = ""
+    TAG_INVHEAD: str = ""
+
+    def _load(self) -> None:
+        raw = self._store.load().get(self.STORE_KEY)
+        if raw is None:
+            self.state = "inherit"
+        elif self.STORAGE == "bool":
+            self.state = "on" if raw else "off"
+        else:
+            self.state = raw if raw in ("on", "off") else "inherit"
+
+    def _save(self) -> None:
+        if self.state == "inherit":
+            self._store.clear(self.STORE_KEY)
+        elif self.STORAGE == "bool":
+            self._store.update(**{self.STORE_KEY: self.state == "on"})
+        else:
+            self._store.update(**{self.STORE_KEY: self.state})
+
+    def _site_default(self) -> bool:
+        raise NotImplementedError
+
+    def _own_handle_key(self, key) -> bool:
+        if key == 27:
+            return True
         elif key in (ord('r'), ord('R')):
-            self._confirm_reset = ConfirmResetPopup(
-                self.dashboard,
-                f"Are you sure you want to reset the Quality settings for {self.entry.streamer}?",
-            )
+            self._open_confirm_reset()
+        elif key == ord(' '):
+            idx = self._STATES.index(self.state)
+            self.state = self._STATES[(idx + 1) % len(self._STATES)]
+        elif key == curses.KEY_LEFT:
+            idx = self._STATES.index(self.state)
+            self.state = self._STATES[(idx - 1) % len(self._STATES)]
+        elif key == curses.KEY_RIGHT:
+            idx = self._STATES.index(self.state)
+            self.state = self._STATES[(idx + 1) % len(self._STATES)]
+        elif key in (10, 13, curses.KEY_ENTER, 459):
+            self._save()
+            return True
+        return False
+
+    def _draw_body(self, stdscr) -> None:
+        db = self.dashboard
+        by1, bx1, by2, bx2, box_w = self._draw_frame(stdscr, box_h=7, box_w=46)
+
+        label_text = f"> {self.LABEL}: "
+        db.safe_addstr(stdscr, by1 + 2, bx1 + 2, label_text, theme.attr(db, self.TAG_HILIGHT_1))
+        state_label = {"inherit": "< Inherit >", "on": "< On >", "off": "< Off >"}[self.state]
+        db.safe_addstr(stdscr, by1 + 2, bx1 + 2 + len(label_text), state_label, theme.attr(db, self.TAG_HILIGHT_2))
+
+        effective = self._site_default() if self.state == "inherit" else (self.state == "on")
+        eff_str = "ON" if effective else "OFF"
+        db.safe_addstr(stdscr, by1 + 4, bx1 + 2, "Effective: ", theme.attr(db, self.TAG_NORMAL_2))
+        db.safe_addstr(stdscr, by1 + 4, bx1 + 13, eff_str, theme.attr(db, self.TAG_WARN))
+
+        db.safe_addstr(stdscr, by2, bx1 + 2,
+                       " Enter:Save  Space/\u2190\u2192:Cycle  R:Reset  Esc:Cancel "[:box_w - 4],
+                       theme.attr(db, self.TAG_INVHEAD))
+
+
+class QualitySettingsPopup(SettingsPopupBase):
+    """Per-streamer override for the low-quality (LQ) downloader."""
+
+    LABEL = "Quality"
+    RESET_KEYS = ("lq_enabled",)
+    TAG_NORMAL = "config_editor_qualitysettingspopup_draw_normal"
+    TAG_SYSTEM = "config_editor_qualitysettingspopup_draw_system"
+
+    def _load(self) -> None:
+        self.lq_enabled = bool(self._store.load().get("lq_enabled", False))
+
+    def _save(self) -> None:
+        self._store.update(lq_enabled=self.lq_enabled)
+
+    def _own_handle_key(self, key) -> bool:
+        if key == 27:
+            return True
+        elif key in (ord('r'), ord('R')):
+            self._open_confirm_reset()
         elif key == ord(' '):
             self.lq_enabled = not self.lq_enabled
         elif key in (10, 13, curses.KEY_ENTER, 459):
@@ -1169,260 +1454,69 @@ class QualitySettingsPopup:
             return True
         return False
 
-    def draw(self, stdscr) -> None:
+    def _draw_body(self, stdscr) -> None:
         db = self.dashboard
-        h, w = stdscr.getmaxyx()
-        
-        box_w = min(40, w - 6)
-        box_h = 7
-        by1 = (h - box_h) // 2
-        bx1 = (w - box_w) // 2
-        by2 = by1 + box_h
-        bx2 = bx1 + box_w
-        
-        for y in range(by1, by2 + 1):
-            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_qualitysettingspopup_draw_normal"))
-            
-        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
-        title = f" {self.entry.streamer.upper()} SETTINGS "
-        db.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(db, "config_editor_qualitysettingspopup_draw_system"))
-        
+        by1, bx1, by2, bx2, box_w = self._draw_frame(stdscr, box_h=7, box_w=40)
+
         val_str = "[x]" if self.lq_enabled else "[ ]"
         db.safe_addstr(stdscr, by1 + 2, bx1 + 2, "> Low Quality Enabled: ", theme.attr(db, "config_editor_qualitysettingspopup_draw_hilight_1"))
         db.safe_addstr(stdscr, by1 + 2, bx1 + 25, val_str, theme.attr(db, "config_editor_qualitysettingspopup_draw_hilight_2"))
-            
-        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space:Toggle  R:Reset  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_qualitysettingspopup_draw_invhead"))
 
-        if self._confirm_reset is not None:
-            self._confirm_reset.draw(stdscr)
+        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space:Toggle  R:Reset  Esc:Cancel "[:box_w - 4], theme.attr(db, "config_editor_qualitysettingspopup_draw_invhead"))
 
 
-class NotificationSettingsPopup:
+class NotificationSettingsPopup(TriStateOverridePopup):
     """Per-streamer override for ntfy.sh push notifications.
 
     Tri-state: "inherit" (default — use the site's NTFY_NOTIFICATIONS
-    value, same as if no streamer-level entry existed at all), "on", or
-    "off". Only "on"/"off" are ever written to global.json; "inherit" is
-    represented by the *absence* of the "notifications_enabled" key, which
-    is exactly what main.py's _resolve_ntfy_enabled() (called from
-    _maybe_show_live_popup()) already checks for (streamer_notif is None →
-    fall back to site config). This popup used to
-    default to True on every load, which meant simply opening it and
-    pressing Enter would silently write an explicit "true" override for a
-    streamer that never had one — that's fixed by defaulting to inherit.
+    value), "on", or "off". Only "on"/"off" are ever written to
+    global.json; "inherit" is the *absence* of the "notifications_enabled"
+    key, which is exactly what main.py's _resolve_ntfy_enabled() checks
+    for (streamer_notif is None → fall back to site config).
     """
 
-    _STATES = ("inherit", "on", "off")
-
-    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
-        self.dashboard = dashboard
-        self.entry     = entry
-        self.config_id = config_id
-        self._store    = PriorityEntryStore(dashboard, entry, config_id)
-        self.state: str = "inherit"   # "inherit" | "on" | "off"
-        self._confirm_reset: "Optional[ConfirmResetPopup]" = None
-        self._load()
-
-    def _reset(self) -> None:
-        self._store.reset("notifications_enabled")
-        self._load()
-
-    def _load(self) -> None:
-        raw = self._store.load().get("notifications_enabled")
-        self.state = "inherit" if raw is None else ("on" if raw else "off")
-
-    def _save(self) -> None:
-        if self.state == "inherit":
-            # Nothing to override — remove any prior explicit value rather
-            # than writing one, so this streamer stops showing up as
-            # having a Notifications override.
-            self._store.clear("notifications_enabled")
-        else:
-            self._store.update(notifications_enabled=(self.state == "on"))
+    LABEL = "ntfy Notifications"
+    STORE_KEY = "notifications_enabled"
+    STORAGE = "bool"
+    RESET_KEYS = ("notifications_enabled",)
+    TAG_NORMAL    = "config_editor_notificationsettings_draw_normal_1"
+    TAG_SYSTEM    = "config_editor_notificationsettings_draw_system"
+    TAG_HILIGHT_1 = "config_editor_notificationsettings_draw_hilight_1"
+    TAG_HILIGHT_2 = "config_editor_notificationsettings_draw_hilight_2"
+    TAG_NORMAL_2  = "config_editor_notificationsettings_draw_normal_2"
+    TAG_WARN      = "config_editor_notificationsettings_draw_warn"
+    TAG_INVHEAD   = "config_editor_notificationsettings_draw_invhead"
 
     def _site_default(self) -> bool:
         cfg = _get_site_default_cfg(self.dashboard, self.entry)
         return bool(cfg.get("ntfy_notifications", True))
 
-    def handle_key(self, key) -> bool:
-        if self._confirm_reset is not None:
-            result = self._confirm_reset.handle_key(key)
-            if result == "yes":
-                self._reset()
-                self._confirm_reset = None
-            elif result == "no":
-                self._confirm_reset = None
-            return False
 
-        if key == 27:
-            return True
-        elif key in (ord('r'), ord('R')):
-            self._confirm_reset = ConfirmResetPopup(
-                self.dashboard,
-                f"Are you sure you want to reset the Notifications settings for {self.entry.streamer}?",
-            )
-        elif key == ord(' '):
-            idx = self._STATES.index(self.state)
-            self.state = self._STATES[(idx + 1) % len(self._STATES)]
-        elif key == curses.KEY_LEFT:
-            idx = self._STATES.index(self.state)
-            self.state = self._STATES[(idx - 1) % len(self._STATES)]
-        elif key == curses.KEY_RIGHT:
-            idx = self._STATES.index(self.state)
-            self.state = self._STATES[(idx + 1) % len(self._STATES)]
-        elif key in (10, 13, curses.KEY_ENTER, 459):
-            self._save()
-            return True
-        return False
-
-    def draw(self, stdscr) -> None:
-        db = self.dashboard
-        h, w = stdscr.getmaxyx()
-        
-        box_w = min(46, w - 6)
-        box_h = 7
-        by1 = (h - box_h) // 2
-        bx1 = (w - box_w) // 2
-        by2 = by1 + box_h
-        bx2 = bx1 + box_w
-        
-        for y in range(by1, by2 + 1):
-            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_notificationsettings_draw_normal_1"))
-            
-        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
-        title = f" {self.entry.streamer.upper()} SETTINGS "
-        db.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(db, "config_editor_notificationsettings_draw_system"))
-
-        state_label = {"inherit": "< Inherit >", "on": "< On >", "off": "< Off >"}[self.state]
-        db.safe_addstr(stdscr, by1 + 2, bx1 + 2, "> ntfy Notifications: ", theme.attr(db, "config_editor_notificationsettings_draw_hilight_1"))
-        db.safe_addstr(stdscr, by1 + 2, bx1 + 24, state_label, theme.attr(db, "config_editor_notificationsettings_draw_hilight_2"))
-
-        site_default = self._site_default()
-        if self.state == "inherit":
-            effective = site_default
-        else:
-            effective = (self.state == "on")
-        eff_str = "ON" if effective else "OFF"
-        db.safe_addstr(stdscr, by1 + 4, bx1 + 2, "Effective: ", theme.attr(db, "config_editor_notificationsettings_draw_normal_2"))
-        db.safe_addstr(stdscr, by1 + 4, bx1 + 13, eff_str, theme.attr(db, "config_editor_notificationsettings_draw_warn"))
-
-        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space/\u2190\u2192:Cycle  R:Reset  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_notificationsettings_draw_invhead"))
-
-        if self._confirm_reset is not None:
-            self._confirm_reset.draw(stdscr)
-
-
-class AutoSuffixSettingsPopup:
+class AutoSuffixSettingsPopup(TriStateOverridePopup):
     """Per-streamer override for AUTO_SUFFIX.
 
     Tri-state: "inherit" (default — use the site's AUTO_SUFFIX value),
-    "on", or "off". Only "on"/"off" are ever written to global.json;
-    "inherit" is represented by the *absence* of the "auto_suffix_mode"
-    key, which is exactly what main.py's _resolve_auto_suffix() checks
-    for (mirrors _resolve_split_after()'s tri-state handling).
+    "on", or "off", mirroring NotificationSettingsPopup's semantics.
     """
 
-    _STATES = ("inherit", "on", "off")
-
-    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
-        self.dashboard = dashboard
-        self.entry     = entry
-        self.config_id = config_id
-        self._store    = PriorityEntryStore(dashboard, entry, config_id)
-        self.state: str = "inherit"   # "inherit" | "on" | "off"
-        self._confirm_reset: "Optional[ConfirmResetPopup]" = None
-        self._load()
-
-    def _reset(self) -> None:
-        self._store.reset("auto_suffix_mode")
-        self._load()
-
-    def _load(self) -> None:
-        raw = self._store.load().get("auto_suffix_mode")
-        self.state = raw if raw in ("on", "off") else "inherit"
-
-    def _save(self) -> None:
-        if self.state == "inherit":
-            # Nothing to override — remove any prior explicit value rather
-            # than writing one, so this streamer stops showing up as
-            # having an Auto-Suffix override.
-            self._store.clear("auto_suffix_mode")
-        else:
-            self._store.update(auto_suffix_mode=self.state)
+    LABEL = "Auto-Suffix"
+    STORE_KEY = "auto_suffix_mode"
+    STORAGE = "str"
+    RESET_KEYS = ("auto_suffix_mode",)
+    TAG_NORMAL    = "config_editor_autosuffixsettingspo_draw_normal_1"
+    TAG_SYSTEM    = "config_editor_autosuffixsettingspo_draw_system"
+    TAG_HILIGHT_1 = "config_editor_autosuffixsettingspo_draw_hilight_1"
+    TAG_HILIGHT_2 = "config_editor_autosuffixsettingspo_draw_hilight_2"
+    TAG_NORMAL_2  = "config_editor_autosuffixsettingspo_draw_normal_2"
+    TAG_WARN      = "config_editor_autosuffixsettingspo_draw_warn"
+    TAG_INVHEAD   = "config_editor_autosuffixsettingspo_draw_invhead"
 
     def _site_default(self) -> bool:
         cfg = _get_site_default_cfg(self.dashboard, self.entry)
         return bool(cfg.get("auto_suffix", True))
 
-    def handle_key(self, key) -> bool:
-        if self._confirm_reset is not None:
-            result = self._confirm_reset.handle_key(key)
-            if result == "yes":
-                self._reset()
-                self._confirm_reset = None
-            elif result == "no":
-                self._confirm_reset = None
-            return False
 
-        if key == 27:
-            return True
-        elif key in (ord('r'), ord('R')):
-            self._confirm_reset = ConfirmResetPopup(
-                self.dashboard,
-                f"Are you sure you want to reset the Auto-Suffix settings for {self.entry.streamer}?",
-            )
-        elif key == ord(' '):
-            idx = self._STATES.index(self.state)
-            self.state = self._STATES[(idx + 1) % len(self._STATES)]
-        elif key == curses.KEY_LEFT:
-            idx = self._STATES.index(self.state)
-            self.state = self._STATES[(idx - 1) % len(self._STATES)]
-        elif key == curses.KEY_RIGHT:
-            idx = self._STATES.index(self.state)
-            self.state = self._STATES[(idx + 1) % len(self._STATES)]
-        elif key in (10, 13, curses.KEY_ENTER, 459):
-            self._save()
-            return True
-        return False
-
-    def draw(self, stdscr) -> None:
-        db = self.dashboard
-        h, w = stdscr.getmaxyx()
-
-        box_w = min(46, w - 6)
-        box_h = 7
-        by1 = (h - box_h) // 2
-        bx1 = (w - box_w) // 2
-        by2 = by1 + box_h
-        bx2 = bx1 + box_w
-
-        for y in range(by1, by2 + 1):
-            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_autosuffixsettingspo_draw_normal_1"))
-
-        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
-        title = f" {self.entry.streamer.upper()} SETTINGS "
-        db.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(db, "config_editor_autosuffixsettingspo_draw_system"))
-
-        state_label = {"inherit": "< Inherit >", "on": "< On >", "off": "< Off >"}[self.state]
-        db.safe_addstr(stdscr, by1 + 2, bx1 + 2, "> Auto-Suffix: ", theme.attr(db, "config_editor_autosuffixsettingspo_draw_hilight_1"))
-        db.safe_addstr(stdscr, by1 + 2, bx1 + 17, state_label, theme.attr(db, "config_editor_autosuffixsettingspo_draw_hilight_2"))
-
-        site_default = self._site_default()
-        if self.state == "inherit":
-            effective = site_default
-        else:
-            effective = (self.state == "on")
-        eff_str = "ON" if effective else "OFF"
-        db.safe_addstr(stdscr, by1 + 4, bx1 + 2, "Effective: ", theme.attr(db, "config_editor_autosuffixsettingspo_draw_normal_2"))
-        db.safe_addstr(stdscr, by1 + 4, bx1 + 13, eff_str, theme.attr(db, "config_editor_autosuffixsettingspo_draw_warn"))
-
-        db.safe_addstr(stdscr, by2, bx1 + 2, " Enter:Save  Space/\u2190\u2192:Cycle  R:Reset  Esc:Cancel "[:box_w-4], theme.attr(db, "config_editor_autosuffixsettingspo_draw_invhead"))
-
-        if self._confirm_reset is not None:
-            self._confirm_reset.draw(stdscr)
-
-
-class OutputDirectorySettingsPopup:
+class OutputDirectorySettingsPopup(SettingsPopupBase):
     """Per-streamer override for OUTPUT_DIR / SUBFOLDERS.
 
     Two independent settings, stored in the same priorities[...][entries]
@@ -1447,12 +1541,12 @@ class OutputDirectorySettingsPopup:
     _FIELD_TOGGLE = "custom_toggle"
     _FIELD_PATH   = "custom_path"
 
-    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
-        self.dashboard = dashboard
-        self.entry     = entry
-        self.config_id = config_id
-        self._store    = PriorityEntryStore(dashboard, entry, config_id)
+    LABEL = "Subfolders"
+    RESET_KEYS = ("output_dir_mode", "output_dir_custom_enabled", "output_dir_custom_path")
+    TAG_NORMAL = "config_editor_outputdirectorysett_draw_normal_1"
+    TAG_SYSTEM = "config_editor_outputdirectorysett_draw_system"
 
+    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
         self.mode:           str  = "inherit"
         self.custom_enabled: bool = False
         self.custom_path:    str  = ""
@@ -1460,9 +1554,12 @@ class OutputDirectorySettingsPopup:
         self._sel:          int = 0
         self._path_cursor:  int = 0
         self._error:        str = ""
-        self._confirm_reset: "Optional[ConfirmResetPopup]" = None
 
-        self._load()
+        super().__init__(dashboard, entry, config_id)
+
+    def _reset(self) -> None:
+        self._sel = 0
+        super()._reset()
 
     # ── Persistence ────────────────────────────────────────────────────────────
 
@@ -1546,17 +1643,7 @@ class OutputDirectorySettingsPopup:
 
     # ── Key handling ───────────────────────────────────────────────────────────
 
-    def handle_key(self, key) -> bool:
-        """Handle one keypress. Returns True when the popup should close."""
-        if self._confirm_reset is not None:
-            result = self._confirm_reset.handle_key(key)
-            if result == "yes":
-                self._reset()
-                self._confirm_reset = None
-            elif result == "no":
-                self._confirm_reset = None
-            return False
-
+    def _own_handle_key(self, key) -> bool:
         fields = self._get_fields()
         self._sel = min(self._sel, len(fields) - 1)
         _, field_key = fields[self._sel]
@@ -1602,10 +1689,7 @@ class OutputDirectorySettingsPopup:
         if key == 27:
             return True
         elif key in (ord('r'), ord('R')):
-            self._confirm_reset = ConfirmResetPopup(
-                self.dashboard,
-                f"Are you sure you want to reset the Subfolders settings for {self.entry.streamer}?",
-            )
+            self._open_confirm_reset()
         elif key == curses.KEY_UP:
             self._sel = max(0, self._sel - 1)
             self._error = ""
@@ -1637,31 +1721,13 @@ class OutputDirectorySettingsPopup:
             return False, "Enter a custom output directory, or uncheck it"
         return True, ""
 
-    def _reset(self) -> None:
-        self._store.reset("output_dir_mode", "output_dir_custom_enabled", "output_dir_custom_path")
-        self._sel = 0
-        self._load()
-
     # ── Drawing ────────────────────────────────────────────────────────────────
 
-    def draw(self, stdscr) -> None:
+    def _draw_body(self, stdscr) -> None:
         db     = self.dashboard
-        h, w   = stdscr.getmaxyx()
         fields = self._get_fields()
-
-        box_w = min(96, w - 6)
         box_h = len(fields) * 2 + 6   # + 2 effective lines + footer
-        by1 = (h - box_h) // 2
-        bx1 = (w - box_w) // 2
-        by2 = by1 + box_h
-        bx2 = bx1 + box_w
-
-        for y in range(by1, by2 + 1):
-            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_outputdirectorysett_draw_normal_1"))
-
-        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
-        title = f" {self.entry.streamer.upper()} SETTINGS "
-        db.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(db, "config_editor_outputdirectorysett_draw_system"))
+        by1, bx1, by2, bx2, box_w = self._draw_frame(stdscr, box_h=box_h, box_w=96)
 
         row = by1 + 2
         for i, (label, field_key) in enumerate(fields):
@@ -1714,11 +1780,8 @@ class OutputDirectorySettingsPopup:
         footer = " Enter:Save  Space/\u2190\u2192:Cycle  R:Reset  Esc:Cancel "
         db.safe_addstr(stdscr, by2, bx1 + 2, footer[:box_w - 4], theme.attr(db, "config_editor_outputdirectorysett_draw_invhead"))
 
-        if self._confirm_reset is not None:
-            self._confirm_reset.draw(stdscr)
 
-
-class SplitSettingsPopup:
+class SplitSettingsPopup(SettingsPopupBase):
     """Modal popup for per-streamer split-after-X-minutes settings.
 
     Opened by StreamerSettingsPopup when the user presses Enter on Split.
@@ -1744,27 +1807,25 @@ class SplitSettingsPopup:
     _FIELD_MINUTES = "split_after"
     _STATES = ("inherit", "on", "off")
 
-    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
-        self.dashboard = dashboard
-        self.entry     = entry
-        self.config_id = config_id
-        self._store    = PriorityEntryStore(dashboard, entry, config_id)
+    LABEL = "Split"
+    RESET_KEYS = ("split_mode", "split_after", "split_enabled")
+    TAG_NORMAL = "config_editor_splitsettingspopup_draw_normal_1"
+    TAG_SYSTEM = "config_editor_splitsettingspopup_draw_system"
+    TEXT_FIELDS = (_FIELD_MINUTES,)
 
+    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
         self.mode:        str  = "inherit"   # "inherit" | "on" | "off"
         self.split_after: int  = 0
 
-        self._sel:      int  = 0      # 0 = mode row, 1 = minutes row (when shown)
-        self._editing:  bool = False  # text-field edit sub-mode
-        self._edit_buf: str  = ""
-        self._error:    str  = ""
-        self._confirm_reset: "Optional[ConfirmResetPopup]" = None
+        self._sel:         int = 0      # 0 = mode row, 1 = minutes row (when shown)
+        self._text_cursor: int = 0
+        self._error:        str = ""
 
-        self._load()
+        super().__init__(dashboard, entry, config_id)
 
     def _reset(self) -> None:
-        self._store.reset("split_mode", "split_after", "split_enabled")
         self._sel = 0
-        self._load()
+        super()._reset()
 
     # ── Persistence ────────────────────────────────────────────────────────────
 
@@ -1827,109 +1888,34 @@ class SplitSettingsPopup:
             ))
         return fields
 
-    # ── Key handling ───────────────────────────────────────────────────────────
+    # ── Minutes text field ─────────────────────────────────────────────────────
 
-    def handle_key(self, key) -> bool:
-        """Handle one keypress. Returns True when the popup should close."""
-        if self._confirm_reset is not None:
-            result = self._confirm_reset.handle_key(key)
-            if result == "yes":
-                self._reset()
-                self._confirm_reset = None
-            elif result == "no":
-                self._confirm_reset = None
-            return False
+    def _get_text(self, field_key: str) -> str:
+        return str(self.split_after) if self.split_after else ""
 
-        fields = self._get_fields()
-        _, _, field_key = fields[self._sel]
+    def _set_text(self, field_key: str, value: str) -> None:
+        self.split_after = int(value) if value.isdigit() else 0
 
-        # ── Text-editing sub-mode (minutes field) ───────────────────────────────
-        if self._editing:
-            if key == 27:                               # Esc → cancel edit
-                self._editing  = False
-                self._edit_buf = ""
-                self._error    = ""
-            elif key in (curses.KEY_BACKSPACE, 127, 8):
-                self._edit_buf = self._edit_buf[:-1]
-                self._error    = ""
-            elif key in (ord("\n"), ord("\r"), curses.KEY_ENTER, 459):
-                val = self._edit_buf.strip()
-                if val == "":
-                    self.split_after = 0
-                    self._editing  = False
-                    self._edit_buf = ""
-                    self._error    = ""
-                elif val.isdigit() and int(val) > 0:
-                    self.split_after = int(val)
-                    self._editing  = False
-                    self._edit_buf = ""
-                    self._error    = ""
-                else:
-                    self._error = "Enter a whole number of minutes"
-            elif 48 <= key <= 57:                        # digits only
-                self._edit_buf += chr(key)
-                self._error     = ""
-            return False
+    def _text_charset(self, field_key: str):
+        return lambda key: 48 <= key <= 57   # digits only
 
-        # ── Normal navigation ─────────────────────────────────────────────────
-        if key == 27:                                   # Esc → close without saving
-            return True
+    # ── Key handling (non-text rows) ────────────────────────────────────────────
 
-        elif key in (ord('r'), ord('R')):
-            self._confirm_reset = ConfirmResetPopup(
-                self.dashboard,
-                f"Are you sure you want to reset the Split settings for {self.entry.streamer}?",
-            )
-
-        elif key == curses.KEY_UP:
-            self._sel   = max(0, self._sel - 1)
+    def _handle_field_key(self, key, field_key: str) -> None:
+        if field_key == self._FIELD_MODE and key in (ord(' '), curses.KEY_LEFT, curses.KEY_RIGHT):
+            idx = self._STATES.index(self.mode)
+            step = -1 if key == curses.KEY_LEFT else 1
+            self.mode = self._STATES[(idx + step) % len(self._STATES)]
+            self._sel = min(self._sel, len(self._get_fields()) - 1)
             self._error = ""
-
-        elif key == curses.KEY_DOWN:
-            self._sel   = min(len(fields) - 1, self._sel + 1)
-            self._error = ""
-
-        elif key in (ord(" "), curses.KEY_LEFT, curses.KEY_RIGHT):
-            if field_key == self._FIELD_MODE:
-                idx = self._STATES.index(self.mode)
-                step = -1 if key == curses.KEY_LEFT else 1
-                self.mode = self._STATES[(idx + step) % len(self._STATES)]
-                self._sel = min(self._sel, len(self._get_fields()) - 1)
-                self._error = ""
-            elif key == ord(" "):
-                self._edit_buf = str(self.split_after) if self.split_after else ""
-                self._editing  = True
-                self._error    = ""
-
-        elif key in (ord("\n"), ord("\r"), curses.KEY_ENTER, 459):
-            valid, err = self._validate()
-            if valid:
-                self._save()
-                return True
-            self._error = err
-
-        return False
 
     # ── Drawing ────────────────────────────────────────────────────────────────
 
-    def draw(self, stdscr) -> None:
+    def _draw_body(self, stdscr) -> None:
         db     = self.dashboard
-        h, w   = stdscr.getmaxyx()
         fields = self._get_fields()
-
-        box_w = min(50, w - 6)
         box_h = len(fields) * 2 + 5   # + effective line + footer
-        by1 = (h - box_h) // 2
-        bx1 = (w - box_w) // 2
-        by2 = by1 + box_h
-        bx2 = bx1 + box_w
-
-        for y in range(by1, by2 + 1):
-            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_splitsettingspopup_draw_normal_1"))
-
-        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
-        title = f" {self.entry.streamer.upper()} SETTINGS "
-        db.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(db, "config_editor_splitsettingspopup_draw_system"))
+        by1, bx1, by2, bx2, box_w = self._draw_frame(stdscr, box_h=box_h, box_w=50)
 
         row = by1 + 2
         for i, (label, val_str, field_key) in enumerate(fields):
@@ -1943,8 +1929,10 @@ class SplitSettingsPopup:
             full_label = f"{prefix}{label}: "
             db.safe_addstr(stdscr, row, bx1 + 2, full_label, label_attr)
 
-            if field_key == self._FIELD_MINUTES and self._editing and is_sel:
-                shown = self._edit_buf + "_"
+            if is_sel and field_key in self.TEXT_FIELDS:
+                text = self._get_text(field_key)
+                cur = min(self._text_cursor, len(text))
+                shown = text[:cur] + "_" + text[cur:]
             else:
                 shown = val_str
             val_x   = bx1 + 2 + len(full_label)
@@ -1972,11 +1960,8 @@ class SplitSettingsPopup:
         footer = " Enter:Save  Space/\u2190\u2192:Cycle  R:Reset  Esc:Cancel "
         db.safe_addstr(stdscr, by2, bx1 + 2, footer[:box_w - 4], theme.attr(db, "config_editor_splitsettingspopup_draw_invhead"))
 
-        if self._confirm_reset is not None:
-            self._confirm_reset.draw(stdscr)
 
-
-class IntroDelaySettingsPopup:
+class IntroDelaySettingsPopup(SettingsPopupBase):
     """Modal popup for per-streamer intro-delay settings.
 
     Opened by StreamerSettingsPopup when the user presses Enter on Intro
@@ -1988,28 +1973,26 @@ class IntroDelaySettingsPopup:
     _FIELD_MINUTES = "intro_delay_minutes"
     _FIELD_SPLIT   = "intro_delay_split"
 
-    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
-        self.dashboard = dashboard
-        self.entry     = entry
-        self.config_id = config_id
-        self._store    = PriorityEntryStore(dashboard, entry, config_id)
+    LABEL = "Intro Delay"
+    RESET_KEYS = ("intro_delay_enabled", "intro_delay_minutes", "intro_delay_split")
+    TAG_NORMAL = "config_editor_introdelaysettingspo_draw_normal_1"
+    TAG_SYSTEM = "config_editor_introdelaysettingspo_draw_system"
+    TEXT_FIELDS = (_FIELD_MINUTES,)
 
+    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
         self.enabled: bool = False
         self.minutes: int  = 0
         self.split:   bool = False
 
-        self._sel:      int  = 0
-        self._editing:  bool = False  # text-field edit sub-mode (minutes)
-        self._edit_buf: str  = ""
-        self._error:    str  = ""
-        self._confirm_reset: "Optional[ConfirmResetPopup]" = None
+        self._sel:         int = 0
+        self._text_cursor: int = 0
+        self._error:        str = ""
 
-        self._load()
+        super().__init__(dashboard, entry, config_id)
 
     def _reset(self) -> None:
-        self._store.reset(self._FIELD_ENABLED, self._FIELD_MINUTES, self._FIELD_SPLIT)
         self._sel = 0
-        self._load()
+        super()._reset()
 
     # ── Persistence ────────────────────────────────────────────────────────────
 
@@ -2060,110 +2043,35 @@ class IntroDelaySettingsPopup:
             ))
         return fields
 
-    # ── Key handling ───────────────────────────────────────────────────────────
+    # ── Minutes text field ─────────────────────────────────────────────────────
 
-    def handle_key(self, key) -> bool:
-        """Handle one keypress. Returns True when the popup should close."""
-        if self._confirm_reset is not None:
-            result = self._confirm_reset.handle_key(key)
-            if result == "yes":
-                self._reset()
-                self._confirm_reset = None
-            elif result == "no":
-                self._confirm_reset = None
-            return False
+    def _get_text(self, field_key: str) -> str:
+        return str(self.minutes) if self.minutes else ""
 
-        fields = self._get_fields()
-        _, _, field_key = fields[self._sel]
+    def _set_text(self, field_key: str, value: str) -> None:
+        self.minutes = int(value) if value.isdigit() else 0
 
-        # ── Text-editing sub-mode (minutes field) ───────────────────────────────
-        if self._editing:
-            if key == 27:                               # Esc → cancel edit
-                self._editing  = False
-                self._edit_buf = ""
-                self._error    = ""
-            elif key in (curses.KEY_BACKSPACE, 127, 8):
-                self._edit_buf = self._edit_buf[:-1]
-                self._error    = ""
-            elif key in (ord("\n"), ord("\r"), curses.KEY_ENTER, 459):
-                val = self._edit_buf.strip()
-                if val == "":
-                    self.minutes = 0
-                    self._editing  = False
-                    self._edit_buf = ""
-                    self._error    = ""
-                elif val.isdigit() and int(val) > 0:
-                    self.minutes = int(val)
-                    self._editing  = False
-                    self._edit_buf = ""
-                    self._error    = ""
-                else:
-                    self._error = "Enter a whole number of minutes"
-            elif 48 <= key <= 57:                        # digits only
-                self._edit_buf += chr(key)
-                self._error     = ""
-            return False
+    def _text_charset(self, field_key: str):
+        return lambda key: 48 <= key <= 57   # digits only
 
-        # ── Normal navigation ─────────────────────────────────────────────────
-        if key == 27:                                   # Esc → close without saving
-            return True
+    # ── Key handling (non-text rows) ────────────────────────────────────────────
 
-        elif key in (ord('r'), ord('R')):
-            self._confirm_reset = ConfirmResetPopup(
-                self.dashboard,
-                f"Are you sure you want to reset the Intro Delay settings for {self.entry.streamer}?",
-            )
-
-        elif key == curses.KEY_UP:
-            self._sel   = max(0, self._sel - 1)
+    def _handle_field_key(self, key, field_key: str) -> None:
+        if field_key == self._FIELD_ENABLED and key == ord(' '):
+            self.enabled = not self.enabled
+            self._sel = min(self._sel, len(self._get_fields()) - 1)
             self._error = ""
-
-        elif key == curses.KEY_DOWN:
-            self._sel   = min(len(fields) - 1, self._sel + 1)
+        elif field_key == self._FIELD_SPLIT and key == ord(' '):
+            self.split = not self.split
             self._error = ""
-
-        elif key in (ord(" "), curses.KEY_LEFT, curses.KEY_RIGHT):
-            if field_key == self._FIELD_ENABLED:
-                self.enabled = not self.enabled
-                self._sel = min(self._sel, len(self._get_fields()) - 1)
-                self._error = ""
-            elif field_key == self._FIELD_SPLIT:
-                self.split = not self.split
-                self._error = ""
-            elif field_key == self._FIELD_MINUTES and key == ord(" "):
-                self._edit_buf = str(self.minutes) if self.minutes else ""
-                self._editing  = True
-                self._error    = ""
-
-        elif key in (ord("\n"), ord("\r"), curses.KEY_ENTER, 459):
-            valid, err = self._validate()
-            if valid:
-                self._save()
-                return True
-            self._error = err
-
-        return False
 
     # ── Drawing ────────────────────────────────────────────────────────────────
 
-    def draw(self, stdscr) -> None:
+    def _draw_body(self, stdscr) -> None:
         db     = self.dashboard
-        h, w   = stdscr.getmaxyx()
         fields = self._get_fields()
-
-        box_w = min(52, w - 6)
         box_h = len(fields) * 2 + 5   # + effective line + footer
-        by1 = (h - box_h) // 2
-        bx1 = (w - box_w) // 2
-        by2 = by1 + box_h
-        bx2 = bx1 + box_w
-
-        for y in range(by1, by2 + 1):
-            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_introdelaysettingspo_draw_normal_1"))
-
-        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
-        title = f" {self.entry.streamer.upper()} SETTINGS "
-        db.safe_addstr(stdscr, by1, bx1 + 2, title, theme.attr(db, "config_editor_introdelaysettingspo_draw_system"))
+        by1, bx1, by2, bx2, box_w = self._draw_frame(stdscr, box_h=box_h, box_w=52)
 
         row = by1 + 2
         for i, (label, val_str, field_key) in enumerate(fields):
@@ -2177,8 +2085,10 @@ class IntroDelaySettingsPopup:
             full_label = f"{prefix}{label}: "
             db.safe_addstr(stdscr, row, bx1 + 2, full_label, label_attr)
 
-            if field_key == self._FIELD_MINUTES and self._editing and is_sel:
-                shown = self._edit_buf + "_"
+            if is_sel and field_key in self.TEXT_FIELDS:
+                text = self._get_text(field_key)
+                cur = min(self._text_cursor, len(text))
+                shown = text[:cur] + "_" + text[cur:]
             else:
                 shown = val_str
             val_x   = bx1 + 2 + len(full_label)
@@ -2202,14 +2112,11 @@ class IntroDelaySettingsPopup:
             db.safe_addstr(stdscr, by2 - 1, bx1 + 2, self._error[:box_w - 4],
                            theme.attr(db, "config_editor_introdelaysettingspo_draw_warn_3"))
 
-        footer = " Enter:Save  Space:Toggle/Edit  R:Reset  Esc:Cancel "
+        footer = " Enter:Save  Space:Toggle  R:Reset  Esc:Cancel "
         db.safe_addstr(stdscr, by2, bx1 + 2, footer[:box_w - 4], theme.attr(db, "config_editor_introdelaysettingspo_draw_invhead"))
 
-        if self._confirm_reset is not None:
-            self._confirm_reset.draw(stdscr)
 
-
-class ScheduleSettingsPopup:
+class ScheduleSettingsPopup(SettingsPopupBase):
     """Modal popup for per-streamer schedule settings.
 
     Opened by StreamerSettingsPopup when the user presses Enter on Schedule.
@@ -2230,12 +2137,16 @@ class ScheduleSettingsPopup:
     _FIELD_REC_START = "recurring_start"
     _FIELD_REC_END   = "recurring_end"
 
-    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
-        self.dashboard = dashboard
-        self.entry     = entry
-        self.config_id = config_id
-        self._store    = PriorityEntryStore(dashboard, entry, config_id)
+    LABEL = "Schedule"
+    RESET_KEYS = ("schedule",)
+    TAG_NORMAL = "config_editor_schedulesettingspopu_draw_normal_1"
+    TAG_SYSTEM = "config_editor_schedulesettingspopu_draw_system"
+    # one_off_start/end and recurring_start/end are plain str attributes
+    # named exactly like their field_key, so the default getattr/setattr
+    # based _get_text()/_set_text() below work without per-field mapping.
+    TEXT_FIELDS = (_FIELD_OO_START, _FIELD_OO_END, _FIELD_REC_START, _FIELD_REC_END)
 
+    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
         # Working copies of schedule settings
         self.schedule_enabled: bool      = False
         self.mode:             str       = "one_off"    # "one_off" | "recurring"
@@ -2246,14 +2157,17 @@ class ScheduleSettingsPopup:
         self.recurring_end:    str       = ""
 
         # UI state
-        self._sel:        int  = 0      # selected field index
-        self._editing:    bool = False  # text-field edit sub-mode
-        self._edit_buf:   str  = ""
-        self._day_cursor: int  = 0      # sub-cursor within the Days row
-        self._error:      str  = ""
-        self._confirm_reset: "Optional[ConfirmResetPopup]" = None
+        self._sel:         int = 0      # selected field index
+        self._text_cursor: int = 0      # cursor within the selected text row
+        self._day_cursor:  int = 0      # sub-cursor within the Days row
+        self._error:        str = ""
 
-        self._load()
+        super().__init__(dashboard, entry, config_id)
+
+    def _reset(self) -> None:
+        self._sel = 0
+        self._day_cursor = 0
+        super()._reset()
 
     # ── Persistence ────────────────────────────────────────────────────────────
 
@@ -2331,12 +2245,6 @@ class ScheduleSettingsPopup:
 
     # ── Validation ─────────────────────────────────────────────────────────────
 
-    def _reset(self) -> None:
-        self._store.reset("schedule")
-        self._sel = 0
-        self._day_cursor = 0
-        self._load()
-
     def _validate(self) -> "tuple[bool, str]":
         if not self.schedule_enabled:
             return True, ""
@@ -2360,143 +2268,54 @@ class ScheduleSettingsPopup:
                     return False, f"{label} time must be HH:MM"
         return True, ""
 
-    # ── Key handling ───────────────────────────────────────────────────────────
+    # ── Datetime/time text fields ───────────────────────────────────────────────
 
-    def handle_key(self, key) -> bool:
-        """Handle one keypress.  Returns True when the popup should close."""
-        if self._confirm_reset is not None:
-            result = self._confirm_reset.handle_key(key)
-            if result == "yes":
-                self._reset()
-                self._confirm_reset = None
-            elif result == "no":
-                self._confirm_reset = None
-            return False
+    def _get_text(self, field_key: str) -> str:
+        return getattr(self, field_key, "")
 
-        fields = self._get_fields()
-        n      = len(fields)
-        _, _, field_key = fields[self._sel] if fields else ("", "", "")
+    def _set_text(self, field_key: str, value: str) -> None:
+        setattr(self, field_key, value)
 
-        # ── Text-editing sub-mode ─────────────────────────────────────────────
-        if self._editing:
-            if key == 27:                               # Esc → cancel edit
-                self._editing  = False
-                self._edit_buf = ""
-                self._error    = ""
-            elif key in (curses.KEY_BACKSPACE, 127, 8):
-                self._edit_buf = self._edit_buf[:-1]
-                self._error    = ""
-            elif key in (ord("\n"), ord("\r"), curses.KEY_ENTER, 459):
-                val = self._edit_buf.strip()
-                fmt = (self._DATETIME_FMT
-                       if field_key in (self._FIELD_OO_START, self._FIELD_OO_END)
-                       else self._TIME_FMT)
-                try:
-                    datetime.strptime(val, fmt)
-                    setattr(self, field_key, val)
-                    self._editing  = False
-                    self._edit_buf = ""
-                    self._error    = ""
-                except Exception:
-                    expected = ("YYYY-MM-DD HH:MM"
-                                if fmt == self._DATETIME_FMT else "HH:MM")
-                    self._error = f"Use format: {expected}"
-            elif 32 <= key < 127:
-                self._edit_buf += chr(key)
-                self._error     = ""
-            return False
+    # ── Key handling (non-text rows) ────────────────────────────────────────────
 
-        # ── Normal navigation ─────────────────────────────────────────────────
-        if key == 27:                                   # Esc → close without saving
-            return True
-
-        if key in (ord('r'), ord('R')):
-            self._confirm_reset = ConfirmResetPopup(
-                self.dashboard,
-                f"Are you sure you want to reset the Schedule settings for {self.entry.streamer}?",
-            )
-
-        elif key == curses.KEY_UP:
-            self._sel   = max(0, self._sel - 1)
-            self._error = ""
-
-        elif key == curses.KEY_DOWN:
-            self._sel   = min(n - 1, self._sel + 1)
-            self._error = ""
-
-        elif key == curses.KEY_LEFT:
-            if field_key == self._FIELD_MODE:
-                self.mode = "one_off"
-                self._sel = min(self._sel, len(self._get_fields()) - 1)
-            elif field_key == self._FIELD_REC_DAYS:
-                self._day_cursor = max(0, self._day_cursor - 1)
-
-        elif key == curses.KEY_RIGHT:
-            if field_key == self._FIELD_MODE:
-                self.mode = "recurring"
-                self._sel = min(self._sel, len(self._get_fields()) - 1)
-            elif field_key == self._FIELD_REC_DAYS:
-                self._day_cursor = min(6, self._day_cursor + 1)
-
-        elif key == ord(" "):
-            if field_key in (self._FIELD_OO_START, self._FIELD_OO_END,
-                             self._FIELD_REC_START, self._FIELD_REC_END):
-                self._edit_buf = getattr(self, field_key, "")
-                self._editing  = True
-                self._error    = ""
-            else:
-                self._toggle_current(field_key, fields)
-
-        elif key in (ord("\n"), ord("\r"), curses.KEY_ENTER, 459):
-            valid, err = self._validate()
-            if valid:
-                self._save()
-                return True
-            self._error = err
-
-        return False
-
-    def _toggle_current(self, field_key: str, fields: list) -> None:
-        """Toggle/cycle the currently selected field."""
-        if field_key == self._FIELD_ENABLED:
+    def _handle_field_key(self, key, field_key: str) -> None:
+        if field_key == self._FIELD_ENABLED and key == ord(' '):
             self.schedule_enabled = not self.schedule_enabled
             self._error = ""
         elif field_key == self._FIELD_MODE:
-            self.mode = "recurring" if self.mode == "one_off" else "one_off"
+            if key == curses.KEY_LEFT:
+                self.mode = "one_off"
+            elif key == curses.KEY_RIGHT:
+                self.mode = "recurring"
+            elif key == ord(' '):
+                self.mode = "recurring" if self.mode == "one_off" else "one_off"
+            else:
+                return
             self._sel = min(self._sel, len(self._get_fields()) - 1)
             self._error = ""
         elif field_key == self._FIELD_REC_DAYS:
-            self.recurring_days[self._day_cursor] = not self.recurring_days[self._day_cursor]
-            self._error = ""
+            if key == curses.KEY_LEFT:
+                self._day_cursor = max(0, self._day_cursor - 1)
+            elif key == curses.KEY_RIGHT:
+                self._day_cursor = min(6, self._day_cursor + 1)
+            elif key == ord(' '):
+                self.recurring_days[self._day_cursor] = not self.recurring_days[self._day_cursor]
+                self._error = ""
 
     # ── Drawing ────────────────────────────────────────────────────────────────
 
-    def draw(self, stdscr) -> None:
+    def _draw_body(self, stdscr) -> None:
         """Draw the popup centred on screen, on top of everything else."""
-        db    = self.dashboard
-        h, w  = stdscr.getmaxyx()
+        db = self.dashboard
+        h, _ = stdscr.getmaxyx()
         fields = self._get_fields()
 
-        box_w   = min(56, w - 6)
         # Two screen-rows per field (field line + blank gap), plus borders / header / footer.
-        box_h   = len(fields) * 2 + 4
-        box_h   = max(box_h, 8)
-        box_h   = min(box_h, h - 4)
+        box_h = len(fields) * 2 + 4
+        box_h = max(box_h, 8)
+        box_h = min(box_h, h - 4)
 
-        by1 = (h - box_h) // 2
-        bx1 = (w - box_w) // 2
-        by2 = by1 + box_h
-        bx2 = bx1 + box_w
-
-        # Clear background area
-        for y in range(by1, by2 + 1):
-            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1),
-                           theme.attr(db, "config_editor_schedulesettingspopu_draw_normal_1"))
-
-        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
-        title = f" {self.entry.streamer.upper()} SETTINGS "
-        db.safe_addstr(stdscr, by1, bx1 + 2, title,
-                       theme.attr(db, "config_editor_schedulesettingspopu_draw_system"))
+        by1, bx1, by2, bx2, box_w = self._draw_frame(stdscr, box_h=box_h, box_w=56)
 
         # Draw each field
         row = by1 + 2
@@ -2531,11 +2350,11 @@ class ScheduleSettingsPopup:
                     if dx + len(day_str) < bx2:
                         db.safe_addstr(stdscr, row, dx, day_str, day_attr)
                     dx += len(day_str) + 1
-            elif (is_sel and self._editing
-                  and field_key in (self._FIELD_OO_START, self._FIELD_OO_END,
-                                    self._FIELD_REC_START, self._FIELD_REC_END)):
-                db.safe_addstr(stdscr, row, val_x,
-                               (self._edit_buf + "_")[:max_len],
+            elif is_sel and field_key in self.TEXT_FIELDS:
+                text = self._get_text(field_key)
+                cur = min(self._text_cursor, len(text))
+                shown = text[:cur] + "_" + text[cur:]
+                db.safe_addstr(stdscr, row, val_x, shown[:max_len],
                                theme.attr(db, "config_editor_schedulesettingspopu_draw_normal_3"))
             else:
                 db.safe_addstr(stdscr, row, val_x, val_str[:max_len], val_attr)
@@ -2548,15 +2367,9 @@ class ScheduleSettingsPopup:
                            f" {self._error} "[:box_w - 4],
                            theme.attr(db, "config_editor_schedulesettingspopu_draw_warn_2"))
         else:
-            if self._editing:
-                hint = " Enter:Commit  Esc:Cancel edit "
-            else:
-                hint = " Enter:Save  Esc:Cancel  Space:Toggle/Edit  \u2190\u2192:Mode/Days  R:Reset "
+            hint = " Enter:Save  Esc:Cancel  Space:Toggle  \u2190\u2192:Mode/Days  R:Reset "
             db.safe_addstr(stdscr, by2, bx1 + 2, hint[:box_w - 4],
                            theme.attr(db, "config_editor_schedulesettingspopu_draw_invhead"))
-
-        if self._confirm_reset is not None:
-            self._confirm_reset.draw(stdscr)
 
 
 def apply_sort_to_streamers(
@@ -2793,11 +2606,11 @@ class SiteSortManager:
         if now - self._prio_cache_ts < 2.0:
             return self._prio_cache
         try:
-            from .main import _global_json_lock, _load_global_json
+            app = self.dashboard.app
             sites     = self.dashboard.sites
             config_id = _compute_config_id([s.config_path for s in sites])
-            with _global_json_lock:
-                global_data = _load_global_json()
+            with app.global_json_lock:
+                global_data = app.load_global_json()
             entries = (global_data.get("priorities", {})
                                   .get(config_id, {})
                                   .get("entries", []))
@@ -3093,11 +2906,9 @@ class GlobalConfigEditor:
 
         # 2. Persist tag overrides to global.json.
         try:
-            from .main import _update_global_json
-
             def _mutate(gdata):
                 gdata["debug_log_tags"] = self._debug_tags_state
-            _update_global_json(_mutate)
+            self.dashboard.app.update_global_json(_mutate)
         except Exception as e:
             _dbg(f"[CONFIG] _save_debug_tags: failed to write global.json: {e}")
 
@@ -3157,11 +2968,6 @@ class GlobalConfigEditor:
 
     def _save_msg_filters(self) -> None:
         """Persist this tag's on/off switch and its per-message overrides."""
-        try:
-            from .main import _update_global_json
-        except ImportError:
-            from main import _update_global_json  # type: ignore[no-redef]
-
         def _mutate(gdata):
             gdata["debug_log_tags"] = self._debug_tags_state
 
@@ -3176,7 +2982,7 @@ class GlobalConfigEditor:
             else:
                 all_filters.pop(self._msg_filters_tag, None)
             gdata["debug_log_message_filters"] = all_filters
-        _update_global_json(_mutate)
+        self.dashboard.app.update_global_json(_mutate)
         _dbg(f"[CONFIG] _save_msg_filters: tag={self._msg_filters_tag!r} "
              f"disabled={sorted(k for k, v in self._msg_filters_state.items() if not v)}")
 
@@ -3894,7 +3700,7 @@ class ConfigEditor:
             if s.startswith("[") and s.endswith("]"):
                 current_section = s[1:-1]
                 if current_section == "General" or current_section in _dlp_sections:
-                    self.items.append(ConfigItem(i, True, current_section, "", False, line, ""))
+                    self.items.append(ConfigItem(i, True, current_section, "", False, line, "", section=current_section))
             else:
                 if current_section == "General":
                     if "=" in s:
@@ -3904,69 +3710,75 @@ class ConfigEditor:
                         if k_stripped.upper() in _GLOBAL_KEYS:
                             continue
                         comment = _KEY_COMMENTS.get(k_stripped.upper(), "")
-                        self.items.append(ConfigItem(i, False, k_stripped, v.strip(), True, line, comment))
+                        self.items.append(ConfigItem(i, False, k_stripped, v.strip(), True, line, comment, section=current_section))
                     else:
                         if s.upper() not in _GLOBAL_KEYS:
                             comment = _KEY_COMMENTS.get(s.upper(), "")
-                            self.items.append(ConfigItem(i, False, s, "", False, line, comment))
+                            self.items.append(ConfigItem(i, False, s, "", False, line, comment, section=current_section))
                 elif current_section in _dlp_sections:
                     if "=" in s:
                         k, v = s.split("=", 1)
                         k_stripped = k.strip()
                         comment = DOWNLOADER_FLAG_COMMENTS.get(k_stripped.upper(), "")
-                        self.items.append(ConfigItem(i, False, k_stripped, v.strip(), True, line, comment))
+                        self.items.append(ConfigItem(i, False, k_stripped, v.strip(), True, line, comment, section=current_section))
                     else:
                         comment = DOWNLOADER_FLAG_COMMENTS.get(s.upper(), "")
-                        self.items.append(ConfigItem(i, False, s, "", False, line, comment))
+                        self.items.append(ConfigItem(i, False, s, "", False, line, comment, section=current_section))
 
         if self.items:
             self.selected_idx = min(self.selected_idx, len(self.items) - 1)
         else:
             self.selected_idx = 0
 
-    def save_file(self):
-        if not self.current_site_path or not self.lines:
-            _dbg(f"[CONFIG] save_file() aborted — site_path={self.current_site_path!r}, lines={len(self.lines) if self.lines else 0}")
-            return
+    def apply_edit(self, item: "ConfigItem", new_val: str) -> "tuple[bool, str]":
+        """Write new_val for item straight to disk, re-reading first.
+        Prevents a concurrent Streamers/Block edit from being silently discarded."""
+        if not self.current_site_path:
+            return False, "Internal error: no config file loaded"
 
-        _dbg(f"[CONFIG] ConfigEditor.save_file() called — site_path={self.current_site_path!r}")
+        _dbg(f"[CONFIG] ConfigEditor.apply_edit() called — site_path={self.current_site_path!r} key={item.key!r}")
 
-        # Create backup
-        backup_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(self.current_site_path))), "backups")
-        _dbg(f"[CONFIG] backup_dir resolved to {backup_dir!r}")
-        try:
-            os.makedirs(backup_dir, exist_ok=True)
-            _dbg(f"[CONFIG] backup_dir created/confirmed OK")
-        except Exception as e:
-            _dbg(f"[CONFIG] ERROR creating backup_dir: {e}")
-        base = os.path.basename(self.current_site_path)
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        backup_path = os.path.join(backup_dir, f"{base}.{timestamp}.bak")
-        _dbg(f"[CONFIG] backup_path={backup_path!r}, source exists={os.path.isfile(self.current_site_path)}")
-        try:
-            shutil.copy2(self.current_site_path, backup_path)
-            _dbg(f"[CONFIG] backup written OK")
-        except Exception as e:
-            _dbg(f"[CONFIG] ERROR writing backup: {e}")
-            self.dashboard.sites[self.selected_site_idx].log_line(f"Failed to backup config: {e}")
+        new_line = f"{item.key} = {new_val}\n" if item.has_equals else f"{new_val}\n"
 
-        # Write new config
-        try:
-            with open(self.current_site_path, "w", encoding="utf-8") as f:
-                f.writelines(self.lines)
-            _dbg(f"[CONFIG] site config written OK ({len(self.lines)} lines)")
-        except Exception as e:
-            _dbg(f"[CONFIG] ERROR writing site config: {e}")
-            self.dashboard.sites[self.selected_site_idx].log_line(f"Failed to save config: {e}")
+        with get_config_file_lock(self.current_site_path):
+            try:
+                with open(self.current_site_path, "r", encoding="utf-8") as f:
+                    fresh_lines = f.readlines()
+            except Exception as e:
+                _dbg(f"[CONFIG] apply_edit: read failed: {e}")
+                return False, f"Could not read config: {e}"
 
-        # Reload
+            idx = _find_key_line(fresh_lines, item.section, item.key, item.has_equals)
+            if idx is not None:
+                fresh_lines[idx] = new_line
+            else:
+                fresh_lines = _append_line_to_section(fresh_lines, item.section, new_line)
+
+            backup_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(self.current_site_path))), "backups")
+            try:
+                os.makedirs(backup_dir, exist_ok=True)
+                base = os.path.basename(self.current_site_path)
+                timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+                shutil.copy2(self.current_site_path, os.path.join(backup_dir, f"{base}.{timestamp}.bak"))
+                _dbg(f"[CONFIG] backup written OK")
+            except Exception as e:
+                _dbg(f"[CONFIG] ERROR writing backup: {e}")
+
+            try:
+                with open(self.current_site_path, "w", encoding="utf-8") as f:
+                    f.writelines(fresh_lines)
+                _dbg(f"[CONFIG] site config written OK ({len(fresh_lines)} lines)")
+            except Exception as e:
+                _dbg(f"[CONFIG] ERROR writing site config: {e}")
+                return False, f"Could not write config: {e}"
+
         try:
             self.load_config(self.current_site_path)
-            _dbg(f"[CONFIG] ConfigEditor.save_file() reload completed items={len(self.items)}")
+            _dbg(f"[CONFIG] ConfigEditor.apply_edit() reload completed items={len(self.items)}")
         except Exception as e:
-            _dbg(f"[CONFIG] ConfigEditor.save_file() reload failed: {e}")
-            if self.current_site_path and self.current_site_path in {site.config_path for site in self.dashboard.sites}:
-                self.dashboard.sites[self.selected_site_idx].log_line(f"Failed to reload config after save: {e}")
+            _dbg(f"[CONFIG] ConfigEditor.apply_edit() reload failed: {e}")
+
+        return True, ""
 
     def draw_tab(self, stdscr, y1, x1, y2, x2):
         # Ensure an initial load if the editor has never loaded a config yet
@@ -4280,18 +4092,9 @@ class ConfigEditor:
                     if not is_valid:
                         self.popup_error = err_msg
                         return True
-                    if 0 <= self.editing_item.line_idx < len(self.lines):
-                        if self.editing_item.has_equals:
-                            self.lines[self.editing_item.line_idx] = f"{self.editing_item.key} = {new_val}\n"
-                        else:
-                            self.lines[self.editing_item.line_idx] = f"{new_val}\n"
-                    else:
-                        self.popup_error = "Internal error: invalid config line"
-                        return True
-                    try:
-                        self.save_file()
-                    except Exception as e:
-                        self.popup_error = f"Save failed: {e}"
+                    ok, err = self.apply_edit(self.editing_item, new_val)
+                    if not ok:
+                        self.popup_error = err
                         return True
                     site = self.sites[self.selected_site_idx]
                     site.trigger_event.set()

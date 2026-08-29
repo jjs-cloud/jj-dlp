@@ -45,18 +45,6 @@ def _logger():
     except ImportError:
         return _NullLogger()
 
-def _load_global_json() -> dict:
-    from .main import _load_global_json as _f
-    return _f()
-
-def _save_global_json(data: dict) -> None:
-    from .main import _save_global_json as _f
-    _f(data)
-
-def _update_global_json(mutate_fn) -> dict:
-    from .main import _update_global_json as _f
-    return _f(mutate_fn)
-
 def _load_config_keys(source_dir=None):
     """Return the CONFIG_KEYS tuple.
 
@@ -152,7 +140,7 @@ PRESERVED_SECTIONS = ["Streamers", "Block"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-def check_for_updates_background():
+def check_for_updates_background(app):
     """Checks for updates in the background and saves the status to global.json."""
     try:
         branch = _get_update_branch()
@@ -182,12 +170,12 @@ def check_for_updates_background():
 
             update_info['latest_sha'] = latest_sha
             _logger().dbg(f"[UPDATER] check_for_updates_background: update_info current_sha={update_info.get('current_sha')} latest_sha={latest_sha} update_available={update_info.get('update_available')}")
-        _update_global_json(_mutate)
+        app.update_global_json(_mutate)
     except Exception as e:
         _logger().dbg(f"[UPDATER] check_for_updates_background: failed during update check: {e}")
 
 
-def mark_update_completed(installed_sha: str | None = None):
+def mark_update_completed(app, installed_sha: str | None = None):
     def _mutate(global_data):
         update_info = global_data.setdefault('update_info', {})
         # Prefer the freshly-fetched SHA passed in by perform_update() so that
@@ -199,12 +187,12 @@ def mark_update_completed(installed_sha: str | None = None):
             update_info['latest_sha'] = sha_to_record
         update_info['update_available'] = False
         _logger().dbg(f"[UPDATER] mark_update_completed: current_sha={update_info.get('current_sha')} latest_sha={update_info.get('latest_sha')} update_available=False")
-    _update_global_json(_mutate)
-    _logger().dbg("[UPDATER] mark_update_completed: _save_global_json() returned")
+    app.update_global_json(_mutate)
+    _logger().dbg("[UPDATER] mark_update_completed: save_global_json() returned")
 
 
-def is_update_available():
-    global_data = _load_global_json()
+def is_update_available(app):
+    global_data = app.load_global_json()
     return global_data.get('update_info', {}).get('update_available', False)
 
 
@@ -609,7 +597,8 @@ if __name__ == "__main__":
                 else:
                     if dst.endswith(".pyc") or os.path.basename(dst) == "global.json":
                         return
-                    if os.path.exists(dst) and not _is_binary(dst) and not dst.endswith(".conf"):
+                    # Exclude .log files from diff generation
+                    if os.path.exists(dst) and not _is_binary(dst) and not dst.endswith(".conf") and not dst.lower().endswith(".log"):
                         with open(dst, "r", encoding="utf-8", errors="ignore") as _f:
                             _oc = _f.read()
                         with open(src, "r", encoding="utf-8", errors="ignore") as _f:

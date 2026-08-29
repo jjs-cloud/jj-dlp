@@ -1,3 +1,19 @@
+v1.28.10
+
+- made it easier to edit the number/date fields in various STREAMER SETTINGS menus. (split, intro delay, schedule)
+- added subfolder grouping on the File Manager tab
+    - press o to toggle grouping on/off
+    - press enter while a subfolder is selected to collapse/expand it
+    - press e to expand/collapse all subfolders
+    - press s to cycle through sort modes
+    - it is recommened to enable the SUBFOLDERS option in GLOBAL SETTINGS to take full advantage of this feature
+- minor display fix (live since column)
+- in the File Manager, the folder row is now highlighted green when there is at least one file that is writing, but only if the folder is collapsed
+- added a directory scan fallback when the recording file cannot be located with yt-dlp (should reduce false positive "Not being recorded" notifs)
+
+====================
+====================
+
 v1.28.0
 
 - You can now skip recording the current stream. The streamer will be automatically re-enabled when the current stream ends. To use this feature, press D on the Dashboard tab, highlight a streamer, then press S. 

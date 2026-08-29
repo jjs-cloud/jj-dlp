@@ -7,5 +7,6 @@
 *.flv
 *.diff
 *.lock
+*.patch
 research/
 !docs/*

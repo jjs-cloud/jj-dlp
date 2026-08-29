@@ -25,12 +25,9 @@ are meaningfully more complex (ordering semantics / arbitrary key-value
 edits) and are left for a later pass.
 
 Concurrency notes for the write path:
-    * _CONFIG_WRITE_LOCK below serializes all streamer-management calls
-      made through this server (ThreadingHTTPServer means concurrent
-      requests are otherwise on separate threads). It does not coordinate
-      with the curses TUI's own 'a'/'r'/'d' handling, but that runs on
-      the single main/curses thread and only ever does one edit at a time,
-      so the risk is limited to two web requests racing each other.
+    * modify_streamer_fn (main._modify_config_streamer) takes a shared
+      per-config-file lock (config_editor.get_config_file_lock), so it's
+      safe against the scheduler, curses UI, and other web requests alike.
     * After a successful edit we call site.invalidate_config_cache() and
       site.trigger_event.set(), exactly like the curses handler does, so
       the monitor thread picks up the change and dash_all_streamers /
@@ -143,10 +140,6 @@ def _build_status_snapshot(sites: List) -> dict:
 _ALLOWED_ACTIONS = ("add", "remove", "disable")
 _MAX_USERNAME_LEN = 100
 _MAX_BODY_BYTES = 4096
-
-# Serializes config-file writes triggered through this server. See the
-# "Concurrency notes" section of the module docstring.
-_CONFIG_WRITE_LOCK = threading.Lock()
 
 # ──────────────────────────────────────────────────────────────────────────
 # Persistent session store (client remembers login via a cookie)
@@ -687,8 +680,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            with _CONFIG_WRITE_LOCK:
-                result = self.modify_streamer_fn(site.config_path, username, action)
+            result = self.modify_streamer_fn(site.config_path, username, action)
         except Exception as e:
             dbg(f"[WEBUI] streamer action error: {type(e).__name__}: {e}")
             self._json_error(500, "internal error")

@@ -75,6 +75,43 @@ _simulate_lq_storm_streamer = ""
 _simulate_lq_armed: set = set()
 _simulate_lq_lock = threading.Lock()
 
+# ── DEBUG: no-sidecar simulation ─────────────────────────────────────────
+# Flip to True to reproduce a real incident: yt-dlp's --print-to-file
+# filename sidecar silently never gets created (the log shows yt-dlp
+# claiming it wrote to it, but the file never appears). The
+# --print-to-file args are stripped from the launch command before Popen,
+# so the sidecar truly never exists and record_stream() falls through its
+# real fallback chain (JSON parsing, then eventually the directory-scan
+# recovery). Flip back to False when done.
+_SIMULATE_NO_SIDECAR = False
+
+
+def maybe_strip_sidecar_args(cmd: list, sidecar_path: str, streamer: str) -> list:
+    """Strip the --print-to-file args pointing at sidecar_path from cmd.
+
+    See the _SIMULATE_NO_SIDECAR flag above. No-op (returns cmd unchanged)
+    unless armed.
+    """
+    if not _SIMULATE_NO_SIDECAR:
+        return cmd
+    out = []
+    i = 0
+    stripped = 0
+    while i < len(cmd):
+        if (cmd[i] == "--print-to-file" and i + 2 < len(cmd)
+                and cmd[i + 2] == sidecar_path):
+            i += 3
+            stripped += 1
+            continue
+        out.append(cmd[i])
+        i += 1
+    if stripped:
+        dbg(f"[SIMULATE_NO_SIDECAR] stripped {stripped} --print-to-file "
+            f"arg(s) for {streamer!r} — sidecar will never be created",
+            site_name=streamer)
+    return out
+
+
 # ── DEBUG: quality-upgrade simulation ──────────────────────────────────────
 # Flip to True to run the real UPGRADE_QUALITY path (_check_quality_upgrades
 # → evict_and_restart) by injecting a higher resolution into the checker's
