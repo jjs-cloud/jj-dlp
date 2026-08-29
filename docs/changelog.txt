@@ -1,3 +1,5 @@
+v1.28.10
+
 - made it easier to edit the number/date fields in various STREAMER SETTINGS menus. (split, intro delay, schedule)
 - added subfolder grouping on the File Manager tab
     - press o to toggle grouping on/off
