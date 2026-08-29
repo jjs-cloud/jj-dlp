@@ -35,6 +35,7 @@ Keybinds (active only while the "File Manager" tab is selected)
     M             - open the "File Options" popup for the selected file
     O             - toggle grouping files by folder/subfolder
                     (persisted to global.json)
+    E             - expand/collapse all folders
 
 When COLLAPSIBLE_FOLDERS is on (default) and grouping is enabled (O key),
 files are grouped under collapsible folder rows. Collapse state lasts for
@@ -957,7 +958,46 @@ class FileManagerTab:
         if key in (ord('o'), ord('O')):
             self._toggle_grouping()
             return True
+        if key in (ord('e'), ord('E')):
+            self._toggle_expand_collapse_all()
+            return True
         return False
+
+    def _all_folder_ids(self):
+        """Abs paths of every subfolder row that can be collapsed, regardless of current collapse state. Excludes OUTPUT_DIR rows themselves."""
+        dirs = self._get_output_dirs()
+        collapsible_subfolders = self._collapsible_folders_enabled() and self._group_by_folder
+        ids = []
+        for _label, folder in dirs:
+            folder_abs = os.path.abspath(folder)
+            files = [p for p, r in self._records.items() if r.get("group_path") == folder_abs]
+            if collapsible_subfolders:
+                def collect(dir_path):
+                    child_paths = set()
+                    for path in files:
+                        parent = os.path.dirname(path)
+                        if parent != dir_path and parent.startswith(dir_path + os.sep):
+                            child_paths.add(os.path.join(
+                                dir_path, os.path.relpath(parent, dir_path).split(os.sep)[0]))
+                    for child_path in child_paths:
+                        ids.append(child_path)
+                        collect(child_path)
+                collect(folder_abs)
+        return ids
+
+    def _toggle_expand_collapse_all(self):
+        """Expand all subfolders if any are collapsed, otherwise collapse all of them. OUTPUT_DIR rows are left untouched."""
+        all_ids = self._all_folder_ids()
+        if not all_ids:
+            self._set_status("No folders to expand/collapse")
+            return
+        if self._collapsed & set(all_ids):
+            self._collapsed -= set(all_ids)
+            self._set_status("Expanded all folders")
+        else:
+            self._collapsed |= set(all_ids)
+            self._set_status("Collapsed all folders")
+        self._rebuild_rows(self._get_output_dirs())
 
     def _toggle_grouping(self):
         self._group_by_folder = not self._group_by_folder
@@ -2574,7 +2614,7 @@ class FileManagerTab:
         db = self.dashboard
         db.draw_box(stdscr, y1, x1, y2, x2, db.C_CHROME)
         db.safe_addstr(stdscr, y1, x1 + 2,
-                       " FILE MANAGER \u2014 (Press M for File Options) (Press O to toggle grouping) ",
+                       " FILE MANAGER \u2014 (Press M for File Options) (Press O to toggle grouping) (Press E to expand/collapse all) ",
                        theme.attr(db, "file_manager_filemanagertab_draw_chrome"))
 
         dirs = self._get_output_dirs()
