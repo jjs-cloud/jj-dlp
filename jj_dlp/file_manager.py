@@ -2614,7 +2614,7 @@ class FileManagerTab:
         db = self.dashboard
         db.draw_box(stdscr, y1, x1, y2, x2, db.C_CHROME)
         db.safe_addstr(stdscr, y1, x1 + 2,
-                       " FILE MANAGER \u2014 (Press M for File Options) (Press O to toggle grouping) (Press E to expand/collapse all) ",
+                       " FILE MANAGER \u2014 (M:File Options) (O:Toggle grouping) (Enter:open file) (Enter:expand/collapse folder) (E:expand/collapse all)",
                        theme.attr(db, "file_manager_filemanagertab_draw_chrome"))
 
         dirs = self._get_output_dirs()

@@ -219,7 +219,7 @@ DEFAULT_SCHEME_IDX = 0
 # Scheme index pushed to all users once. Change this to a new scheme
 # index to push that theme whenever it differs from the recorded
 # 'theme_pushed' index in theme.json.
-THEME_PUSH = 6   # 6 = DOS Blue
+THEME_PUSH = 0   # 6 = DOS Blue
 
 
 def apply_pending_theme_push() -> bool:
