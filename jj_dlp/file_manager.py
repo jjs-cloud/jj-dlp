@@ -2782,8 +2782,17 @@ class FileManagerTab:
         info = (f" Delete mode: {delete_lbl} (T to toggle)   "
                 f"Sort: {_FM_SORT_LABELS.get(self._sort_key, self._sort_key)} ")
         info_attr = theme.attr(db, "file_manager_filemanagertab_draw_delete") if self._delete_mode == DELETE_MODE_PERMANENT else theme.attr(db, "file_manager_filemanagertab_draw_dim_4")
-        db.safe_addstr(stdscr, y2, x1 + 2, info[:avail_w], info_attr)
 
+        # Add file counter on the right side of the bottom border line
+        total_files = sum(1 for r in self._rows if r[0] == "file")
+        counter_str = f"Total: {total_files}"
+        counter_width = len(counter_str)
+        # Reserve space for the counter plus a one-space margin
+        info_max_width = max(0, avail_w - counter_width - 2)
+        db.safe_addstr(stdscr, y2, x1 + 2, info[:info_max_width], info_attr)
+        counter_x = x2 - counter_width - 1  # leave one space from right border
+        db.safe_addstr(stdscr, y2, counter_x, counter_str, info_attr)
+        
         if self._status_msg and (time.time() - self._status_msg_ts) < STATUS_MSG_TTL_S:
             db.safe_addstr(stdscr, y1 + 2, x1 + 2, self._status_msg[:avail_w],
                            theme.attr(db, "file_manager_filemanagertab_draw_warn"))
