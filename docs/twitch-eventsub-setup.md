@@ -73,7 +73,7 @@ Twitch must be able to reach your HTTP server. You have two options:
 
 ## Step 3 — Add the `[Twitch]` section to your config file
 
-Open your `jj-dlp.conf` and add this section (put it anywhere, e.g. at the bottom):
+Open your `twitch.conf` and add this section (put it anywhere, e.g. at the bottom):
 
 ```ini
 [Twitch]

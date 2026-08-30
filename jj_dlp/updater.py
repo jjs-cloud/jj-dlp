@@ -543,8 +543,6 @@ if __name__ == "__main__":
             _src_cfgs = os.path.join(_source_dir, "configs")
             if os.path.exists(_src_cfgs):
                 _new_cfgs += [os.path.join(_src_cfgs, f) for f in os.listdir(_src_cfgs) if f.endswith(".conf")]
-            if os.path.exists(os.path.join(_source_dir, "jj-dlp.conf")):
-                _new_cfgs.append(os.path.join(_source_dir, "jj-dlp.conf"))
             _new_cfg_map = {os.path.basename(p): p for p in _new_cfgs}
 
             # ── Merge each user config ────────────────────────────────────────
