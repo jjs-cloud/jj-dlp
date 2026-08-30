@@ -3957,6 +3957,10 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
             _pending_rename_file = _publish_active_file_and_finalize_rename(
                 site, streamer, active_file, _pending_rename_file, segment_num)
 
+            # Simulation hook: optionally inject a wrong filename so that
+            # jj‑dlp looks for a non‑existent file while yt‑dlp writes normally.
+            active_file = _simulation.maybe_inject_wrong_filename(active_file, streamer)
+
             last_size, _, _, _ = get_streamer_file_size(
                 output_dir,
                 streamer,

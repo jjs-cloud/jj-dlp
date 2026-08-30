@@ -25,6 +25,14 @@ if TYPE_CHECKING:
 _SIMULATE_WRITE_FAILURE = False
 _SIMULATE_WRITE_FAILURE_BLOCKER_NAME = "_simulated_write_failure_do_not_create"
 
+# ── DEBUG: wrong‑filename simulation ─────────────────────────────────────────
+# Flip to True to make jj‑dlp search for the wrong recording file, while
+# yt‑dlp writes normally. The sidecar file is read as usual, then the
+# resolved filename is replaced with a fake name that does not exist on disk.
+# This exercises the same “file not found” / “no confirm” paths as a real
+# write failure, but without interfering with yt‑dlp’s actual output.
+_SIMULATE_WRITE_FAILURE_FILE = True
+
 # ── DEBUG: stall simulation ─────────────────────────────────────────────────
 # Flip to True to make a recording look stalled (file exists, stops growing):
 # real growth proceeds until the stall checker arms (growth_seen), then the size
@@ -149,6 +157,22 @@ def get_write_failure_output_path(output_dir: str, current_output_tmpl: str) -> 
             dbg(f"[SIMULATE_WRITE_FAILURE] could not create blocker file: {_blocker_exc!r}")
     return os.path.join(_blocker_path, current_output_tmpl)
 
+
+def maybe_inject_wrong_filename(active_file: Optional[str], streamer: str) -> Optional[str]:
+    """Replace the resolved active_file with a fake non‑existent filename.
+
+    See the _SIMULATE_WRITE_FAILURE_FILE flag above. No‑op (returns active_file
+    unchanged) unless armed; when armed, constructs a fake path that does not
+    exist on disk, causing all subsequent file‑size checks to fail.
+    """
+    if not _SIMULATE_WRITE_FAILURE_FILE or active_file is None:
+        return active_file
+    dirname = os.path.dirname(active_file)
+    basename = os.path.basename(active_file)
+    fake_name = "wrong_" + basename
+    fake_path = os.path.join(dirname, fake_name)
+    dbg(f"[SIMULATE_WRITE_FAILURE_FILE] injecting wrong filename for {streamer}: {fake_path!r} (original {active_file!r})", site_name=streamer)
+    return fake_path
 
 def maybe_freeze_stall_size(filename, size, last_growth_time, stall_timeout, streamer) -> int:
     """Apply _SIMULATE_STALL freezing to a just-read file size.
