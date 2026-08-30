@@ -31,7 +31,7 @@ _SIMULATE_WRITE_FAILURE_BLOCKER_NAME = "_simulated_write_failure_do_not_create"
 # resolved filename is replaced with a fake name that does not exist on disk.
 # This exercises the same “file not found” / “no confirm” paths as a real
 # write failure, but without interfering with yt‑dlp’s actual output.
-_SIMULATE_WRITE_FAILURE_FILE = True
+_SIMULATE_WRITE_FAILURE_FILE = False
 
 # ── DEBUG: stall simulation ─────────────────────────────────────────────────
 # Flip to True to make a recording look stalled (file exists, stops growing):
