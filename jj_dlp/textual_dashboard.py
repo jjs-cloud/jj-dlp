@@ -65,14 +65,17 @@ BLINK_INTERVAL = 0.25
 
 
 def _fmt_duration(seconds: float) -> str:
-    """Format a duration in seconds as e.g. '1h 02m 03s'."""
+    """Format a duration as a single truncated unit, e.g. '35m', '56d'."""
     seconds = int(seconds)
-    h, rem = divmod(seconds, 3600)
-    m, s = divmod(rem, 60)
-    if h:
-        return f"{h}h {m:02d}m {s:02d}s"
-    elif m:
-        return f"{m}m {s:02d}s"
+    days, rem = divmod(seconds, 86400)
+    if days:
+        return f"{days}d"
+    hours, rem = divmod(rem, 3600)
+    if hours:
+        return f"{hours}h"
+    minutes, s = divmod(rem, 60)
+    if minutes:
+        return f"{minutes}m"
     return f"{s}s"
 
 
