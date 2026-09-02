@@ -294,6 +294,7 @@ class SitePanel(Container):
                 status_b, style_b = "[x  DIS]", "dim"
                 self._blinking[s] = (status_a, style_a, status_b, style_b)
             elif is_live and is_rec:
+                status_a, style_a = "[● Live]", theme.success
                 status_b, style_b = "[►  REC]", theme.error
                 self._blinking[s] = (status_a, style_a, status_b, style_b)
             else:
