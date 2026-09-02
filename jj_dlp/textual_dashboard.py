@@ -257,7 +257,6 @@ class SitePanel(Container):
             }
 
         bar_max_secs = cfg.get("progress_bar_max_hours", 6) * 3600
-        bar_width = max(4, cfg.get("progress_bar_width", 14))
         highlight_days = cfg.get("last_live_highlight", 0)
 
         self.border_title = f" {site_label} "
@@ -278,6 +277,9 @@ class SitePanel(Container):
         theme = self.app.current_theme
         self._blinking.clear()
 
+        # Bar rendering is deferred until the other columns' widths are final.
+        bar_rows: list[tuple[str, bool, bool, float]] = []
+
         for s in all_streamers:
             is_live = s in live_since
             is_rec = s in recording
@@ -297,11 +299,6 @@ class SitePanel(Container):
             else:
                 table.update_cell(s, col["status"], Text(status_a, style=style_a), update_width=True)
 
-            bar_fn = _live_bar_dashed if is_disabled else _live_bar
-            bar_text = bar_fn(seconds, width=bar_width, max_secs=bar_max_secs) if is_live else " " * bar_width
-            bar_style = theme.warning if (s in ad_alert_streamers or s in ffmpeg_error_streamers) else ""
-            table.update_cell(s, col["bar"], Text(bar_text, style=bar_style), update_width=True)
-
             duration_text = _fmt_duration(seconds) if is_live else "-"
             table.update_cell(s, col["duration"], duration_text, update_width=True)
 
@@ -311,7 +308,29 @@ class SitePanel(Container):
                 update_width=True,
             )
 
+            bar_rows.append((s, is_live, is_disabled, seconds))
+
+        bar_width = self._fit_bar_width(table, col)
+        for s, is_live, is_disabled, seconds in bar_rows:
+            bar_fn = _live_bar_dashed if is_disabled else _live_bar
+            bar_text = bar_fn(seconds, width=bar_width, max_secs=bar_max_secs) if is_live else " " * bar_width
+            bar_style = theme.warning if (s in ad_alert_streamers or s in ffmpeg_error_streamers) else ""
+            table.update_cell(s, col["bar"], Text(bar_text, style=bar_style), update_width=True)
+
         self._update_countdown()
+
+    def _fit_bar_width(self, table: DataTable, col: dict) -> int:
+        """Compute the widest the Bar column can be without forcing horizontal scroll."""
+        available = table.container_size.width - table.scrollbar_size_vertical
+        other = sum(
+            table.columns[col[name]].get_render_width(table)
+            for name in ("name", "status", "duration", "last_live")
+        )
+        return max(0, available - other - 2 * table.cell_padding)
+
+    def on_resize(self) -> None:
+        """Recompute the Bar column width immediately when the panel is resized."""
+        self.refresh_data()
 
     def _status_cell(self, is_live: bool, is_rec: bool, is_disabled: bool, theme) -> tuple[str, str]:
         """Return (text, style) for a row's non-blinking/base status state."""
