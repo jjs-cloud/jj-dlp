@@ -344,7 +344,7 @@ class SitePanel(Container):
 
     def _last_live_cell(self, s, is_live, recording_res, last_live, now, highlight_days, theme) -> Text:
         if is_live and s in recording_res:
-            return Text(recording_res[s])
+            return Text(f"{recording_res[s]}p")
         if s not in last_live:
             return Text("never", style="dim")
         elapsed_days = (now - last_live[s]) / 86400
