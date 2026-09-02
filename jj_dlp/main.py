@@ -5676,7 +5676,7 @@ def main() -> None:
     try:
         if global_cfg.get("dashboard") == "textual":
             from .textual_dashboard import JJDlpApp
-            JJDlpApp().run()
+            JJDlpApp(app).run()
         else:
             from . import curses_dashboard
             dashboard = curses_dashboard.run_dashboard(app, global_cfg=global_cfg)
