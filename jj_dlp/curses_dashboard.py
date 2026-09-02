@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from . import theme
 from . import graph as _graph
+from . import logger as _logger
 from .file_manager import FileManagerTab
 from .config_editor import SiteSortManager
 from .logger import dbg, get_debug_log_path

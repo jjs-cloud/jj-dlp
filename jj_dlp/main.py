@@ -5668,10 +5668,18 @@ def main() -> None:
         _dash_log(msg)
 
     # ── Launch dashboard ───────────────────────────────────────────────────────
+    # DASHBOARD selects which UI to launch. "textual" is a work-in-progress
+    # demo shell (no real site/streamer data wired in yet) and isn't offered
+    # in the config editor's popup — it's only reachable by hand-editing
+    # global.conf during development.
     dashboard = None
     try:
-        from . import curses_dashboard
-        dashboard = curses_dashboard.run_dashboard(app, global_cfg=global_cfg)
+        if global_cfg.get("dashboard") == "textual":
+            from .textual_dashboard import JJDlpApp
+            JJDlpApp().run()
+        else:
+            from . import curses_dashboard
+            dashboard = curses_dashboard.run_dashboard(app, global_cfg=global_cfg)
 
     except KeyboardInterrupt:
         pass

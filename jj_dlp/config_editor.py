@@ -149,6 +149,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("LQ_DOWNLOADER",            scope="global",                    default="false",                      preserve=True, type="bool",  comment="When any recording reaches the ffmpeg error threshold (FF_ERR_THRESH) lower the video quality of the lowest priority streamer, freeing up bandwidth for the remaining streamers."),
     _KeyDef("FF_ERR_THRESH",            scope="global",                    default="200",                        preserve=True, type="int",   comment='Restart the download if we see this many ffmpeg errors ("timestamp discontinuity", "Packet corrupt") default: 200'),
     _KeyDef("SUBFOLDERS",               scope="global",                    default="off",                        preserve=True, type="str",   comment="Save recordings in a subfolder(s) inside OUTPUT_DIR. Options: streamer-only, site-only, streamer-site, site-streamer, off."),
+    _KeyDef("DASHBOARD",                scope="global",                    default="curses",                     preserve=True, type="str",   comment="Which dashboard UI to launch. Options: curses, textual. (textual is under development and not yet selectable in this editor)."),
     _KeyDef("GRAPH_SCALE",              scope="global",                    default="300",                        preserve=True, type="int",   comment="The number of seconds each bar in the graph represents. (default = 600)."),
     _KeyDef("DESTINATIONS",             scope="global",                    default="",                           preserve=True, type="list",  comment="A list of destination paths where you might want to move your files.  Used in File Manager > File Options > Move. (e.g. C:\\My Recordings  OR /home/greg/twitch)"),
     _KeyDef("NTFY_TOPIC",               scope="global",                    default="",                           preserve=True,               comment="The topic name to use for ntfy.sh notifications. (example: jj-dlp-fj48dh734fk) Refer to docs/ntfy-setup.md for a detailed setup guide. (blank = disabled)"),
@@ -256,6 +257,21 @@ def _coerce_subfolders_value(raw: str) -> str:
     return val if val in SUBFOLDERS_MODES else "off"
 
 
+# Valid DASHBOARD values. "textual" is accepted here (so a manually-edited
+# config file still loads/saves cleanly) but is deliberately left out of
+# _DASHBOARD_UI_MODES below until the Textual dashboard is finished.
+DASHBOARD_MODES: tuple[str, ...] = ("curses", "textual")
+
+# Values offered by the arrow-cycle popup. Add "textual" here once it's ready.
+_DASHBOARD_UI_MODES: tuple[str, ...] = ("curses",)
+
+
+def _coerce_dashboard_value(raw: str) -> str:
+    """Coerce a raw DASHBOARD string, defaulting to curses when unrecognized."""
+    val = (raw or "").strip().strip('"\'').lower()
+    return val if val in DASHBOARD_MODES else "curses"
+
+
 def _coerce_global_value(kdef: "_KeyDef", raw: str) -> object:
     """Coerce a raw global.conf string into the runtime type declared by kdef.type."""
     raw = (raw or "").strip().strip('"\'')
@@ -310,6 +326,7 @@ def load_global_config(path: str) -> dict:
     # A couple of keys need a touch of normalization beyond their basic type.
     cfg["update_branch"] = cfg["update_branch"].lower()
     cfg["subfolders"] = _coerce_subfolders_value(general.get("SUBFOLDERS", ""))
+    cfg["dashboard"] = _coerce_dashboard_value(general.get("DASHBOARD", ""))
     if not cfg["compact_view"]:
         cfg["compact_view"] = "auto"
     cfg["graph_scale"] = max(1, cfg["graph_scale"])
@@ -2664,6 +2681,9 @@ def _validate_value(key: str, value: str) -> tuple[bool, str]:
         # but aren't offered as valid input here.
         if value.lower() not in SUBFOLDERS_MODES:
             return False, f"Must be one of: {', '.join(SUBFOLDERS_MODES)}"
+    if key == "DASHBOARD":
+        if value.lower() not in DASHBOARD_MODES:
+            return False, f"Must be one of: {', '.join(DASHBOARD_MODES)}"
     if key == "WEB_UI_PORT":
         try:
             port = int(value)
@@ -2756,6 +2776,14 @@ class GlobalConfigEditor:
         # placeholders for the site and streamer since neither is known yet.
         self.subfolders_mode:  bool = False
         self._subfolders_value: str = "off"   # working copy of the mode
+
+        # ── Dashboard popup state ─────────────────────────────────────────────
+        # Activated instead of the plain text popup when DASHBOARD is selected.
+        # Mirrors the SUBFOLDERS selector, but the arrow-cycle is restricted to
+        # _DASHBOARD_UI_MODES (currently just "curses") since "textual" isn't
+        # ready to be user-selectable yet.
+        self.dashboard_mode:  bool = False
+        self._dashboard_value: str = "curses"   # working copy of the mode
 
     @staticmethod
     def _find_global_conf() -> str:
@@ -3239,6 +3267,78 @@ class GlobalConfigEditor:
         footer = " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "
         db.safe_addstr(stdscr, by2, bx1 + 2, footer[:box_w - 4], theme.attr(db, "config_editor_globalconfigeditor_draw_subfolders_popu_invhead"))
 
+    # ── Dashboard popup (DASHBOARD key) ────────────────────────────────────────
+
+    def _open_dashboard_popup(self) -> None:
+        """Switch to the mode-selector editor for the DASHBOARD key."""
+        self._dashboard_value = _coerce_dashboard_value(self.editing_item.value)
+        self.dashboard_mode = True
+
+    def _handle_dashboard_key(self, key) -> bool:
+        """Handle keypresses while the DASHBOARD popup is open."""
+        if key == 27:  # Esc -> discard
+            self.dashboard_mode = False
+            self.editing_item   = None
+            return True
+        elif key in (ord(' '), curses.KEY_LEFT, curses.KEY_RIGHT):
+            idx  = _DASHBOARD_UI_MODES.index(self._dashboard_value)
+            step = -1 if key == curses.KEY_LEFT else 1
+            self._dashboard_value = _DASHBOARD_UI_MODES[(idx + step) % len(_DASHBOARD_UI_MODES)]
+            return True
+        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
+            self._save_dashboard()
+            self.dashboard_mode = False
+            self.editing_item   = None
+            return True
+        return True   # consume all other keys so they don't leak to the list
+
+    def _save_dashboard(self) -> None:
+        """Persist the selected mode back to global.conf."""
+        if self.editing_item and 0 <= self.editing_item.line_idx < len(self.lines):
+            self.lines[self.editing_item.line_idx] = f"{self.editing_item.key} = {self._dashboard_value}\n"
+        self.save()
+
+    def _draw_dashboard_popup(self, stdscr) -> None:
+        """Draw the DASHBOARD mode-selector popup."""
+        db   = self.dashboard
+        h, w = stdscr.getmaxyx()
+
+        box_w   = min(78, w - 4)
+        inner_w = box_w - 4
+        comment = self.editing_item.comment if self.editing_item else ""
+        comment_lines = _wrap_text(comment, inner_w) if comment else []
+        comment_h = len(comment_lines) + (1 if comment_lines else 0)
+
+        # 2 borders + 1 title gap + selector row + blank + legend + comment rows
+        box_h = 6 + comment_h
+        by1 = (h - box_h) // 2
+        bx1 = (w - box_w) // 2
+        by2 = by1 + box_h
+        bx2 = bx1 + box_w
+
+        for y in range(by1, by2 + 1):
+            db.safe_addstr(stdscr, y, bx1, " " * (box_w + 1), theme.attr(db, "config_editor_globalconfigeditor_draw_dashboard_popup_normal_1"))
+        db.draw_box(stdscr, by1, bx1, by2, bx2, db.C_SYSTEM)
+        db.safe_addstr(stdscr, by1, bx1 + 2, " DASHBOARD ",
+                       theme.attr(db, "config_editor_globalconfigeditor_draw_dashboard_popup_system"))
+
+        row = by1 + 1
+        if comment_lines:
+            for cl in comment_lines:
+                db.safe_addstr(stdscr, row, bx1 + 2, cl, theme.attr(db, "config_editor_globalconfigeditor_draw_dashboard_popup_dim_1"))
+                row += 1
+            row += 1  # blank separator
+        else:
+            row += 1
+
+        db.safe_addstr(stdscr, row, bx1 + 2, "> Dashboard: ",
+                       theme.attr(db, "config_editor_globalconfigeditor_draw_dashboard_popup_hilight_1"))
+        db.safe_addstr(stdscr, row, bx1 + 15, f"< {self._dashboard_value} >",
+                       theme.attr(db, "config_editor_globalconfigeditor_draw_dashboard_popup_hilight_2"))
+
+        footer = " Enter:Save  Space/\u2190\u2192:Cycle  Esc:Cancel "
+        db.safe_addstr(stdscr, by2, bx1 + 2, footer[:box_w - 4], theme.attr(db, "config_editor_globalconfigeditor_draw_dashboard_popup_invhead"))
+
     def _draw_msg_filters_popup(self, stdscr) -> None:
         """Draw the per-message toggle popup for a single tag."""
         db   = self.dashboard
@@ -3459,6 +3559,8 @@ class GlobalConfigEditor:
             return self._handle_destinations_key(key)
         if self.subfolders_mode:
             return self._handle_subfolders_key(key)
+        if self.dashboard_mode:
+            return self._handle_dashboard_key(key)
 
         if self.popup_mode:
             _dbg(f"[CONFIG] GlobalConfigEditor.handle_key() popup key={key} popup_buf={self.popup_buf!r} editing_item={self.editing_item.key if self.editing_item else None}")
@@ -3517,6 +3619,8 @@ class GlobalConfigEditor:
                     self._open_destinations_popup()
                 elif self.editing_item.key == "SUBFOLDERS":
                     self._open_subfolders_popup()
+                elif self.editing_item.key == "DASHBOARD":
+                    self._open_dashboard_popup()
                 else:
                     self.popup_buf = self.editing_item.value
                     self.popup_mode = True
@@ -3576,7 +3680,7 @@ class GlobalConfigEditor:
 
         if self.popup_mode and self.editing_item:
             self.draw_popup(stdscr)
-        elif self.debug_tags_mode or self.msg_filters_mode or self.destinations_mode or self.subfolders_mode:
+        elif self.debug_tags_mode or self.msg_filters_mode or self.destinations_mode or self.subfolders_mode or self.dashboard_mode:
             self.draw_popup(stdscr)
 
     def draw_popup(self, stdscr):
@@ -3588,6 +3692,8 @@ class GlobalConfigEditor:
             self._draw_destinations_popup(stdscr)
         elif self.subfolders_mode:
             self._draw_subfolders_popup(stdscr)
+        elif self.dashboard_mode:
+            self._draw_dashboard_popup(stdscr)
         else:
             self._draw_popup(stdscr)
 
@@ -3950,6 +4056,7 @@ class ConfigEditor:
             or self.global_editor.msg_filters_mode
             or self.global_editor.destinations_mode
             or self.global_editor.subfolders_mode
+            or self.global_editor.dashboard_mode
         ):
             self.global_editor.draw_popup(stdscr)
         elif self._focus == "site" and self.popup_mode and self.editing_item:
@@ -4026,7 +4133,8 @@ class ConfigEditor:
         # (only when no popup is open in any sub-editor)
         any_popup = (self.global_editor.popup_mode or self.global_editor.debug_tags_mode
                      or self.global_editor.msg_filters_mode or self.global_editor.destinations_mode
-                     or self.global_editor.subfolders_mode or self.popup_mode
+                     or self.global_editor.subfolders_mode or self.global_editor.dashboard_mode
+                     or self.popup_mode
                      or self.priority_editor._settings_popup is not None)
         if key == ord('\t') and not any_popup:
             _cycle = ["site", "global", "priority"]
@@ -4051,7 +4159,8 @@ class ConfigEditor:
                     and not self.global_editor.debug_tags_mode
                     and not self.global_editor.msg_filters_mode
                     and not self.global_editor.destinations_mode
-                    and not self.global_editor.subfolders_mode):
+                    and not self.global_editor.subfolders_mode
+                    and not self.global_editor.dashboard_mode):
                 self.dashboard.selected_tab = 0
                 return True
             return self.global_editor.handle_key(key)
