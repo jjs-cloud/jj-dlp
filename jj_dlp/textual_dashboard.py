@@ -191,13 +191,7 @@ class SitePanel(Container):
 
     DEFAULT_CSS = """
     SitePanel {
-        border: solid $secondary;
-        background: $panel;
         padding: 0 1;
-    }
-
-    SitePanel:focus-within {
-        border: solid $accent;
     }
 
     SitePanel DataTable {
@@ -469,29 +463,6 @@ class JJDlpApp(App):
         color: $text;
     }
 
-    Tabs Underline {
-        display: none;
-    }
-
-    Tab {
-        background: $background;
-        color: $text-secondary;
-        text-style: bold;
-        padding: 0 2;
-        margin-right: 1;
-    }
-
-    Tab:hover {
-        background: $surface;
-        color: $text;
-    }
-
-    Tab.-active {
-        background: $primary;
-        color: $background;
-        text-style: bold;
-    }
-
     Separator {
         height: 1;
         color: $border;
@@ -518,19 +489,12 @@ class JJDlpApp(App):
     SystemPanel {
         width: 28;
         height: 100%;
-        border: solid $secondary;
-        background: $panel;
-        color: $text-secondary;
-        text-style: bold;
         padding: 1;
     }
 
     FooterHints {
         height: 1;
-        background: $primary;
-        color: $background;
         dock: bottom;
-        text-style: bold;
     }
     """
 
