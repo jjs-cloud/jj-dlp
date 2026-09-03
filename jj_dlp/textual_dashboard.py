@@ -439,7 +439,7 @@ class SitePanel(Container):
         if not is_live:
             return ("off ", "dim")
         if is_disabled:
-            return ("Live", theme.success)
+            return ("Live", "dim")
         if is_rec:
             return ("REC ", theme.error)
         return ("Live", theme.success)
