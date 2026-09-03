@@ -32,7 +32,6 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Grid, Horizontal, Vertical
-from textual.reactive import reactive
 from textual.widgets import (
     Button,
     DataTable,
@@ -117,38 +116,6 @@ TAB_LABELS = {
 }
 
 
-# Per-tab footer hints, mirrors the curses draw_footer() switch statement.
-TAB_HINTS = {
-    "dashboard": (
-        "  LEFT/RIGHT: switch tabs  [: prev site  ]: next site  "
-        "A: add/enable streamer R: remove streamer D: disable streamer  "
-        "S: Sort  C: Colors  Q: quit  "
-    ),
-    "log": (
-        "  LEFT/RIGHT: switch tabs  [: prev site  ]: next site  "
-        "UP: scroll up  DOWN: scroll down  C: Colors  Q: quit  "
-    ),
-    "stdout": (
-        "  LEFT/RIGHT: switch tabs  [: prev site  ]: next site  "
-        "Tab: switch panel  UP/DOWN: select streamer  A: Show All [OFF]  "
-        "C: Colors  Q: quit  "
-    ),
-    "stderr": (
-        "  LEFT/RIGHT: switch tabs  [: prev site  ]: next site  "
-        "Tab: switch panel  UP/DOWN: select streamer  A: Show All [OFF]  "
-        "C: Colors  Q: quit  "
-    ),
-    "config": (
-        "  LEFT/RIGHT: switch tabs  [: prev site  ]: next site  "
-        "Tab: Next Panel  G: Changelog  C: Colors  N: Theme Manager  Q: quit  "
-    ),
-    "filemanager": (
-        "  ↑↓: select  Space: show folder  DEL: delete  S: sort  "
-        "T: toggle trash  C: Colors  Q: quit  "
-    ),
-}
-
-
 class Separator(Static):
     """The plain rule drawn between the tab bar and content."""
 
@@ -181,15 +148,6 @@ class SystemPanel(Static):
 
     def on_mount(self) -> None:
         self.border_title = " SYSTEM "
-
-
-class FooterHints(Static):
-    """Bottom hint bar; text changes per active tab."""
-
-    hint_text = reactive("")
-
-    def watch_hint_text(self, text: str) -> None:
-        self.update(text)
 
 
 class SitePanel(Container):
@@ -552,10 +510,6 @@ class JJDlpApp(App):
         padding: 1;
     }
 
-    FooterHints {
-        height: 1;
-        dock: bottom;
-    }
     """
 
     # Keep theme switching available.
@@ -609,16 +563,12 @@ class JJDlpApp(App):
 
                 yield SystemPanel()
 
-        yield FooterHints()
-
     def on_mount(self) -> None:
         # Gruvbox is the default theme.
         #
         # Textual exposes the built-in theme by this name in versions
         # which include it.
-        self.theme = "gruvbox"
-
-        self.query_one(FooterHints).hint_text = TAB_HINTS[TAB_IDS[0]]
+        self.theme = "atom-one-dark"
 
         self.set_interval(DATA_POLL_INTERVAL, self._data_tick)
         self.set_interval(BLINK_INTERVAL, self._blink_tick)
@@ -662,10 +612,6 @@ class JJDlpApp(App):
             return
 
         self.query_one(ContentSwitcher).current = tab_id
-        self.query_one(FooterHints).hint_text = TAB_HINTS.get(
-            tab_id,
-            "",
-        )
 
         # The Log tab uses the full width so its text stays easy to select;
         # every other tab keeps the system sidebar.
