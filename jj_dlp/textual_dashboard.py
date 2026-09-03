@@ -155,6 +155,15 @@ TOGGLE_COLUMN_INDEX = 0
 NAME_COLUMN_INDEX = 1
 
 
+class StreamerTable(DataTable):
+    """DataTable that never shows the cursor highlight on the toggle column."""
+
+    def _should_highlight(self, cursor, target_cell, type_of_cursor) -> bool:
+        if type_of_cursor == "cell" and target_cell.column == TOGGLE_COLUMN_INDEX:
+            return False
+        return super()._should_highlight(cursor, target_cell, type_of_cursor)
+
+
 class SitePanel(Container):
     """One site's streamer table, with badge/countdown border decorations."""
 
@@ -221,7 +230,7 @@ class SitePanel(Container):
         self._selected_streamer: str | None = None
 
     def compose(self) -> ComposeResult:
-        yield DataTable(cursor_type="cell", id="streamer-table")
+        yield StreamerTable(cursor_type="cell", id="streamer-table")
         with Horizontal(id="add-row"):
             yield Input(placeholder="Add streamer...", id="add-input")
             yield Button("Add", id="add-button", variant="success")
