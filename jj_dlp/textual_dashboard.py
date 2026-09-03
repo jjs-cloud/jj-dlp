@@ -93,8 +93,7 @@ def _live_bar(seconds: float, width: int = 14, max_secs: int = 6 * 3600) -> str:
 def _live_bar_dashed(seconds: float, width: int = 14, max_secs: int = 6 * 3600) -> str:
     """Like _live_bar, but dashed for disabled streamers."""
     filled = min(int(width * seconds / max(1, max_secs)), width)
-    dashed = ("─ " * filled)[:width]
-    return dashed + "─" * (width - len(dashed))
+    return "─" * filled + ("─ " * (width - filled))[:width - filled]
 
 
 TAB_IDS = [
