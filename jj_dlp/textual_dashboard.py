@@ -29,9 +29,13 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Grid, Horizontal, Vertical
+from textual.coordinate import Coordinate
+from textual.message import Message
+from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
     DataTable,
@@ -150,6 +154,99 @@ class SystemPanel(Static):
         self.border_title = " SYSTEM "
 
 
+class StreamerTable(DataTable):
+    """DataTable that also posts NameClicked on any click within the Name column.
+
+    DataTable's own click handling only selects a cell on the *second* click on
+    it (the first click just moves the cursor there), so we can't rely on
+    CellSelected to catch a single click. Textual calls a widget's public
+    `on_click` handler independently of its own internal `_on_click`, so this
+    fires on every click without disturbing DataTable's normal behavior.
+    """
+
+    NAME_COLUMN_INDEX = 0
+
+    class NameClicked(Message):
+        """Posted when a cell in the Name column is clicked."""
+
+        def __init__(self, data_table: "StreamerTable", row_key) -> None:
+            self.data_table = data_table
+            self.row_key = row_key
+            super().__init__()
+
+    def on_click(self, event: events.Click) -> None:
+        meta = event.style.meta
+        row_index = meta.get("row")
+        column_index = meta.get("column")
+        if (
+            column_index == self.NAME_COLUMN_INDEX
+            and row_index is not None
+            and row_index != -1
+            and not meta.get("out_of_bounds", False)
+        ):
+            row_key, _ = self.coordinate_to_cell_key(Coordinate(row_index, column_index))
+            self.post_message(self.NameClicked(self, row_key))
+
+
+class StreamerActionModal(ModalScreen[str | None]):
+    """Popup with Disable/Enable and Remove buttons for a clicked streamer."""
+
+    DEFAULT_CSS = """
+    StreamerActionModal {
+        align: center middle;
+    }
+
+    StreamerActionModal > Vertical {
+        width: auto;
+        height: auto;
+        padding: 1 2;
+        border: round $accent;
+        background: $surface;
+    }
+
+    StreamerActionModal #modal-title {
+        width: 100%;
+        content-align: center middle;
+        padding-bottom: 1;
+        text-style: bold;
+    }
+
+    StreamerActionModal Horizontal {
+        width: auto;
+        height: auto;
+    }
+
+    StreamerActionModal Button {
+        margin: 0 1;
+    }
+    """
+
+    # priority=True so this shadows any app-level "escape" binding added later.
+    BINDINGS = [Binding("escape", "dismiss_modal", show=False, priority=True)]
+
+    def __init__(self, streamer: str, is_disabled: bool, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.streamer = streamer
+        self.streamer_disabled = is_disabled
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(self.streamer, id="modal-title")
+            with Horizontal():
+                label = "Enable" if self.streamer_disabled else "Disable"
+                yield Button(label, id="toggle-button", variant="warning")
+                yield Button("Remove", id="remove-button", variant="error")
+
+    def action_dismiss_modal(self) -> None:
+        self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "toggle-button":
+            self.dismiss("add" if self.streamer_disabled else "disable")
+        elif event.button.id == "remove-button":
+            self.dismiss("remove")
+
+
 class SitePanel(Container):
     """One site's streamer table, with badge/countdown border decorations."""
 
@@ -201,9 +298,14 @@ class SitePanel(Container):
         self._blinking: dict[str, tuple[str, str, str, str]] = {}
         self._next_check_in: float = 0.0
         self._countdown_message_until: float = 0.0
+        self._blocked: set[str] = set()
+        # Suppresses the CellSelected that DataTable also fires for a click
+        # landing on a cell that was already the cursor position, so a single
+        # click can't open the popup twice (see on_streamer_table_name_clicked).
+        self._suppress_next_cell_selected: str | None = None
 
     def compose(self) -> ComposeResult:
-        yield DataTable(cursor_type="cell", id="streamer-table")
+        yield StreamerTable(cursor_type="cell", id="streamer-table")
         with Horizontal(id="add-row"):
             yield Input(placeholder="Add streamer...", id="add-input")
             yield Button("Add", id="add-button", variant="success")
@@ -225,6 +327,46 @@ class SitePanel(Container):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "add-button":
             self._add_streamer(self.query_one("#add-input", Input).value)
+
+    def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
+        """Open the popup when Enter is pressed on a Name cell (click is handled separately)."""
+        if event.coordinate.column != StreamerTable.NAME_COLUMN_INDEX:
+            return
+        streamer = event.cell_key.row_key.value
+        if streamer is None:
+            return
+        if self._suppress_next_cell_selected == streamer:
+            self._suppress_next_cell_selected = None
+            return
+        self._open_streamer_modal(streamer)
+
+    def on_streamer_table_name_clicked(self, event: StreamerTable.NameClicked) -> None:
+        """Open the popup on any click within the Name column."""
+        streamer = event.row_key.value
+        if streamer is None:
+            return
+        self._suppress_next_cell_selected = streamer
+        self.call_after_refresh(self._clear_click_suppression)
+        self._open_streamer_modal(streamer)
+
+    def _clear_click_suppression(self) -> None:
+        self._suppress_next_cell_selected = None
+
+    def _open_streamer_modal(self, streamer: str) -> None:
+        """Push the Disable/Enable + Remove popup for a clicked streamer name."""
+        is_disabled = streamer in self._blocked
+        self.app.push_screen(
+            StreamerActionModal(streamer, is_disabled),
+            callback=lambda action: self._handle_streamer_action(streamer, action),
+        )
+
+    def _handle_streamer_action(self, streamer: str, action: str | None) -> None:
+        """Apply the modal's chosen action to the config and refresh the panel."""
+        if action is None:
+            return
+        message = _modify_config_streamer(self.site.config_path, streamer, action)
+        self._flash_countdown_message(message)
+        self.refresh_data()
 
     def _add_streamer(self, username: str) -> None:
         """Add a streamer to this site's config and flash the result."""
@@ -249,6 +391,7 @@ class SitePanel(Container):
             all_streamers = list(site.dash_all_streamers)
             last_live = dict(site.dash_last_live)
             blocked = set(site.dash_blocked)
+            self._blocked = blocked
             self._next_check_in = site.dash_next_check_in
 
         live_since = site.snapshot_live_since()
