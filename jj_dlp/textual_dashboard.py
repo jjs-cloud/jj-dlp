@@ -29,12 +29,9 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from rich.text import Text
-from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Grid, Horizontal, Vertical
-from textual.coordinate import Coordinate
-from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
@@ -154,38 +151,7 @@ class SystemPanel(Static):
         self.border_title = " SYSTEM "
 
 
-class StreamerTable(DataTable):
-    """DataTable that also posts NameClicked on any click within the Name column.
-
-    DataTable's own click handling only selects a cell on the *second* click on
-    it (the first click just moves the cursor there), so we can't rely on
-    CellSelected to catch a single click. Textual calls a widget's public
-    `on_click` handler independently of its own internal `_on_click`, so this
-    fires on every click without disturbing DataTable's normal behavior.
-    """
-
-    NAME_COLUMN_INDEX = 0
-
-    class NameClicked(Message):
-        """Posted when a cell in the Name column is clicked."""
-
-        def __init__(self, data_table: "StreamerTable", row_key) -> None:
-            self.data_table = data_table
-            self.row_key = row_key
-            super().__init__()
-
-    def on_click(self, event: events.Click) -> None:
-        meta = event.style.meta
-        row_index = meta.get("row")
-        column_index = meta.get("column")
-        if (
-            column_index == self.NAME_COLUMN_INDEX
-            and row_index is not None
-            and row_index != -1
-            and not meta.get("out_of_bounds", False)
-        ):
-            row_key, _ = self.coordinate_to_cell_key(Coordinate(row_index, column_index))
-            self.post_message(self.NameClicked(self, row_key))
+NAME_COLUMN_INDEX = 0  # Position of the "Name" column added in SitePanel.on_mount.
 
 
 class StreamerActionModal(ModalScreen[str | None]):
@@ -299,13 +265,9 @@ class SitePanel(Container):
         self._next_check_in: float = 0.0
         self._countdown_message_until: float = 0.0
         self._blocked: set[str] = set()
-        # Suppresses the CellSelected that DataTable also fires for a click
-        # landing on a cell that was already the cursor position, so a single
-        # click can't open the popup twice (see on_streamer_table_name_clicked).
-        self._suppress_next_cell_selected: str | None = None
 
     def compose(self) -> ComposeResult:
-        yield StreamerTable(cursor_type="cell", id="streamer-table")
+        yield DataTable(cursor_type="cell", id="streamer-table")
         with Horizontal(id="add-row"):
             yield Input(placeholder="Add streamer...", id="add-input")
             yield Button("Add", id="add-button", variant="success")
@@ -313,7 +275,7 @@ class SitePanel(Container):
 
     def on_mount(self) -> None:
         table = self.query_one(DataTable)
-        keys = table.add_columns("Name", "Status", "Bar", "Duration", "Last Live")
+        keys = table.add_columns("", "", "", "", "")
         self._col = dict(zip(("name", "status", "bar", "duration", "last_live"), keys))
         self.refresh_data()
 
@@ -329,31 +291,16 @@ class SitePanel(Container):
             self._add_streamer(self.query_one("#add-input", Input).value)
 
     def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
-        """Open the popup when Enter is pressed on a Name cell (click is handled separately)."""
-        if event.coordinate.column != StreamerTable.NAME_COLUMN_INDEX:
+        """Open the popup for a Name cell selected via click-again or Enter."""
+        if event.coordinate.column != NAME_COLUMN_INDEX:
             return
         streamer = event.cell_key.row_key.value
         if streamer is None:
             return
-        if self._suppress_next_cell_selected == streamer:
-            self._suppress_next_cell_selected = None
-            return
         self._open_streamer_modal(streamer)
-
-    def on_streamer_table_name_clicked(self, event: StreamerTable.NameClicked) -> None:
-        """Open the popup on any click within the Name column."""
-        streamer = event.row_key.value
-        if streamer is None:
-            return
-        self._suppress_next_cell_selected = streamer
-        self.call_after_refresh(self._clear_click_suppression)
-        self._open_streamer_modal(streamer)
-
-    def _clear_click_suppression(self) -> None:
-        self._suppress_next_cell_selected = None
 
     def _open_streamer_modal(self, streamer: str) -> None:
-        """Push the Disable/Enable + Remove popup for a clicked streamer name."""
+        """Push the Disable/Enable + Remove popup for a selected streamer name."""
         is_disabled = streamer in self._blocked
         self.app.push_screen(
             StreamerActionModal(streamer, is_disabled),
@@ -447,11 +394,11 @@ class SitePanel(Container):
 
             status_a, style_a = self._status_cell(is_live, is_rec, is_disabled, theme)
             if is_live and is_disabled:
-                status_b, style_b = "[x  DIS]", "dim"
+                status_b, style_b = "DIS ", "dim"
                 self._blinking[s] = (status_a, style_a, status_b, style_b)
             elif is_live and is_rec:
-                status_a, style_a = "[● Live]", theme.success
-                status_b, style_b = "[►  REC]", theme.error
+                status_a, style_a = "Live", theme.success
+                status_b, style_b = "REC ", theme.error
                 self._blinking[s] = (status_a, style_a, status_b, style_b)
             else:
                 table.update_cell(s, col["status"], Text(status_a, style=style_a), update_width=True)
@@ -492,12 +439,12 @@ class SitePanel(Container):
     def _status_cell(self, is_live: bool, is_rec: bool, is_disabled: bool, theme) -> tuple[str, str]:
         """Return (text, style) for a row's non-blinking/base status state."""
         if not is_live:
-            return ("[○  off]", "dim")
+            return ("off ", "dim")
         if is_disabled:
-            return ("[● Live]", theme.success)
+            return ("Live", theme.success)
         if is_rec:
-            return ("[►  REC]", theme.error)
-        return ("[● Live]", theme.success)
+            return ("REC ", theme.error)
+        return ("Live", theme.success)
 
     def _last_live_cell(self, s, is_live, recording_res, last_live, now, highlight_days, theme) -> Text:
         if is_live and s in recording_res:
