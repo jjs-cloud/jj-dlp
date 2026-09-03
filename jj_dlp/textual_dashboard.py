@@ -32,7 +32,6 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Grid, Horizontal, Vertical
-from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
     DataTable,
@@ -151,66 +150,9 @@ class SystemPanel(Static):
         self.border_title = " SYSTEM "
 
 
-NAME_COLUMN_INDEX = 0  # Position of the "Name" column added in SitePanel.on_mount.
-
-
-class StreamerActionModal(ModalScreen[str | None]):
-    """Popup with Disable/Enable and Remove buttons for a clicked streamer."""
-
-    DEFAULT_CSS = """
-    StreamerActionModal {
-        align: center middle;
-    }
-
-    StreamerActionModal > Vertical {
-        width: auto;
-        height: auto;
-        padding: 1 2;
-        border: round $accent;
-        background: $surface;
-    }
-
-    StreamerActionModal #modal-title {
-        width: 100%;
-        content-align: center middle;
-        padding-bottom: 1;
-        text-style: bold;
-    }
-
-    StreamerActionModal Horizontal {
-        width: auto;
-        height: auto;
-    }
-
-    StreamerActionModal Button {
-        margin: 0 1;
-    }
-    """
-
-    # priority=True so this shadows any app-level "escape" binding added later.
-    BINDINGS = [Binding("escape", "dismiss_modal", show=False, priority=True)]
-
-    def __init__(self, streamer: str, is_disabled: bool, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.streamer = streamer
-        self.streamer_disabled = is_disabled
-
-    def compose(self) -> ComposeResult:
-        with Vertical():
-            yield Static(self.streamer, id="modal-title")
-            with Horizontal():
-                label = "Enable" if self.streamer_disabled else "Disable"
-                yield Button(label, id="toggle-button", variant="warning")
-                yield Button("Remove", id="remove-button", variant="error")
-
-    def action_dismiss_modal(self) -> None:
-        self.dismiss(None)
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "toggle-button":
-            self.dismiss("add" if self.streamer_disabled else "disable")
-        elif event.button.id == "remove-button":
-            self.dismiss("remove")
+# Column positions added in SitePanel.on_mount.
+TOGGLE_COLUMN_INDEX = 0
+NAME_COLUMN_INDEX = 1
 
 
 class SitePanel(Container):
@@ -244,6 +186,14 @@ class SitePanel(Container):
         padding: 0 1;
     }
 
+    SitePanel #rem-button {
+        width: auto;
+        min-width: 10;
+        height: 1;
+        border: none;
+        padding: 0 1;
+    }
+
     SitePanel #countdown {
         height: 1;
         color: $warning;
@@ -264,19 +214,24 @@ class SitePanel(Container):
         self._blinking: dict[str, tuple[str, str, str, str]] = {}
         self._next_check_in: float = 0.0
         self._countdown_message_until: float = 0.0
-        self._blocked: set[str] = set()
+        self._disabled: set[str] = set()
+        # streamer -> (want_disabled, expiry_time) for optimistic toggle clicks
+        # not yet confirmed by SiteState's next checker cycle.
+        self._pending_toggle: dict[str, tuple[bool, float]] = {}
+        self._selected_streamer: str | None = None
 
     def compose(self) -> ComposeResult:
         yield DataTable(cursor_type="cell", id="streamer-table")
         with Horizontal(id="add-row"):
             yield Input(placeholder="Add streamer...", id="add-input")
             yield Button("Add", id="add-button", variant="success")
+            yield Button("Rem", id="rem-button", variant="error")
         yield Static("", id="countdown")
 
     def on_mount(self) -> None:
         table = self.query_one(DataTable)
-        keys = table.add_columns("", "", "", "", "")
-        self._col = dict(zip(("name", "status", "bar", "duration", "last_live"), keys))
+        keys = table.add_columns("", "Name", "Stat", "Prog", "Dur", "Last")
+        self._col = dict(zip(("toggle", "name", "status", "bar", "duration", "last_live"), keys))
         self.refresh_data()
 
     def action_focus_add_input(self) -> None:
@@ -289,31 +244,53 @@ class SitePanel(Container):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "add-button":
             self._add_streamer(self.query_one("#add-input", Input).value)
+        elif event.button.id == "rem-button":
+            self._remove_selected_streamer()
+
+    def on_data_table_cell_highlighted(self, event: DataTable.CellHighlighted) -> None:
+        """Track the Name cell under the cursor so Rem knows what to remove."""
+        if event.coordinate.column == NAME_COLUMN_INDEX:
+            self._selected_streamer = event.cell_key.row_key.value
 
     def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
-        """Open the popup for a Name cell selected via click-again or Enter."""
-        if event.coordinate.column != NAME_COLUMN_INDEX:
+        """Toggle enable/disable on a selected toggle-column cell (click-again or Enter)."""
+        if event.coordinate.column != TOGGLE_COLUMN_INDEX:
             return
         streamer = event.cell_key.row_key.value
-        if streamer is None:
-            return
-        self._open_streamer_modal(streamer)
+        if streamer is not None:
+            self._toggle_streamer(streamer)
 
-    def _open_streamer_modal(self, streamer: str) -> None:
-        """Push the Disable/Enable + Remove popup for a selected streamer name."""
-        is_disabled = streamer in self._blocked
-        self.app.push_screen(
-            StreamerActionModal(streamer, is_disabled),
-            callback=lambda action: self._handle_streamer_action(streamer, action),
-        )
-
-    def _handle_streamer_action(self, streamer: str, action: str | None) -> None:
-        """Apply the modal's chosen action to the config and refresh the panel."""
-        if action is None:
-            return
+    def _toggle_streamer(self, streamer: str) -> None:
+        """Flip a streamer's disabled state instantly, then persist the change."""
+        want_disabled = streamer not in self._disabled
+        if want_disabled:
+            self._disabled.add(streamer)
+        else:
+            self._disabled.discard(streamer)
+        self._pending_toggle[streamer] = (want_disabled, time.time() + 45.0)
+        self._paint_toggle_cell(streamer, want_disabled)
+        action = "disable" if want_disabled else "add"
         message = _modify_config_streamer(self.site.config_path, streamer, action)
         self._flash_countdown_message(message)
-        self.refresh_data()
+
+    def _paint_toggle_cell(self, streamer: str, is_disabled: bool) -> None:
+        """Redraw one row's toggle glyph without waiting for the next poll."""
+        theme = self.app.current_theme
+        glyph, style = ("○", "dim") if is_disabled else ("●", theme.success)
+        self.query_one(DataTable).update_cell(
+            streamer, self._col["toggle"], Text(glyph, style=style), update_width=True
+        )
+
+    def _remove_selected_streamer(self) -> None:
+        """Remove whichever streamer's Name cell is currently selected."""
+        streamer = self._selected_streamer
+        if streamer is None:
+            self._flash_countdown_message("No streamer selected")
+            return
+        message = _modify_config_streamer(self.site.config_path, streamer, "remove")
+        self._pending_toggle.pop(streamer, None)
+        self._selected_streamer = None
+        self._flash_countdown_message(message)
 
     def _add_streamer(self, username: str) -> None:
         """Add a streamer to this site's config and flash the result."""
@@ -337,9 +314,19 @@ class SitePanel(Container):
             site_label = cfg.get("site_label", os.path.basename(site.config_path))
             all_streamers = list(site.dash_all_streamers)
             last_live = dict(site.dash_last_live)
-            blocked = set(site.dash_blocked)
-            self._blocked = blocked
+            disabled = set(site.dash_blocked)
             self._next_check_in = site.dash_next_check_in
+
+        # Apply optimistic toggle clicks the backend hasn't confirmed yet;
+        # drop each override once dash_blocked agrees with it or it expires.
+        for s, (want_disabled, expires) in list(self._pending_toggle.items()):
+            if (s in disabled) == want_disabled or now >= expires:
+                del self._pending_toggle[s]
+            elif want_disabled:
+                disabled.add(s)
+            else:
+                disabled.discard(s)
+        self._disabled = disabled
 
         live_since = site.snapshot_live_since()
 
@@ -363,14 +350,14 @@ class SitePanel(Container):
         highlight_days = cfg.get("last_live_highlight", 0)
 
         self.border_title = f" {site_label} "
-        self._update_badges(all_streamers, live_since, recording, blocked)
+        self._update_badges(all_streamers, live_since, recording, disabled)
 
         table = self.query_one(DataTable)
         col = self._col
         new_keys = set(all_streamers)
 
         for s in new_keys - self._row_keys:
-            table.add_row("", "", "", "", "", key=s)
+            table.add_row("", "", "", "", "", "", key=s)
             self._row_keys.add(s)
         for s in self._row_keys - new_keys:
             table.remove_row(s)
@@ -386,8 +373,10 @@ class SitePanel(Container):
         for s in all_streamers:
             is_live = s in live_since
             is_rec = s in recording
-            is_disabled = s in blocked
+            is_disabled = s in disabled
             seconds = now - live_since.get(s, now) if is_live else 0.0
+
+            self._paint_toggle_cell(s, is_disabled)
 
             name_style = "dim" if is_disabled else ""
             table.update_cell(s, col["name"], Text(s, style=name_style), update_width=True)
@@ -428,7 +417,7 @@ class SitePanel(Container):
         available = table.container_size.width - table.scrollbar_size_vertical
         other = sum(
             table.columns[col[name]].get_render_width(table)
-            for name in ("name", "status", "duration", "last_live")
+            for name in ("toggle", "name", "status", "duration", "last_live")
         )
         return max(0, available - other - 2 * table.cell_padding)
 
@@ -450,15 +439,15 @@ class SitePanel(Container):
         if is_live and s in recording_res:
             return Text(f"{recording_res[s]}p")
         if s not in last_live:
-            return Text("never", style="dim")
+            return Text("-")
         elapsed_days = (now - last_live[s]) / 86400
         recent = highlight_days and elapsed_days <= highlight_days
-        return Text(_fmt_duration(now - last_live[s]) + " ago", style=theme.accent if recent else "dim")
+        return Text(_fmt_duration(now - last_live[s]), style=theme.accent if recent else "dim")
 
-    def _update_badges(self, all_streamers, live_since, recording, blocked) -> None:
+    def _update_badges(self, all_streamers, live_since, recording, disabled) -> None:
         live_n = sum(1 for s in all_streamers if s in live_since)
         rec_n = len(recording)
-        dis_n = len(blocked)
+        dis_n = len(disabled)
         off_n = len(all_streamers) - live_n
         theme = self.app.current_theme
         self.border_subtitle = (
