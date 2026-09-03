@@ -34,12 +34,18 @@ from textual.binding import Binding
 from textual.containers import Container, Grid, Horizontal, Vertical
 from textual.reactive import reactive
 from textual.widgets import (
+    Button,
     DataTable,
+    Input,
     Static,
     Tabs,
     Tab,
     ContentSwitcher,
 )
+
+# Safe at module load time: main.py only imports this module lazily, inside
+# a function, by which point main.py itself has already finished importing.
+from .main import _modify_config_streamer
 
 if TYPE_CHECKING:
     # Avoids a circular import; main.py imports this module.
@@ -198,11 +204,36 @@ class SitePanel(Container):
         height: 1fr;
     }
 
+    SitePanel #add-row {
+        height: 1;
+    }
+
+    SitePanel #add-input {
+        width: 1fr;
+        height: 1;
+        border: none;
+        padding: 0 1;
+    }
+
+    SitePanel #add-button {
+        width: auto;
+        min-width: 10;
+        height: 1;
+        border: none;
+        padding: 0 1;
+    }
+
     SitePanel #countdown {
         height: 1;
         color: $warning;
     }
     """
+
+    # 'a' bubbles up from the DataTable (which doesn't bind it) to focus
+    # this panel's Add input, even while the table has focus.
+    BINDINGS = [
+        Binding("a", "focus_add_input", "Add streamer", show=False),
+    ]
 
     def __init__(self, site: "SiteState", **kwargs) -> None:
         super().__init__(**kwargs)
@@ -211,9 +242,13 @@ class SitePanel(Container):
         # streamer -> (text_a, style_a, text_b, style_b) for blinking rows.
         self._blinking: dict[str, tuple[str, str, str, str]] = {}
         self._next_check_in: float = 0.0
+        self._countdown_message_until: float = 0.0
 
     def compose(self) -> ComposeResult:
         yield DataTable(cursor_type="cell", id="streamer-table")
+        with Horizontal(id="add-row"):
+            yield Input(placeholder="Add streamer...", id="add-input")
+            yield Button("Add", id="add-button", variant="success")
         yield Static("", id="countdown")
 
     def on_mount(self) -> None:
@@ -221,6 +256,29 @@ class SitePanel(Container):
         keys = table.add_columns("Name", "Status", "Bar", "Duration", "Last Live")
         self._col = dict(zip(("name", "status", "bar", "duration", "last_live"), keys))
         self.refresh_data()
+
+    def action_focus_add_input(self) -> None:
+        self.query_one("#add-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "add-input":
+            self._add_streamer(event.value)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "add-button":
+            self._add_streamer(self.query_one("#add-input", Input).value)
+
+    def _add_streamer(self, username: str) -> None:
+        """Add a streamer to this site's config and flash the result."""
+        message = _modify_config_streamer(self.site.config_path, username, "add")
+        self.query_one("#add-input", Input).value = ""
+        self._flash_countdown_message(message)
+
+    def _flash_countdown_message(self, message: str, seconds: float = 3.0) -> None:
+        """Briefly show `message` on the countdown line, then let it revert."""
+        self._countdown_message_until = time.time() + seconds
+        self.query_one("#countdown", Static).update(message)
+        self.set_timer(seconds, self._update_countdown)
 
     def refresh_data(self) -> None:
         """Diff streamer rows against SiteState and update changed cells."""
@@ -363,6 +421,8 @@ class SitePanel(Container):
         )
 
     def _update_countdown(self) -> None:
+        if time.time() < self._countdown_message_until:
+            return
         nxt = max(0.0, self._next_check_in)
         if nxt <= 0:
             frame = self.app.blink_frame % 3
@@ -389,7 +449,7 @@ class SitePanel(Container):
 class SitePanelGrid(Grid):
     """Auto-fit grid of SitePanels; column count follows available width."""
 
-    MIN_PANEL_WIDTH = 60
+    MIN_PANEL_WIDTH = 59
 
     def on_mount(self) -> None:
         self._recompute_columns()
