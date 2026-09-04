@@ -802,7 +802,7 @@ class ConfigPane(Vertical):
 
     def compose(self) -> ComposeResult:
         yield Tabs(
-            Tab("global.conf", id="global"),
+            Tab("global", id="global"),
             *(Tab(_site_label(s), id=f"site-{i}") for i, s in enumerate(self._sites_app.sites)),
             id="config-site-tabs",
         )
