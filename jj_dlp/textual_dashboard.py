@@ -45,6 +45,7 @@ from textual.widgets import (
     Switch,
     Tabs,
     Tab,
+    TextArea,
     ContentSwitcher,
 )
 
@@ -777,19 +778,18 @@ class PipePane(Vertical):
 
 
 class ConfigPane(Vertical):
-    """Read-only view of each site's active configuration.
-
-    config_editor.ConfigEditor (the interactive curses editor) lives in a
-    module that wasn't available to port, so this shows the same values
-    read-only via a DataTable instead.
-    """
+    """Edits each site's .conf file directly, with a Save button per site."""
 
     DEFAULT_CSS = """
     ConfigPane #config-site-tabs {
         height: 1;
     }
-    ConfigPane DataTable {
+    ConfigPane TextArea {
         height: 1fr;
+    }
+    ConfigPane #config-toolbar {
+        height: 3;
+        align-horizontal: right;
     }
     """
 
@@ -797,42 +797,51 @@ class ConfigPane(Vertical):
         super().__init__(**kwargs)
         self._sites_app = sites_app
         self._site_idx = 0
-        self._last_cfg: "dict | None" = None
 
     def compose(self) -> ComposeResult:
         yield Tabs(
             *(Tab(_site_label(s), id=f"site-{i}") for i, s in enumerate(self._sites_app.sites)),
             id="config-site-tabs",
         )
-        yield DataTable(id="config-table")
+        yield TextArea(id="config-editor", show_line_numbers=False)
+        with Horizontal(id="config-toolbar"):
+            yield Button("Save", id="config-save")
 
     def on_mount(self) -> None:
-        table = self.query_one(DataTable)
-        table.add_columns("Key", "Value")
-        table.cursor_type = "row"
+        self._load_file()
 
     def on_tabs_tab_activated(self, event: Tabs.TabActivated) -> None:
-        """Switch which site's config values are shown."""
+        """Switch which site's .conf file is loaded into the editor."""
         if event.tabs.id != "config-site-tabs":
             return
         event.stop()
         self._site_idx = int(event.tab.id.split("-")[1])
-        self._last_cfg = None
-        self.refresh_data()
+        self._load_file()
 
-    def refresh_data(self) -> None:
-        """Repaint the table if the selected site's cached config changed."""
+    def _load_file(self) -> None:
+        """Read the selected site's .conf file into the editor."""
         sites = self._sites_app.sites
         if not sites:
             return
-        cfg = sites[self._site_idx].get_cached_config()
-        if cfg == self._last_cfg:
+        try:
+            with open(sites[self._site_idx].config_path, "r") as f:
+                text = f.read()
+        except OSError:
+            text = ""
+        self.query_one(TextArea).text = text
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Write the editor's contents back to the selected site's .conf file."""
+        if event.button.id != "config-save":
             return
-        self._last_cfg = dict(cfg)
-        table = self.query_one(DataTable)
-        table.clear()
-        for key in sorted(cfg):
-            table.add_row(key, str(cfg[key]))
+        event.stop()
+        sites = self._sites_app.sites
+        if not sites:
+            return
+        path = sites[self._site_idx].config_path
+        with open(path, "w") as f:
+            f.write(self.query_one(TextArea).text)
+        self.notify(f"Saved {os.path.basename(path)}")
 
 
 class FileManagerPane(Vertical):
@@ -1048,8 +1057,6 @@ class JJDlpApp(App):
         for pane in self.query(LogPane):
             pane.refresh_data()
         for pane in self.query(PipePane):
-            pane.refresh_data()
-        for pane in self.query(ConfigPane):
             pane.refresh_data()
 
     def _blink_tick(self) -> None:
