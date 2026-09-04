@@ -35,8 +35,14 @@ from textual.containers import Container, Grid, Horizontal, Vertical
 from textual.widgets import (
     Button,
     DataTable,
+    DirectoryTree,
     Input,
+    Label,
+    ListItem,
+    ListView,
+    RichLog,
     Static,
+    Switch,
     Tabs,
     Tab,
     ContentSwitcher,
@@ -44,7 +50,7 @@ from textual.widgets import (
 
 # Safe at module load time: main.py only imports this module lazily, inside
 # a function, by which point main.py itself has already finished importing.
-from .main import _modify_config_streamer
+from .main import _modify_config_streamer, _CHECKER_STDOUT_PREFIX, _CHECKER_STDERR_PREFIX
 
 if TYPE_CHECKING:
     # Avoids a circular import; main.py imports this module.
@@ -94,6 +100,77 @@ def _live_bar_dashed(seconds: float, width: int = 14, max_secs: int = 6 * 3600) 
     """Like _live_bar, but dashed for disabled streamers."""
     filled = min(int(width * seconds / max(1, max_secs)), width)
     return "─" * filled + ("─ " * (width - filled))[:width - filled]
+
+
+def _site_label(site: "SiteState") -> str:
+    """Return a site's configured label, or its config filename if unset."""
+    return site.get_cached_config().get("site_label", os.path.basename(site.config_path))
+
+
+def _log_line_style(line: str, theme) -> str:
+    """Pick a style for one activity/debug log line, mirroring curses_dashboard."""
+    if "Live now" in line or "Recording started" in line:
+        return theme.success
+    if "ERROR" in line or "Stall" in line or "STOPPED" in line or "Warning" in line:
+        return theme.error
+    if "Info" in line:
+        return theme.warning
+    return "dim"
+
+
+def _collect_log_lines(sites_app: "AppState", site_idx: "int | None", show_debug: bool) -> list[str]:
+    """Merge activity (and optionally debug) lines for one site, or all sites, in time order."""
+    def ts(ln: str) -> str:
+        return ln[:20] if ln[:1] == "[" else ""
+
+    if site_idx is None:
+        raw_lines: list[str] = []
+        raw_debug: list[str] = []
+        with sites_app.global_log_lock:
+            raw_lines.extend(sites_app.global_log_lines)
+        for site in sites_app.sites:
+            lbl = _site_label(site)
+            with site.dash_lock:
+                site_lines = list(site.dash_log_lines)
+                site_debug = list(site.dash_debug_lines) if show_debug else []
+            raw_lines.extend(
+                f"{ln[:21]} [{lbl}]{ln[21:]}" if ln[:1] == "[" else ln for ln in site_lines
+            )
+            raw_debug.extend(
+                f"{ln[:21]} [{lbl}]{ln[21:]}" if ln[:1] == "[" else ln for ln in site_debug
+            )
+        raw_lines.sort(key=ts)
+        raw_debug.sort(key=ts)
+    else:
+        site = sites_app.sites[site_idx]
+        with site.dash_lock:
+            raw_lines = list(site.dash_log_lines)
+        raw_debug = []
+
+    merged: list[str] = []
+    i = j = 0
+    while i < len(raw_lines) and j < len(raw_debug):
+        if ts(raw_lines[i]) <= ts(raw_debug[j]):
+            merged.append(raw_lines[i]); i += 1
+        else:
+            merged.append(raw_debug[j]); j += 1
+    merged.extend(raw_lines[i:])
+    merged.extend(raw_debug[j:])
+    return merged
+
+
+def _redraw_log(widget: RichLog, lines: list[str], styles: "list[str] | None" = None) -> None:
+    """Repaint a RichLog with `lines`, preserving scroll position unless at the bottom."""
+    at_bottom = widget.scroll_y >= max(0.0, widget.max_scroll_y - 0.5)
+    old_y = widget.scroll_y
+    widget.clear()
+    for i, line in enumerate(lines):
+        style = styles[i] if styles else ""
+        widget.write(Text(line, style=style) if style else line)
+    if at_bottom:
+        widget.scroll_end(animate=False)
+    else:
+        widget.scroll_to(y=old_y, animate=False)
 
 
 TAB_IDS = [
@@ -508,6 +585,308 @@ class SitePanelGrid(Grid):
         self.styles.grid_size_columns = cols
 
 
+class LogPane(Vertical):
+    """Log tab: merged or per-site activity log, with a debug-line toggle."""
+
+    DEFAULT_CSS = """
+    LogPane #log-toolbar {
+        height: 1;
+    }
+    LogPane #log-debug-switch {
+        width: auto;
+        margin: 0 1;
+    }
+    LogPane #log-debug-label {
+        width: auto;
+        color: $text-muted;
+    }
+    LogPane RichLog {
+        height: 1fr;
+    }
+    """
+
+    def __init__(self, sites_app: "AppState", **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._sites_app = sites_app
+        self._site_idx: "int | None" = None
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(id="log-toolbar"):
+            yield Tabs(
+                Tab("All", id="all"),
+                *(Tab(_site_label(s), id=f"site-{i}") for i, s in enumerate(self._sites_app.sites)),
+                id="log-site-tabs",
+            )
+            yield Switch(value=False, id="log-debug-switch")
+            yield Static("Show debug", id="log-debug-label")
+        yield RichLog(id="log-view", wrap=True, auto_scroll=False, max_lines=2000)
+
+    def on_tabs_tab_activated(self, event: Tabs.TabActivated) -> None:
+        """Switch which site's log lines are shown."""
+        if event.tabs.id != "log-site-tabs":
+            return
+        event.stop()
+        self._site_idx = None if event.tab.id == "all" else int(event.tab.id.split("-")[1])
+        is_all = self._site_idx is None
+        self.query_one("#log-debug-switch", Switch).display = is_all
+        self.query_one("#log-debug-label", Static).display = is_all
+        self.refresh_data()
+
+    def on_switch_changed(self, event: Switch.Changed) -> None:
+        """Toggle whether debug lines are merged into the 'All' site log."""
+        if event.switch.id == "log-debug-switch":
+            event.stop()
+            self.refresh_data()
+
+    def refresh_data(self) -> None:
+        """Re-render the log view from the latest SiteState/AppState buffers."""
+        show_debug = self.query_one("#log-debug-switch", Switch).value
+        lines = _collect_log_lines(self._sites_app, self._site_idx, show_debug)
+        theme = self.app.current_theme
+        styles = [_log_line_style(line, theme) for line in lines]
+        _redraw_log(self.query_one(RichLog), lines, styles)
+
+
+class PipePane(Vertical):
+    """Stdout/Stderr tab: per-site streamer list plus that streamer's raw output."""
+
+    DEFAULT_CSS = """
+    PipePane #pipe-toolbar {
+        height: 1;
+    }
+    PipePane #pipe-show-all {
+        width: auto;
+        margin: 0 1;
+    }
+    PipePane #pipe-show-all-label {
+        width: auto;
+        color: $text-muted;
+    }
+    PipePane #pipe-body {
+        height: 1fr;
+    }
+    PipePane #pipe-streamers {
+        width: 26;
+        border: round $panel;
+    }
+    PipePane #pipe-content {
+        width: 1fr;
+        border: round $panel;
+        padding: 0 1;
+    }
+    """
+
+    def __init__(self, sites_app: "AppState", kind: str, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._sites_app = sites_app
+        self._kind = kind  # "stdout" or "stderr"
+        self._site_idx = 0
+        self._streamer_names: list[str] = []
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(id="pipe-toolbar"):
+            yield Tabs(
+                *(Tab(_site_label(s), id=f"site-{i}") for i, s in enumerate(self._sites_app.sites)),
+                id=f"pipe-site-tabs-{self._kind}",
+            )
+            yield Switch(value=False, id="pipe-show-all")
+            yield Static("Show all", id="pipe-show-all-label")
+        with Horizontal(id="pipe-body"):
+            yield ListView(ListItem(Label("All Streamers")), id="pipe-streamers")
+            yield RichLog(id="pipe-content", wrap=True, auto_scroll=False, max_lines=2000)
+
+    def on_mount(self) -> None:
+        self.query_one("#pipe-streamers", ListView).border_title = " STREAMERS "
+
+    def _site(self) -> "SiteState | None":
+        sites = self._sites_app.sites
+        return sites[self._site_idx] if sites else None
+
+    def on_tabs_tab_activated(self, event: Tabs.TabActivated) -> None:
+        """Switch which site's streamers/output are shown."""
+        if event.tabs.id != f"pipe-site-tabs-{self._kind}":
+            return
+        event.stop()
+        self._site_idx = int(event.tab.id.split("-")[1])
+        self.query_one(ListView).index = 0
+        site = self._site()
+        if site is not None:
+            attr = "show_checker_stdout" if self._kind == "stdout" else "show_checker_stderr"
+            self.query_one("#pipe-show-all", Switch).value = getattr(site, attr)
+        self.refresh_data(force_rebuild=True)
+
+    def on_switch_changed(self, event: Switch.Changed) -> None:
+        """Toggle whether checker-only lines are mixed into 'All Streamers'."""
+        if event.switch.id != "pipe-show-all":
+            return
+        event.stop()
+        site = self._site()
+        if site is not None:
+            attr = "show_checker_stdout" if self._kind == "stdout" else "show_checker_stderr"
+            setattr(site, attr, event.value)
+        self.refresh_data()
+
+    def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
+        """Follow the highlighted streamer, like curses' arrow-key navigation."""
+        if event.list_view.id == "pipe-streamers":
+            self.refresh_data()
+
+    def refresh_data(self, force_rebuild: bool = False) -> None:
+        """Rebuild the streamer list (if changed) and re-render the content pane."""
+        site = self._site()
+        streamers = list(site.dash_all_streamers) if site is not None else []
+        list_view = self.query_one(ListView)
+        if force_rebuild or streamers != self._streamer_names:
+            selected = list_view.index or 0
+            self._streamer_names = streamers
+            list_view.clear()
+            list_view.append(ListItem(Label("All Streamers")))
+            for name in streamers:
+                list_view.append(ListItem(Label(name)))
+            list_view.index = min(selected, len(streamers))
+
+        sel_idx = list_view.index or 0
+        show_all_switch = self.query_one("#pipe-show-all", Switch)
+        show_all_switch.display = sel_idx == 0
+        self.query_one("#pipe-show-all-label", Static).display = sel_idx == 0
+
+        content = self.query_one("#pipe-content", RichLog)
+        lines: list[str] = []
+        title = f" {self._kind.upper()} "
+        if site is not None:
+            lines_attr = f"dash_{self._kind}_lines"
+            by_streamer_attr = f"dash_{self._kind}_lines_by_streamer"
+            prefix = _CHECKER_STDOUT_PREFIX if self._kind == "stdout" else _CHECKER_STDERR_PREFIX
+            if sel_idx == 0:
+                show_all = show_all_switch.value
+                with site.dash_lock:
+                    raw = list(getattr(site, lines_attr))
+                if show_all:
+                    lines = [ln[len(prefix):] if ln.startswith(prefix) else ln for ln in raw]
+                else:
+                    lines = [ln for ln in raw if not ln.startswith(prefix)]
+                title = f" {self._kind.upper()} — Show All: {'ON' if show_all else 'OFF'} "
+            else:
+                streamer = streamers[sel_idx - 1] if sel_idx - 1 < len(streamers) else ""
+                with site.dash_lock:
+                    lines = list(getattr(site, by_streamer_attr).get(streamer, ()))
+                title = f" {self._kind.upper()} — {streamer} "
+
+        content.border_title = title
+        _redraw_log(content, lines)
+
+
+class ConfigPane(Vertical):
+    """Read-only view of each site's active configuration.
+
+    config_editor.ConfigEditor (the interactive curses editor) lives in a
+    module that wasn't available to port, so this shows the same values
+    read-only via a DataTable instead.
+    """
+
+    DEFAULT_CSS = """
+    ConfigPane #config-site-tabs {
+        height: 1;
+    }
+    ConfigPane DataTable {
+        height: 1fr;
+    }
+    """
+
+    def __init__(self, sites_app: "AppState", **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._sites_app = sites_app
+        self._site_idx = 0
+        self._last_cfg: "dict | None" = None
+
+    def compose(self) -> ComposeResult:
+        yield Tabs(
+            *(Tab(_site_label(s), id=f"site-{i}") for i, s in enumerate(self._sites_app.sites)),
+            id="config-site-tabs",
+        )
+        yield DataTable(id="config-table")
+
+    def on_mount(self) -> None:
+        table = self.query_one(DataTable)
+        table.add_columns("Key", "Value")
+        table.cursor_type = "row"
+
+    def on_tabs_tab_activated(self, event: Tabs.TabActivated) -> None:
+        """Switch which site's config values are shown."""
+        if event.tabs.id != "config-site-tabs":
+            return
+        event.stop()
+        self._site_idx = int(event.tab.id.split("-")[1])
+        self._last_cfg = None
+        self.refresh_data()
+
+    def refresh_data(self) -> None:
+        """Repaint the table if the selected site's cached config changed."""
+        sites = self._sites_app.sites
+        if not sites:
+            return
+        cfg = sites[self._site_idx].get_cached_config()
+        if cfg == self._last_cfg:
+            return
+        self._last_cfg = dict(cfg)
+        table = self.query_one(DataTable)
+        table.clear()
+        for key in sorted(cfg):
+            table.add_row(key, str(cfg[key]))
+
+
+class FileManagerPane(Vertical):
+    """Browses each site's output directory.
+
+    file_manager.FileManagerTab's move/fixup/trim/split actions live in a
+    module that wasn't available to port, so this is a read-only browser
+    built from Textual's default DirectoryTree.
+    """
+
+    DEFAULT_CSS = """
+    FileManagerPane #filemanager-site-tabs {
+        height: 1;
+    }
+    FileManagerPane DirectoryTree {
+        height: 1fr;
+    }
+    """
+
+    RELOAD_INTERVAL = 5.0
+
+    def __init__(self, sites_app: "AppState", **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._sites_app = sites_app
+
+    def compose(self) -> ComposeResult:
+        yield Tabs(
+            *(Tab(_site_label(s), id=f"site-{i}") for i, s in enumerate(self._sites_app.sites)),
+            id="filemanager-site-tabs",
+        )
+        yield DirectoryTree(self._output_dir(0), id="filemanager-tree")
+
+    def on_mount(self) -> None:
+        self.set_interval(self.RELOAD_INTERVAL, self._reload)
+
+    def _output_dir(self, site_idx: int) -> str:
+        sites = self._sites_app.sites
+        if not sites:
+            return os.getcwd()
+        path = sites[site_idx].get_cached_config().get("output_dir")
+        return path if path and os.path.isdir(path) else os.getcwd()
+
+    def on_tabs_tab_activated(self, event: Tabs.TabActivated) -> None:
+        """Point the tree at the newly selected site's output directory."""
+        if event.tabs.id != "filemanager-site-tabs":
+            return
+        event.stop()
+        site_idx = int(event.tab.id.split("-")[1])
+        self.query_one(DirectoryTree).path = self._output_dir(site_idx)
+
+    def _reload(self) -> None:
+        self.query_one(DirectoryTree).reload()
+
+
 class JJDlpApp(App):
     """Main dashboard application."""
 
@@ -644,9 +1023,11 @@ class JJDlpApp(App):
                     with SitePanelGrid(id="dashboard"):
                         for site in self._sites_app.sites:
                             yield SitePanel(site)
-                    for tid in TAB_IDS:
-                        if tid != "dashboard":
-                            yield Static("", id=tid, classes="tab-pane")
+                    yield LogPane(self._sites_app, id="log", classes="tab-pane")
+                    yield PipePane(self._sites_app, "stdout", id="stdout", classes="tab-pane")
+                    yield PipePane(self._sites_app, "stderr", id="stderr", classes="tab-pane")
+                    yield ConfigPane(self._sites_app, id="config", classes="tab-pane")
+                    yield FileManagerPane(self._sites_app, id="filemanager", classes="tab-pane")
 
                 yield SystemPanel()
 
@@ -664,6 +1045,12 @@ class JJDlpApp(App):
         """Poll SiteState and refresh every panel's table. See POLLING DECISION above."""
         for panel in self.query(SitePanel):
             panel.refresh_data()
+        for pane in self.query(LogPane):
+            pane.refresh_data()
+        for pane in self.query(PipePane):
+            pane.refresh_data()
+        for pane in self.query(ConfigPane):
+            pane.refresh_data()
 
     def _blink_tick(self) -> None:
         """Flip the shared blink flag/frame and let panels re-render blinking cells."""
