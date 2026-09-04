@@ -312,8 +312,8 @@ class SitePanel(Container):
         yield StreamerTable(cursor_type="cell", id="streamer-table")
         with Horizontal(id="add-row"):
             yield Input(placeholder="Add streamer...", id="add-input")
-            yield Button("Add", id="add-button", variant="success")
-            yield Button("Rem", id="rem-button", variant="error")
+            yield Button("Add", id="add-button", variant="primary")
+            yield Button("Remove", id="rem-button", variant="error")
         yield Static("", id="countdown")
 
     def on_mount(self) -> None:
@@ -919,8 +919,7 @@ def _move_to_trash(path: str) -> "tuple[bool, str | None]":
 class FileManagerPane(Vertical):
     """Browses each site's output directory.
 
-    Single-click opens a file (Textual selects on click natively); the
-    Delete button sends the selected file/folder to the Trash / Recycle Bin.
+    Open/Delete act on whichever file/folder is under the tree cursor.
     """
 
     DEFAULT_CSS = """
@@ -930,9 +929,16 @@ class FileManagerPane(Vertical):
     FileManagerPane DirectoryTree {
         height: 1fr;
     }
+    FileManagerPane #filemanager-buttons {
+        height: auto;
+        margin: 1 0 0 0;
+    }
+    FileManagerPane #filemanager-open {
+        width: auto;
+        margin: 0 1 0 0;
+    }
     FileManagerPane #filemanager-delete {
         width: auto;
-        margin: 1 0 0 0;
     }
     """
 
@@ -948,21 +954,33 @@ class FileManagerPane(Vertical):
             id="filemanager-site-tabs",
         )
         yield DirectoryTree(self._output_dir(0), id="filemanager-tree")
-        yield Button("Delete", id="filemanager-delete", variant="error")
+        with Horizontal(id="filemanager-buttons"):
+            yield Button("Open", id="filemanager-open", variant="primary")
+            yield Button("Delete", id="filemanager-delete", variant="error")
 
     def on_mount(self) -> None:
         self.set_interval(self.RELOAD_INTERVAL, self._reload)
 
-    def on_directory_tree_file_selected(self, event: DirectoryTree.FileSelected) -> None:
-        """Open the clicked file with the OS default application."""
-        event.stop()
-        _open_file(str(event.path))
-
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Send the currently selected file or folder to the Trash / Recycle Bin."""
-        if event.button.id != "filemanager-delete":
+        """Open or trash whichever file/folder is under the tree cursor."""
+        if event.button.id == "filemanager-open":
+            event.stop()
+            self._open_selected()
+        elif event.button.id == "filemanager-delete":
+            event.stop()
+            self._delete_selected()
+
+    def _open_selected(self) -> None:
+        """Open the cursor's file with the OS default application."""
+        node = self.query_one(DirectoryTree).cursor_node
+        if node is None or node.data is None:
             return
-        event.stop()
+        path = str(node.data.path)
+        if os.path.isfile(path):
+            _open_file(path)
+
+    def _delete_selected(self) -> None:
+        """Send the cursor's file or folder to the Trash / Recycle Bin."""
         tree = self.query_one(DirectoryTree)
         node = tree.cursor_node
         if node is None or node.data is None:
