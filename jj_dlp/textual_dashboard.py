@@ -24,6 +24,8 @@ longer block rendering or input handling.
 """
 
 import os
+import platform
+import subprocess
 import time
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -844,12 +846,81 @@ class ConfigPane(Vertical):
         self.notify(f"Saved {os.path.basename(path)}")
 
 
+IS_WINDOWS = platform.system() == "Windows"
+IS_MAC = platform.system() == "Darwin"
+
+
+def _open_file(path: str) -> None:
+    """Open *path* with the OS default application."""
+    if IS_WINDOWS:
+        os.startfile(path)
+    elif IS_MAC:
+        subprocess.Popen(["open", path])
+    else:
+        subprocess.Popen(["xdg-open", path])
+
+
+def _move_to_trash(path: str) -> "tuple[bool, str | None]":
+    """Send *path* to the Recycle Bin / Trash, per file_manager.move_to_trash (minus the send2trash branch)."""
+    abs_path = os.path.abspath(path)
+    try:
+        if IS_WINDOWS:
+            import ctypes
+            from ctypes import wintypes
+
+            class SHFILEOPSTRUCTW(ctypes.Structure):
+                _fields_ = [
+                    ("hwnd", wintypes.HWND),
+                    ("wFunc", wintypes.UINT),
+                    ("pFrom", wintypes.LPCWSTR),
+                    ("pTo", wintypes.LPCWSTR),
+                    ("fFlags", ctypes.c_uint),
+                    ("fAnyOperationsAborted", wintypes.BOOL),
+                    ("hNameMappings", ctypes.c_void_p),
+                    ("lpszProgressTitle", wintypes.LPCWSTR),
+                ]
+
+            FO_DELETE = 0x0003
+            FOF_ALLOWUNDO = 0x0040
+            FOF_NOCONFIRMATION = 0x0010
+            FOF_SILENT = 0x0004
+            # pFrom must be double-null-terminated
+            op = SHFILEOPSTRUCTW(
+                hwnd=None, wFunc=FO_DELETE, pFrom=abs_path + "\0", pTo=None,
+                fFlags=FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT,
+                fAnyOperationsAborted=False, hNameMappings=None, lpszProgressTitle=None,
+            )
+            result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+            if result != 0:
+                return False, f"SHFileOperationW failed (code {result})"
+            return True, None
+        elif IS_MAC:
+            script = (
+                'tell application "Finder" to delete POSIX file '
+                f'"{abs_path}"'
+            )
+            subprocess.run(["osascript", "-e", script], check=True,
+                            capture_output=True)
+            return True, None
+        else:
+            for cmd in (["gio", "trash", abs_path],
+                        ["trash-put", abs_path],
+                        ["trash", abs_path]):
+                try:
+                    subprocess.run(cmd, check=True, capture_output=True)
+                    return True, None
+                except (OSError, subprocess.CalledProcessError):
+                    continue
+            return False, "No trash utility found (tried gio/trash-put/trash)."
+    except Exception as exc:
+        return False, str(exc)
+
+
 class FileManagerPane(Vertical):
     """Browses each site's output directory.
 
-    file_manager.FileManagerTab's move/fixup/trim/split actions live in a
-    module that wasn't available to port, so this is a read-only browser
-    built from Textual's default DirectoryTree.
+    Single-click opens a file (Textual selects on click natively); the
+    Delete button sends the selected file/folder to the Trash / Recycle Bin.
     """
 
     DEFAULT_CSS = """
@@ -858,6 +929,10 @@ class FileManagerPane(Vertical):
     }
     FileManagerPane DirectoryTree {
         height: 1fr;
+    }
+    FileManagerPane #filemanager-delete {
+        width: auto;
+        margin: 1 0 0 0;
     }
     """
 
@@ -873,9 +948,32 @@ class FileManagerPane(Vertical):
             id="filemanager-site-tabs",
         )
         yield DirectoryTree(self._output_dir(0), id="filemanager-tree")
+        yield Button("Delete", id="filemanager-delete", variant="error")
 
     def on_mount(self) -> None:
         self.set_interval(self.RELOAD_INTERVAL, self._reload)
+
+    def on_directory_tree_file_selected(self, event: DirectoryTree.FileSelected) -> None:
+        """Open the clicked file with the OS default application."""
+        event.stop()
+        _open_file(str(event.path))
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Send the currently selected file or folder to the Trash / Recycle Bin."""
+        if event.button.id != "filemanager-delete":
+            return
+        event.stop()
+        tree = self.query_one(DirectoryTree)
+        node = tree.cursor_node
+        if node is None or node.data is None:
+            return
+        path = str(node.data.path)
+        ok, err = _move_to_trash(path)
+        if ok:
+            tree.reload()
+            self.notify(f"Trashed {os.path.basename(path)}")
+        else:
+            self.notify(f"Trash failed: {err}", severity="error")
 
     def _output_dir(self, site_idx: int) -> str:
         sites = self._sites_app.sites
