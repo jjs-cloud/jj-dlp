@@ -53,7 +53,7 @@ from textual.widgets import (
 
 # Safe at module load time: main.py only imports this module lazily, inside
 # a function, by which point main.py itself has already finished importing.
-from .main import _modify_config_streamer, _CHECKER_STDOUT_PREFIX, _CHECKER_STDERR_PREFIX
+from .main import _modify_config_streamer, _CHECKER_STDOUT_PREFIX, _CHECKER_STDERR_PREFIX, get_global_conf_path
 
 if TYPE_CHECKING:
     # Avoids a circular import; main.py imports this module.
@@ -798,16 +798,17 @@ class ConfigPane(Vertical):
     def __init__(self, sites_app: "AppState", **kwargs) -> None:
         super().__init__(**kwargs)
         self._sites_app = sites_app
-        self._site_idx = 0
+        self._tab_idx = 0
 
     def compose(self) -> ComposeResult:
         yield Tabs(
+            Tab("global.conf", id="global"),
             *(Tab(_site_label(s), id=f"site-{i}") for i, s in enumerate(self._sites_app.sites)),
             id="config-site-tabs",
         )
         yield TextArea(id="config-editor", show_line_numbers=False)
         with Horizontal(id="config-toolbar"):
-            yield Button("Save", id="config-save")
+            yield Button("Save", id="config-save", variant="primary")
 
     def on_mount(self) -> None:
         self._load_file()
@@ -817,30 +818,38 @@ class ConfigPane(Vertical):
         if event.tabs.id != "config-site-tabs":
             return
         event.stop()
-        self._site_idx = int(event.tab.id.split("-")[1])
+        self._tab_idx = -1 if event.tab.id == "global" else int(event.tab.id.split("-")[1])
         self._load_file()
 
     def _load_file(self) -> None:
-        """Read the selected site's .conf file into the editor."""
-        sites = self._sites_app.sites
-        if not sites:
-            return
+        """Read the selected site .conf or global.conf into the editor."""
+        if self._tab_idx == -1:
+            path = get_global_conf_path()
+        else:
+            sites = self._sites_app.sites
+            if not sites:
+                return
+            path = sites[self._tab_idx].config_path
+
         try:
-            with open(sites[self._site_idx].config_path, "r") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 text = f.read()
         except OSError:
             text = ""
         self.query_one(TextArea).text = text
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Write the editor's contents back to the selected site's .conf file."""
+        """Write the editor's contents back to the selected config file."""
         if event.button.id != "config-save":
             return
-        event.stop()
-        sites = self._sites_app.sites
-        if not sites:
-            return
-        path = sites[self._site_idx].config_path
+        if self._tab_idx == -1:
+            path = get_global_conf_path()
+        else:
+            sites = self._sites_app.sites
+            if not sites:
+                return
+            path = sites[self._tab_idx].config_path
+
         with open(path, "w") as f:
             f.write(self.query_one(TextArea).text)
         self.notify(f"Saved {os.path.basename(path)}")
