@@ -168,7 +168,7 @@ COLOR_SCHEMES = [
      curses.COLOR_WHITE,   curses.COLOR_MAGENTA),
     # 4: Magenta/purple
     (curses.COLOR_MAGENTA, curses.COLOR_WHITE,   curses.COLOR_MAGENTA,
-     curses.COLOR_CYAN,    curses.COLOR_GREEN,   curses.COLOR_BLACK,
+     curses.COLOR_CYAN,    curses.COLOR_GREEN,   curses.COLOR_WHITE,
      curses.COLOR_MAGENTA, curses.COLOR_GREEN,    curses.COLOR_RED,
      curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
      curses.COLOR_MAGENTA,   curses.COLOR_CYAN,    curses.COLOR_YELLOW,
