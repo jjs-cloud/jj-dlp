@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder
 """
-__version__ = "1.28.12"
+__version__ = "1.28.13"
 
 import subprocess
 import textwrap
@@ -3512,6 +3512,22 @@ def _launch_yt_dlp_attempt(app: "AppState", cmd: list, out_target, err_target, c
         return None
 
 
+def _remove_sidecar_with_retry(sidecar_path: str, attempts: int = 5, delay: float = 0.2) -> None:
+    """Remove sidecar_path, retrying briefly if it's transiently locked."""
+    for i in range(attempts):
+        try:
+            os.remove(sidecar_path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError as e:
+            if i == attempts - 1:
+                dbg(f"giving up removing sidecar {sidecar_path!r} after "
+                    f"{attempts} attempts: {e!r}")
+            else:
+                time.sleep(delay)
+
+
 def _resolve_active_recording_file(proc, sidecar_path: str, output_dir: str, streamer: str):
     """3-tier fallback to find the file yt-dlp is actually writing to:
     1. the --print-to-file sidecar (UTF-8, avoids console encoding issues),
@@ -3550,10 +3566,7 @@ def _resolve_active_recording_file(proc, sidecar_path: str, output_dir: str, str
             # The sidecar has served its purpose the moment we've read
             # it — remove it right away rather than waiting for
             # end-of-recording cleanup.
-            try:
-                os.remove(sidecar_path)
-            except OSError:
-                pass
+            _remove_sidecar_with_retry(sidecar_path)
 
             if raw_dest:
                 if os.path.isabs(raw_dest):
@@ -3603,12 +3616,8 @@ def _resolve_active_recording_file(proc, sidecar_path: str, output_dir: str, str
 
     # Best-effort cleanup: if we broke out early (timeout / proc exit)
     # before the sidecar ever appeared, make sure nothing is left behind.
-    if not active_file:
-        try:
-            if os.path.isfile(sidecar_path):
-                os.remove(sidecar_path)
-        except OSError:
-            pass
+    if not active_file and os.path.isfile(sidecar_path):
+        _remove_sidecar_with_retry(sidecar_path)
 
     return active_file
 
