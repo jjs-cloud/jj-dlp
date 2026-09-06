@@ -142,7 +142,7 @@ COLOR_SCHEMES = [
     (curses.COLOR_CYAN,    curses.COLOR_WHITE,   curses.COLOR_BLUE,
      curses.COLOR_YELLOW,  curses.COLOR_GREEN,   curses.COLOR_BLACK,
      curses.COLOR_CYAN,    curses.COLOR_GREEN, curses.COLOR_RED,
-     curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
+     curses.COLOR_YELLOW,   curses.COLOR_BLACK,   curses.COLOR_GREEN,
      curses.COLOR_WHITE,   curses.COLOR_YELLOW,  curses.COLOR_YELLOW,
      curses.COLOR_WHITE,   curses.COLOR_RED),
     # 1: Amber terminal
@@ -177,7 +177,7 @@ COLOR_SCHEMES = [
     (curses.COLOR_CYAN,    curses.COLOR_WHITE,   curses.COLOR_CYAN,
      curses.COLOR_WHITE,   curses.COLOR_GREEN,   curses.COLOR_BLACK,
      curses.COLOR_WHITE,   curses.COLOR_GREEN,    curses.COLOR_RED,
-     curses.COLOR_CYAN,    curses.COLOR_BLACK,   curses.COLOR_GREEN,
+     curses.COLOR_WHITE,    curses.COLOR_BLACK,   curses.COLOR_GREEN,
      curses.COLOR_BLUE,   curses.COLOR_YELLOW,  curses.COLOR_MAGENTA,
      curses.COLOR_WHITE,   curses.COLOR_RED),
     # 6: DOS Blue (classic QBasic/EDIT-style white-on-blue screen)
@@ -487,7 +487,7 @@ SITE_REGISTRY = {
     'file_manager_filemanagertab_draw_live_2': {'file': 'file_manager.py', 'label': 'File Manager — Scroll-Up Arrow', 'default_role': 'LIVE', 'default_bold': True},
     'file_manager_filemanagertab_draw_live_3': {'file': 'file_manager.py', 'label': 'File Manager — Scroll-Down Arrow', 'default_role': 'LIVE', 'default_bold': True},
     'file_manager_filemanagertab_draw_dim_3': {'file': 'file_manager.py', 'label': 'File Manager — File Row (Idle)', 'default_role': 'NORMAL', 'default_bold': True},
-    'file_manager_filemanagertab_draw_system_2': {'file': 'file_manager.py', 'label': 'File Manager — Subfolder Path Prefix', 'default_role': 'NORMAL', 'default_bold': False},
+    'file_manager_filemanagertab_draw_system_2': {'file': 'file_manager.py', 'label': 'File Manager — Subfolder Path Prefix', 'default_role': 'DIM', 'default_bold': False},
     'file_manager_filemanagertab_draw_delete': {'file': 'file_manager.py', 'label': 'File Manager — Delete-Mode Info (Permanent)', 'default_role': 'DELETE', 'default_bold': True},
     'file_manager_filemanagertab_draw_dim_4': {'file': 'file_manager.py', 'label': 'File Manager — Delete-Mode Info (Trash)', 'default_role': 'DIM', 'default_bold': False},
     'file_manager_filemanagertab_draw_warn': {'file': 'file_manager.py', 'label': 'File Manager — Status Message Line', 'default_role': 'WARN', 'default_bold': True},
