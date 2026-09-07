@@ -2948,6 +2948,10 @@ def _scan_directory_for_active_file(output_dir: str, streamer: str,
         return None
     dbg(f"[STALL] directory scan: {len(candidates)} candidate(s) match "
         f"streamer={streamer!r}", site_name=streamer)
+    _sidecar_hits = [c for c in candidates if ".jjdlp_filename_" in os.path.basename(c)]
+    if _sidecar_hits:
+        dbg(f"[SIDECAR_LEAK] directory scan candidates include jj-dlp's own "
+            f"sidecar file(s): {_sidecar_hits!r}", site_name=streamer)
     # Cap and prioritize by recency so a huge/ambiguous match set (a busy
     # shared OUTPUT_DIR, an overlapping name substring) doesn't turn into an
     # unbounded scan or an arbitrary pick — the real file is always among
@@ -3525,8 +3529,8 @@ def _remove_sidecar_with_retry(sidecar_path: str, attempts: int = 5, delay: floa
             return
         except OSError as e:
             if i == attempts - 1:
-                dbg(f"giving up removing sidecar {sidecar_path!r} after "
-                    f"{attempts} attempts: {e!r}")
+                dbg(f"[SIDECAR_LEAK] giving up removing sidecar "
+                    f"{sidecar_path!r} after {attempts} attempts: {e!r}")
             else:
                 time.sleep(delay)
 
@@ -3569,6 +3573,8 @@ def _resolve_active_recording_file(proc, sidecar_path: str, output_dir: str, str
             # The sidecar has served its purpose the moment we've read
             # it — remove it right away rather than waiting for
             # end-of-recording cleanup.
+            dbg(f"[SIDECAR_LEAK] found-and-read branch: removing "
+                f"{sidecar_path!r}", site_name=streamer)
             _remove_sidecar_with_retry(sidecar_path)
 
             if raw_dest:
@@ -3610,17 +3616,26 @@ def _resolve_active_recording_file(proc, sidecar_path: str, output_dir: str, str
             # no point waiting out the rest of the timeout.
             dbg(f"[STALL] proc exited before writing filename sidecar "
                 f"(returncode={proc.returncode})", site_name=streamer)
+            dbg(f"[SIDECAR_LEAK] proc-exit branch: isfile({sidecar_path!r})="
+                f"{os.path.isfile(sidecar_path)}", site_name=streamer)
             break
 
         time.sleep(0.25)
     else:
         dbg(f"[STALL] timed out after {_FILENAME_WAIT_TIMEOUT}s waiting for "
             f"filename sidecar {sidecar_path!r}", site_name=streamer)
+        dbg(f"[SIDECAR_LEAK] timeout branch: isfile({sidecar_path!r})="
+            f"{os.path.isfile(sidecar_path)}", site_name=streamer)
 
     # Best-effort cleanup: if we broke out early (timeout / proc exit)
     # before the sidecar ever appeared, make sure nothing is left behind.
     if not active_file and os.path.isfile(sidecar_path):
+        dbg(f"[SIDECAR_LEAK] final cleanup found sidecar present, removing: "
+            f"{sidecar_path!r}", site_name=streamer)
         _remove_sidecar_with_retry(sidecar_path)
+    elif not active_file:
+        dbg(f"[SIDECAR_LEAK] final cleanup found sidecar absent (possible "
+            f"race): {sidecar_path!r}", site_name=streamer)
 
     return active_file
 
