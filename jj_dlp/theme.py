@@ -156,7 +156,7 @@ COLOR_SCHEMES = [
     (curses.COLOR_YELLOW,   curses.COLOR_WHITE,   curses.COLOR_GREEN,
      curses.COLOR_CYAN,    curses.COLOR_WHITE,   curses.COLOR_BLACK,
      curses.COLOR_GREEN,   curses.COLOR_CYAN,   curses.COLOR_RED,
-     curses.COLOR_GREEN,   curses.COLOR_BLACK,   curses.COLOR_WHITE,
+     curses.COLOR_WHITE,   curses.COLOR_BLACK,   curses.COLOR_WHITE,
      curses.COLOR_GREEN,   curses.COLOR_CYAN,    curses.COLOR_YELLOW,
      curses.COLOR_WHITE,   curses.COLOR_RED),
     # 3: Red alert
