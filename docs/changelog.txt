@@ -2,6 +2,7 @@
 - updated the color schemes
 - when moving files in the File Manager tab, the destination filepath now appears on a single line
 - added a total files counter to the File Manager tab (bottom right)
+- further refine the "Not being recorded" notif. (run directory scan even if active_file is known)
 
 ====================
 ====================

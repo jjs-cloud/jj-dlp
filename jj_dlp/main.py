@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder
 """
-__version__ = "1.28.13"
+__version__ = "1.28.14"
 
 import subprocess
 import textwrap
@@ -2920,12 +2920,15 @@ def wait_for_new_file_growth(filepath: str, timeout: float = 15.0,
 
 def _scan_directory_for_active_file(output_dir: str, streamer: str,
                                     proc_start_time: Optional[float] = None,
-                                    growth_wait: float = 2.0) -> Optional[str]:
+                                    growth_wait: float = 2.0,
+                                    site: Optional["SiteState"] = None) -> Optional[str]:
     """Last-ditch scan for the file yt-dlp is writing, used when the filename
     sidecar never resolved a path. Matches by streamer name only (not an
     exact filename), then confirms the match is actively growing before
     returning it."""
     dbg(f"[STALL] directory scan: checking {output_dir!r} for streamer={streamer!r}")
+    if site is not None:
+        site.log_line(f"Info: Falling back to directory scan: checking {output_dir!r} for streamer={streamer!r}")
     if not os.path.isdir(output_dir):
         return None
     candidates = []
@@ -3983,19 +3986,26 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
                         and time.time() >= _no_confirm_deadline):
                     _no_confirm_warned = True
 
-                    if not active_file:
-                        _scanned_file = _scan_directory_for_active_file(
-                            output_dir, streamer, proc_start_time)
-                        if _scanned_file:
-                            active_file = _scanned_file
-                            site.set_recording_output(streamer, active_file)
+                    _old_active_file = active_file
+                    _scanned_file = _scan_directory_for_active_file(
+                        output_dir, streamer, proc_start_time, site=site)
+                    if _scanned_file:
+                        active_file = _scanned_file
+                        site.set_recording_output(streamer, active_file)
+                        if _old_active_file:
+                            site.log_line(
+                                f"Info: directory-scan updated recording file from "
+                                f"{os.path.basename(_old_active_file)} to "
+                                f"{os.path.basename(active_file)}"
+                            )
+                        else:
                             site.log_line(
                                 f"Info: located recording file for {streamer} via "
                                 f"directory scan: {os.path.basename(active_file)}"
                             )
-                            dbg(f"[STALL] directory scan recovered active_file="
-                                f"{active_file!r}", site_name=streamer)
-                            return
+                        dbg(f"[STALL] directory scan recovered active_file="
+                            f"{active_file!r}", site_name=streamer)
+                        return
 
                     if active_file:
                         _nc_size, _, _, _nc_file_error = get_streamer_file_size(
