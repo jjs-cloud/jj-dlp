@@ -3158,7 +3158,7 @@ def _refresh_restart_anchor_if_growing(site: "SiteState", streamer: str,
     if not growth_seen:
         return
     site.set_last_restart_anchor(streamer, time.time())
-    dbg(f"[RESTART_ANCHOR] refreshed for {streamer!r} (reason={reason})",
+    dbg(f"[NO_CONFIRM_RACE] [RESTART_ANCHOR] refreshed for {streamer!r} (reason={reason})",
         site_name=streamer)
 
 
@@ -3473,7 +3473,7 @@ def _launch_yt_dlp_attempt(app: "AppState", cmd: list, out_target, err_target, c
         dbg(f"[POPEN] PYTHONPATH={os.environ.get('PYTHONPATH', '<not set>')!r}")
         proc = subprocess.Popen(cmd, **_popen_kwargs)
         proc_start_time = time.time()
-        dbg(f"[POPEN] launched pid={proc.pid}")
+        dbg(f"[NO_CONFIRM_RACE] [POPEN] launched pid={proc.pid}")
 
         site.register_proc(streamer, proc)
 
@@ -3682,7 +3682,7 @@ def _compute_no_confirm_deadline(site: "SiteState", streamer: str, stall_timeout
         _no_confirm_anchor_val = _last_restart_anchor
         _no_confirm_anchor_src = "last_restart_anchor"
     if _no_confirm_anchor_val < _SCRIPT_START_TIME:
-        dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: {_no_confirm_anchor_src} "
+        dbg(f"[NO_CONFIRM_RACE] [NOTIFY] NOTIFY_NO_CONFIRM_FILE: {_no_confirm_anchor_src} "
             f"({_no_confirm_anchor_val:.2f}) predates this process's start "
             f"({_SCRIPT_START_TIME:.2f}) — flooring anchor at process start "
             f"for streamer={streamer!r}",
@@ -3690,7 +3690,7 @@ def _compute_no_confirm_deadline(site: "SiteState", streamer: str, stall_timeout
         _no_confirm_anchor_val = _SCRIPT_START_TIME
         _no_confirm_anchor_src += "+floored_at_process_start"
     _no_confirm_deadline = _no_confirm_anchor_val + stall_timeout + no_confirm_grace_seconds
-    dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: confirmation deadline for "
+    dbg(f"[NO_CONFIRM_RACE] [NOTIFY] NOTIFY_NO_CONFIRM_FILE: confirmation deadline for "
         f"streamer={streamer!r} = {_no_confirm_anchor_src}+{stall_timeout}s"
         f"{f'+{no_confirm_grace_seconds:.0f}s intro-delay grace' if no_confirm_grace_seconds else ''} "
         f"({_no_confirm_deadline:.2f}), live_since={site.get_live_since(streamer)}, "
@@ -3856,7 +3856,7 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
     notify_confirm_file = _global_cfg_nc.get("notify_confirm_file", True)
     notify_no_confirm_file = _global_cfg_nc.get("notify_no_confirm_file", False)
     initial_notification_sent = not notify_confirm_file
-    dbg(f"[NOTIFY] NOTIFY_CONFIRM_FILE={notify_confirm_file} NOTIFY_NO_CONFIRM_FILE={notify_no_confirm_file} "
+    dbg(f"[NO_CONFIRM_RACE] [NOTIFY] NOTIFY_CONFIRM_FILE={notify_confirm_file} NOTIFY_NO_CONFIRM_FILE={notify_no_confirm_file} "
         f"for streamer={streamer!r} — "
         f"initial_notification_sent={initial_notification_sent} "
         f"({'live notification already fired, nothing held back' if initial_notification_sent else 'live notification held until file growth is confirmed'})",
@@ -4018,7 +4018,7 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
                                 f"Info: located recording file for {streamer} via "
                                 f"directory scan: {os.path.basename(active_file)}"
                             )
-                        dbg(f"[STALL] directory scan recovered active_file="
+                        dbg(f"[NO_CONFIRM_RACE] [STALL] directory scan recovered active_file="
                             f"{active_file!r}", site_name=streamer)
                         return
 
@@ -4030,7 +4030,7 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
                         )
                     else:
                         _nc_size, _nc_file_error = 0, True
-                    dbg(f"[NOTIFY] NOTIFY_NO_CONFIRM_FILE: file not confirmed for "
+                    dbg(f"[NO_CONFIRM_RACE] [NOTIFY] NOTIFY_NO_CONFIRM_FILE: file not confirmed for "
                         f"streamer={streamer!r} within {int(stall_timeout)}s "
                         f"(deadline={_no_confirm_deadline:.2f}) — sending warning; "
                         f"attempt_age={time.time() - recording_start_time:.1f}s "
@@ -4063,7 +4063,7 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
             # recording file, so we don't spam the same warning every stall-check
             # cycle. Reset whenever the file is found again or a new attempt starts.
             filename_error_warned = False
-            dbg(f"[STALL] init: stall_timeout={stall_timeout}s "
+            dbg(f"[NO_CONFIRM_RACE] [STALL] init: stall_timeout={stall_timeout}s "
                 f"stall_check_interval={stall_check_interval}s "
                 f"last_size={last_size} last_growth_time={last_growth_time:.2f} "
                 f"growth_seen={growth_seen}",
@@ -4299,7 +4299,7 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
 
                 if seconds_since_check >= stall_check_interval:
                     seconds_since_check = 0
-                    dbg(f"[STALL] check cycle: elapsed_since_growth="
+                    dbg(f"[NO_CONFIRM_RACE] [STALL] check cycle: elapsed_since_growth="
                         f"{time.time() - last_growth_time:.2f}s growth_seen={growth_seen}",
                         site_name=streamer)
                     current_size, stall_detected, _, file_error = get_streamer_file_size(
@@ -4384,17 +4384,17 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
                         if not growth_seen:
                             growth_seen = True
                             site.clear_last_restart_anchor(streamer)
-                            dbg(f"[STALL] first growth observed for this file — "
+                            dbg(f"[NO_CONFIRM_RACE] [STALL] first growth observed for this file — "
                                 f"stall checker is now armed", site_name=streamer)
                             if not initial_notification_sent:
-                                dbg(f"[NOTIFY] NOTIFY_CONFIRM_FILE: file growth confirmed for "
+                                dbg(f"[NO_CONFIRM_RACE] [NOTIFY] NOTIFY_CONFIRM_FILE: file growth confirmed for "
                                     f"streamer={streamer!r} — sending held-back live notification",
                                     site_name=streamer)
                                 _maybe_show_live_popup(app, streamer, cfg, site, show_popup=show_popup,
                                                        source="confirm_file", is_recording=True,
                                                        warning=eviction_warning, confirmed=True)
                                 initial_notification_sent = True
-                        dbg(f"[STALL] grew: {last_size} -> {current_size} "
+                        dbg(f"[NO_CONFIRM_RACE] [STALL] grew: {last_size} -> {current_size} "
                             f"(+{current_size - last_size} bytes), resetting timer",
                             site_name=streamer)
                         last_size = current_size
@@ -4405,7 +4405,7 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
                         # the stall checker hasn't started, so there's nothing to
                         # flag as stalled. Just wait for the first sign of growth.
                         filename_error_warned = False
-                        dbg(f"[STALL] no growth yet, but stall checker not armed "
+                        dbg(f"[NO_CONFIRM_RACE] [STALL] no growth yet, but stall checker not armed "
                             f"(no growth seen for {active_file!r} yet) — skipping stall "
                             f"detection", site_name=streamer)
                         # NOTIFY_NO_CONFIRM_FILE is now checked every second via
@@ -4414,7 +4414,7 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
                         # stall_check_interval-only branch.
                     else:
                         filename_error_warned = False
-                        dbg(f"[STALL] NO GROWTH: size={current_size} "
+                        dbg(f"[NO_CONFIRM_RACE] [STALL] NO GROWTH: size={current_size} "
                             f"stall_since={time.time() - last_growth_time:.2f}s",
                             site_name=streamer)
                         site.set_stall_since(streamer, last_growth_time)
@@ -4460,7 +4460,7 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
                     _final_size, _final_file_error = 0, True
                 _refresh_restart_anchor_if_growing(
                     site, streamer, growth_seen, reason="normal_exit")
-                dbg(f"[STALL] attempt ended (normal_exit): streamer={streamer!r} "
+                dbg(f"[NO_CONFIRM_RACE] [STALL] attempt ended (normal_exit): streamer={streamer!r} "
                     f"returncode={proc.returncode} active_file={active_file!r} "
                     f"last_size={last_size} final_size={_final_size} "
                     f"file_error={_final_file_error} growth_seen={growth_seen} "
@@ -5227,7 +5227,7 @@ def monitor_site(app: "AppState", site: "SiteState") -> None:
             live_set = set(live_now)
 
             dbg(
-                f"[SESSION] RECONCILE cycle={_check_generation} "
+                f"[NO_CONFIRM_RACE] [SESSION] RECONCILE cycle={_check_generation} "
                 f"streamers={len(streamers)} live_now={len(live_set)} "
                 f"tracked_live={len(site.live_sessions)}",
                 site_name=site.label,
@@ -5240,7 +5240,7 @@ def monitor_site(app: "AppState", site: "SiteState") -> None:
                     _last_seen = site._last_seen_live.get(s)
 
                     dbg(
-                        f"[SESSION] RECONCILE cycle={_check_generation} "
+                        f"[NO_CONFIRM_RACE] [SESSION] RECONCILE cycle={_check_generation} "
                         f"streamer={s!r} result=OFFLINE "
                         f"live_session_present={_was_tracked} "
                         f"live_since_cache_present={_cache_present} "
@@ -5248,7 +5248,7 @@ def monitor_site(app: "AppState", site: "SiteState") -> None:
                         f"last_seen_age={time.time() - _last_seen:.1f}s"
                         if _last_seen is not None
                         else
-                        f"[SESSION] RECONCILE cycle={_check_generation} "
+                        f"[NO_CONFIRM_RACE] [SESSION] RECONCILE cycle={_check_generation} "
                         f"streamer={s!r} result=OFFLINE "
                         f"live_session_present={_was_tracked} "
                         f"live_since_cache_present={_cache_present} "
@@ -5259,7 +5259,7 @@ def monitor_site(app: "AppState", site: "SiteState") -> None:
                     site.mark_offline(s)
                 else:
                     dbg(
-                        f"[SESSION] RECONCILE cycle={_check_generation} "
+                        f"[NO_CONFIRM_RACE] [SESSION] RECONCILE cycle={_check_generation} "
                         f"streamer={s!r} result=LIVE "
                         f"live_session_present={s in site.live_sessions} "
                         f"live_since_cache_present={s in site._live_since_cache}",

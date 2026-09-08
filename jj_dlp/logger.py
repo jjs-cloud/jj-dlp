@@ -165,6 +165,7 @@ def configure(dashboard_log_fn=None, dashboard_dbg_fn=None) -> None:
 #   CTRLHANDLER — Windows console control-handler diagnostics
 #   SIGHANDLER — POSIX signal-handler diagnostics
 #   SESSION — identifies each monitor reconciliation cycle so live-session transitions can be correlated across checker cycles
+#   NO_CONFIRM_RACE — single switch covering the NOTIFY_NO_CONFIRM_FILE deadline/growth-timing race (deadline calc, anchor refresh, growth-armed timing, live/offline detection, process-launch timing)
 #
 DBG_TAGS: list[str] = [
     "DRAIN",
@@ -205,6 +206,7 @@ DBG_TAGS: list[str] = [
     "CTRLHANDLER",
     "SIGHANDLER",
     "SESSION",
+    "NO_CONFIRM_RACE",
 ]
 
 import json
