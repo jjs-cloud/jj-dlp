@@ -166,6 +166,7 @@ def configure(dashboard_log_fn=None, dashboard_dbg_fn=None) -> None:
 #   SIGHANDLER — POSIX signal-handler diagnostics
 #   SESSION — identifies each monitor reconciliation cycle so live-session transitions can be correlated across checker cycles
 #   NO_CONFIRM_RACE — single switch covering the NOTIFY_NO_CONFIRM_FILE deadline/growth-timing race (deadline calc, anchor refresh, growth-armed timing, live/offline detection, process-launch timing)
+#   SIDECAR_LEAK — diagnostics for orphaned filename-sidecar .tmp files
 #
 DBG_TAGS: list[str] = [
     "DRAIN",
@@ -207,6 +208,7 @@ DBG_TAGS: list[str] = [
     "SIGHANDLER",
     "SESSION",
     "NO_CONFIRM_RACE",
+    "SIDECAR_LEAK",
 ]
 
 import json
