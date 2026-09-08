@@ -18,7 +18,7 @@ _API_BASE   = "https://api.github.com/repos/jjs-cloud/jj-dlp"
 # ── Updater version ───────────────────────────────────────────────────────────
 # Incremented independently of the main jj-dlp version so we can tell which
 # updater logic is actually running during an update.
-UPDATER_VERSION = "2.4.2"
+UPDATER_VERSION = "2.4.3"
 
 # ── Lazy package imports ──────────────────────────────────────────────────────
 # Relative imports are deferred to call time so this file is also safe to
@@ -201,6 +201,16 @@ def get_base_dir():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _safe_extract_zip(zip_ref: zipfile.ZipFile, extract_dir: str) -> None:
+    """Extract *zip_ref* into *extract_dir*, rejecting entries that would land outside it."""
+    extract_root = os.path.realpath(extract_dir)
+    for member in zip_ref.infolist():
+        member_path = os.path.realpath(os.path.join(extract_root, member.filename))
+        if member_path != extract_root and not member_path.startswith(extract_root + os.sep):
+            raise UpdateError(f"unsafe path in update archive: {member.filename!r}")
+    zip_ref.extractall(extract_root)
+
+
 def perform_update():
     _logger().dbg(f"[UPDATER] perform_update: starting — updater version {UPDATER_VERSION}")
     print(f"\n--- jj-dlp Updater (v{UPDATER_VERSION}) ---")
@@ -237,7 +247,7 @@ def perform_update():
     os.makedirs(extract_dir, exist_ok=True)
     try:
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(extract_dir)
+            _safe_extract_zip(zip_ref, extract_dir)
         _logger().dbg(f"[UPDATER] perform_update: extracted zip to {extract_dir}")
     except Exception as e:
         _logger().dbg(f"[UPDATER] perform_update: extraction failed: {e}")
