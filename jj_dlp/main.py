@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder
 """
-__version__ = "1.28.15"
+__version__ = "1.28.16"
 
 import subprocess
 import textwrap
@@ -895,14 +895,24 @@ def _load_skip_disabled(app: "AppState", config_path: str) -> Set[str]:
     return {str(s).strip().lower() for s in entries if str(s).strip()}
 
 
-def _save_skip_disabled(app: "AppState", config_path: str, skip_disabled: Set[str]) -> None:
+def _save_json_field(app: "AppState", bucket_fn, field: str, value, delete_if_falsy: bool = False) -> None:
+    """Persist value under field in the dict returned by bucket_fn(gdata).
+
+    If delete_if_falsy and value is falsy, the field is removed instead of set.
+    """
     def _mutate(gdata):
-        all_skip = gdata.setdefault("skip_disabled", {})
-        if skip_disabled:
-            all_skip[config_path] = sorted(skip_disabled)
+        bucket = bucket_fn(gdata)
+        if delete_if_falsy and not value:
+            bucket.pop(field, None)
         else:
-            all_skip.pop(config_path, None)
+            bucket[field] = value
     app.update_global_json(_mutate)
+
+
+def _save_skip_disabled(app: "AppState", config_path: str, skip_disabled: Set[str]) -> None:
+    """Persist (or clear, if empty) the skip-disabled set for the given site."""
+    _save_json_field(app, lambda gdata: gdata.setdefault("skip_disabled", {}),
+                      config_path, sorted(skip_disabled), delete_if_falsy=True)
 
 
 def _site_json_bucket(gdata: dict, config_path: str) -> dict:
@@ -928,14 +938,14 @@ def _load_last_live_cache(app: "AppState", config_path: str) -> Dict[str, float]
     return {}
 
 
-def _save_last_live_cache(app: "AppState", config_path: str, last_live: Dict[str, float]) -> None:
-    """Persist last-live timestamps for the given site into global.json.
+def _save_site_field(app: "AppState", config_path: str, field: str, value) -> None:
+    """Persist value under field in config_path's site bucket in global.json."""
+    _save_json_field(app, lambda gdata: _site_json_bucket(gdata, config_path), field, value)
 
-    Merges with any existing data so other sites' entries are preserved.
-    """
-    def _mutate(gdata):
-        _site_json_bucket(gdata, config_path)["last_live"] = dict(last_live)
-    app.update_global_json(_mutate)
+
+def _save_last_live_cache(app: "AppState", config_path: str, last_live: Dict[str, float]) -> None:
+    """Persist last-live timestamps for the given site into global.json."""
+    _save_site_field(app, config_path, "last_live", dict(last_live))
 
 
 # How many of the most recent disk-rate graph bars to persist across restarts.
@@ -960,9 +970,7 @@ def _load_last_gql_backfill_ts(app: "AppState", config_path: str) -> Optional[fl
 
 def _save_last_gql_backfill_ts(app: "AppState", config_path: str, ts: float) -> None:
     """Persist the epoch this site's last_live GQL backfill last fired."""
-    def _mutate(gdata):
-        _site_json_bucket(gdata, config_path)["last_gql_backfill_ts"] = ts
-    app.update_global_json(_mutate)
+    _save_site_field(app, config_path, "last_gql_backfill_ts", ts)
 
 
 def _load_disk_rate_history(app: "AppState") -> List[float]:
@@ -982,14 +990,9 @@ def _load_disk_rate_history(app: "AppState") -> List[float]:
 
 
 def _save_disk_rate_history(app: "AppState", bars) -> None:
-    """Persist the most recent disk-rate graph bars into global.json.
-
-    Merges with any existing data so other keys are preserved. Keeps at most
-    _GRAPH_PERSIST_BARS entries.
-    """
-    def _mutate(gdata):
-        gdata["disk_rate_history"] = [float(b) for b in bars][-_GRAPH_PERSIST_BARS:]
-    app.update_global_json(_mutate)
+    """Persist the most recent disk-rate graph bars into global.json."""
+    _save_json_field(app, lambda gdata: gdata, "disk_rate_history",
+                      [float(b) for b in bars][-_GRAPH_PERSIST_BARS:])
 
 
 def _load_live_since_cache(app: "AppState", config_path: str) -> Dict[str, float]:
@@ -1006,15 +1009,8 @@ def _load_live_since_cache(app: "AppState", config_path: str) -> Dict[str, float
 
 
 def _save_live_since_cache(app: "AppState", config_path: str, live_since: Dict[str, float]) -> None:
-    """Persist live-since timestamps for the given site into global.json.
-
-    Merges with any existing data so other sites' entries are preserved.
-    Called on every live/offline transition (see SiteState.mark_live /
-    mark_offline), mirroring _save_last_live_cache's call pattern.
-    """
-    def _mutate(gdata):
-        _site_json_bucket(gdata, config_path)["live_since"] = dict(live_since)
-    app.update_global_json(_mutate)
+    """Persist live-since timestamps for the given site into global.json."""
+    _save_site_field(app, config_path, "live_since", dict(live_since))
 
 
 def _load_segment_continuation_cache(app: "AppState", config_path: str) -> Dict[str, dict]:
@@ -1044,13 +1040,11 @@ def _load_segment_continuation_cache(app: "AppState", config_path: str) -> Dict[
 def _save_segment_continuation_cache(app: "AppState", config_path: str, mapping: Dict[str, dict]) -> None:
     """Persist AUTO_SUFFIX/SPLIT_AFTER part-numbering continuation state
     for the given site into global.json."""
-    def _mutate(gdata):
-        _site_json_bucket(gdata, config_path)["segment_continuation"] = {
-            streamer: {"next_part": entry.get("next_part", 1),
-                       "unsuffixed_file": entry.get("unsuffixed_file")}
-            for streamer, entry in mapping.items()
-        }
-    app.update_global_json(_mutate)
+    _save_site_field(app, config_path, "segment_continuation", {
+        streamer: {"next_part": entry.get("next_part", 1),
+                   "unsuffixed_file": entry.get("unsuffixed_file")}
+        for streamer, entry in mapping.items()
+    })
 
 
 @dataclass
