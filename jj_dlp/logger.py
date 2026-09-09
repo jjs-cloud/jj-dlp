@@ -126,9 +126,9 @@ def configure(dashboard_log_fn=None, dashboard_dbg_fn=None) -> None:
 
 # ── Per-tag debug filter ───────────────────────────────────────────────────────
 # Controls which [TAG] groups appear in the debug log.
-# Keys must match the bracketed tag at the start of each dbg() message exactly.
-# Set a tag to False to silence all dbg() calls that begin with [TAG].
-# Set to True to allow them through (subject to DEBUG_LOGS_ENABLED being on).
+# Keys must match a bracketed tag appearing anywhere in a dbg() message exactly.
+# Set a tag to False to silence dbg() calls whose ONLY matching tag(s) are False.
+# A message with multiple tags is shown if ANY of its tags is True.
 #
 # Tags used in jj-dlp:
 #   DRAIN    — yt-dlp stdout/stderr pipe drain threads
@@ -269,16 +269,26 @@ def _get_active_msg_filters() -> dict[str, dict[str, bool]]:
 
 # ── Per-message call-site registry ─────────────────────────────────────────────
 # Powers the "drill into a tag" popup in the config editor: for a given TAG,
-# lists every individual dbg()/_dbg() call site in the codebase that starts
-# with "[TAG]" so each one can be toggled on/off independently. This registry
-# is built by scanning source files — it is never consulted by dbg() itself,
-# only get_dbg_call_sites() (used by the UI). dbg() only ever reads the saved
-# overrides from _get_active_msg_filters().
+# lists every individual dbg()/_dbg() call site in the codebase whose message
+# contains "[TAG]" so each one can be toggled on/off independently per tag.
+# This registry is built by scanning source files — it is never consulted by
+# dbg() itself, only get_dbg_call_sites() (used by the UI). dbg() only ever
+# reads the saved overrides from _get_active_msg_filters().
 _CALL_SITE_RE = re.compile(
     r'(?<![A-Za-z0-9_])(?:_dbg|dbg)\(\s*f?(["\'])((?:\\.|(?!\1).)*)\1', re.DOTALL
 )
-_TAG_PREFIX_RE = re.compile(r'^\[([A-Za-z_]+)\]')
+_TAG_BRACKET_RE = re.compile(r'\[([A-Za-z_]+)\]')
+_DBG_TAGS_SET: frozenset = frozenset(DBG_TAGS)
 _CALL_SITE_SKIP_DIRS = {"__pycache__", ".git", "venv", ".venv", "node_modules", "backups", "configs"}
+
+
+def _extract_valid_tags(msg: str) -> list[str]:
+    """Return every bracketed token in msg matching a defined DBG_TAGS entry, in order, deduped."""
+    found: list[str] = []
+    for token in _TAG_BRACKET_RE.findall(msg):
+        if token in _DBG_TAGS_SET and token not in found:
+            found.append(token)
+    return found
 
 _call_site_registry: dict[str, list[tuple[str, str]]] = {}
 _call_site_lock = threading.Lock()
@@ -287,9 +297,8 @@ _call_site_scanned = False
 
 def rescan_dbg_call_sites() -> None:
     """(Re)scan every .py file under the package directory for dbg() call
-    sites, grouping them by their leading [TAG]. Cheap enough to call each
-    time the config editor opens the per-tag message popup, so edits made
-    to the source since the last scan show up without a restart.
+    sites, grouping them by every valid [TAG] they contain. A call site with
+    multiple tags is registered once per tag, as an independent entry.
     """
     global _call_site_registry, _call_site_scanned
     registry: dict[str, list[tuple[str, str]]] = {}
@@ -308,15 +317,16 @@ def rescan_dbg_call_sites() -> None:
             rel = os.path.relpath(fpath, _PKG_DIR)
             for m in _CALL_SITE_RE.finditer(src):
                 literal = m.group(2)
-                tag_m = _TAG_PREFIX_RE.match(literal)
-                if not tag_m:
+                tags_found = _extract_valid_tags(literal)
+                if not tags_found:
                     continue
-                tag = tag_m.group(1)
                 lineno = src.count("\n", 0, m.start()) + 1
                 label = literal.strip()
                 if len(label) > 90:
                     label = label[:87] + "..."
-                registry.setdefault(tag, []).append((f"{rel}:{lineno}", label))
+                callsite_id = f"{rel}:{lineno}"
+                for tag in tags_found:
+                    registry.setdefault(tag, []).append((callsite_id, label))
 
     for sites in registry.values():
         sites.sort(key=lambda t: t[0])
@@ -429,39 +439,39 @@ def dbg(msg: str, site_name: str = "") -> None:
     """
     Write msg (with timestamp and optional site name) to the debug log.
 
-    The message is dropped silently if its leading [TAG] appears in
-    DBG_FILTERS with a value of False.  Messages with no recognisable
+    Every valid [TAG] found anywhere in msg is checked against DBG_FILTERS;
+    the message is shown if ANY of them is True. Messages with no valid
     [TAG] are always written.
     """
     # ── Tag-based filter ──────────────────────────────────────────────────────
-    # Extract the first [TAG] token from the message, e.g. "[DRAIN]" -> "DRAIN".
-    # A compound tag like "[SPLIT][wait_for_streamer_file]" uses only the first
-    # bracket group as the filter key so a single switch covers the whole group.
-    if msg.startswith("["):
-        end = msg.find("]")
-        if end > 1:
-            tag = msg[1:end]
-            tags = _get_active_tags()
-            allowed = tags.get(tag, False)   # unknown tags are dropped
-            if not allowed:
-                return
+    valid_tags = _extract_valid_tags(msg)
+    if valid_tags:
+        tags = _get_active_tags()
+        enabled_tags = [t for t in valid_tags if tags.get(t, False)]
+        if not enabled_tags:
+            return
 
-            # ── Per-message filter ──────────────────────────────────────────
-            # Finer-grained than the tag switch above: individual call sites
-            # within an enabled tag can still be silenced. Only pay the cost
-            # of identifying the call site (via the caller's frame) when this
-            # tag actually has overrides configured — the common case has
-            # none, so this is a no-op dict lookup for most dbg() calls.
-            msg_overrides = _get_active_msg_filters().get(tag)
-            if msg_overrides:
-                caller = sys._getframe(1)
-                try:
-                    rel = os.path.relpath(os.path.abspath(caller.f_code.co_filename), _PKG_DIR)
-                except ValueError:
-                    rel = caller.f_code.co_filename  # different drive on Windows — use raw path
-                callsite_id = f"{rel}:{caller.f_lineno}"
-                if msg_overrides.get(callsite_id) is False:
-                    return
+        # ── Per-message filter ──────────────────────────────────────────
+        # Finer-grained than the tag switch above: individual call sites can
+        # still be silenced per tag. A call site is suppressed only if every
+        # currently-enabled tag on this message has an override disabling it.
+        # Only pay the cost of identifying the call site (via the caller's
+        # frame) when at least one enabled tag actually has overrides.
+        msg_filters = _get_active_msg_filters()
+        if any(msg_filters.get(t) for t in enabled_tags):
+            caller = sys._getframe(1)
+            try:
+                rel = os.path.relpath(os.path.abspath(caller.f_code.co_filename), _PKG_DIR)
+            except ValueError:
+                rel = caller.f_code.co_filename  # different drive on Windows — use raw path
+            callsite_id = f"{rel}:{caller.f_lineno}"
+
+            def _disabled(t: str) -> bool:
+                overrides = msg_filters.get(t)
+                return bool(overrides) and overrides.get(callsite_id) is False
+
+            if all(_disabled(t) for t in enabled_tags):
+                return
 
     ts   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 

@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder
 """
-__version__ = "1.28.16"
+__version__ = "1.28.17"
 
 import subprocess
 import textwrap
@@ -2915,15 +2915,20 @@ def wait_for_new_file_growth(filepath: str, timeout: float = 15.0,
 def _scan_directory_for_active_file(output_dir: str, streamer: str,
                                     proc_start_time: Optional[float] = None,
                                     growth_wait: float = 2.0,
+                                    poll_interval: float = 2.0,
                                     site: Optional["SiteState"] = None) -> Optional[str]:
     """Last-ditch scan for the file yt-dlp is writing, used when the filename
     sidecar never resolved a path. Matches by streamer name only (not an
-    exact filename), then confirms the match is actively growing before
-    returning it."""
-    dbg(f"[STALL] directory scan: checking {output_dir!r} for streamer={streamer!r}")
+    exact filename), then polls for growth over up to growth_wait seconds
+    before returning it."""
+    dbg(f"[NO_CONFIRM_RACE] [STALL] directory scan: checking {output_dir!r} for "
+        f"streamer={streamer!r} growth_wait={growth_wait}s poll_interval={poll_interval}s",
+        site_name=streamer)
     if site is not None:
         site.log_line(f"Info: Falling back to directory scan: checking {output_dir!r} for streamer={streamer!r}")
     if not os.path.isdir(output_dir):
+        dbg(f"[NO_CONFIRM_RACE] [STALL] directory scan: output_dir does not exist: "
+            f"{output_dir!r}", site_name=streamer)
         return None
     candidates = []
     for root, _dirs, files in os.walk(output_dir):
@@ -2939,12 +2944,14 @@ def _scan_directory_for_active_file(output_dir: str, streamer: str,
                 continue
             candidates.append(fpath)
     if not candidates:
+        dbg(f"[NO_CONFIRM_RACE] [STALL] directory scan: no candidate files matched "
+            f"streamer={streamer!r} in {output_dir!r}", site_name=streamer)
         return None
-    dbg(f"[STALL] directory scan: {len(candidates)} candidate(s) match "
-        f"streamer={streamer!r}", site_name=streamer)
+    dbg(f"[NO_CONFIRM_RACE] [STALL] directory scan: {len(candidates)} candidate(s) match "
+        f"streamer={streamer!r}: {[os.path.basename(c) for c in candidates]}", site_name=streamer)
     _sidecar_hits = [c for c in candidates if ".jjdlp_filename_" in os.path.basename(c)]
     if _sidecar_hits:
-        dbg(f"[SIDECAR_LEAK] directory scan candidates include jj-dlp's own "
+        dbg(f"[NO_CONFIRM_RACE] [SIDECAR_LEAK] directory scan candidates include jj-dlp's own "
             f"sidecar file(s): {_sidecar_hits!r}", site_name=streamer)
     # Cap and prioritize by recency so a huge/ambiguous match set (a busy
     # shared OUTPUT_DIR, an overlapping name substring) doesn't turn into an
@@ -2958,19 +2965,41 @@ def _scan_directory_for_active_file(output_dir: str, streamer: str,
             sizes_before[fpath] = os.path.getsize(fpath)
         except OSError:
             pass
-    time.sleep(growth_wait)
+    dbg(f"[NO_CONFIRM_RACE] [STALL] directory scan: sizes_before="
+        f"{ {os.path.basename(k): v for k, v in sizes_before.items()} }", site_name=streamer)
+
+    # Poll for growth in poll_interval steps (instead of one snapshot after a
+    # single sleep) so a slow/bursty writer isn't mistaken for a dead one,
+    # and bail early if this streamer gets stopped/evicted mid-poll.
+    elapsed = 0.0
     grown = []
-    for fpath in candidates:
-        try:
-            size_after = os.path.getsize(fpath)
-        except OSError:
-            continue
-        if size_after > sizes_before.get(fpath, -1):
-            grown.append(fpath)
+    while elapsed < growth_wait:
+        if site is not None and (site._stop_event.is_set() or streamer in site.evicted_streamers):
+            dbg(f"[NO_CONFIRM_RACE] [STALL] directory scan: aborting poll early — "
+                f"streamer={streamer!r} stopped/evicted", site_name=streamer)
+            return None
+        _step = min(poll_interval, growth_wait - elapsed)
+        time.sleep(_step)
+        elapsed += _step
+        grown = []
+        for fpath in candidates:
+            try:
+                size_after = os.path.getsize(fpath)
+            except OSError:
+                continue
+            if size_after > sizes_before.get(fpath, -1):
+                grown.append(fpath)
+        dbg(f"[NO_CONFIRM_RACE] [STALL] directory scan: poll at elapsed={elapsed:.1f}s "
+            f"grown={[os.path.basename(g) for g in grown]}", site_name=streamer)
+        if grown:
+            break
+
     if not grown:
+        dbg(f"[NO_CONFIRM_RACE] [STALL] directory scan: no candidate grew within "
+            f"{growth_wait}s — giving up", site_name=streamer)
         return None
     if len(grown) > 1:
-        dbg(f"[STALL] directory scan: {len(grown)} candidates are all growing "
+        dbg(f"[NO_CONFIRM_RACE] [STALL] directory scan: {len(grown)} candidates are all growing "
             f"for streamer={streamer!r} — picking the most recently modified",
             site_name=streamer)
     # Already sorted newest-first, so the first growing entry is the best pick.
@@ -3912,12 +3941,16 @@ class _RecordingAttempt:
             self._no_confirm_warned = True
 
             _old_active_file = self.active_file
+            # growth_wait=stall_check_interval: same cadence the ongoing
+            # stall checker uses to decide growth, instead of the 2s default
+            # (too short — bursty/buffered writers can go quiet that long).
             _scanned_file = _scan_directory_for_active_file(
-                self.output_dir, streamer, self.proc_start_time, site=site)
+                self.output_dir, streamer, self.proc_start_time,
+                growth_wait=self.stall_check_interval or 30.0, site=site)
             if _scanned_file:
                 self.active_file = _scanned_file
                 site.set_recording_output(streamer, self.active_file)
-                if _old_active_file:
+                if _old_active_file and _old_active_file != self.active_file:
                     site.log_line(
                         f"Info: directory-scan updated recording file from "
                         f"{os.path.basename(_old_active_file)} to "
@@ -3928,8 +3961,19 @@ class _RecordingAttempt:
                         f"Info: located recording file for {streamer} via "
                         f"directory scan: {os.path.basename(self.active_file)}"
                     )
+                # The scan already confirmed this file is growing, so treat
+                # growth as seen here too — otherwise the stall checker and
+                # anchor-refresh logic never learn about this growth and the
+                # next attempt's deadline stays anchored to the stale time.
+                self.growth_seen = True
+                self.last_growth_time = time.time()
+                try:
+                    self.last_size = os.path.getsize(self.active_file)
+                except OSError:
+                    pass
                 dbg(f"[NO_CONFIRM_RACE] [STALL] directory scan recovered active_file="
-                    f"{self.active_file!r}", site_name=streamer)
+                    f"{self.active_file!r} — marking growth_seen=True last_size={self.last_size}",
+                    site_name=streamer)
                 return
 
             if self.active_file:
