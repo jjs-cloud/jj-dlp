@@ -3843,6 +3843,429 @@ def _update_last_live_cache(app: "AppState", site: "SiteState", streamer: str) -
     _save_last_live_cache(app, site.config_path, _last_live_snapshot)
 
 
+class _RecordingAttempt:
+    """Per-attempt state for one record_stream() call.
+
+    Bundles what used to be nonlocal state shared between record_stream()'s
+    outer loop and its _try_split / _run_stall_check_cycle /
+    _check_no_confirm_deadline closures. One instance per record_stream()
+    call — not shared across streamers or threads (unlike AppState/SiteState).
+    """
+
+    _SPLIT_RETRY_COOLDOWN_SECONDS = 60.0
+
+    def __init__(self, app: "AppState", streamer: str, cfg: dict, site: "SiteState",
+                 use_lq: bool, show_popup: bool, eviction_warning: str,
+                 channel_url: str, output_dir: str, notify_no_confirm_file: bool,
+                 segment_num: int, split_after_seconds: float,
+                 intro_delay_disable_after_split: bool,
+                 initial_notification_sent: bool) -> None:
+        self.app = app
+        self.streamer = streamer
+        self.cfg = cfg
+        self.site = site
+        self.use_lq = use_lq
+        self.show_popup = show_popup
+        self.eviction_warning = eviction_warning
+        self.channel_url = channel_url
+        self.output_dir = output_dir
+        self.notify_no_confirm_file = notify_no_confirm_file
+
+        # Persist across outer-loop restarts within this record_stream() call.
+        self.segment_num = segment_num
+        self.split_after_seconds = split_after_seconds
+        self.intro_delay_disable_after_split = intro_delay_disable_after_split
+        self.initial_notification_sent = initial_notification_sent
+        self.next_split_retry_time = 0.0
+
+        # Reset fresh at the start of each outer-loop (launch) iteration.
+        self.proc = None
+        self.close_logs = lambda: None
+        self.active_file = None
+        self.proc_start_time = None
+        self.ffmpeg_error_counter = None
+        self.ffmpeg_error_event = None
+        self.last_size = 0
+        self.last_growth_time = 0.0
+        self.recording_start_time = 0.0
+        self.stall_check_interval = None
+        self.stall_timeout = None
+        self._no_confirm_deadline = 0.0
+        self._no_confirm_warned = False
+        self._split_log_counter = 0
+        self.growth_seen = False
+        self.filename_error_warned = False
+
+    def _check_no_confirm_deadline(self) -> None:
+        # Fires the NOTIFY_NO_CONFIRM_FILE warning as soon as the
+        # deadline has passed, independent of stall_check_interval
+        # and independent of whether proc is still alive when it's
+        # called. This must NOT be gated behind a "proc survived a
+        # full stall_check_interval" condition: _SIMULATE_WRITE_FAILURE
+        # (and real write failures) can make yt-dlp exit in well
+        # under stall_check_interval on every retry, which previously
+        # meant this check was never reached at all.
+        # FIX: guard so this function never fires for a streamer that's
+        # being evicted or the app is shutting down, no matter which
+        # call site invokes it.
+        app, streamer, cfg, site = self.app, self.streamer, self.cfg, self.site
+        if site._stop_event.is_set() or streamer in site.evicted_streamers:
+            return
+        if (self.notify_no_confirm_file
+                and not self._no_confirm_warned
+                and not self.growth_seen
+                and time.time() >= self._no_confirm_deadline):
+            self._no_confirm_warned = True
+
+            _old_active_file = self.active_file
+            _scanned_file = _scan_directory_for_active_file(
+                self.output_dir, streamer, self.proc_start_time, site=site)
+            if _scanned_file:
+                self.active_file = _scanned_file
+                site.set_recording_output(streamer, self.active_file)
+                if _old_active_file:
+                    site.log_line(
+                        f"Info: directory-scan updated recording file from "
+                        f"{os.path.basename(_old_active_file)} to "
+                        f"{os.path.basename(self.active_file)}"
+                    )
+                else:
+                    site.log_line(
+                        f"Info: located recording file for {streamer} via "
+                        f"directory scan: {os.path.basename(self.active_file)}"
+                    )
+                dbg(f"[NO_CONFIRM_RACE] [STALL] directory scan recovered active_file="
+                    f"{self.active_file!r}", site_name=streamer)
+                return
+
+            if self.active_file:
+                _nc_size, _, _, _nc_file_error = get_streamer_file_size(
+                    self.output_dir, streamer, cfg=cfg,
+                    proc_start_time=self.proc_start_time,
+                    known_filename=self.active_file,
+                )
+            else:
+                _nc_size, _nc_file_error = 0, True
+            dbg(f"[NO_CONFIRM_RACE] [NOTIFY] NOTIFY_NO_CONFIRM_FILE: file not confirmed for "
+                f"streamer={streamer!r} within {int(self.stall_timeout)}s "
+                f"(deadline={self._no_confirm_deadline:.2f}) — sending warning; "
+                f"attempt_age={time.time() - self.recording_start_time:.1f}s "
+                f"active_file={self.active_file!r} last_size={self.last_size} "
+                f"cur_size={_nc_size} file_error={_nc_file_error} "
+                f"growth_seen={self.growth_seen}",
+                site_name=streamer)
+            _maybe_show_live_popup(
+                app, streamer, cfg, site, show_popup=self.show_popup,
+                source="no_confirm_file", is_recording=False,
+                warning=(f"The recording file could not be confirmed within "
+                         f"{int(self.stall_timeout)}s — the start may have failed."),
+                confirmed=False)
+            _log_filename = os.path.basename(self.active_file) if self.active_file else "<unknown>"
+            site.log_line(
+                f"Warning: {_log_filename} could not be confirmed within "
+                f"{int(self.stall_timeout)} seconds."
+            )
+            # Also drives the dashboard's full-screen recording-
+            # failure alert (see App.draw_write_failure_alert).
+            site.flag_write_failure(streamer)
+
+    def _try_split(self, manual_split: bool) -> bool:
+        # Handles a timed or manual split request. Returns True if it
+        # switched to a new segment (caller should `continue` the loop).
+        app, streamer, cfg, site = self.app, self.streamer, self.cfg, self.site
+        channel_url, output_dir = self.channel_url, self.output_dir
+
+        elapsed = time.time() - self.recording_start_time
+        self._split_log_counter += 1
+        if self._split_log_counter % 30 == 0:  # log roughly every 30s
+            dbg(f"[SPLIT][record_stream] split timer: streamer={streamer!r} "
+                f"segment={self.segment_num} elapsed={elapsed:.1f}s / "
+                f"split_after_seconds={self.split_after_seconds}s "
+                f"remaining={max(0, self.split_after_seconds - elapsed):.1f}s")
+
+        if manual_split or (
+                elapsed >= self.split_after_seconds
+                and time.time() >= self.next_split_retry_time):
+            if manual_split:
+                site.log_line(
+                    f"Manual split requested for {streamer} — starting part {self.segment_num + 1}"
+                )
+            next_segment_num = self.segment_num + 1
+
+            next_output_tmpl = add_segment_suffix_to_tmpl(
+                cfg["output_tmpl"],
+                next_segment_num
+            )
+
+            next_output_path = os.path.join(output_dir, next_output_tmpl)
+
+            dbg(f"[SPLIT][record_stream] SPLIT_AFTER={self.split_after_seconds}s triggered for "
+                f"streamer={streamer!r} elapsed={elapsed:.1f}s "
+                f"segment_num={self.segment_num} -> next_segment_num={next_segment_num} "
+                f"next_output_path={next_output_path!r}")
+
+            dbg(f"[SPLIT][record_stream] SPLIT_AFTER reached for {streamer} — "
+                f"starting part {next_segment_num}")
+
+            next_cmd = build_yt_dlp_command(
+                cfg["yt_dlp_path"],
+                cfg["downloader_cmd"],
+                ["-o", next_output_path, channel_url]
+            )
+
+            next_out_target, next_err_target, next_close_logs, next_log_out_fp, next_log_err_fp = open_log_streams(cfg, streamer)
+
+            try:
+                part_suffix = f"_part{next_segment_num}"
+                next_proc, next_proc_start_time, next_file, split_success = _spawn_and_verify_split_segment(
+                    app, next_cmd, cfg, next_out_target, next_err_target,
+                    next_log_out_fp, next_log_err_fp,
+                    output_dir, streamer, site, part_suffix)
+
+                if split_success:
+                    site.log_line(
+                        f"Split confirmed for {streamer} — switching to part {next_segment_num}"
+                    )
+
+                    dbg(f"[SPLIT][record_stream] killing old proc pid={self.proc.pid} "
+                        f"(was part {self.segment_num})")
+                    kill_proc(self.proc)
+                    try:
+                        self.proc.wait(timeout=15)
+                        dbg(f"[SPLIT][record_stream] old proc pid={self.proc.pid} exited cleanly")
+                    except Exception as wait_err:
+                        dbg(f"[SPLIT][record_stream] old proc pid={self.proc.pid} wait() error: {wait_err}")
+
+                    # Part 2 is confirmed — retroactively rename the first
+                    # segment from its clean name to FILENAME_part1.ext now
+                    # that we know multiple parts exist.
+                    if self.segment_num == 1 and self.active_file and os.path.isfile(self.active_file):
+                        _part1_path = add_segment_suffix_to_tmpl(self.active_file, 1)
+                        try:
+                            os.rename(self.active_file, _part1_path)
+                            dbg(f"[SPLIT][record_stream] renamed first segment to: "
+                                f"{os.path.basename(_part1_path)} "
+                                f"({self.active_file!r} -> {_part1_path!r})")
+                        except Exception as _ren_err:
+                            dbg(f"[SPLIT][record_stream] rename of first segment FAILED: "
+                                f"{_ren_err!r}")
+
+                    site.unregister_proc(streamer)
+                    try:
+                        self.close_logs()
+                    except Exception as e:
+                        dbg(f"record_stream: close_logs() failed for {streamer!r} during split switch: {e}")
+
+                    self.proc = next_proc
+                    self.close_logs = next_close_logs
+                    self.proc_start_time = next_proc_start_time
+                    self.active_file = next_file
+                    # Republish the switched-to segment as the
+                    # active recording output so the disk-rate
+                    # graph follows the new file (the previous
+                    # segment has stopped growing).
+                    if self.active_file:
+                        site.set_recording_output(streamer, self.active_file)
+                    # Use next_proc_start_time (not time.time()) so the
+                    # split timer accounts for time already spent verifying
+                    # the new file. time.time() here would let each segment
+                    # silently overrun SPLIT_AFTER by the verification delay.
+                    self.recording_start_time = next_proc_start_time
+                    self.segment_num = next_segment_num
+                    # Persist immediately rather than waiting for this thread's finally: block.
+                    site.set_segment_continuation(streamer, self.segment_num, None)
+
+                    if self.intro_delay_disable_after_split:
+                        self.split_after_seconds = 0
+                        self.intro_delay_disable_after_split = False
+                        dbg(f"[INTRO_DELAY] streamer={streamer!r} intro split "
+                            f"confirmed — splitting disabled for remainder of stream")
+
+                    site.register_proc(streamer, self.proc)
+
+                    self.ffmpeg_error_counter = [0]
+                    self.ffmpeg_error_event   = threading.Event()
+                    site.clear_ffmpeg_error_count(streamer)
+                    site.clear_stall_since(streamer)
+
+                    self.last_size = 0
+                    self.last_growth_time = time.time()
+                    self.next_split_retry_time = 0.0
+                    # New segment is a new file — it hasn't grown yet,
+                    # so the stall checker must re-earn the right to run.
+                    self.growth_seen = False
+                    # Re-arm the NOTIFY_NO_CONFIRM_FILE deadline for
+                    # the new segment.
+                    self._no_confirm_deadline = time.time() + self.stall_timeout
+                    self._no_confirm_warned   = False
+
+                    dbg(f"[SPLIT][record_stream] switched to part {self.segment_num} "
+                        f"pid={self.proc.pid} active_file={self.active_file!r} "
+                        f"recording_start_time reset")
+
+                    return True
+
+                dbg(f"[SPLIT][record_stream] SPLIT FAILED — "
+                    f"next_file={next_file!r} split_success={split_success} — "
+                    f"killing next_proc pid={next_proc.pid} and continuing current segment")
+                self.next_split_retry_time = time.time() + self._SPLIT_RETRY_COOLDOWN_SECONDS
+                site.log_line(
+                    f"Split verification FAILED for {streamer} — keeping current recording "
+                    f"(will retry split in {int(self._SPLIT_RETRY_COOLDOWN_SECONDS)}s)"
+                )
+
+                kill_proc(next_proc)
+
+                try:
+                    next_close_logs()
+                except Exception as e:
+                    dbg(f"record_stream: next_close_logs() failed for {streamer!r} after failed split: {e}")
+
+            except Exception as e:
+                dbg(f"[SPLIT][record_stream] EXCEPTION launching next proc: "
+                    f"{type(e).__name__}: {e}")
+                self.next_split_retry_time = time.time() + self._SPLIT_RETRY_COOLDOWN_SECONDS
+                site.log_line(
+                    f"Failed to start split recording for {streamer}: {e} "
+                    f"(will retry split in {int(self._SPLIT_RETRY_COOLDOWN_SECONDS)}s)"
+                )
+        return False
+
+    def _run_stall_check_cycle(self) -> bool:
+        # Runs one stall-detection poll cycle. Returns True if a stall
+        # was detected (caller should break the loop and restart).
+        app, streamer, cfg, site = self.app, self.streamer, self.cfg, self.site
+        output_dir = self.output_dir
+
+        dbg(f"[NO_CONFIRM_RACE] [STALL] check cycle: elapsed_since_growth="
+            f"{time.time() - self.last_growth_time:.2f}s growth_seen={self.growth_seen}",
+            site_name=streamer)
+        current_size, stall_detected, _, file_error = get_streamer_file_size(
+            output_dir,
+            streamer,
+            cfg=cfg,
+            proc_start_time=self.proc_start_time,
+            # Only arm the stall checker once this file has grown at
+            # least once. get_streamer_file_size() only computes
+            # stall_detected when both last_growth_time and
+            # stall_timeout are provided, so withholding stall_timeout
+            # here is what keeps the checker from starting on a file
+            # that has never shown growth.
+            last_growth_time=self.last_growth_time if self.growth_seen else None,
+            stall_timeout=self.stall_timeout if self.growth_seen else None,
+            stall_check_interval=self.stall_check_interval,
+            known_filename=self.active_file,
+        )
+
+        # Dashboard quality display (independent of stall logic):
+        # measure the actual on-disk resolution via ffprobe, reusing
+        # the same active_file the stall checker just used above.
+        _update_measured_quality(app, site, streamer, self.active_file, file_error)
+
+        if file_error:
+            # We couldn't even locate/read the recording file this
+            # cycle (e.g. active_file points at a filename that
+            # doesn't exist). Note: This only fires if yt-dlp stays alive
+            # for the duration of STALL_TIMEOUT without producing a
+            # file.
+            dbg("[STALL] filename lookup failed — giving up on "
+                "stall detection for this cycle", site_name=streamer)
+            site.clear_stall_since(streamer)
+            if not self.filename_error_warned:
+                site.log_line(
+                    f"Warning: stall checker could not locate file for {streamer}"
+                )
+                self.filename_error_warned = True
+
+        elif stall_detected:
+            site.log_line(f"Stall detected for {streamer} — restarting")
+
+            # Growth was already confirmed (that's what makes
+            # this a "stall" not a never-confirmed start), so
+            # give the next attempt's deadline a fresh window.
+            _refresh_restart_anchor_if_growing(
+                site, streamer, self.growth_seen, reason="stall_detected")
+
+            _teardown_attempt(site, streamer, self.proc, self.close_logs,
+                               clear_stall=True, clear_ad_alert=True)
+            time.sleep(5)
+            return True
+
+        elif current_size < self.last_size and self.growth_seen:
+            # File size went BACKWARDS since the last poll — the
+            # file was truncated/reopened (e.g. yt-dlp reopening
+            # the output file from byte 0 after a live-stream
+            # reconnect instead of resuming/appending).
+            dbg(f"[STALL] COLLAPSE DETECTED: size dropped "
+                f"{self.last_size} -> {current_size} "
+                f"(-{self.last_size - current_size} bytes) — file was "
+                f"likely truncated/reopened on reconnect",
+                site_name=streamer)
+            site.log_line(
+                f"Warning: recording file for {streamer} shrank "
+                f"from {self.last_size} to {current_size} bytes "
+                f"(likely truncated on reconnect) — some footage "
+                f"may have been lost"
+            )
+            # Re-sync the comparison baseline to this poll's size
+            # so the next poll compares against reality. Leave
+            # last_growth_time / stall_since untouched — a shrink
+            # isn't a stall, so it shouldn't affect the genuine
+            # stall timer; if the file also stops growing after
+            # this, the existing NO GROWTH branch will catch that
+            # on its own on a later poll.
+            self.filename_error_warned = False
+            self.last_size = current_size
+
+        elif current_size > self.last_size:
+            self.filename_error_warned = False
+            if not self.growth_seen:
+                self.growth_seen = True
+                site.clear_last_restart_anchor(streamer)
+                dbg(f"[NO_CONFIRM_RACE] [STALL] first growth observed for this file — "
+                    f"stall checker is now armed", site_name=streamer)
+                if not self.initial_notification_sent:
+                    dbg(f"[NO_CONFIRM_RACE] [NOTIFY] NOTIFY_CONFIRM_FILE: file growth confirmed for "
+                        f"streamer={streamer!r} — sending held-back live notification",
+                        site_name=streamer)
+                    _maybe_show_live_popup(app, streamer, cfg, site, show_popup=self.show_popup,
+                                           source="confirm_file", is_recording=True,
+                                           warning=self.eviction_warning, confirmed=True)
+                    self.initial_notification_sent = True
+            dbg(f"[NO_CONFIRM_RACE] [STALL] grew: {self.last_size} -> {current_size} "
+                f"(+{current_size - self.last_size} bytes), resetting timer",
+                site_name=streamer)
+            self.last_size = current_size
+            self.last_growth_time = time.time()
+            site.clear_stall_since(streamer)
+        elif not self.growth_seen:
+            # No growth yet and none has ever been seen for this file —
+            # the stall checker hasn't started, so there's nothing to
+            # flag as stalled. Just wait for the first sign of growth.
+            self.filename_error_warned = False
+            dbg(f"[NO_CONFIRM_RACE] [STALL] no growth yet, but stall checker not armed "
+                f"(no growth seen for {self.active_file!r} yet) — skipping stall "
+                f"detection", site_name=streamer)
+            # NOTIFY_NO_CONFIRM_FILE is now checked every second via
+            # _check_no_confirm_deadline() above, not here — see
+            # that function for why it can't be gated behind this
+            # stall_check_interval-only branch.
+        else:
+            self.filename_error_warned = False
+            dbg(f"[NO_CONFIRM_RACE] [STALL] NO GROWTH: size={current_size} "
+                f"stall_since={time.time() - self.last_growth_time:.2f}s",
+                site_name=streamer)
+            site.set_stall_since(streamer, self.last_growth_time)
+            # Re-sync the comparison baseline to this poll's reading.
+            # last_size is a rolling "previous poll" value, not an
+            # all-time high water mark: if it stayed a permanent
+            # ceiling, a single spuriously-low os.path.getsize()
+            # sample (observed under brief heavy CPU/disk load
+            # could permanently poison it.
+            self.last_size = current_size
+        return False
+
+
 def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
                   use_lq: bool = False, show_popup: bool = True,
                   eviction_warning: str = "") -> None:
@@ -3883,26 +4306,18 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
     # session cannot target this streamer again (even if the proc hasn't opened yet).
     _record_lq_attempt(app, streamer, cfg, site, use_lq)
 
-    proc = None
-    close_logs = lambda: None
-    segment_num = 1
-    active_file = None   # pre-declared so the `finally` block can always
-                          # reference it, even if the thread exits before the
-                          # first outer-loop iteration ever sets it.
-    # Backoff for split attempts: after a failed split (e.g. couldn't find/
-    # confirm the new segment file), don't retry every second — wait a bit
-    # so a persistent problem doesn't spawn a fresh yt-dlp probe process
-    # every loop iteration. 0.0 means "no cooldown in effect yet".
-    _split_retry_cooldown_seconds = 60.0
-    next_split_retry_time = 0.0
-
     # If a previous record_stream() attempt for this same live session (a
     # different thread call — e.g. before an eviction) left off mid-way
     # through a part sequence, pick up where it left off instead of
     # starting back at part 1. See SiteState.get_segment_continuation().
-    _pending_rename_file = None
     segment_num, _pending_rename_file = _resume_segment_continuity(
-        site, streamer, continuity_active, segment_num, _pending_rename_file)
+        site, streamer, continuity_active, 1, None)
+
+    attempt = _RecordingAttempt(
+        app, streamer, cfg, site, use_lq, show_popup, eviction_warning,
+        channel_url, output_dir, notify_no_confirm_file,
+        segment_num, split_after_seconds, _intro_delay_disable_after_split,
+        initial_notification_sent)
 
     _outer_iteration = 0
 
@@ -3916,11 +4331,11 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
                 # Restarting within this same thread (ffmpeg-error threshold,
                 # stall recovery, or a normal yt-dlp exit while still live) —
                 # this new attempt is another part of the same recording.
-                segment_num, _pending_rename_file = _bump_segment_for_inplace_restart(
-                    site, streamer, segment_num, active_file)
+                attempt.segment_num, _pending_rename_file = _bump_segment_for_inplace_restart(
+                    site, streamer, attempt.segment_num, attempt.active_file)
 
             current_output_tmpl, output_path = _build_segment_output_paths(
-                cfg, output_dir, continuity_active, segment_num)
+                cfg, output_dir, continuity_active, attempt.segment_num)
 
             _active_dl_cmd = _select_downloader_cmd(cfg, use_lq, streamer)
 
@@ -3944,446 +4359,75 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
             cmd = _simulation.maybe_strip_sidecar_args(cmd, _sidecar_path, streamer)
 
             out_target, err_target, close_logs, log_out_fp, log_err_fp = open_log_streams(cfg, streamer)
+            attempt.close_logs = close_logs
 
             _launch_result = _launch_yt_dlp_attempt(
                 app, cmd, out_target, err_target, close_logs, log_out_fp, log_err_fp,
                 cfg, site, streamer)
             if _launch_result is None:
                 break
-            proc, proc_start_time, ffmpeg_error_counter, ffmpeg_error_event = _launch_result
+            attempt.proc, attempt.proc_start_time, attempt.ffmpeg_error_counter, attempt.ffmpeg_error_event = _launch_result
 
             # Resolve the file this attempt is actually writing to (sidecar-based,
             # with a bounded wait) and publish/finalize any pending rename.
-            active_file = _resolve_active_recording_file(proc, _sidecar_path, output_dir, streamer)
+            attempt.active_file = _resolve_active_recording_file(attempt.proc, _sidecar_path, output_dir, streamer)
             _pending_rename_file = _publish_active_file_and_finalize_rename(
-                site, streamer, active_file, _pending_rename_file, segment_num)
+                site, streamer, attempt.active_file, _pending_rename_file, attempt.segment_num)
 
             # Simulation hook: optionally inject a wrong filename so that
             # jj‑dlp looks for a non‑existent file while yt‑dlp writes normally.
-            active_file = _simulation.maybe_inject_wrong_filename(active_file, streamer)
+            attempt.active_file = _simulation.maybe_inject_wrong_filename(attempt.active_file, streamer)
 
-            last_size, _, _, _ = get_streamer_file_size(
+            attempt.last_size, _, _, _ = get_streamer_file_size(
                 output_dir,
                 streamer,
                 cfg=cfg,
-                proc_start_time=proc_start_time,
-                known_filename=active_file,
+                proc_start_time=attempt.proc_start_time,
+                known_filename=attempt.active_file,
             )
 
-            last_growth_time     = time.time()
-            recording_start_time = time.time()
-            stall_check_interval = cfg["stall_check_interval"]
-            stall_timeout        = cfg["stall_timeout"]
+            attempt.last_growth_time     = time.time()
+            attempt.recording_start_time = time.time()
+            attempt.stall_check_interval = cfg["stall_check_interval"]
+            attempt.stall_timeout        = cfg["stall_timeout"]
             # NOTIFY_NO_CONFIRM_FILE tracking: see _compute_no_confirm_deadline()
             # for the anchor-selection reasoning.
-            _no_confirm_deadline = _compute_no_confirm_deadline(
-                site, streamer, stall_timeout, _no_confirm_grace_seconds)
-            _no_confirm_warned = False
+            attempt._no_confirm_deadline = _compute_no_confirm_deadline(
+                site, streamer, attempt.stall_timeout, _no_confirm_grace_seconds)
+            attempt._no_confirm_warned = False
 
-            def _check_no_confirm_deadline():
-                # Fires the NOTIFY_NO_CONFIRM_FILE warning as soon as the
-                # deadline has passed, independent of stall_check_interval
-                # and independent of whether proc is still alive when it's
-                # called. This must NOT be gated behind a "proc survived a
-                # full stall_check_interval" condition: _SIMULATE_WRITE_FAILURE
-                # (and real write failures) can make yt-dlp exit in well
-                # under stall_check_interval on every retry, which previously
-                # meant this check was never reached at all.
-                nonlocal _no_confirm_warned, active_file
-                # FIX: guard so this function never fires for a streamer that's
-                # being evicted or the app is shutting down, no matter which
-                # call site invokes it.
-                if site._stop_event.is_set() or streamer in site.evicted_streamers:
-                    return
-                if (notify_no_confirm_file
-                        and not _no_confirm_warned
-                        and not growth_seen
-                        and time.time() >= _no_confirm_deadline):
-                    _no_confirm_warned = True
-
-                    _old_active_file = active_file
-                    _scanned_file = _scan_directory_for_active_file(
-                        output_dir, streamer, proc_start_time, site=site)
-                    if _scanned_file:
-                        active_file = _scanned_file
-                        site.set_recording_output(streamer, active_file)
-                        if _old_active_file:
-                            site.log_line(
-                                f"Info: directory-scan updated recording file from "
-                                f"{os.path.basename(_old_active_file)} to "
-                                f"{os.path.basename(active_file)}"
-                            )
-                        else:
-                            site.log_line(
-                                f"Info: located recording file for {streamer} via "
-                                f"directory scan: {os.path.basename(active_file)}"
-                            )
-                        dbg(f"[NO_CONFIRM_RACE] [STALL] directory scan recovered active_file="
-                            f"{active_file!r}", site_name=streamer)
-                        return
-
-                    if active_file:
-                        _nc_size, _, _, _nc_file_error = get_streamer_file_size(
-                            output_dir, streamer, cfg=cfg,
-                            proc_start_time=proc_start_time,
-                            known_filename=active_file,
-                        )
-                    else:
-                        _nc_size, _nc_file_error = 0, True
-                    dbg(f"[NO_CONFIRM_RACE] [NOTIFY] NOTIFY_NO_CONFIRM_FILE: file not confirmed for "
-                        f"streamer={streamer!r} within {int(stall_timeout)}s "
-                        f"(deadline={_no_confirm_deadline:.2f}) — sending warning; "
-                        f"attempt_age={time.time() - recording_start_time:.1f}s "
-                        f"active_file={active_file!r} last_size={last_size} "
-                        f"cur_size={_nc_size} file_error={_nc_file_error} "
-                        f"growth_seen={growth_seen}",
-                        site_name=streamer)
-                    _maybe_show_live_popup(
-                        app, streamer, cfg, site, show_popup=show_popup,
-                        source="no_confirm_file", is_recording=False,
-                        warning=(f"The recording file could not be confirmed within "
-                                 f"{int(stall_timeout)}s — the start may have failed."),
-                        confirmed=False)
-                    _log_filename = os.path.basename(active_file) if active_file else "<unknown>"
-                    site.log_line(
-                        f"Warning: {_log_filename} could not be confirmed within "
-                        f"{int(stall_timeout)} seconds."
-                    )
-                    # Also drives the dashboard's full-screen recording-
-                    # failure alert (see App.draw_write_failure_alert).
-                    site.flag_write_failure(streamer)
-
-            seconds_since_check  = 0
-            _split_log_counter   = 0  # throttle periodic split-timer dbg lines
+            attempt._split_log_counter = 0  # throttle periodic split-timer dbg lines
             # Whether we've ever observed this file grow. The stall checker is
             # only allowed to run (and potentially restart the recording) once
             # growth has actually been seen at least once.
-            growth_seen = False
+            attempt.growth_seen = False
             # Set once we've already warned the Log tab about a missing/unreadable
             # recording file, so we don't spam the same warning every stall-check
             # cycle. Reset whenever the file is found again or a new attempt starts.
-            filename_error_warned = False
-            dbg(f"[NO_CONFIRM_RACE] [STALL] init: stall_timeout={stall_timeout}s "
-                f"stall_check_interval={stall_check_interval}s "
-                f"last_size={last_size} last_growth_time={last_growth_time:.2f} "
-                f"growth_seen={growth_seen}",
+            attempt.filename_error_warned = False
+            dbg(f"[NO_CONFIRM_RACE] [STALL] init: stall_timeout={attempt.stall_timeout}s "
+                f"stall_check_interval={attempt.stall_check_interval}s "
+                f"last_size={attempt.last_size} last_growth_time={attempt.last_growth_time:.2f} "
+                f"growth_seen={attempt.growth_seen}",
                 site_name=streamer)
 
             dbg(f"[SPLIT][record_stream] inner loop starting: streamer={streamer!r} "
-                f"segment_num={segment_num} pid={proc.pid} "
-                f"split_after_seconds={split_after_seconds} "
-                f"stall_check_interval={stall_check_interval} stall_timeout={stall_timeout}")
+                f"segment_num={attempt.segment_num} pid={attempt.proc.pid} "
+                f"split_after_seconds={attempt.split_after_seconds} "
+                f"stall_check_interval={attempt.stall_check_interval} stall_timeout={attempt.stall_timeout}")
 
+            seconds_since_check = 0
 
-            def _try_split(manual_split: bool) -> bool:
-                # Handles a timed or manual split request. Returns True if it
-                # switched to a new segment (caller should `continue` the loop).
-                nonlocal _split_log_counter, next_split_retry_time
-                nonlocal proc, close_logs, proc_start_time, active_file, recording_start_time, segment_num
-                nonlocal ffmpeg_error_counter, ffmpeg_error_event, last_size, last_growth_time, growth_seen
-                nonlocal _no_confirm_deadline, _no_confirm_warned
-                nonlocal split_after_seconds, _intro_delay_disable_after_split
-
-                elapsed = time.time() - recording_start_time
-                _split_log_counter += 1
-                if _split_log_counter % 30 == 0:  # log roughly every 30s
-                    dbg(f"[SPLIT][record_stream] split timer: streamer={streamer!r} "
-                        f"segment={segment_num} elapsed={elapsed:.1f}s / "
-                        f"split_after_seconds={split_after_seconds}s "
-                        f"remaining={max(0, split_after_seconds - elapsed):.1f}s")
-
-                if manual_split or (
-                        elapsed >= split_after_seconds
-                        and time.time() >= next_split_retry_time):
-                    if manual_split:
-                        site.log_line(
-                            f"Manual split requested for {streamer} — starting part {segment_num + 1}"
-                        )
-                    next_segment_num = segment_num + 1
-
-                    next_output_tmpl = add_segment_suffix_to_tmpl(
-                        cfg["output_tmpl"],
-                        next_segment_num
-                    )
-
-                    next_output_path = os.path.join(output_dir, next_output_tmpl)
-
-                    dbg(f"[SPLIT][record_stream] SPLIT_AFTER={split_after_seconds}s triggered for "
-                        f"streamer={streamer!r} elapsed={elapsed:.1f}s "
-                        f"segment_num={segment_num} -> next_segment_num={next_segment_num} "
-                        f"next_output_path={next_output_path!r}")
-
-                    dbg(f"[SPLIT][record_stream] SPLIT_AFTER reached for {streamer} — "
-                        f"starting part {next_segment_num}")
-
-                    next_cmd = build_yt_dlp_command(
-                        cfg["yt_dlp_path"],
-                        cfg["downloader_cmd"],
-                        ["-o", next_output_path, channel_url]
-                    )
-
-                    next_out_target, next_err_target, next_close_logs, next_log_out_fp, next_log_err_fp = open_log_streams(cfg, streamer)
-
-                    try:
-                        part_suffix = f"_part{next_segment_num}"
-                        next_proc, next_proc_start_time, next_file, split_success = _spawn_and_verify_split_segment(
-                            app, next_cmd, cfg, next_out_target, next_err_target,
-                            next_log_out_fp, next_log_err_fp,
-                            output_dir, streamer, site, part_suffix)
-
-                        if split_success:
-                            site.log_line(
-                                f"Split confirmed for {streamer} — switching to part {next_segment_num}"
-                            )
-
-                            dbg(f"[SPLIT][record_stream] killing old proc pid={proc.pid} "
-                                f"(was part {segment_num})")
-                            kill_proc(proc)
-                            try:
-                                proc.wait(timeout=15)
-                                dbg(f"[SPLIT][record_stream] old proc pid={proc.pid} exited cleanly")
-                            except Exception as wait_err:
-                                dbg(f"[SPLIT][record_stream] old proc pid={proc.pid} wait() error: {wait_err}")
-
-                            # Part 2 is confirmed — retroactively rename the first
-                            # segment from its clean name to FILENAME_part1.ext now
-                            # that we know multiple parts exist.
-                            if segment_num == 1 and active_file and os.path.isfile(active_file):
-                                _part1_path = add_segment_suffix_to_tmpl(active_file, 1)
-                                try:
-                                    os.rename(active_file, _part1_path)
-                                    dbg(f"[SPLIT][record_stream] renamed first segment to: "
-                                        f"{os.path.basename(_part1_path)} "
-                                        f"({active_file!r} -> {_part1_path!r})")
-                                except Exception as _ren_err:
-                                    dbg(f"[SPLIT][record_stream] rename of first segment FAILED: "
-                                        f"{_ren_err!r}")
-
-                            site.unregister_proc(streamer)
-                            try:
-                                close_logs()
-                            except Exception as e:
-                                dbg(f"record_stream: close_logs() failed for {streamer!r} during split switch: {e}")
-
-                            proc = next_proc
-                            close_logs = next_close_logs
-                            proc_start_time = next_proc_start_time
-                            active_file = next_file
-                            # Republish the switched-to segment as the
-                            # active recording output so the disk-rate
-                            # graph follows the new file (the previous
-                            # segment has stopped growing).
-                            if active_file:
-                                site.set_recording_output(streamer, active_file)
-                            # Use next_proc_start_time (not time.time()) so the
-                            # split timer accounts for time already spent verifying
-                            # the new file. time.time() here would let each segment
-                            # silently overrun SPLIT_AFTER by the verification delay.
-                            recording_start_time = next_proc_start_time
-                            segment_num = next_segment_num
-                            # Persist immediately rather than waiting for this thread's finally: block.
-                            site.set_segment_continuation(streamer, segment_num, None)
-
-                            if _intro_delay_disable_after_split:
-                                split_after_seconds = 0
-                                _intro_delay_disable_after_split = False
-                                dbg(f"[INTRO_DELAY] streamer={streamer!r} intro split "
-                                    f"confirmed — splitting disabled for remainder of stream")
-
-                            site.register_proc(streamer, proc)
-
-                            ffmpeg_error_counter = [0]
-                            ffmpeg_error_event   = threading.Event()
-                            site.clear_ffmpeg_error_count(streamer)
-                            site.clear_stall_since(streamer)
-
-                            last_size = 0
-                            last_growth_time = time.time()
-                            next_split_retry_time = 0.0
-                            # New segment is a new file — it hasn't grown yet,
-                            # so the stall checker must re-earn the right to run.
-                            growth_seen = False
-                            # Re-arm the NOTIFY_NO_CONFIRM_FILE deadline for
-                            # the new segment.
-                            _no_confirm_deadline = time.time() + stall_timeout
-                            _no_confirm_warned   = False
-
-                            dbg(f"[SPLIT][record_stream] switched to part {segment_num} "
-                                f"pid={proc.pid} active_file={active_file!r} "
-                                f"recording_start_time reset")
-
-                            return True
-
-                        dbg(f"[SPLIT][record_stream] SPLIT FAILED — "
-                            f"next_file={next_file!r} split_success={split_success} — "
-                            f"killing next_proc pid={next_proc.pid} and continuing current segment")
-                        next_split_retry_time = time.time() + _split_retry_cooldown_seconds
-                        site.log_line(
-                            f"Split verification FAILED for {streamer} — keeping current recording "
-                            f"(will retry split in {int(_split_retry_cooldown_seconds)}s)"
-                        )
-
-                        kill_proc(next_proc)
-
-                        try:
-                            next_close_logs()
-                        except Exception as e:
-                            dbg(f"record_stream: next_close_logs() failed for {streamer!r} after failed split: {e}")
-
-                    except Exception as e:
-                        dbg(f"[SPLIT][record_stream] EXCEPTION launching next proc: "
-                            f"{type(e).__name__}: {e}")
-                        next_split_retry_time = time.time() + _split_retry_cooldown_seconds
-                        site.log_line(
-                            f"Failed to start split recording for {streamer}: {e} "
-                            f"(will retry split in {int(_split_retry_cooldown_seconds)}s)"
-                        )
-                return False
-
-            def _run_stall_check_cycle() -> bool:
-                # Runs one stall-detection poll cycle. Returns True if a stall
-                # was detected (caller should break the loop and restart).
-                nonlocal filename_error_warned, growth_seen, initial_notification_sent
-                nonlocal last_size, last_growth_time
-
-                dbg(f"[NO_CONFIRM_RACE] [STALL] check cycle: elapsed_since_growth="
-                    f"{time.time() - last_growth_time:.2f}s growth_seen={growth_seen}",
-                    site_name=streamer)
-                current_size, stall_detected, _, file_error = get_streamer_file_size(
-                    output_dir,
-                    streamer,
-                    cfg=cfg,
-                    proc_start_time=proc_start_time,
-                    # Only arm the stall checker once this file has grown at
-                    # least once. get_streamer_file_size() only computes
-                    # stall_detected when both last_growth_time and
-                    # stall_timeout are provided, so withholding stall_timeout
-                    # here is what keeps the checker from starting on a file
-                    # that has never shown growth.
-                    last_growth_time=last_growth_time if growth_seen else None,
-                    stall_timeout=stall_timeout if growth_seen else None,
-                    stall_check_interval=stall_check_interval,
-                    known_filename=active_file,
-                )
-
-                # Dashboard quality display (independent of stall logic):
-                # measure the actual on-disk resolution via ffprobe, reusing
-                # the same active_file the stall checker just used above.
-                _update_measured_quality(app, site, streamer, active_file, file_error)
-
-                if file_error:
-                    # We couldn't even locate/read the recording file this
-                    # cycle (e.g. active_file points at a filename that
-                    # doesn't exist). Note: This only fires if yt-dlp stays alive
-                    # for the duration of STALL_TIMEOUT without producing a
-                    # file.
-                    dbg("[STALL] filename lookup failed — giving up on "
-                        "stall detection for this cycle", site_name=streamer)
-                    site.clear_stall_since(streamer)
-                    if not filename_error_warned:
-                        site.log_line(
-                            f"Warning: stall checker could not locate file for {streamer}"
-                        )
-                        filename_error_warned = True
-
-                elif stall_detected:
-                    site.log_line(f"Stall detected for {streamer} — restarting")
-
-                    # Growth was already confirmed (that's what makes
-                    # this a "stall" not a never-confirmed start), so
-                    # give the next attempt's deadline a fresh window.
-                    _refresh_restart_anchor_if_growing(
-                        site, streamer, growth_seen, reason="stall_detected")
-
-                    _teardown_attempt(site, streamer, proc, close_logs,
-                                       clear_stall=True, clear_ad_alert=True)
-                    time.sleep(5)
-                    return True
-
-                elif current_size < last_size and growth_seen:
-                    # File size went BACKWARDS since the last poll — the
-                    # file was truncated/reopened (e.g. yt-dlp reopening
-                    # the output file from byte 0 after a live-stream
-                    # reconnect instead of resuming/appending).
-                    dbg(f"[STALL] COLLAPSE DETECTED: size dropped "
-                        f"{last_size} -> {current_size} "
-                        f"(-{last_size - current_size} bytes) — file was "
-                        f"likely truncated/reopened on reconnect",
-                        site_name=streamer)
-                    site.log_line(
-                        f"Warning: recording file for {streamer} shrank "
-                        f"from {last_size} to {current_size} bytes "
-                        f"(likely truncated on reconnect) — some footage "
-                        f"may have been lost"
-                    )
-                    # Re-sync the comparison baseline to this poll's size
-                    # so the next poll compares against reality. Leave
-                    # last_growth_time / stall_since untouched — a shrink
-                    # isn't a stall, so it shouldn't affect the genuine
-                    # stall timer; if the file also stops growing after
-                    # this, the existing NO GROWTH branch will catch that
-                    # on its own on a later poll.
-                    filename_error_warned = False
-                    last_size = current_size
-
-                elif current_size > last_size:
-                    filename_error_warned = False
-                    if not growth_seen:
-                        growth_seen = True
-                        site.clear_last_restart_anchor(streamer)
-                        dbg(f"[NO_CONFIRM_RACE] [STALL] first growth observed for this file — "
-                            f"stall checker is now armed", site_name=streamer)
-                        if not initial_notification_sent:
-                            dbg(f"[NO_CONFIRM_RACE] [NOTIFY] NOTIFY_CONFIRM_FILE: file growth confirmed for "
-                                f"streamer={streamer!r} — sending held-back live notification",
-                                site_name=streamer)
-                            _maybe_show_live_popup(app, streamer, cfg, site, show_popup=show_popup,
-                                                   source="confirm_file", is_recording=True,
-                                                   warning=eviction_warning, confirmed=True)
-                            initial_notification_sent = True
-                    dbg(f"[NO_CONFIRM_RACE] [STALL] grew: {last_size} -> {current_size} "
-                        f"(+{current_size - last_size} bytes), resetting timer",
-                        site_name=streamer)
-                    last_size = current_size
-                    last_growth_time = time.time()
-                    site.clear_stall_since(streamer)
-                elif not growth_seen:
-                    # No growth yet and none has ever been seen for this file —
-                    # the stall checker hasn't started, so there's nothing to
-                    # flag as stalled. Just wait for the first sign of growth.
-                    filename_error_warned = False
-                    dbg(f"[NO_CONFIRM_RACE] [STALL] no growth yet, but stall checker not armed "
-                        f"(no growth seen for {active_file!r} yet) — skipping stall "
-                        f"detection", site_name=streamer)
-                    # NOTIFY_NO_CONFIRM_FILE is now checked every second via
-                    # _check_no_confirm_deadline() above, not here — see
-                    # that function for why it can't be gated behind this
-                    # stall_check_interval-only branch.
-                else:
-                    filename_error_warned = False
-                    dbg(f"[NO_CONFIRM_RACE] [STALL] NO GROWTH: size={current_size} "
-                        f"stall_since={time.time() - last_growth_time:.2f}s",
-                        site_name=streamer)
-                    site.set_stall_since(streamer, last_growth_time)
-                    # Re-sync the comparison baseline to this poll's reading.
-                    # last_size is a rolling "previous poll" value, not an
-                    # all-time high water mark: if it stayed a permanent
-                    # ceiling, a single spuriously-low os.path.getsize()
-                    # sample (observed under brief heavy CPU/disk load
-                    # could permanently poison it.
-                    last_size = current_size
-                return False
-
-            while proc.poll() is None:
+            while attempt.proc.poll() is None:
 
                 if site._stop_event.is_set() or streamer in site.evicted_streamers:
-                    _teardown_attempt(site, streamer, proc, close_logs, wait_after_kill=True)
+                    _teardown_attempt(site, streamer, attempt.proc, attempt.close_logs, wait_after_kill=True)
                     return
 
                 _t0 = time.time()
                 current_cfg = site.get_cached_config()
                 _load_cfg_ms = (time.time() - _t0) * 1000
-                if _split_log_counter % 30 == 0:
+                if attempt._split_log_counter % 30 == 0:
                     dbg(f"[PERF][record_stream/inner] get_cached_config took {_load_cfg_ms:.2f}ms streamer={streamer!r}")
 
                 if streamer in current_cfg["blocked"]:
@@ -4393,7 +4437,7 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
                     # the AUTO_SUFFIX/SPLIT_AFTER set_segment_continuation()
                     # write, and the single cooldown wait, in that order.
                     site.log_line(f"Recording STOPPED (blocked) -> {streamer}")
-                    _teardown_attempt(site, streamer, proc, close_logs,
+                    _teardown_attempt(site, streamer, attempt.proc, attempt.close_logs,
                                        clear_stall=True, clear_ffmpeg_error=True)
                     return
 
@@ -4403,20 +4447,20 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
                 # Placed just before the event check below so a simulated
                 # threshold hit is caught on the very next loop iteration.
                 _simulation._maybe_simulate_lq_errors(
-                    streamer, site, use_lq, growth_seen,
-                    ffmpeg_error_counter, ffmpeg_error_event,
+                    streamer, site, use_lq, attempt.growth_seen,
+                    attempt.ffmpeg_error_counter, attempt.ffmpeg_error_event,
                     app.ffmpeg_error_restart_threshold)
 
-                if ffmpeg_error_event.is_set():
+                if attempt.ffmpeg_error_event.is_set():
                     site.log_line(f"ffmpeg error threshold reached for {streamer} — restarting")
 
                     # Same reasoning as stall-detected below: this attempt
                     # was recording, so give the next attempt's deadline a
                     # fresh window instead of a stale live_since/enable_anchor.
                     _refresh_restart_anchor_if_growing(
-                        site, streamer, growth_seen, reason="ffmpeg_error_threshold")
+                        site, streamer, attempt.growth_seen, reason="ffmpeg_error_threshold")
 
-                    _teardown_attempt(site, streamer, proc, close_logs, clear_ad_alert=True)
+                    _teardown_attempt(site, streamer, attempt.proc, attempt.close_logs, clear_ad_alert=True)
 
                     # LQ bandwidth-saving trigger (non-LQ recordings only):
                     # only trigger LQ for normal recordings; if a LQ recording
@@ -4433,7 +4477,7 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
                         site.manual_split_requests.discard(streamer)
                         manual_split = True
 
-                if (split_after_seconds > 0 or manual_split) and _try_split(manual_split):
+                if (attempt.split_after_seconds > 0 or manual_split) and attempt._try_split(manual_split):
                     continue
 
                 time.sleep(1)
@@ -4442,11 +4486,11 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
                 # Checked every second (not gated behind stall_check_interval)
                 # so a fast-failing recording attempt can't prevent this from
                 # ever firing. See _check_no_confirm_deadline() above.
-                _check_no_confirm_deadline()
+                attempt._check_no_confirm_deadline()
 
-                if seconds_since_check >= stall_check_interval:
+                if seconds_since_check >= attempt.stall_check_interval:
                     seconds_since_check = 0
-                    if _run_stall_check_cycle():
+                    if attempt._run_stall_check_cycle():
                         break
 
             else:
@@ -4466,38 +4510,38 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
                 # bookkeeping, no safety-net check) instead of treating it
                 # like a normal end-of-attempt.
                 if site._stop_event.is_set() or streamer in site.evicted_streamers:
-                    _teardown_attempt(site, streamer, proc, close_logs, kill=False,
+                    _teardown_attempt(site, streamer, attempt.proc, attempt.close_logs, kill=False,
                                        clear_stall=True, clear_ffmpeg_error=True, clear_ad_alert=True)
                     return
 
                 # Normal yt-dlp exit (return code 0) is a valid restart
                 # trigger too: the monitor loop sees the streamer still live
                 # and relaunches almost immediately.
-                if active_file:
+                if attempt.active_file:
                     _final_size, _, _, _final_file_error = get_streamer_file_size(
                         output_dir, streamer, cfg=cfg,
-                        proc_start_time=proc_start_time,
-                        known_filename=active_file,
+                        proc_start_time=attempt.proc_start_time,
+                        known_filename=attempt.active_file,
                     )
                 else:
                     _final_size, _final_file_error = 0, True
                 _refresh_restart_anchor_if_growing(
-                    site, streamer, growth_seen, reason="normal_exit")
+                    site, streamer, attempt.growth_seen, reason="normal_exit")
                 dbg(f"[NO_CONFIRM_RACE] [STALL] attempt ended (normal_exit): streamer={streamer!r} "
-                    f"returncode={proc.returncode} active_file={active_file!r} "
-                    f"last_size={last_size} final_size={_final_size} "
-                    f"file_error={_final_file_error} growth_seen={growth_seen} "
-                    f"attempt_duration={time.time() - proc_start_time:.1f}s "
-                    f"anchor_refreshed={bool(growth_seen)}",
+                    f"returncode={attempt.proc.returncode} active_file={attempt.active_file!r} "
+                    f"last_size={attempt.last_size} final_size={_final_size} "
+                    f"file_error={_final_file_error} growth_seen={attempt.growth_seen} "
+                    f"attempt_duration={time.time() - attempt.proc_start_time:.1f}s "
+                    f"anchor_refreshed={bool(attempt.growth_seen)}",
                     site_name=streamer)
 
                 # Safety net: if proc.poll() was already non-None before the
                 # loop got to sleep even once, _check_no_confirm_deadline()
                 # above may never have run this attempt. Give it one last
                 # chance here before we report the attempt as finished.
-                _check_no_confirm_deadline()
+                attempt._check_no_confirm_deadline()
 
-                _teardown_attempt(site, streamer, proc, close_logs, kill=False,
+                _teardown_attempt(site, streamer, attempt.proc, attempt.close_logs, kill=False,
                                    clear_stall=True, clear_ffmpeg_error=True, clear_ad_alert=True)
 
                 # Clear LQ tracking when streamer goes offline: this ensures
@@ -4511,9 +4555,9 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
                 break
 
     except KeyboardInterrupt:
-        if proc is not None:
+        if attempt.proc is not None:
             try:
-                kill_proc(proc)
+                kill_proc(attempt.proc)
             except Exception as e:
                 dbg(f"record_stream: kill_proc() failed for {streamer!r} during KeyboardInterrupt: {e}")
 
@@ -4521,7 +4565,7 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
         site.clear_ad_alert(streamer)
 
         try:
-            close_logs()
+            attempt.close_logs()
         except Exception as e:
             dbg(f"record_stream: close_logs() failed for {streamer!r} during KeyboardInterrupt: {e}")
 
@@ -4558,10 +4602,10 @@ def record_stream(app: "AppState", streamer: str, cfg: dict, site: "SiteState",
         # segment_num>1 means it was already suffixed at creation, so
         # there's nothing pending.
         _unsuffixed_for_continuation = (
-            active_file if (active_file and segment_num == 1) else None
+            attempt.active_file if (attempt.active_file and attempt.segment_num == 1) else None
         )
         site.set_segment_continuation(
-            streamer, segment_num + 1, _unsuffixed_for_continuation
+            streamer, attempt.segment_num + 1, _unsuffixed_for_continuation
         )
 
         site.clear_ad_alert(streamer)
