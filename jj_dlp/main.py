@@ -1838,16 +1838,6 @@ def _compile_ad_alert_pattern(cfg: dict) -> Optional["_re.Pattern"]:
 # streamer ineligible for another LQ trigger during that online session.
 _LQ_RECENT_WINDOW: float = 30 * 60   # 30 minutes
 
-# ── Keybinds ──
-KEYBIND_ADD       = "a"
-KEYBIND_REMOVE    = "r"
-KEYBIND_DISABLE   = "d"
-KEYBIND_LABELS = {
-    KEYBIND_ADD:       "A",
-    KEYBIND_REMOVE:    "R",
-    KEYBIND_DISABLE:   "D",
-}
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Process helpers
