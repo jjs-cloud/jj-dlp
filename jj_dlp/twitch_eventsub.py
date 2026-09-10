@@ -921,6 +921,8 @@ class TwitchEventSub:
             try:
                 data = b""
                 conn.settimeout(5.0)
+                cl = 0
+                have_cl = False
                 while True:
                     chunk = conn.recv(4096)
                     if not chunk:
@@ -928,14 +930,15 @@ class TwitchEventSub:
                     data += chunk
                     if b"\r\n\r\n" in data:
                         header_part, _, body_so_far = data.partition(b"\r\n\r\n")
-                        cl = 0
-                        for hline in header_part.split(b"\r\n"):
-                            if hline.lower().startswith(b"content-length:"):
-                                try:
-                                    cl = int(hline.split(b":", 1)[1].strip())
-                                except (ValueError, IndexError) as e:
-                                    self._dbg(f"[TWITCH] http_server: bad Content-Length header: {e}")
-                        if len(body_so_far) >= cl:
+                        if not have_cl:
+                            for hline in header_part.split(b"\r\n"):
+                                if hline.lower().startswith(b"content-length:"):
+                                    try:
+                                        cl = int(hline.split(b":", 1)[1].strip())
+                                        have_cl = True
+                                    except (ValueError, IndexError) as e:
+                                        self._dbg(f"[TWITCH] http_server: bad Content-Length header: {e}")
+                        if have_cl and len(body_so_far) >= cl:
                             self._dbg(
                                 f"[TWITCH] http_server: req #{req_count} "
                                 f"headers_len={len(header_part)} "
