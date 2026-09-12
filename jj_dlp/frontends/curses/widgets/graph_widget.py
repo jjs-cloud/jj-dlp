@@ -1,0 +1,1 @@
+"""Draw-only sparkline widget."""

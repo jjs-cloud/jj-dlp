@@ -1,0 +1,1 @@
+"""Footer/help bar rendering."""

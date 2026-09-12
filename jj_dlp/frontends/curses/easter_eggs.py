@@ -1,0 +1,1 @@
+"""Christmas Day dashboard decoration."""

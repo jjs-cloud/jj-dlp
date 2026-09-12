@@ -1,0 +1,1 @@
+"""Post-update changelog popup."""
