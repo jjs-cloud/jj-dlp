@@ -27,3 +27,6 @@ def get_plugin(plugin_id: str) -> SitePlugin:
 def list_plugin_ids() -> List[str]:
     """Return every currently registered plugin id."""
     return list(_REGISTRY.keys())
+
+
+from jj_dlp.core.plugins import chatsite  # noqa: E402,F401  registers the plugin
