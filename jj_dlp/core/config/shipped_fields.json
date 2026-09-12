@@ -1,0 +1,430 @@
+{
+  "schema_version": 1,
+  "app_fields": [
+    {
+      "path": "updates.check_for_updates",
+      "type": "bool",
+      "default": true,
+      "preserve": true,
+      "help": "Check for new releases on startup and periodically."
+    },
+    {
+      "path": "updates.update_interval_min",
+      "type": "int",
+      "default": 30,
+      "preserve": true,
+      "help": "Minutes between background update checks."
+    },
+    {
+      "path": "updates.update_branch",
+      "type": "str",
+      "default": "main",
+      "preserve": true,
+      "help": "Release branch to check for updates against."
+    },
+    {
+      "path": "web_ui.enabled",
+      "type": "bool",
+      "default": false,
+      "preserve": true,
+      "help": "Start the local web UI/API server."
+    },
+    {
+      "path": "web_ui.port",
+      "type": "int",
+      "default": 8765,
+      "preserve": true,
+      "help": "Port the web UI/API server listens on."
+    },
+    {
+      "path": "web_ui.user",
+      "type": "str",
+      "default": "",
+      "preserve": true,
+      "help": "Username for web UI HTTP Basic Auth."
+    },
+    {
+      "path": "web_ui.pass",
+      "type": "str",
+      "default": "",
+      "preserve": true,
+      "help": "Password for web UI HTTP Basic Auth."
+    },
+    {
+      "path": "recording.max_concurrent",
+      "type": "int",
+      "default": 0,
+      "preserve": true,
+      "help": "Max non-bypass streamers recording at once. 0 means unlimited."
+    },
+    {
+      "path": "recording.lq_downloader_enabled",
+      "type": "bool",
+      "default": false,
+      "preserve": true,
+      "help": "Master switch for the low-quality downloader fallback mechanism."
+    },
+    {
+      "path": "recording.ff_err_threshold",
+      "type": "int",
+      "default": 200,
+      "preserve": true,
+      "help": "ffmpeg error count that triggers a switch to the LQ downloader."
+    },
+    {
+      "path": "output.subfolders",
+      "type": "enum",
+      "choices": ["none", "site-only", "streamer-only", "site-and-streamer"],
+      "default": "streamer-only",
+      "preserve": true,
+      "help": "How recordings are grouped into subfolders under a site's output dir."
+    },
+    {
+      "path": "output.delete_empty",
+      "type": "bool",
+      "default": true,
+      "preserve": true,
+      "help": "Delete empty output subfolders left behind after moves/deletes."
+    },
+    {
+      "path": "output.collapsible_folders",
+      "type": "bool",
+      "default": true,
+      "preserve": true,
+      "help": "Allow folder rows in the File Manager to be collapsed."
+    },
+    {
+      "path": "notifications.ntfy_topic",
+      "type": "str",
+      "default": "",
+      "preserve": true,
+      "help": "ntfy.sh topic used for push notifications."
+    },
+    {
+      "path": "notifications.notify_confirm_file",
+      "type": "bool",
+      "default": true,
+      "preserve": true,
+      "help": "Notify when a finished recording's output file is confirmed on disk."
+    },
+    {
+      "path": "notifications.notify_no_confirm_file",
+      "type": "bool",
+      "default": true,
+      "preserve": true,
+      "help": "Notify when a finished recording's output file could not be confirmed."
+    },
+    {
+      "path": "ui.site_sort",
+      "type": "enum",
+      "choices": ["last_live_desc", "last_live_asc", "name_asc", "name_desc"],
+      "default": "last_live_desc",
+      "preserve": true,
+      "help": "Sort order for site panels on the dashboard."
+    },
+    {
+      "path": "ui.dashboard",
+      "type": "str",
+      "default": "curses",
+      "preserve": true,
+      "help": "Which frontend to launch."
+    },
+    {
+      "path": "ui.rgb_mode",
+      "type": "bool",
+      "default": true,
+      "preserve": true,
+      "help": "Use true-color terminal palettes when the terminal supports them."
+    },
+    {
+      "path": "ui.compact_view",
+      "type": "enum",
+      "choices": ["auto", "on", "off"],
+      "default": "auto",
+      "preserve": true,
+      "help": "Use a denser dashboard layout. Auto selects based on terminal size."
+    },
+    {
+      "path": "disk.drives",
+      "type": "list[str]",
+      "default": [],
+      "preserve": true,
+      "help": "Drive roots to monitor. Empty means auto-detect from site output dirs."
+    },
+    {
+      "path": "disk.graph_scale",
+      "type": "int",
+      "default": 300,
+      "preserve": true,
+      "help": "Number of samples kept for the disk-rate sparkline graph."
+    },
+    {
+      "path": "disk.sample_interval_sec",
+      "type": "int",
+      "default": 5,
+      "preserve": true,
+      "help": "Seconds between disk usage/rate samples."
+    },
+    {
+      "path": "prompts.ask_for_config",
+      "type": "bool",
+      "default": true,
+      "preserve": true,
+      "help": "Prompt to review settings when creating a new site."
+    },
+    {
+      "path": "debug.enabled",
+      "type": "bool",
+      "default": false,
+      "preserve": true,
+      "help": "Write debug log lines to disk."
+    },
+    {
+      "path": "debug.log_path",
+      "type": "str",
+      "default": "logs/debug.log",
+      "preserve": true,
+      "help": "Path to the debug log file."
+    }
+  ],
+  "site_fields": [
+    {
+      "path": "url_template",
+      "type": "str",
+      "default": "https://example.com/{username}",
+      "preserve": true,
+      "help": "URL pattern used to reach a streamer's page. {username} is substituted."
+    },
+    {
+      "path": "timing.check_interval",
+      "type": "int",
+      "default": 60,
+      "preserve": true,
+      "help": "Seconds between liveness checks for an offline streamer."
+    },
+    {
+      "path": "timing.cooldown_after_recording",
+      "type": "int",
+      "default": 60,
+      "preserve": true,
+      "help": "Seconds to wait after a recording ends before it can start again."
+    },
+    {
+      "path": "timing.stall_check_interval",
+      "type": "int",
+      "default": 30,
+      "preserve": true,
+      "help": "Seconds between file-size checks used to detect a stalled recording."
+    },
+    {
+      "path": "timing.stall_timeout",
+      "type": "int",
+      "default": 120,
+      "preserve": true,
+      "help": "Seconds of no file growth before a recording is considered stalled and restarted."
+    },
+    {
+      "path": "timing.split_after_minutes",
+      "type": "int",
+      "default": 0,
+      "preserve": true,
+      "help": "Split a recording into numbered parts after this many minutes. 0 disables splitting."
+    },
+    {
+      "path": "output.dir",
+      "type": "str",
+      "default": "recordings",
+      "preserve": true,
+      "help": "Directory recordings for this site are saved into."
+    },
+    {
+      "path": "output.template",
+      "type": "str",
+      "default": "%(title)s [%(id)s].%(ext)s",
+      "preserve": true,
+      "help": "yt-dlp output filename template."
+    },
+    {
+      "path": "output.auto_suffix",
+      "type": "bool",
+      "default": true,
+      "preserve": true,
+      "help": "Append _2, _3, etc. instead of overwriting an existing output file."
+    },
+    {
+      "path": "output.panel_resize",
+      "type": "bool",
+      "default": true,
+      "preserve": true,
+      "help": "Let this site's dashboard panel grow/shrink with its streamer count."
+    },
+    {
+      "path": "checker.cookies_from_browser",
+      "type": "bool",
+      "default": false,
+      "preserve": true,
+      "yt_dlp_flag": "--cookies-from-browser",
+      "help": "Use browser cookies when checking liveness."
+    },
+    {
+      "path": "downloader.verbose",
+      "type": "bool",
+      "default": false,
+      "preserve": true,
+      "yt_dlp_flag": "-v",
+      "help": "Run yt-dlp in verbose mode while recording."
+    },
+    {
+      "path": "downloader.cookies_from_browser",
+      "type": "bool",
+      "default": false,
+      "preserve": true,
+      "yt_dlp_flag": "--cookies-from-browser",
+      "help": "Use browser cookies for the normal-quality downloader."
+    },
+    {
+      "path": "downloader.fixup",
+      "type": "enum",
+      "choices": ["never", "warn", "detect_or_warn", "force"],
+      "default": "never",
+      "preserve": true,
+      "yt_dlp_flag": "--fixup",
+      "help": "yt-dlp container fixup policy for normal-quality recording."
+    },
+    {
+      "path": "downloader.no_part",
+      "type": "bool",
+      "default": true,
+      "preserve": true,
+      "yt_dlp_flag": "--no-part",
+      "help": "Write directly to the final filename instead of a .part file."
+    },
+    {
+      "path": "downloader.format",
+      "type": "str",
+      "default": "best",
+      "preserve": true,
+      "yt_dlp_flag": "-f",
+      "help": "yt-dlp format selector for normal-quality recording."
+    },
+    {
+      "path": "downloader.retries",
+      "type": "int",
+      "default": 10,
+      "preserve": true,
+      "yt_dlp_flag": "--retries",
+      "help": "yt-dlp retry count for normal-quality recording."
+    },
+    {
+      "path": "downloader.downloader_args",
+      "type": "str",
+      "default": "",
+      "preserve": true,
+      "help": "Raw arguments passed through to yt-dlp's external/post-processor downloader."
+    },
+    {
+      "path": "downloader.extra_args",
+      "type": "str",
+      "default": "",
+      "preserve": true,
+      "help": "Raw yt-dlp CLI flags appended last, verbatim, overriding anything above."
+    },
+    {
+      "path": "lq_downloader.format",
+      "type": "str",
+      "default": "480p",
+      "preserve": true,
+      "yt_dlp_flag": "-f",
+      "help": "yt-dlp format selector for low-quality fallback recording."
+    },
+    {
+      "path": "lq_downloader.cookies_from_browser",
+      "type": "bool",
+      "default": false,
+      "preserve": true,
+      "yt_dlp_flag": "--cookies-from-browser",
+      "help": "Use browser cookies for the low-quality downloader."
+    },
+    {
+      "path": "lq_downloader.fixup",
+      "type": "enum",
+      "choices": ["never", "warn", "detect_or_warn", "force"],
+      "default": "never",
+      "preserve": true,
+      "yt_dlp_flag": "--fixup",
+      "help": "yt-dlp container fixup policy for low-quality recording."
+    },
+    {
+      "path": "lq_downloader.no_part",
+      "type": "bool",
+      "default": true,
+      "preserve": true,
+      "yt_dlp_flag": "--no-part",
+      "help": "Write directly to the final filename instead of a .part file."
+    },
+    {
+      "path": "notifications.popup_enabled",
+      "type": "bool",
+      "default": true,
+      "preserve": true,
+      "help": "Show a desktop popup when a streamer starts recording."
+    },
+    {
+      "path": "notifications.popup_timeout_sec",
+      "type": "int",
+      "default": 15,
+      "preserve": true,
+      "help": "Seconds the desktop popup stays visible."
+    },
+    {
+      "path": "notifications.popup_cooldown_sec",
+      "type": "int",
+      "default": 240,
+      "preserve": true,
+      "help": "Minimum seconds between desktop popups for the same streamer."
+    },
+    {
+      "path": "notifications.ntfy_enabled",
+      "type": "bool",
+      "default": false,
+      "preserve": true,
+      "help": "Send an ntfy.sh push notification when a streamer starts recording."
+    },
+    {
+      "path": "display.last_live_highlight_days",
+      "type": "int",
+      "default": 1,
+      "preserve": true,
+      "help": "Highlight a streamer as recently-live for this many days after going offline."
+    },
+    {
+      "path": "display.progress_bar_max_hours",
+      "type": "int",
+      "default": 10,
+      "preserve": true,
+      "help": "Hours of live duration at which the dashboard's duration bar is full."
+    },
+    {
+      "path": "display.progress_bar_width",
+      "type": "int",
+      "default": 40,
+      "preserve": true,
+      "help": "Width, in columns, of the dashboard's live-duration bar."
+    },
+    {
+      "path": "browser",
+      "type": "str",
+      "default": "firefox",
+      "preserve": true,
+      "help": "Browser to read cookies from when a cookies_from_browser flag is set."
+    },
+    {
+      "path": "upgrade_quality",
+      "type": "bool",
+      "default": true,
+      "preserve": true,
+      "help": "Periodically retry normal quality after a switch to the LQ downloader."
+    }
+  ],
+  "plugin_fields": {}
+}

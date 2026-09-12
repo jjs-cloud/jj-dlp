@@ -14,3 +14,6 @@ jj-dlp = "jj_dlp.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["jj_dlp*"]
+
+[tool.setuptools.package-data]
+jj_dlp = ["**/*.json"]
