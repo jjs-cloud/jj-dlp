@@ -31,3 +31,4 @@ def list_plugin_ids() -> List[str]:
 
 from jj_dlp.core.plugins import chatsite  # noqa: E402,F401  registers the plugin
 from jj_dlp.core.plugins import twitch  # noqa: E402,F401  registers the plugin
+from jj_dlp.core.plugins import tiktok_live  # noqa: E402,F401  registers the plugin
