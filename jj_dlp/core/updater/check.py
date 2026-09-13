@@ -15,7 +15,7 @@ from jj_dlp.core.config import state
 from jj_dlp.core.notify import logger
 
 # owner/repo slug queried on the GitHub Releases API; update for the real repo.
-GITHUB_REPO = "jjs-cloud/jj-dlp"
+GITHUB_REPO = "jj-dlp/jj-dlp"
 RELEASES_API_URL = "https://api.github.com/repos/{repo}/releases"
 REQUEST_TIMEOUT_SEC = 10
 # how often the background loop wakes to check whether a real check is due

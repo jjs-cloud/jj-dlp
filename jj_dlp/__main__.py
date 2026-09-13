@@ -9,6 +9,7 @@ from pathlib import Path
 
 from jj_dlp import __version__
 from jj_dlp.core.deps import curses_dep, ffmpeg_dep, registry  # noqa: F401
+from jj_dlp.core.updater import install as updater_install
 
 
 def check_dependencies() -> None:
@@ -61,7 +62,13 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    # TODO: --finish-update is accepted but not yet handled (Doc 1 §9.2, Phase 5).
+    if args.finish_update:
+        updater_install.finish_update(Path(args.finish_update), args.data_dir)
+        clean_argv = [a for a in (argv or sys.argv[1:]) if a != args.finish_update]
+        clean_argv = [a for a in clean_argv if a != updater_install.FINISH_UPDATE_FLAG]
+        os.execv(sys.executable, [sys.executable, "-m", "jj_dlp", *clean_argv])
+        return  # unreachable; execv replaces this process
+
     check_dependencies()
     print("jj-dlp starting...")
 
