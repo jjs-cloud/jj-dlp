@@ -8,6 +8,7 @@ from typing import Dict, Optional, Tuple
 
 from jj_dlp.core.config import app as app_config
 from jj_dlp.core.theme import palette, resolve, store
+from jj_dlp.frontends.curses import footer
 from jj_dlp.frontends.curses.tabs.framework import EmptyTab, TabBar
 
 ColorTuple = Tuple[str, str, bool]
@@ -113,11 +114,14 @@ class CursesApp:
         return self.colors.attr_for(pair)
 
     def draw(self) -> None:
-        """Draw one frame: the tab strip, then the active tab's body."""
+        """Draw one frame: the tab strip, the active tab's body, then the footer."""
         self.stdscr.erase()
         self.tab_bar.draw_bar(self.stdscr, 0, 0, self.width - 1, self.color)
+        if self.height > 3:
+            self.tab_bar.draw_active(self.stdscr, 1, 0, self.height - 3, self.width - 1)
         if self.height > 2:
-            self.tab_bar.draw_active(self.stdscr, 1, 0, self.height - 1, self.width - 1)
+            # Row height-2, not height-1: writing the last cell of the last row can raise curses.error.
+            footer.draw_footer(self.stdscr, self.height - 2, 0, self.width - 1, self.tab_bar, self.color)
         self.stdscr.noutrefresh()
         curses.doupdate()
 
