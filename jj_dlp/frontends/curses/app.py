@@ -8,11 +8,23 @@ from typing import Dict, Optional, Tuple
 
 from jj_dlp.core.config import app as app_config
 from jj_dlp.core.theme import palette, resolve, store
+from jj_dlp.frontends.curses.tabs.framework import EmptyTab, TabBar
 
 ColorTuple = Tuple[str, str, bool]
 
 # Input-poll timeout (ms) driving the redraw tick between keypresses.
 TICK_MS = 200
+
+# Placeholder tab titles; Phases 8-13 replace these with real tabs.
+_PLACEHOLDER_TAB_TITLES = [
+    "Dashboard",
+    "Log",
+    "Pipes",
+    "EventSub",
+    "Config",
+    "Priority",
+    "Files",
+]
 
 _CURSES_COLOR_NAMES: Dict[str, int] = {
     "black": curses.COLOR_BLACK,
@@ -66,6 +78,7 @@ class CursesApp:
         self.running = True
         self.height = 0
         self.width = 0
+        self.tab_bar = TabBar([EmptyTab(title) for title in _PLACEHOLDER_TAB_TITLES])
         self._init_curses()
         self._apply_palette()
         self._layout()
@@ -100,24 +113,27 @@ class CursesApp:
         return self.colors.attr_for(pair)
 
     def draw(self) -> None:
-        """Draw one frame. Later phases replace this blank body with real tabs."""
+        """Draw one frame: the tab strip, then the active tab's body."""
         self.stdscr.erase()
-        self.stdscr.attrset(self.color("dashboard.system_panel.border"))
-        self.stdscr.border()
-        self.stdscr.attrset(curses.A_NORMAL)
-        title = " jj-dlp "
-        if self.width > len(title) + 2:
-            self.stdscr.addstr(0, 2, title, self.color("dashboard.system_panel.text"))
+        self.tab_bar.draw_bar(self.stdscr, 0, 0, self.width - 1, self.color)
+        if self.height > 2:
+            self.tab_bar.draw_active(self.stdscr, 1, 0, self.height - 1, self.width - 1)
         self.stdscr.noutrefresh()
         curses.doupdate()
 
     def handle_key(self, key: int) -> None:
-        """Handle one input event. Only quit and resize are wired at this stage."""
+        """Handle one input event: resize, quit, tab switch, else delegate to the active tab."""
         if key == curses.KEY_RESIZE:
             curses.update_lines_cols()
             self._layout()
         elif key in (ord("q"), ord("Q")):
             self.running = False
+        elif key == ord("\t"):
+            self.tab_bar.next_tab()
+        elif key == curses.KEY_BTAB:
+            self.tab_bar.prev_tab()
+        else:
+            self.tab_bar.handle_key(key)
 
     def run(self) -> None:
         """Main draw/input loop: draw a frame, wait for input, repeat until quit."""
