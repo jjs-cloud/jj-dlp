@@ -7,8 +7,10 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 from jj_dlp.core.config import app as app_config
+from jj_dlp.core.engine.site_state import SiteState
 from jj_dlp.core.theme import palette, resolve, store
 from jj_dlp.frontends.curses import footer
+from jj_dlp.frontends.curses.popups.exit_confirm import confirm_exit
 from jj_dlp.frontends.curses.tabs.framework import EmptyTab, TabBar
 
 ColorTuple = Tuple[str, str, bool]
@@ -71,7 +73,7 @@ class ColorManager:
 class CursesApp:
     """Owns the curses screen, active theme, and the draw/input loop."""
 
-    def __init__(self, stdscr, data_dir: Path) -> None:
+    def __init__(self, stdscr, data_dir: Path, site_states: Optional[Dict[str, SiteState]] = None) -> None:
         self.stdscr = stdscr
         self.data_dir = Path(data_dir)
         self.colors = ColorManager()
@@ -79,6 +81,8 @@ class CursesApp:
         self.running = True
         self.height = 0
         self.width = 0
+        # Empty until Phase 17 wires real engine-backed SiteState instances in.
+        self.site_states: Dict[str, SiteState] = site_states or {}
         self.tab_bar = TabBar([EmptyTab(title) for title in _PLACEHOLDER_TAB_TITLES])
         self._init_curses()
         self._apply_palette()
@@ -125,13 +129,18 @@ class CursesApp:
         self.stdscr.noutrefresh()
         curses.doupdate()
 
+    def request_quit(self) -> None:
+        """Ask for confirmation if recordings are active, then quit if confirmed."""
+        if confirm_exit(self.stdscr, self.site_states.values(), self.color):
+            self.running = False
+
     def handle_key(self, key: int) -> None:
         """Handle one input event: resize, quit, tab switch, else delegate to the active tab."""
         if key == curses.KEY_RESIZE:
             curses.update_lines_cols()
             self._layout()
         elif key in (ord("q"), ord("Q")):
-            self.running = False
+            self.request_quit()
         elif key == ord("\t"):
             self.tab_bar.next_tab()
         elif key == curses.KEY_BTAB:
