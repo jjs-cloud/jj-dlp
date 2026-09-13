@@ -17,6 +17,11 @@ ColorFn = Callable[[str, Optional[ColorTuple]], int]
 
 _STATE_GLYPHS = {"recording": "●", "live": "○", "offline": "–"}
 
+# Minimum width for one site panel column when packing the grid.
+MIN_PANEL_WIDTH = 34
+# Height used for a panel whose site has output.panel_resize == False.
+FIXED_PANEL_HEIGHT = 8
+
 
 def _default_color_fn(_element_id: str, _runtime_pair: Optional[ColorTuple] = None) -> int:
     """Fallback color resolver used when no themed CursesApp is available yet."""
@@ -138,6 +143,10 @@ class DashboardTab(Tab):
         self.disk_sampler = disk_sampler
         self.sites = sorted(sites or [], key=lambda s: (s.config.get("order", 0), s.label))
         self.color = color_fn or _default_color_fn
+        self.scroll_row = 0
+        # Cached from the last draw, so handle_key/footer_hints can size scrolling correctly.
+        self._last_row_heights: List[int] = []
+        self._last_available_height = 0
 
     def _system_panel_lines(self) -> List[str]:
         """Build the system panel's text lines: uptime plus per-drive free/used space."""
@@ -228,29 +237,105 @@ class DashboardTab(Tab):
                 pass
             row += 1
 
+    @staticmethod
+    def _panel_height(source: SitePanelSource) -> int:
+        """A resizing panel's height tracks its streamer count; others use a fixed height."""
+        if source.config.get("output", {}).get("panel_resize", True):
+            return max(2, len(source.config.get("streamers", [])) + 2)
+        return FIXED_PANEL_HEIGHT
+
+    def _grid_rows(self, width: int) -> Tuple[int, List[List[SitePanelSource]]]:
+        """Split sites into row-major grid rows, as many columns as MIN_PANEL_WIDTH allows."""
+        if not self.sites or width <= 0:
+            return 1, []
+        columns = max(1, min(width // MIN_PANEL_WIDTH, len(self.sites)))
+        rows = [self.sites[i : i + columns] for i in range(0, len(self.sites), columns)]
+        return columns, rows
+
+    @staticmethod
+    def _max_scroll_row(row_heights: List[int], available_height: int) -> int:
+        """Largest scroll offset that still leaves every remaining row visible."""
+        if not row_heights or sum(row_heights) <= available_height:
+            return 0
+        used = 0
+        for start in range(len(row_heights) - 1, -1, -1):
+            used += row_heights[start]
+            if used > available_height:
+                return min(start + 1, len(row_heights) - 1)
+        return 0
+
+    def _visible_row_count(self) -> int:
+        """How many grid rows fit at once, for page-up/page-down scrolling."""
+        count = 0
+        used = 0
+        for height in self._last_row_heights:
+            used += height
+            if used > self._last_available_height and count > 0:
+                break
+            count += 1
+        return max(1, count)
+
     def _draw_site_panels(self, stdscr, y1: int, x1: int, y2: int, x2: int) -> None:
-        """Stack every loaded site's panel vertically, clipped to the available rows."""
-        row = y1
-        for source in self.sites:
-            if row > y2:
+        """Arrange site panels in a column grid, honoring panel_resize, and scroll if needed."""
+        available_width = x2 - x1 + 1
+        available_height = y2 - y1 + 1
+        columns, rows = self._grid_rows(available_width)
+        row_heights = [max(self._panel_height(source) for source in row) for row in rows]
+
+        self._last_row_heights = row_heights
+        self._last_available_height = available_height
+        if available_height <= 0 or not rows:
+            self.scroll_row = 0
+            return
+
+        max_scroll = self._max_scroll_row(row_heights, available_height)
+        self.scroll_row = max(0, min(self.scroll_row, max_scroll))
+
+        panel_width = available_width // columns
+        row_top = y1
+        for row_index, row in enumerate(rows):
+            if row_index < self.scroll_row:
+                continue
+            if row_top > y2:
                 break
-            needed = len(source.config.get("streamers", [])) + 2
-            panel_bottom = min(y2, row + needed - 1)
-            if panel_bottom - row + 1 < 2:
-                break
-            self._draw_site_panel(stdscr, source, row, x1, panel_bottom, x2)
-            row = panel_bottom + 1
+            row_bottom = min(y2, row_top + row_heights[row_index] - 1)
+            col_x = x1
+            for col_index, source in enumerate(row):
+                is_last_col = col_index == len(row) - 1
+                panel_x2 = x2 if is_last_col else min(x2, col_x + panel_width - 1)
+                if panel_x2 - col_x + 1 >= 2:
+                    self._draw_site_panel(stdscr, source, row_top, col_x, row_bottom, panel_x2)
+                col_x = panel_x2 + 1
+            row_top = row_bottom + 1
 
     def draw(self, stdscr, y1: int, x1: int, y2: int, x2: int) -> None:
-        """Draw the system panel, then every site's panel stacked below it."""
+        """Draw the system panel, then every site's panel grid below it."""
         next_row = self._draw_system_panel(stdscr, y1, x1, y2, x2)
         if next_row <= y2:
             self._draw_site_panels(stdscr, next_row, x1, y2, x2)
+        else:
+            self._last_row_heights = []
+            self._last_available_height = 0
 
     def handle_key(self, key: int) -> bool:
-        """No keybinds yet; site panel scrolling arrives in Step 8.3."""
-        return False
+        """Scroll the site-panel grid with arrow/page keys when it doesn't fully fit."""
+        max_scroll = self._max_scroll_row(self._last_row_heights, self._last_available_height)
+        if max_scroll <= 0:
+            return False
+        if key == curses.KEY_UP:
+            self.scroll_row = max(0, self.scroll_row - 1)
+        elif key == curses.KEY_DOWN:
+            self.scroll_row = min(max_scroll, self.scroll_row + 1)
+        elif key == curses.KEY_PPAGE:
+            self.scroll_row = max(0, self.scroll_row - self._visible_row_count())
+        elif key == curses.KEY_NPAGE:
+            self.scroll_row = min(max_scroll, self.scroll_row + self._visible_row_count())
+        else:
+            return False
+        return True
 
     def footer_hints(self) -> List[Tuple[str, str]]:
-        """No tab-specific keybinds yet."""
+        """Show the scroll hint only when the site-panel grid doesn't fully fit."""
+        if self._max_scroll_row(self._last_row_heights, self._last_available_height) > 0:
+            return [("↑/↓/pgup/pgdn", "scroll sites")]
         return []
