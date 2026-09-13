@@ -61,6 +61,14 @@ def _row_state(snapshot: Optional[StreamerSnapshot]) -> str:
     return "recording" if snapshot.recording else "live"
 
 
+def _recently_live(snapshot: Optional[StreamerSnapshot], highlight_days: float) -> bool:
+    """True if an offline streamer's last_live falls within highlight_days of now."""
+    if snapshot is None or not snapshot.last_live or highlight_days <= 0:
+        return False
+    age_days = (time.time() - snapshot.last_live) / 86400
+    return 0 <= age_days <= highlight_days
+
+
 def _status_string(snapshot: Optional[StreamerSnapshot]) -> str:
     """Pick the most relevant short status word for a streamer row."""
     if snapshot is None:
@@ -212,6 +220,7 @@ class DashboardTab(Tab):
 
         display_cfg = source.config.get("display", {})
         max_hours = float(display_cfg.get("progress_bar_max_hours", 10))
+        highlight_days = float(display_cfg.get("last_live_highlight_days", 0))
         name_width = 16
         bar_width = max(0, min(int(display_cfg.get("progress_bar_width", 40)), inner_width - name_width - 14))
 
@@ -223,7 +232,10 @@ class DashboardTab(Tab):
             stream_snap = snapshot.streamers.get(name)
             state = _row_state(stream_snap)
             glyph = _STATE_GLYPHS[state]
-            row_attr = self.color(f"dashboard.streamer.row_{state}", None)
+            if state == "offline" and _recently_live(stream_snap, highlight_days):
+                row_attr = self.color("dashboard.streamer.last_live_highlight", None)
+            else:
+                row_attr = self.color(f"dashboard.streamer.row_{state}", None)
             dot_attr = self.color("dashboard.streamer.recording_dot", None) if state == "recording" else row_attr
 
             live_since = stream_snap.live_since if stream_snap else None
