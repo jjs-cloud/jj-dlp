@@ -8,6 +8,21 @@ import sys
 from pathlib import Path
 
 from jj_dlp import __version__
+from jj_dlp.core.deps import curses_dep, ffmpeg_dep, registry  # noqa: F401
+
+
+def check_dependencies() -> None:
+    """Check every registered dependency, offering to install anything missing."""
+    for dep in registry.get_all():
+        ok, message = dep.check()
+        if ok:
+            continue
+        print(f"[{dep.name}] {message}")
+        answer = input(f"Install {dep.name} now? [y/N] ").strip().lower()
+        if answer != "y":
+            continue
+        ok, message = dep.install(progress_cb=print)
+        print(f"[{dep.name}] {message}")
 
 
 def default_data_dir() -> Path:
@@ -47,6 +62,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     # TODO: --finish-update is accepted but not yet handled (Doc 1 §9.2, Phase 5).
+    check_dependencies()
     print("jj-dlp starting...")
 
 
