@@ -63,6 +63,15 @@ def _free_space(drive: str) -> int:
         return 0
 
 
+def get_usage(drive: str) -> Optional[Tuple[int, int]]:
+    """Return (free, total) bytes for a drive path, or None if it can't be statted."""
+    try:
+        usage = shutil.disk_usage(drive)
+        return usage.free, usage.total
+    except OSError:
+        return None
+
+
 def _file_size(path: str) -> int:
     """Return a file's current size in bytes, or 0 if it doesn't exist."""
     try:
@@ -120,6 +129,10 @@ class DiskSampler:
 
         config_state.append_disk_history(self.data_dir, rate, self.app_config.get_disk().graph_scale)
         return rate
+
+    def drives(self) -> List[str]:
+        """Return the resolved list of drive paths currently being monitored."""
+        return resolve_drives(self.app_config, self.sources)
 
     def current_rate(self) -> float:
         """Return the most recently sampled instantaneous write rate, in bytes/sec."""
