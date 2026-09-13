@@ -1,5 +1,7 @@
 """SitePlugin implementation for the twitch plugin."""
 
+from typing import Any
+
 from jj_dlp.core.plugins import register_plugin
 from jj_dlp.core.plugins.base import FieldDef, SitePlugin
 
@@ -133,7 +135,15 @@ class TwitchPlugin(SitePlugin):
             ),
         ]
 
-    # on_downloader_line: implemented in Phase 2 (Step 2.11, ad_alerts.py).
+    def on_downloader_line(self, site: Any, streamer: str, line: str) -> None:
+        """Flag ad_alert_active for streamer on a matching ad-pattern substring."""
+        settings = site.config.get("plugin_settings", {})
+        if not settings.get("ad_alerts_enabled", True):
+            return
+        patterns = settings.get("ad_alert_patterns", [])
+        lowered = line.lower()
+        if any(pattern.lower() in lowered for pattern in patterns):
+            site.site_state.set_ad_alert_active(streamer, True)
 
     # start_background_service / stop_background_service: implemented in
     # Phase 16 (Twitch EventSub subsystem).
