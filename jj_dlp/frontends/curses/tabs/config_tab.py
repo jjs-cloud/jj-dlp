@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import copy
 import curses
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from jj_dlp.core.config import app as app_config
+from jj_dlp.core.config import schema
+from jj_dlp.frontends.curses.tabs.framework import Tab
 
 ColorTuple = Tuple[str, str, bool]
 ColorFn = Callable[[str, Optional[ColorTuple]], int]
@@ -335,3 +340,79 @@ class FieldListEditor:
                 set_field_value(self.data, field["path"], not bool(get_field_value(self.data, field["path"])))
             return True
         return False
+
+
+def _schema_path(data_dir: Path) -> Path:
+    """Return the schema/fields.json path under a data directory."""
+    return Path(data_dir) / "schema" / "fields.json"
+
+
+class GlobalSettingsScreen:
+    """Schema-driven editor for config/app.json, via core/config/app.py."""
+
+    def __init__(self, data_dir: Path, color_fn: Optional[ColorFn] = None) -> None:
+        self.data_dir = Path(data_dir)
+        self.color = color_fn or _default_color_fn
+        self.editor: FieldListEditor
+        self.reload()
+
+    def reload(self) -> None:
+        """Reload config/app.json from disk, discarding any unsaved edits."""
+        self._config = app_config.load(self.data_dir)
+        fields = schema.get_app_fields(_schema_path(self.data_dir))
+        self.editor = FieldListEditor(fields, self._config.to_dict(), self.color)
+        self.editor.error = "Reloaded from disk."
+
+    def save(self) -> None:
+        """Rebuild an AppConfig from the editor's data and save it to config/app.json."""
+        try:
+            self._config = app_config.AppConfig.from_dict(self.editor.data)
+        except Exception as exc:  # malformed edit slipped past field-level coercion
+            self.editor.error = f"Save failed: {exc}"
+            return
+        app_config.save(self.data_dir, self._config)
+        self.editor.mark_clean()
+        self.editor.error = "Saved."
+
+    def draw(self, stdscr, y1: int, x1: int, y2: int, x2: int) -> None:
+        """Draw the app_fields list."""
+        self.editor.draw(stdscr, y1, x1, y2, x2)
+
+    def handle_key(self, key: int, stdscr=None) -> bool:
+        """Save on 's', reload on 'r', else delegate to the field editor."""
+        if key == ord("s"):
+            self.save()
+            return True
+        if key == ord("r"):
+            self.reload()
+            return True
+        return self.editor.handle_key(key, stdscr)
+
+    def footer_hints(self) -> List[Tuple[str, str]]:
+        """Field navigation hints plus save/reload."""
+        return field_editor_hints() + [("s", "save"), ("r", "reload")]
+
+
+class ConfigTab(Tab):
+    """Config tab: global app settings for now, per-site screens join in Step 10.3."""
+
+    title = "Config"
+
+    def __init__(self, data_dir: Path, color_fn: Optional[ColorFn] = None) -> None:
+        self.data_dir = Path(data_dir)
+        self.color = color_fn or _default_color_fn
+        self.global_screen = GlobalSettingsScreen(self.data_dir, self.color)
+        self._stdscr = None
+
+    def draw(self, stdscr, y1: int, x1: int, y2: int, x2: int) -> None:
+        """Draw the active screen (only the global settings screen exists so far)."""
+        self._stdscr = stdscr
+        self.global_screen.draw(stdscr, y1, x1, y2, x2)
+
+    def handle_key(self, key: int) -> bool:
+        """Delegate to the active screen, passing the stdscr captured at draw time."""
+        return self.global_screen.handle_key(key, self._stdscr)
+
+    def footer_hints(self) -> List[Tuple[str, str]]:
+        """Footer hints from the active screen."""
+        return self.global_screen.footer_hints()
