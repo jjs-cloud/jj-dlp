@@ -10,7 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from jj_dlp.core.config import app as app_config
 from jj_dlp.core.config import schema
 from jj_dlp.core.config import sites as sites_config
-from jj_dlp.core.plugins import get_plugin
+from jj_dlp.core.plugins import get_plugin, list_plugin_ids
 from jj_dlp.frontends.curses.tabs.framework import Tab
 
 ColorTuple = Tuple[str, str, bool]
@@ -454,8 +454,109 @@ class SiteSettingsScreen:
         return field_editor_hints() + [("s", "save"), ("r", "reload")]
 
 
+class CreateSiteFlow:
+    """Modal flow: pick a plugin, enter a unique label, then create the site."""
+
+    def __init__(self, data_dir: Path, color_fn: Optional[ColorFn] = None) -> None:
+        self.data_dir = Path(data_dir)
+        self.color = color_fn or _default_color_fn
+        self.plugin_ids = list_plugin_ids()
+        self.index = 0
+        self.error: Optional[str] = None
+
+    def _draw_plugin_menu(self, stdscr) -> None:
+        """Render a centered list of registered plugin display names."""
+        height, width = stdscr.getmaxyx()
+        rows = [get_plugin(pid).display_name for pid in self.plugin_ids]
+        title = "New site \u2014 choose a plugin"
+        box_width = max(24, min(width - 2, max(len(r) for r in rows + [title]) + 4))
+        box_height = max(5, min(height - 2, len(rows) + 4))
+        y1 = max(0, (height - box_height) // 2)
+        x1 = max(0, (width - box_width) // 2)
+
+        win = curses.newwin(box_height, box_width, y1, x1)
+        win.erase()
+        win.attrset(self.color("popup.border", None))
+        win.border()
+        win.attrset(curses.A_NORMAL)
+        win.addstr(1, 2, title[: box_width - 4], self.color("popup.title", None))
+        for i, row_text in enumerate(rows):
+            row = 3 + i
+            if row >= box_height - 1:
+                break
+            attr = self.color("popup.button_focused", None) if i == self.index else self.color("config.field_value", None)
+            win.addstr(row, 2, row_text[: box_width - 4], attr)
+        win.noutrefresh()
+        curses.doupdate()
+
+    def _pick_plugin(self, stdscr) -> Optional[str]:
+        """Run the plugin-choice menu. Returns the chosen plugin id, or None if cancelled."""
+        if not self.plugin_ids:
+            return None
+        while True:
+            self._draw_plugin_menu(stdscr)
+            key = stdscr.getch()
+            if key == curses.KEY_UP:
+                self.index = (self.index - 1) % len(self.plugin_ids)
+            elif key == curses.KEY_DOWN:
+                self.index = (self.index + 1) % len(self.plugin_ids)
+            elif key in (curses.KEY_ENTER, 10, 13):
+                return self.plugin_ids[self.index]
+            elif key == 27:
+                return None
+
+    def _prompt_label(self, stdscr) -> Optional[str]:
+        """Prompt for a label, re-prompting on validation errors until cancelled."""
+        text = ""
+        while True:
+            entered = _edit_text(stdscr, text, "New site label: ", self.color)
+            if entered is None:
+                return None
+            text = entered
+            if not text or not sites_config.LABEL_RE.match(text):
+                text = _flash_and_retry(
+                    stdscr, self.color, text,
+                    "Label must be non-empty, using only letters, numbers, _ or -.",
+                )
+                continue
+            if text in sites_config.list_sites(self.data_dir):
+                text = _flash_and_retry(
+                    stdscr, self.color, text, f"A site named '{text}' already exists.",
+                )
+                continue
+            return text
+
+    def run(self, stdscr) -> Optional[Tuple[str, str]]:
+        """Run plugin choice then label entry. Returns (label, plugin_id), or None if cancelled."""
+        plugin_id = self._pick_plugin(stdscr)
+        if plugin_id is None:
+            return None
+        label = self._prompt_label(stdscr)
+        if label is None:
+            return None
+        return label, plugin_id
+
+
+def _flash_and_retry(stdscr, color_fn: ColorFn, text: str, message: str) -> str:
+    """Briefly show a validation error, then return the text to re-prompt with."""
+    height, width = stdscr.getmaxyx()
+    win_width = max(20, min(width - 4, max(len(message) + 4, 30)))
+    win = curses.newwin(3, win_width, max(0, height // 2 + 1), max(0, (width - win_width) // 2))
+    win.erase()
+    win.attrset(color_fn("popup.border", None))
+    win.border()
+    win.attrset(curses.A_NORMAL)
+    win.addstr(1, 2, message[: win_width - 4], color_fn("footer.hint_text", None))
+    win.noutrefresh()
+    curses.doupdate()
+    stdscr.getch()
+    return text
+
+
 class SiteListScreen:
-    """Top-level Config picker: App Settings plus every configured site's label."""
+    """Top-level Config picker: App Settings, every configured site, plus New Site."""
+
+    NEW_SITE_LABEL = "+ New Site"
 
     def __init__(self, data_dir: Path, color_fn: Optional[ColorFn] = None) -> None:
         self.data_dir = Path(data_dir)
@@ -465,12 +566,16 @@ class SiteListScreen:
 
     def refresh(self) -> None:
         """Re-read the site list from disk, keeping the selection in range."""
-        self.labels = ["App Settings"] + sites_config.list_sites(self.data_dir)
+        self.labels = ["App Settings"] + sites_config.list_sites(self.data_dir) + [self.NEW_SITE_LABEL]
         self.index = min(self.index, len(self.labels) - 1)
 
     def selected(self) -> str:
-        """Return 'app' for the App Settings row, else the selected site's label."""
-        return "app" if self.index == 0 else self.labels[self.index]
+        """Return 'app', 'new', or the selected site's label."""
+        if self.index == 0:
+            return "app"
+        if self.labels[self.index] == self.NEW_SITE_LABEL:
+            return "new"
+        return self.labels[self.index]
 
     def draw(self, stdscr, y1: int, x1: int, y2: int, x2: int) -> None:
         """Draw one row per entry, highlighting the current selection."""
@@ -500,7 +605,7 @@ class SiteListScreen:
 
     def footer_hints(self) -> List[Tuple[str, str]]:
         """Navigation hints for the picker screen."""
-        return [("↑/↓", "move"), ("enter", "open")]
+        return [("↑/↓", "move"), ("enter", "open/create")]
 
 
 class ConfigTab(Tab):
@@ -535,6 +640,8 @@ class ConfigTab(Tab):
                 if choice == "app":
                     self.global_screen.reload()
                     self.mode = "app"
+                elif choice == "new":
+                    self._create_site()
                 else:
                     self.site_screen = SiteSettingsScreen(self.data_dir, choice, self.color)
                     self.mode = "site"
@@ -550,6 +657,24 @@ class ConfigTab(Tab):
         if self.mode == "site" and self.site_screen is not None:
             return self.site_screen.handle_key(key, self._stdscr)
         return False
+
+    def _create_site(self) -> None:
+        """Run the create-new-site flow and land in that site's settings screen on success."""
+        if self._stdscr is None:
+            return
+        flow = CreateSiteFlow(self.data_dir, self.color)
+        result = flow.run(self._stdscr)
+        if result is None:
+            return
+        label, plugin_id = result
+        try:
+            sites_config.create_site(self.data_dir, label, plugin_id)
+        except ValueError as exc:  # e.g. a concurrent writer took the label first
+            _flash_and_retry(self._stdscr, self.color, label, str(exc))
+            return
+        self.list_screen.refresh()
+        self.site_screen = SiteSettingsScreen(self.data_dir, label, self.color)
+        self.mode = "site"
 
     def footer_hints(self) -> List[Tuple[str, str]]:
         """Footer hints from the active screen, plus 'back' once inside one."""
