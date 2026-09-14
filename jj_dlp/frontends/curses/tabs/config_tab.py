@@ -9,6 +9,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from jj_dlp.core.config import app as app_config
 from jj_dlp.core.config import schema
+from jj_dlp.core.config import sites as sites_config
+from jj_dlp.core.plugins import get_plugin
 from jj_dlp.frontends.curses.tabs.framework import Tab
 
 ColorTuple = Tuple[str, str, bool]
@@ -393,26 +395,166 @@ class GlobalSettingsScreen:
         return field_editor_hints() + [("s", "save"), ("r", "reload")]
 
 
+def _site_fields(data_dir: Path, plugin_id: Optional[str]) -> List[FieldDef]:
+    """Return site_fields plus the given plugin's plugin_settings_schema(), as plain dicts."""
+    fields = list(schema.get_site_fields(_schema_path(data_dir)))
+    if plugin_id:
+        try:
+            plugin = get_plugin(plugin_id)
+        except KeyError:
+            plugin = None
+        if plugin is not None:
+            fields += [f.to_dict() for f in plugin.plugin_settings_schema()]
+    return fields
+
+
+class SiteSettingsScreen:
+    """Schema-driven editor for one config/sites/<label>.json, via core/config/sites.py."""
+
+    def __init__(self, data_dir: Path, label: str, color_fn: Optional[ColorFn] = None) -> None:
+        self.data_dir = Path(data_dir)
+        self.label = label
+        self.color = color_fn or _default_color_fn
+        self.editor: FieldListEditor
+        self.reload()
+
+    def reload(self) -> None:
+        """Reload this site's config from disk, discarding any unsaved edits."""
+        self._data = sites_config.load_site(self.data_dir, self.label, _schema_path(self.data_dir))
+        fields = _site_fields(self.data_dir, self._data.get("plugin"))
+        self.editor = FieldListEditor(fields, self._data, self.color)
+        self.editor.error = "Reloaded from disk."
+
+    def save(self) -> None:
+        """Save the editor's data back to this site's config file."""
+        try:
+            sites_config.save_site(self.data_dir, self.label, self.editor.data)
+        except Exception as exc:  # malformed edit or IO failure
+            self.editor.error = f"Save failed: {exc}"
+            return
+        self.editor.mark_clean()
+        self.editor.error = "Saved."
+
+    def draw(self, stdscr, y1: int, x1: int, y2: int, x2: int) -> None:
+        """Draw the site_fields plus plugin fields list."""
+        self.editor.draw(stdscr, y1, x1, y2, x2)
+
+    def handle_key(self, key: int, stdscr=None) -> bool:
+        """Save on 's', reload on 'r', else delegate to the field editor."""
+        if key == ord("s"):
+            self.save()
+            return True
+        if key == ord("r"):
+            self.reload()
+            return True
+        return self.editor.handle_key(key, stdscr)
+
+    def footer_hints(self) -> List[Tuple[str, str]]:
+        """Field navigation hints plus save/reload."""
+        return field_editor_hints() + [("s", "save"), ("r", "reload")]
+
+
+class SiteListScreen:
+    """Top-level Config picker: App Settings plus every configured site's label."""
+
+    def __init__(self, data_dir: Path, color_fn: Optional[ColorFn] = None) -> None:
+        self.data_dir = Path(data_dir)
+        self.color = color_fn or _default_color_fn
+        self.index = 0
+        self.refresh()
+
+    def refresh(self) -> None:
+        """Re-read the site list from disk, keeping the selection in range."""
+        self.labels = ["App Settings"] + sites_config.list_sites(self.data_dir)
+        self.index = min(self.index, len(self.labels) - 1)
+
+    def selected(self) -> str:
+        """Return 'app' for the App Settings row, else the selected site's label."""
+        return "app" if self.index == 0 else self.labels[self.index]
+
+    def draw(self, stdscr, y1: int, x1: int, y2: int, x2: int) -> None:
+        """Draw one row per entry, highlighting the current selection."""
+        width = x2 - x1 + 1
+        row = y1
+        for i, label in enumerate(self.labels):
+            if row > y2:
+                break
+            role = "popup.button_focused" if i == self.index else "config.field_value"
+            try:
+                stdscr.addstr(row, x1, label[:width], self.color(role, None))
+            except curses.error:
+                pass
+            row += 1
+
+    def handle_key(self, key: int) -> bool:
+        """Move the selection up/down, wrapping around."""
+        if not self.labels:
+            return False
+        if key == curses.KEY_UP:
+            self.index = (self.index - 1) % len(self.labels)
+            return True
+        if key == curses.KEY_DOWN:
+            self.index = (self.index + 1) % len(self.labels)
+            return True
+        return False
+
+    def footer_hints(self) -> List[Tuple[str, str]]:
+        """Navigation hints for the picker screen."""
+        return [("↑/↓", "move"), ("enter", "open")]
+
+
 class ConfigTab(Tab):
-    """Config tab: global app settings for now, per-site screens join in Step 10.3."""
+    """Config tab: a site/settings picker, the global screen, and per-site screens."""
 
     title = "Config"
 
     def __init__(self, data_dir: Path, color_fn: Optional[ColorFn] = None) -> None:
         self.data_dir = Path(data_dir)
         self.color = color_fn or _default_color_fn
+        self.list_screen = SiteListScreen(self.data_dir, self.color)
         self.global_screen = GlobalSettingsScreen(self.data_dir, self.color)
+        self.site_screen: Optional[SiteSettingsScreen] = None
+        self.mode = "list"  # "list" | "app" | "site"
         self._stdscr = None
 
     def draw(self, stdscr, y1: int, x1: int, y2: int, x2: int) -> None:
-        """Draw the active screen (only the global settings screen exists so far)."""
+        """Draw whichever screen is currently active."""
         self._stdscr = stdscr
-        self.global_screen.draw(stdscr, y1, x1, y2, x2)
+        if self.mode == "app":
+            self.global_screen.draw(stdscr, y1, x1, y2, x2)
+        elif self.mode == "site" and self.site_screen is not None:
+            self.site_screen.draw(stdscr, y1, x1, y2, x2)
+        else:
+            self.list_screen.draw(stdscr, y1, x1, y2, x2)
 
     def handle_key(self, key: int) -> bool:
-        """Delegate to the active screen, passing the stdscr captured at draw time."""
-        return self.global_screen.handle_key(key, self._stdscr)
+        """Route a keypress to the active screen; esc returns to the picker."""
+        if self.mode == "list":
+            if key in (curses.KEY_ENTER, 10, 13):
+                choice = self.list_screen.selected()
+                if choice == "app":
+                    self.global_screen.reload()
+                    self.mode = "app"
+                else:
+                    self.site_screen = SiteSettingsScreen(self.data_dir, choice, self.color)
+                    self.mode = "site"
+                return True
+            return self.list_screen.handle_key(key)
+
+        if key == 27:
+            self.mode = "list"
+            self.list_screen.refresh()
+            return True
+        if self.mode == "app":
+            return self.global_screen.handle_key(key, self._stdscr)
+        if self.mode == "site" and self.site_screen is not None:
+            return self.site_screen.handle_key(key, self._stdscr)
+        return False
 
     def footer_hints(self) -> List[Tuple[str, str]]:
-        """Footer hints from the active screen."""
-        return self.global_screen.footer_hints()
+        """Footer hints from the active screen, plus 'back' once inside one."""
+        if self.mode == "app":
+            return self.global_screen.footer_hints() + [("esc", "back")]
+        if self.mode == "site" and self.site_screen is not None:
+            return self.site_screen.footer_hints() + [("esc", "back")]
+        return self.list_screen.footer_hints()
