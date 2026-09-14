@@ -553,6 +553,56 @@ def _flash_and_retry(stdscr, color_fn: ColorFn, text: str, message: str) -> str:
     return text
 
 
+def _confirm_popup(stdscr, color_fn: ColorFn, message: str) -> bool:
+    """Blocking yes/no confirmation popup. Returns True if the user confirms."""
+    height, width = stdscr.getmaxyx()
+    win_width = max(24, min(width - 4, len(message) + 8))
+    win = curses.newwin(3, win_width, max(0, height // 2 - 1), max(0, (width - win_width) // 2))
+    win.erase()
+    win.attrset(color_fn("popup.border", None))
+    win.border()
+    win.attrset(curses.A_NORMAL)
+    win.addstr(1, 2, (message + " (y/n)")[: win_width - 4], color_fn("popup.title", None))
+    win.noutrefresh()
+    curses.doupdate()
+    while True:
+        key = stdscr.getch()
+        if key in (ord("y"), ord("Y")):
+            return True
+        if key in (ord("n"), ord("N"), 27):
+            return False
+
+
+class RenameSiteFlow:
+    """Modal flow: prompt for a new, valid, unique label and rename a site."""
+
+    def __init__(self, data_dir: Path, old_label: str, color_fn: Optional[ColorFn] = None) -> None:
+        self.data_dir = Path(data_dir)
+        self.old_label = old_label
+        self.color = color_fn or _default_color_fn
+
+    def run(self, stdscr) -> Optional[str]:
+        """Prompt for a new label, re-prompting on validation errors. Returns it, or None if cancelled."""
+        text = self.old_label
+        while True:
+            entered = _edit_text(stdscr, text, "Rename site to: ", self.color)
+            if entered is None:
+                return None
+            text = entered
+            if not text or not sites_config.LABEL_RE.match(text):
+                text = _flash_and_retry(
+                    stdscr, self.color, text,
+                    "Label must be non-empty, using only letters, numbers, _ or -.",
+                )
+                continue
+            if text != self.old_label and text in sites_config.list_sites(self.data_dir):
+                text = _flash_and_retry(
+                    stdscr, self.color, text, f"A site named '{text}' already exists.",
+                )
+                continue
+            return text
+
+
 class SiteListScreen:
     """Top-level Config picker: App Settings, every configured site, plus New Site."""
 
@@ -576,6 +626,10 @@ class SiteListScreen:
         if self.labels[self.index] == self.NEW_SITE_LABEL:
             return "new"
         return self.labels[self.index]
+
+    def selected_is_site(self) -> bool:
+        """Return whether the current selection is a real site (not App Settings/New Site)."""
+        return self.index != 0 and self.labels[self.index] != self.NEW_SITE_LABEL
 
     def draw(self, stdscr, y1: int, x1: int, y2: int, x2: int) -> None:
         """Draw one row per entry, highlighting the current selection."""
@@ -605,7 +659,10 @@ class SiteListScreen:
 
     def footer_hints(self) -> List[Tuple[str, str]]:
         """Navigation hints for the picker screen."""
-        return [("↑/↓", "move"), ("enter", "open/create")]
+        hints = [("↑/↓", "move"), ("enter", "open/create")]
+        if self.selected_is_site():
+            hints += [("r", "rename"), ("d", "delete")]
+        return hints
 
 
 class ConfigTab(Tab):
@@ -646,6 +703,12 @@ class ConfigTab(Tab):
                     self.site_screen = SiteSettingsScreen(self.data_dir, choice, self.color)
                     self.mode = "site"
                 return True
+            if key == ord("r") and self.list_screen.selected_is_site():
+                self._rename_site()
+                return True
+            if key == ord("d") and self.list_screen.selected_is_site():
+                self._delete_site()
+                return True
             return self.list_screen.handle_key(key)
 
         if key == 27:
@@ -675,6 +738,38 @@ class ConfigTab(Tab):
         self.list_screen.refresh()
         self.site_screen = SiteSettingsScreen(self.data_dir, label, self.color)
         self.mode = "site"
+
+    def _rename_site(self) -> None:
+        """Run the rename flow for the selected site, updating priority/state references."""
+        if self._stdscr is None:
+            return
+        old_label = self.list_screen.selected()
+        flow = RenameSiteFlow(self.data_dir, old_label, self.color)
+        new_label = flow.run(self._stdscr)
+        if new_label is None or new_label == old_label:
+            return
+        try:
+            sites_config.rename_site(self.data_dir, old_label, new_label)
+        except ValueError as exc:  # e.g. a concurrent writer took the label first
+            _flash_and_retry(self._stdscr, self.color, new_label, str(exc))
+            return
+        if self.site_screen is not None and self.site_screen.label == old_label:
+            self.site_screen = SiteSettingsScreen(self.data_dir, new_label, self.color)
+        self.list_screen.refresh()
+
+    def _delete_site(self) -> None:
+        """Confirm, then delete the selected site and its priority/state entries."""
+        if self._stdscr is None:
+            return
+        label = self.list_screen.selected()
+        message = f"Delete site '{label}'? This removes its config and priority/state entries."
+        if not _confirm_popup(self._stdscr, self.color, message):
+            return
+        sites_config.delete_site(self.data_dir, label)
+        if self.site_screen is not None and self.site_screen.label == label:
+            self.site_screen = None
+            self.mode = "list"
+        self.list_screen.refresh()
 
     def footer_hints(self) -> List[Tuple[str, str]]:
         """Footer hints from the active screen, plus 'back' once inside one."""
