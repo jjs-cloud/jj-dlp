@@ -8,6 +8,7 @@ from typing import Callable, List, Optional, Tuple
 
 from jj_dlp.core.theme import roles as roles_core
 from jj_dlp.core.theme import store
+from jj_dlp.frontends.curses.theme_manager import color_picker
 
 ColorTuple = Tuple[str, str, bool]
 ColorFn = Callable[[str, Optional[ColorTuple]], int]
@@ -64,66 +65,6 @@ def _edit_text(win, y: int, x: int, width: int, initial: str, color: ColorFn) ->
         curses.curs_set(0)
 
 
-def _edit_role_fields(
-    stdscr, name: str, fg: str, bg: str, bold: bool, color: ColorFn
-) -> Optional[Tuple[str, str, bool]]:
-    """Boxed fg/bg/bold editor for one role. Returns the edited values, or None if canceled.
-
-    Stands in for the shared color-picker widget until Step 14.4 builds it and
-    refactors this function to use it instead.
-    """
-    values: List = [fg, bg, bold]
-    labels = ["Foreground", "Background", "Bold"]
-    index = 0
-    height, width = stdscr.getmaxyx()
-    box_width = min(width - 2, 44)
-    box_height = 6
-    y1 = max(0, (height - box_height) // 2)
-    x1 = max(0, (width - box_width) // 2)
-    win = curses.newwin(box_height, box_width, y1, x1)
-    win.keypad(True)
-
-    while True:
-        win.erase()
-        win.attrset(color("popup.border", None))
-        win.border()
-        win.attrset(curses.A_NORMAL)
-        win.addstr(0, 2, f" Role: {name} "[: box_width - 4], color("popup.title", None))
-        for i, label in enumerate(labels):
-            row_y = 1 + i
-            text = ("on" if values[2] else "off") if i == 2 else str(values[i])
-            attr = color("popup.button_focused", None) if i == index else curses.A_NORMAL
-            try:
-                win.addstr(row_y, 2, f"{label}:", attr)
-                win.addstr(row_y, 14, text[: box_width - 16], attr)
-            except curses.error:
-                pass
-        hint = "\u2191/\u2193 move  Enter edit  s save  Esc cancel"
-        try:
-            win.addstr(box_height - 2, 2, hint[: box_width - 4], curses.A_DIM)
-        except curses.error:
-            pass
-        win.noutrefresh()
-        curses.doupdate()
-
-        key = win.getch()
-        if key == curses.KEY_UP:
-            index = max(0, index - 1)
-        elif key == curses.KEY_DOWN:
-            index = min(2, index + 1)
-        elif key in (curses.KEY_ENTER, 10, 13, ord(" ")):
-            if index == 2:
-                values[2] = not values[2]
-            else:
-                result = _edit_text(win, 1 + index, 14, box_width - 16, str(values[index]), color)
-                if result is not None:
-                    values[index] = result
-        elif key in (ord("s"), ord("S")):
-            return values[0], values[1], bool(values[2])
-        elif key == 27:
-            return None
-
-
 def _draw_role_list(stdscr, theme_id: str, names: List[str], index: int, color: ColorFn) -> None:
     """Render the centered list of roles in the active theme."""
     height, width = stdscr.getmaxyx()
@@ -162,7 +103,7 @@ def _draw_role_list(stdscr, theme_id: str, names: List[str], index: int, color: 
 def _edit_existing_role(stdscr, data_dir: Path, theme: dict, name: str, color: ColorFn) -> None:
     """Open the fg/bg/bold editor for one existing role and save any changes."""
     role = roles_core.get_role(theme, name)
-    result = _edit_role_fields(stdscr, name, role["fg"], role["bg"], role["bold"], color)
+    result = color_picker.pick_color(stdscr, f"Role: {name}", role["fg"], role["bg"], role["bold"], color)
     if result is None:
         return
     fg, bg, bold = result
@@ -191,7 +132,7 @@ def _create_new_role(stdscr, data_dir: Path, theme: dict, color: ColorFn) -> Non
         _draw_message(stdscr, f"Role already exists: {name}", color)
         return
 
-    result = _edit_role_fields(stdscr, name, "white", "black", False, color)
+    result = color_picker.pick_color(stdscr, f"Role: {name}", "white", "black", False, color)
     if result is None:
         return
     fg, bg, bold = result
