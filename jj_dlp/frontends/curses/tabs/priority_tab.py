@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 from jj_dlp.core.config import priority as priority_config
+from jj_dlp.frontends.curses.popups.settings_menu import open_settings_menu
 from jj_dlp.frontends.curses.tabs.framework import Tab
 
 ColorTuple = Tuple[str, str, bool]
@@ -110,8 +111,16 @@ class PriorityTab(Tab):
                 pass
             row += 1
 
-    def handle_key(self, key: int) -> bool:
-        """Move the selection, reorder with K/J, and toggle bypass with b."""
+    def _open_settings(self, stdscr) -> None:
+        """Open the settings menu for the selected entry, then reload afterward."""
+        entry = self._selected()
+        if entry is None or stdscr is None:
+            return
+        open_settings_menu(stdscr, self.data_dir, entry, self.color)
+        self.reload()
+
+    def handle_key(self, key: int, stdscr=None) -> bool:
+        """Move the selection, reorder with K/J, toggle bypass with b, edit settings with Enter."""
         if not self.entries:
             return False
         if key == curses.KEY_UP:
@@ -135,8 +144,11 @@ class PriorityTab(Tab):
         if key == ord("b"):
             self._toggle_bypass()
             return True
+        if key in (curses.KEY_ENTER, 10, 13):
+            self._open_settings(stdscr)
+            return True
         return False
 
     def footer_hints(self) -> List[Tuple[str, str]]:
-        """Navigation, reorder, and bypass-toggle hints."""
-        return [("↑/↓", "move"), ("K/J", "reorder"), ("b", "toggle bypass")]
+        """Navigation, reorder, bypass-toggle, and settings-menu hints."""
+        return [("↑/↓", "move"), ("K/J", "reorder"), ("b", "toggle bypass"), ("Enter", "settings")]
