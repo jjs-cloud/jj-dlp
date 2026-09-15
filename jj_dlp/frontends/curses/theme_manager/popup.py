@@ -11,9 +11,9 @@ from jj_dlp.core.theme import store
 ColorTuple = Tuple[str, str, bool]
 ColorFn = Callable[[str, Optional[ColorTuple]], int]
 
-# Steps 14.2/14.3 wire real role/element editors in here; until then these
-# entries just explain what the keys will do.
-_ROLE_EDIT_PLACEHOLDER = "Role editing arrives in Step 14.2."
+# Step 14.3 wires the real element editor in here; until then this entry
+# just explains what the key will do. Role editing is passed in by the
+# caller as edit_role_fn (see theme_manager/role_edit.py, Step 14.2).
 _ELEMENT_EDIT_PLACEHOLDER = "Element editing arrives in Step 14.3."
 
 RoleEditFn = Callable[..., None]
@@ -110,7 +110,7 @@ def open_theme_manager(
             if edit_role_fn is not None:
                 edit_role_fn(stdscr, data_dir, active_id, color)
             else:
-                _draw_message(stdscr, _ROLE_EDIT_PLACEHOLDER, color)
+                _draw_message(stdscr, "Role editor not available.", color)
         elif key in (ord("x"), ord("X")):
             if edit_element_fn is not None:
                 edit_element_fn(stdscr, data_dir, active_id, color)
