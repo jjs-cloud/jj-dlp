@@ -11,6 +11,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from jj_dlp.core.engine import file_ops, file_scan
 from jj_dlp.core.engine.site_state import SiteState
 from jj_dlp.core.notify import logger
+from jj_dlp.frontends.curses.popups.file_manager.menu import open_file_menu
 from jj_dlp.frontends.curses.tabs.framework import Tab
 
 ColorTuple = Tuple[str, str, bool]
@@ -352,10 +353,14 @@ class FileManagerTab(Tab):
         self._refresh_display(force_scan=True)
 
     def _open_menu(self, stdscr) -> None:
-        """Open the File Options menu for the selected file. TODO: menu built in Step 13.5."""
+        """Open the File Options menu for the selected file and apply its result."""
         row = self.selected_file()
         if row is None or stdscr is None:
             return
+        result = open_file_menu(stdscr, row, self.color)
+        if result:
+            self._set_status(result)
+        self._refresh_display(force_scan=True)
 
     def handle_key(self, key: int, stdscr=None) -> bool:
         """Selection movement, sort/expand-collapse, open/open-folder/delete, and the file menu."""
