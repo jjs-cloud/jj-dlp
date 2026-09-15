@@ -121,7 +121,7 @@ def _run_with_progress(stdscr, message: str, color: ColorFn, work: Callable[[], 
     return f"Fixed up -> {Path(result['value']).name}"
 
 
-def open_fixup_popup(stdscr, file_row, color_fn: Optional[ColorFn] = None) -> Optional[str]:
+def open_fixup_popup(stdscr, file_row, color_fn: Optional[ColorFn] = None, data_dir=None) -> Optional[str]:
     """Run the Fixup popup for one file: pick options, remux via file_ops, return a status message."""
     color = color_fn or _default_color_fn
     filename = Path(file_row.path).name

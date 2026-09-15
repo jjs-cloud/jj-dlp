@@ -36,7 +36,7 @@ def _placeholder(stdscr, message: str, color: ColorFn) -> None:
     stdscr.getch()
 
 
-def open_split_popup(stdscr, file_row, color_fn: Optional[ColorFn] = None) -> Optional[str]:
+def open_split_popup(stdscr, file_row, color_fn: Optional[ColorFn] = None, data_dir=None) -> Optional[str]:
     """Placeholder Split popup; Step 13.10 replaces this with the real confirm/run flow."""
     _placeholder(stdscr, "Split not yet implemented.", color_fn or _default_color_fn)
     return None

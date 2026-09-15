@@ -120,12 +120,14 @@ class FileManagerTab(Tab):
         collapsible_folders: bool = True,
         rescan_interval: float = DEFAULT_RESCAN_INTERVAL,
         color_fn: Optional[ColorFn] = None,
+        data_dir: Optional[Path] = None,
     ) -> None:
         self.sites = sites or []
         self.subfolders_mode = subfolders_mode
         self.collapsible = collapsible_folders
         self.rescan_interval = rescan_interval
         self.color = color_fn or _default_color_fn
+        self.data_dir = data_dir
 
         self.sort_mode_index = 0
         self.scroll_offset = 0
@@ -357,7 +359,7 @@ class FileManagerTab(Tab):
         row = self.selected_file()
         if row is None or stdscr is None:
             return
-        result = open_file_menu(stdscr, row, self.color)
+        result = open_file_menu(stdscr, row, self.color, self.data_dir)
         if result:
             self._set_status(result)
         self._refresh_display(force_scan=True)

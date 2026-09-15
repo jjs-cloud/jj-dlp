@@ -59,7 +59,12 @@ def _draw_menu(stdscr, filename: str, index: int, color_fn: ColorFn) -> None:
     curses.doupdate()
 
 
-def open_file_menu(stdscr, file_row: FileRow, color_fn: Optional[ColorFn] = None) -> Optional[str]:
+def open_file_menu(
+    stdscr,
+    file_row: FileRow,
+    color_fn: Optional[ColorFn] = None,
+    data_dir=None,
+) -> Optional[str]:
     """Run the File Options menu for one file, looping until dismissed with Esc.
 
     Returns a status message from whichever operation ran, or None if nothing changed.
@@ -76,7 +81,7 @@ def open_file_menu(stdscr, file_row: FileRow, color_fn: Optional[ColorFn] = None
             index = (index + 1) % len(MENU_ITEMS)
         elif key in (curses.KEY_ENTER, 10, 13):
             _label, opener = MENU_ITEMS[index]
-            result = opener(stdscr, file_row, color)
+            result = opener(stdscr, file_row, color, data_dir)
             if result is not None:
                 return result
         elif key == 27:

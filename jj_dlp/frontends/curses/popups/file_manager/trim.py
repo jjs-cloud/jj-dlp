@@ -36,7 +36,7 @@ def _placeholder(stdscr, message: str, color: ColorFn) -> None:
     stdscr.getch()
 
 
-def open_trim_popup(stdscr, file_row, color_fn: Optional[ColorFn] = None) -> Optional[str]:
+def open_trim_popup(stdscr, file_row, color_fn: Optional[ColorFn] = None, data_dir=None) -> Optional[str]:
     """Placeholder Trim popup; Step 13.9 replaces this with the real time-entry/run flow."""
     _placeholder(stdscr, "Trim not yet implemented.", color_fn or _default_color_fn)
     return None
