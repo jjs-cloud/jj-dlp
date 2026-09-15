@@ -12,6 +12,7 @@ from jj_dlp.core.theme import palette, resolve, store
 from jj_dlp.frontends.curses import easter_eggs, footer
 from jj_dlp.frontends.curses.popups.exit_confirm import confirm_exit
 from jj_dlp.frontends.curses.tabs.framework import EmptyTab, TabBar
+from jj_dlp.frontends.curses.theme_manager import scheme_popup
 
 ColorTuple = Tuple[str, str, bool]
 
@@ -73,11 +74,17 @@ class ColorManager:
 class CursesApp:
     """Owns the curses screen, active theme, and the draw/input loop."""
 
-    def __init__(self, stdscr, data_dir: Path, site_states: Optional[Dict[str, SiteState]] = None) -> None:
+    def __init__(
+        self,
+        stdscr,
+        data_dir: Path,
+        site_states: Optional[Dict[str, SiteState]] = None,
+        session_theme_id: Optional[str] = None,
+    ) -> None:
         self.stdscr = stdscr
         self.data_dir = Path(data_dir)
         self.colors = ColorManager()
-        self.theme = store.get_active_theme(self.data_dir)
+        self.theme = self._resolve_startup_theme(session_theme_id)
         self.running = True
         self.height = 0
         self.width = 0
@@ -87,6 +94,14 @@ class CursesApp:
         self._init_curses()
         self._apply_palette()
         self._layout()
+
+    def _resolve_startup_theme(self, session_theme_id: Optional[str]) -> dict:
+        """Use the session-only theme override if given, else the saved active theme."""
+        if session_theme_id is not None:
+            override = store.get_theme(self.data_dir, session_theme_id)
+            if override is not None:
+                return override
+        return store.get_active_theme(self.data_dir)
 
     def _init_curses(self) -> None:
         """One-time curses setup: hide cursor, no echo, color mode, input timeout."""
@@ -164,7 +179,11 @@ class CursesApp:
 
 def _entry(stdscr, data_dir: Path) -> None:
     """curses.wrapper target: build and run the app, restoring the palette on exit."""
-    app = CursesApp(stdscr, data_dir)
+    curses.curs_set(0)
+    if curses.has_colors():
+        curses.start_color()
+    session_theme_id = scheme_popup.maybe_offer_random_scheme(stdscr, data_dir)
+    app = CursesApp(stdscr, data_dir, session_theme_id=session_theme_id)
     try:
         app.run()
     finally:
