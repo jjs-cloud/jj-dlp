@@ -7,14 +7,10 @@ from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 from jj_dlp.core.theme import store
+from jj_dlp.frontends.curses.theme_manager import element_edit
 
 ColorTuple = Tuple[str, str, bool]
 ColorFn = Callable[[str, Optional[ColorTuple]], int]
-
-# Step 14.3 wires the real element editor in here; until then this entry
-# just explains what the key will do. Role editing is passed in by the
-# caller as edit_role_fn (see theme_manager/role_edit.py, Step 14.2).
-_ELEMENT_EDIT_PLACEHOLDER = "Element editing arrives in Step 14.3."
 
 RoleEditFn = Callable[..., None]
 ElementEditFn = Callable[..., None]
@@ -92,6 +88,7 @@ def open_theme_manager(
     edit_element_fn: Optional[ElementEditFn] = None,
 ) -> None:
     """Run the theme manager shell: pick the active theme, or enter role/element editing."""
+    edit_element_fn = edit_element_fn or element_edit.open_element_editor
     color = color_fn or _default_color_fn
     index = 0
     while True:
@@ -112,9 +109,6 @@ def open_theme_manager(
             else:
                 _draw_message(stdscr, "Role editor not available.", color)
         elif key in (ord("x"), ord("X")):
-            if edit_element_fn is not None:
-                edit_element_fn(stdscr, data_dir, active_id, color)
-            else:
-                _draw_message(stdscr, _ELEMENT_EDIT_PLACEHOLDER, color)
+            edit_element_fn(stdscr, data_dir, active_id, color)
         elif key == 27:
             return
