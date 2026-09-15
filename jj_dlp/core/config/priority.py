@@ -88,6 +88,15 @@ def _validate_field(field: str) -> None:
         raise ValueError(f"Unknown override field: {field!r}")
 
 
+def remove_entry(data_dir: Path, site: str, streamer: str) -> None:
+    """Drop a site+streamer's priority.json entry entirely, if present."""
+    data = _load(data_dir)
+    kept = [e for e in data["entries"] if not (e.get("site") == site and e.get("streamer") == streamer)]
+    if len(kept) != len(data["entries"]):
+        data["entries"] = kept
+        _save(data_dir, data)
+
+
 def get_order(data_dir: Path) -> List[PriorityEntry]:
     """Return every entry, bypass entries first, then sorted by position."""
     data = _load(data_dir)
