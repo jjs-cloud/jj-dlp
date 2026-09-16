@@ -76,7 +76,7 @@ def build_status_snapshot(app_state: AppState, data_dir: Path) -> Dict[str, Any]
     }
 
 
-def _write_json(handler: BaseHTTPRequestHandler, status: int, payload: Dict[str, Any]) -> None:
+def write_json(handler: BaseHTTPRequestHandler, status: int, payload: Dict[str, Any]) -> None:
     """Send a JSON response body with the given HTTP status code."""
     body = json.dumps(payload).encode("utf-8")
     handler.send_response(status)
@@ -86,14 +86,14 @@ def _write_json(handler: BaseHTTPRequestHandler, status: int, payload: Dict[str,
     handler.wfile.write(body)
 
 
-def _write_error(handler: BaseHTTPRequestHandler, status: int, message: str) -> None:
+def write_error(handler: BaseHTTPRequestHandler, status: int, message: str) -> None:
     """Send a JSON error response body with the given HTTP status code."""
-    _write_json(handler, status, {"error": message})
+    write_json(handler, status, {"error": message})
 
 
 def handle_status(handler: BaseHTTPRequestHandler, app_state: AppState, data_dir: Path) -> None:
     """Write a GET /api/status JSON response from the current status snapshot."""
-    _write_json(handler, 200, build_status_snapshot(app_state, data_dir))
+    write_json(handler, 200, build_status_snapshot(app_state, data_dir))
 
 
 def _read_json_body(handler: BaseHTTPRequestHandler) -> Dict[str, Any]:
@@ -172,12 +172,12 @@ def handle_add_streamer(handler: BaseHTTPRequestHandler, app_state: AppState, da
         site, streamer = _require_site_and_streamer(_read_json_body(handler))
         add_streamer(data_dir, site, streamer)
     except (ValueError, json.JSONDecodeError) as exc:
-        _write_error(handler, 400, str(exc))
+        write_error(handler, 400, str(exc))
         return
     except KeyError as exc:
-        _write_error(handler, 404, exc.args[0])
+        write_error(handler, 404, exc.args[0])
         return
-    _write_json(handler, 200, {"site": site, "streamer": streamer, "added": True})
+    write_json(handler, 200, {"site": site, "streamer": streamer, "added": True})
 
 
 def handle_remove_streamer(handler: BaseHTTPRequestHandler, app_state: AppState, data_dir: Path) -> None:
@@ -186,12 +186,12 @@ def handle_remove_streamer(handler: BaseHTTPRequestHandler, app_state: AppState,
         site, streamer = _require_site_and_streamer(_read_json_body(handler))
         remove_streamer(data_dir, site, streamer)
     except (ValueError, json.JSONDecodeError) as exc:
-        _write_error(handler, 400, str(exc))
+        write_error(handler, 400, str(exc))
         return
     except KeyError as exc:
-        _write_error(handler, 404, exc.args[0])
+        write_error(handler, 404, exc.args[0])
         return
-    _write_json(handler, 200, {"site": site, "streamer": streamer, "removed": True})
+    write_json(handler, 200, {"site": site, "streamer": streamer, "removed": True})
 
 
 def handle_disable_streamer(handler: BaseHTTPRequestHandler, app_state: AppState, data_dir: Path) -> None:
@@ -200,9 +200,9 @@ def handle_disable_streamer(handler: BaseHTTPRequestHandler, app_state: AppState
         site, streamer = _require_site_and_streamer(_read_json_body(handler))
         now_enabled = disable_streamer(data_dir, site, streamer)
     except (ValueError, json.JSONDecodeError) as exc:
-        _write_error(handler, 400, str(exc))
+        write_error(handler, 400, str(exc))
         return
     except KeyError as exc:
-        _write_error(handler, 404, exc.args[0])
+        write_error(handler, 404, exc.args[0])
         return
-    _write_json(handler, 200, {"site": site, "streamer": streamer, "enabled": now_enabled})
+    write_json(handler, 200, {"site": site, "streamer": streamer, "enabled": now_enabled})

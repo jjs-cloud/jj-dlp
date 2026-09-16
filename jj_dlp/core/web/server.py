@@ -9,9 +9,12 @@ import secrets
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Dict, Optional, Type
+from pathlib import Path
+from typing import Callable, Dict, Optional, Tuple, Type
 
 from jj_dlp.core.config import app as app_config
+from jj_dlp.core.engine.app_state import AppState
+from jj_dlp.core.web import api
 
 log = logging.getLogger("jj_dlp.web.server")
 
@@ -88,11 +91,40 @@ def _get_session_token(handler: BaseHTTPRequestHandler) -> Optional[str]:
     return morsel.value if morsel else None
 
 
-def make_handler_class(user: str, password: str, sessions: SessionStore) -> Type[BaseHTTPRequestHandler]:
-    """Build a BaseHTTPRequestHandler subclass enforcing auth/sessions for one server instance."""
+RouteHandler = Callable[[BaseHTTPRequestHandler], None]
+
+
+def _build_routes(app_state: AppState, data_dir: Path) -> Dict[Tuple[str, str], RouteHandler]:
+    """Map (method, path) to the api.py handler that serves it."""
+    return {
+        ("GET", "/api/status"): lambda h: api.handle_status(h, app_state, data_dir),
+        ("POST", "/api/streamers/add"): lambda h: api.handle_add_streamer(h, app_state, data_dir),
+        ("POST", "/api/streamers/remove"): lambda h: api.handle_remove_streamer(h, app_state, data_dir),
+        ("POST", "/api/streamers/disable"): lambda h: api.handle_disable_streamer(h, app_state, data_dir),
+    }
+
+
+def make_handler_class(
+    user: str,
+    password: str,
+    sessions: SessionStore,
+    app_state: AppState,
+    data_dir: Path,
+) -> Type[BaseHTTPRequestHandler]:
+    """Build a BaseHTTPRequestHandler subclass enforcing auth/sessions and routing for one server instance."""
+
+    routes = _build_routes(app_state, data_dir)
 
     class AuthHandler(BaseHTTPRequestHandler):
         server_version = "jj-dlp/1.0"
+        _session_cookie_header: Optional[str] = None
+
+        def end_headers(self) -> None:
+            """Inject a pending Set-Cookie header, if one was queued for this response."""
+            if self._session_cookie_header is not None:
+                self.send_header("Set-Cookie", self._session_cookie_header)
+                self._session_cookie_header = None
+            super().end_headers()
 
         def _has_valid_session(self) -> bool:
             """Return whether this request carries an unexpired session cookie."""
@@ -103,36 +135,43 @@ def make_handler_class(user: str, password: str, sessions: SessionStore) -> Type
             return _check_basic_auth(self.headers.get("Authorization"), user, password)
 
         def _send_auth_challenge(self) -> None:
-            """Respond 401 with a Basic Auth challenge."""
+            """Respond 401 with a Basic Auth challenge and a JSON error body."""
+            body = b'{"error": "Authentication required"}'
             self.send_response(401)
             self.send_header("WWW-Authenticate", f'Basic realm="{REALM}"')
-            self.send_header("Content-Length", "0")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
+            self.wfile.write(body)
 
-        def _set_session_cookie(self) -> None:
-            """Queue a Set-Cookie header for a freshly issued session token."""
+        def _queue_session_cookie(self) -> None:
+            """Issue a fresh session token and queue it to go out with this response's headers."""
             token = sessions.create()
             cookie: http.cookies.SimpleCookie = http.cookies.SimpleCookie()
             cookie[SESSION_COOKIE_NAME] = token
             cookie[SESSION_COOKIE_NAME]["path"] = "/"
             cookie[SESSION_COOKIE_NAME]["max-age"] = int(sessions.ttl_sec)
             cookie[SESSION_COOKIE_NAME]["httponly"] = True
-            self.send_header("Set-Cookie", cookie[SESSION_COOKIE_NAME].OutputString())
+            self._session_cookie_header = cookie[SESSION_COOKIE_NAME].OutputString()
+
+        def _route(self) -> None:
+            """Look up this request's (method, path) and dispatch to its handler, or 404."""
+            path = self.path.split("?", 1)[0]
+            route = routes.get((self.command, path))
+            if route is None:
+                api.write_error(self, 404, f"No such route: {self.command} {path}")
+                return
+            route(self)
 
         def _handle(self) -> None:
-            """Authenticate the request, then serve the placeholder response."""
+            """Authenticate the request, queue a session cookie if newly authenticated, then route it."""
             has_session = self._has_valid_session()
             if not has_session and not self._has_valid_basic_auth():
                 self._send_auth_challenge()
                 return
-            body = b"jj-dlp web server\n"
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
             if not has_session:
-                self._set_session_cookie()
-            self.end_headers()
-            self.wfile.write(body)
+                self._queue_session_cookie()
+            self._route()
 
         def do_GET(self) -> None:
             self._handle()
@@ -148,13 +187,21 @@ def make_handler_class(user: str, password: str, sessions: SessionStore) -> Type
 
 
 class WebServer:
-    """Threaded HTTP server enforcing auth and sessions; routes are wired in later steps."""
+    """Threaded HTTP server enforcing auth/sessions and routing requests to core/web/api.py."""
 
-    def __init__(self, host: str, port: int, user: str, password: str) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        user: str,
+        password: str,
+        app_state: AppState,
+        data_dir: Path,
+    ) -> None:
         self.host = host
         self.port = port
         self.sessions = SessionStore()
-        handler_cls = make_handler_class(user, password, self.sessions)
+        handler_cls = make_handler_class(user, password, self.sessions, app_state, data_dir)
         self._httpd = ThreadingHTTPServer((host, port), handler_cls)
         self._thread: Optional[threading.Thread] = None
 
@@ -177,6 +224,18 @@ class WebServer:
         return f"http://{self.host}:{self.port}/"
 
 
-def build_server(config: app_config.WebUiConfig, host: str = "0.0.0.0") -> WebServer:
+def build_server(
+    config: app_config.WebUiConfig,
+    app_state: AppState,
+    data_dir: Path,
+    host: str = "0.0.0.0",
+) -> WebServer:
     """Construct a WebServer bound to a WebUiConfig's port and basic-auth credentials."""
-    return WebServer(host=host, port=config.port, user=config.user, password=config.password)
+    return WebServer(
+        host=host,
+        port=config.port,
+        user=config.user,
+        password=config.password,
+        app_state=app_state,
+        data_dir=data_dir,
+    )
