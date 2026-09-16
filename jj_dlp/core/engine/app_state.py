@@ -9,6 +9,8 @@ import threading
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from jj_dlp.core.engine.site_state import SiteState
+
 log = logging.getLogger("jj_dlp.engine.app_state")
 
 LOCK_RELPATH = Path("state") / ".lock"
@@ -40,12 +42,29 @@ class AppState:
         self.recording_decision_lock = threading.Lock()
         self._pids: Dict[int, str] = {}
         self._pids_lock = threading.Lock()
+        self._site_states: Dict[str, SiteState] = {}
         self._lock_path = self.data_dir / LOCK_RELPATH
         self._holds_lock = False
 
     def set_loaded_sites(self, labels: List[str]) -> None:
         """Replace the list of site labels loaded for this run."""
         self.loaded_sites = list(labels)
+
+    def register_site_state(self, label: str, site_state: SiteState) -> None:
+        """Register a loaded site's runtime SiteState so other modules can look it up by label."""
+        self._site_states[label] = site_state
+
+    def unregister_site_state(self, label: str) -> None:
+        """Drop a site's runtime SiteState, e.g. on site removal or shutdown."""
+        self._site_states.pop(label, None)
+
+    def get_site_state(self, label: str) -> Optional[SiteState]:
+        """Return a loaded site's registered SiteState, or None if not registered."""
+        return self._site_states.get(label)
+
+    def site_states(self) -> Dict[str, SiteState]:
+        """Return a shallow copy of the label -> SiteState registry."""
+        return dict(self._site_states)
 
     def register_pid(self, pid: int, label: str = "") -> None:
         """Start tracking a downloader/ffmpeg process PID, optionally tagged."""
