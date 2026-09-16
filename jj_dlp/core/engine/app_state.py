@@ -7,7 +7,7 @@ import os
 import signal
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from jj_dlp.core.engine.site_state import SiteState
 
@@ -43,6 +43,8 @@ class AppState:
         self._pids: Dict[int, str] = {}
         self._pids_lock = threading.Lock()
         self._site_states: Dict[str, SiteState] = {}
+        self._checkers: Dict[str, Any] = {}
+        self._active_services: Dict[str, Tuple[Any, Any]] = {}
         self._lock_path = self.data_dir / LOCK_RELPATH
         self._holds_lock = False
 
@@ -65,6 +67,41 @@ class AppState:
     def site_states(self) -> Dict[str, SiteState]:
         """Return a shallow copy of the label -> SiteState registry."""
         return dict(self._site_states)
+
+    def register_checker(self, label: str, checker: Any) -> None:
+        """Register a loaded site's Checker so background services can hand off live events to it."""
+        self._checkers[label] = checker
+
+    def unregister_checker(self, label: str) -> None:
+        """Drop a site's registered Checker, e.g. on site removal or shutdown."""
+        self._checkers.pop(label, None)
+
+    def get_checker(self, label: str) -> Optional[Any]:
+        """Return a loaded site's registered Checker, or None if not registered."""
+        return self._checkers.get(label)
+
+    def start_site_services(self, site: Any, plugin: Any) -> None:
+        """Call a site's plugin start_background_service hook, if defined, and track it for shutdown."""
+        hook = getattr(plugin, "start_background_service", None)
+        if hook is None:
+            return
+        hook(self, site)
+        self._active_services[site.label] = (plugin, site)
+
+    def stop_site_services(self, label: str) -> None:
+        """Call a previously started site's plugin stop_background_service hook, if any is running."""
+        entry = self._active_services.pop(label, None)
+        if entry is None:
+            return
+        plugin, site = entry
+        hook = getattr(plugin, "stop_background_service", None)
+        if hook is not None:
+            hook(site)
+
+    def stop_all_site_services(self) -> None:
+        """Stop every currently running site background service, e.g. during shutdown."""
+        for label in list(self._active_services):
+            self.stop_site_services(label)
 
     def register_pid(self, pid: int, label: str = "") -> None:
         """Start tracking a downloader/ffmpeg process PID, optionally tagged."""

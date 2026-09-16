@@ -1,9 +1,21 @@
 """SitePlugin implementation for the twitch plugin."""
 
-from typing import Any
+import threading
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
 
+from jj_dlp.core.eventsub import backfill, subscriptions, webhook
 from jj_dlp.core.plugins import register_plugin
 from jj_dlp.core.plugins.base import FieldDef, SitePlugin
+
+
+@dataclass
+class _RunningService:
+    """One twitch site's live background-service handles, for later shutdown."""
+
+    webhook_server: Optional[Any]
+    backfill_stop: threading.Event
+    backfill_thread: threading.Thread
 
 
 @register_plugin
@@ -12,6 +24,9 @@ class TwitchPlugin(SitePlugin):
 
     id = "twitch"
     display_name = "Twitch"
+
+    def __init__(self) -> None:
+        self._services: Dict[str, _RunningService] = {}
 
     def default_config(self) -> dict:
         """Return the §3.4 base shape with twitch's overrides applied."""
@@ -145,5 +160,61 @@ class TwitchPlugin(SitePlugin):
         if any(pattern.lower() in lowered for pattern in patterns):
             site.site_state.set_ad_alert_active(streamer, True)
 
-    # start_background_service / stop_background_service: implemented in
-    # Phase 16 (Twitch EventSub subsystem).
+    def start_background_service(self, app_state: Any, site: Any) -> None:
+        """Reconcile subscriptions, then start this site's webhook server and backfill polling."""
+        plugin_settings = site.config.get("plugin_settings", {})
+        disabled = set(site.config.get("disabled", []))
+        streamers = [s for s in site.config.get("streamers", []) if s not in disabled]
+
+        subscriptions.reconcile(app_state.data_dir, site.label, plugin_settings, streamers)
+
+        checker = app_state.get_checker(site.label)
+        if checker is not None:
+            on_online = webhook.dispatch_to_checker(checker)
+            backfill_on_live = backfill.dispatch_to_checker(checker)
+        else:
+            # No Checker registered yet for this site (engine wiring not started) —
+            # fall back to the same default a fresh Checker would use.
+            on_online = site.site_state.mark_live
+            backfill_on_live = site.site_state.mark_live
+        on_offline = webhook.dispatch_offline_to_site_state(site.site_state)
+
+        webhook_server = None
+        eventsub_cfg = plugin_settings.get("eventsub", {})
+        client_secret = eventsub_cfg.get("client_secret", "")
+        if client_secret:
+            secret = subscriptions.derive_secret(client_secret, site.label)
+            webhook_server = webhook.EventSubWebhookServer(
+                data_dir=app_state.data_dir,
+                site=site.label,
+                port=eventsub_cfg.get("webhook_port", 8888),
+                secret=secret,
+                on_online=on_online,
+                on_offline=on_offline,
+            )
+            webhook_server.start()
+
+        backfill_runner = backfill.BackfillRunner(
+            site=site.label,
+            plugin_settings=plugin_settings,
+            site_config=site.config,
+            site_state=site.site_state,
+            on_live=backfill_on_live,
+        )
+        backfill_stop = threading.Event()
+        backfill_thread = threading.Thread(target=backfill_runner.run_loop, args=(backfill_stop,), daemon=True)
+        backfill_thread.start()
+
+        self._services[site.label] = _RunningService(
+            webhook_server=webhook_server, backfill_stop=backfill_stop, backfill_thread=backfill_thread
+        )
+
+    def stop_background_service(self, site: Any) -> None:
+        """Stop this site's running webhook server and backfill polling thread, if any."""
+        service = self._services.pop(site.label, None)
+        if service is None:
+            return
+        service.backfill_stop.set()
+        service.backfill_thread.join(timeout=5)
+        if service.webhook_server is not None:
+            service.webhook_server.stop()
