@@ -58,16 +58,31 @@ def get_site_fields(schema_path: Optional[Path] = None) -> List[dict]:
 
 
 def get_plugin_fields(plugin_id: str, schema_path: Optional[Path] = None) -> List[dict]:
-    """Return the field definitions contributed by one plugin, or [] if none."""
-    return _data(schema_path).get("plugin_fields", {}).get(plugin_id, [])
+    """Return one plugin's field defs straight from its plugin_settings_schema(), or [] if unregistered."""
+    from jj_dlp.core.plugins import get_plugin  # deferred: avoids import-order issues at module load
+
+    try:
+        plugin = get_plugin(plugin_id)
+    except KeyError:
+        return []
+    return [f.to_dict() for f in plugin.plugin_settings_schema()]
+
+
+def _all_plugin_fields(schema_path: Optional[Path]) -> List[dict]:
+    """Return field defs for every currently registered plugin, live from plugin_settings_schema()."""
+    from jj_dlp.core.plugins import list_plugin_ids
+
+    fields: List[dict] = []
+    for plugin_id in list_plugin_ids():
+        fields.extend(get_plugin_fields(plugin_id, schema_path))
+    return fields
 
 
 def _all_fields(schema_path: Optional[Path]) -> List[dict]:
-    """Return every field definition across app, site, and plugin field lists."""
+    """Return every field definition across app, site, and (live) plugin field lists."""
     data = _data(schema_path)
     fields = list(data["app_fields"]) + list(data["site_fields"])
-    for plugin_fields in data.get("plugin_fields", {}).values():
-        fields.extend(plugin_fields)
+    fields.extend(_all_plugin_fields(schema_path))
     return fields
 
 
