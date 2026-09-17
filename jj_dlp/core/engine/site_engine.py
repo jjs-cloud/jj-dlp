@@ -12,6 +12,7 @@ import copy
 import logging
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -61,46 +62,68 @@ def may_start_recording(
         return count < max_concurrent
 
 
-def apply_priority_overrides(data_dir: Path, site: str, streamer: str, config: dict) -> tuple:
-    """Return (config with quality/output_dir/auto_suffix/split overrides applied, lq_fallback_disabled)."""
+@dataclass
+class EffectiveConfig:
+    """One streamer's fully-resolved config: site config plus all seven priority overrides."""
+
+    config: dict
+    lq_fallback_disabled: bool
+    popup_enabled: bool
+    ntfy_enabled: bool
+    intro_delay: int
+    schedule: Optional[dict]
+
+
+def resolve_effective_config(data_dir: Path, site: str, streamer: str, config: dict) -> EffectiveConfig:
+    """Resolve all seven priority.json override types (Doc 1 §6.1) via resolve_effective into one config.
+
+    This is the single place override resolution happens; checker.py, downloader.py,
+    recording.py and friends only ever see the resulting merged config, never a raw
+    site config plus their own separate overrides lookup.
+    """
     cfg = copy.deepcopy(config)
-    quality_ov = priority_config.get_override(data_dir, site, streamer, "quality") or {}
-    if quality_ov.get("format"):
-        cfg["downloader"]["format"] = quality_ov["format"]
-    output_dir_ov = priority_config.get_override(data_dir, site, streamer, "output_dir")
-    if output_dir_ov:
-        cfg["output"]["dir"] = output_dir_ov
-    auto_suffix_ov = priority_config.get_override(data_dir, site, streamer, "auto_suffix")
-    if auto_suffix_ov is not None:
-        cfg["output"]["auto_suffix"] = bool(auto_suffix_ov)
-    split_ov = priority_config.get_override(data_dir, site, streamer, "split")
-    if split_ov:
-        if split_ov.get("enabled") is False:
+
+    quality = priority_config.resolve_effective(data_dir, site, streamer, "quality", None) or {}
+    if quality.get("format"):
+        cfg["downloader"]["format"] = quality["format"]
+    lq_fallback_disabled = bool(quality.get("lq_fallback_disabled"))
+
+    site_notif = cfg.get("notifications", {})
+    notif = priority_config.resolve_effective(data_dir, site, streamer, "notifications", None) or {}
+    popup_enabled = site_notif.get("popup_enabled", True) if notif.get("popup_enabled") is None else notif["popup_enabled"]
+    ntfy_enabled = site_notif.get("ntfy_enabled", False) if notif.get("ntfy_enabled") is None else notif["ntfy_enabled"]
+    cfg["notifications"] = {**site_notif, "popup_enabled": popup_enabled, "ntfy_enabled": ntfy_enabled}
+
+    auto_suffix = priority_config.resolve_effective(
+        data_dir, site, streamer, "auto_suffix", cfg["output"].get("auto_suffix", True)
+    )
+    cfg["output"]["auto_suffix"] = bool(auto_suffix)
+
+    output_dir = priority_config.resolve_effective(data_dir, site, streamer, "output_dir", cfg["output"].get("dir"))
+    cfg["output"]["dir"] = output_dir
+
+    split = priority_config.resolve_effective(data_dir, site, streamer, "split", None)
+    if split is not None:
+        if split.get("enabled") is False:
             cfg["timing"]["split_after_minutes"] = 0
-        elif split_ov.get("enabled") and split_ov.get("split_after_minutes"):
-            cfg["timing"]["split_after_minutes"] = split_ov["split_after_minutes"]
-    return cfg, bool(quality_ov.get("lq_fallback_disabled"))
+        elif split.get("enabled") and split.get("split_after_minutes"):
+            cfg["timing"]["split_after_minutes"] = split["split_after_minutes"]
+
+    intro_delay = int(priority_config.resolve_effective(data_dir, site, streamer, "intro_delay", 0) or 0)
+    schedule = priority_config.resolve_effective(data_dir, site, streamer, "schedule", None)
+
+    return EffectiveConfig(
+        config=cfg,
+        lq_fallback_disabled=lq_fallback_disabled,
+        popup_enabled=popup_enabled,
+        ntfy_enabled=ntfy_enabled,
+        intro_delay=intro_delay,
+        schedule=schedule,
+    )
 
 
-def effective_notifications(data_dir: Path, site: str, streamer: str, site_notif: dict) -> tuple:
-    """Resolve the per-field tri-state notification override against the site's defaults."""
-    override = priority_config.get_override(data_dir, site, streamer, "notifications") or {}
-    popup = override.get("popup_enabled")
-    ntfy_on = override.get("ntfy_enabled")
-    popup_enabled = site_notif.get("popup_enabled", True) if popup is None else popup
-    ntfy_enabled = site_notif.get("ntfy_enabled", False) if ntfy_on is None else ntfy_on
-    return popup_enabled, ntfy_enabled
-
-
-def intro_delay_seconds(data_dir: Path, site: str, streamer: str) -> int:
-    """Return the streamer's intro_delay override in seconds, or 0 if unset."""
-    value = priority_config.get_override(data_dir, site, streamer, "intro_delay")
-    return int(value) if value else 0
-
-
-def within_schedule(data_dir: Path, site: str, streamer: str, now: Optional[datetime] = None) -> bool:
-    """Return whether now falls inside the streamer's schedule override, if one is set."""
-    schedule = priority_config.get_override(data_dir, site, streamer, "schedule")
+def within_schedule(schedule: Optional[dict], now: Optional[datetime] = None) -> bool:
+    """Return whether now falls inside a resolved schedule override, if one is set."""
     if not schedule or not schedule.get("days"):
         return True
     now = now or datetime.now()
@@ -209,11 +232,11 @@ class SiteEngine:
 
     def _restart(self, streamer: str, path: str) -> None:
         """Shared restart callback for the stall/quality/segment monitors: relaunch at path."""
-        effective_cfg, lq_disabled = apply_priority_overrides(self.data_dir, self.label, streamer, self.config)
-        self._lq_disabled[streamer] = lq_disabled
-        lq = False if lq_disabled else self.quality.is_lq_active(streamer)
+        effective = resolve_effective_config(self.data_dir, self.label, streamer, self.config)
+        self._lq_disabled[streamer] = effective.lq_fallback_disabled
+        lq = False if effective.lq_fallback_disabled else self.quality.is_lq_active(streamer)
         process = self.coordinator.restart_session(
-            effective_cfg, streamer, self.site_state, path, lq=lq, on_line=self._make_on_line(streamer)
+            effective.config, streamer, self.site_state, path, lq=lq, on_line=self._make_on_line(streamer)
         )
         self._register_launch(streamer, process)
 
@@ -229,37 +252,38 @@ class SiteEngine:
             return
         self.site_state.mark_live(streamer)
 
-        if not within_schedule(self.data_dir, self.label, streamer):
+        effective = resolve_effective_config(self.data_dir, self.label, streamer, self.config)
+
+        if not within_schedule(effective.schedule):
             return
-        delay = intro_delay_seconds(self.data_dir, self.label, streamer)
-        if delay:
-            time.sleep(delay)
+        if effective.intro_delay:
+            time.sleep(effective.intro_delay)
         if self.site_state.is_recording(streamer):
             return
         if not may_start_recording(self.data_dir, self.app_state, self.app_cfg, self.label, streamer):
             return
 
-        effective_cfg, lq_disabled = apply_priority_overrides(self.data_dir, self.label, streamer, self.config)
-        self._lq_disabled[streamer] = lq_disabled
-        lq = False if lq_disabled else self.quality.is_lq_active(streamer)
+        self._lq_disabled[streamer] = effective.lq_fallback_disabled
+        lq = False if effective.lq_fallback_disabled else self.quality.is_lq_active(streamer)
         process = self.coordinator.start_session(
-            self.label, effective_cfg, streamer, self.site_state, lq=lq, on_line=self._make_on_line(streamer)
+            self.label, effective.config, streamer, self.site_state, lq=lq, on_line=self._make_on_line(streamer)
         )
         self._register_launch(streamer, process)
 
         path = self.site_state.get_in_progress_path(streamer)
-        split_minutes = effective_cfg.get("timing", {}).get("split_after_minutes", 0)
+        split_minutes = effective.config.get("timing", {}).get("split_after_minutes", 0)
         if split_minutes and path:
             self.segments.start(streamer, path)
         self.stall.reset(streamer)
         self.quality.reset(streamer)
         self.site_state.reset_recording_flags(streamer)
 
-        notif_cfg = self.config.get("notifications", {})
-        popup_enabled, ntfy_enabled = effective_notifications(self.data_dir, self.label, streamer, notif_cfg)
+        notif_cfg = effective.config.get("notifications", {})
         desktop.notify_recording_started(
-            self.label, streamer, popup_enabled,
+            self.label, streamer, effective.popup_enabled,
             notif_cfg.get("popup_timeout_sec", 15), notif_cfg.get("popup_cooldown_sec", 240),
         )
-        ntfy.notify_recording_started(self.label, streamer, ntfy_enabled, self.app_cfg.notifications.ntfy_topic)
+        ntfy.notify_recording_started(
+            self.label, streamer, effective.ntfy_enabled, self.app_cfg.notifications.ntfy_topic
+        )
         activity_log.log_activity(self.label, f"{streamer} started recording")
