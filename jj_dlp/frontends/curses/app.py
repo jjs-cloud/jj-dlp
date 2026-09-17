@@ -1,34 +1,36 @@
-"""Main loop, screen setup, and resize handling."""
+"""Main loop, screen setup, resize handling, and full-app tab/overlay wiring."""
 
 from __future__ import annotations
 
 import curses
+import threading
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from jj_dlp.core.config import app as app_config
+from jj_dlp.core.engine.disk import DiskSampler
 from jj_dlp.core.engine.site_state import SiteState
 from jj_dlp.core.theme import palette, resolve, store
 from jj_dlp.frontends.curses import easter_eggs, footer
+from jj_dlp.frontends.curses.popups import changelog as changelog_popup
+from jj_dlp.frontends.curses.popups import manage_menu, mgmt_add, mgmt_disable, mgmt_remove
+from jj_dlp.frontends.curses.popups import write_failure_alert
 from jj_dlp.frontends.curses.popups.exit_confirm import confirm_exit
-from jj_dlp.frontends.curses.tabs.framework import EmptyTab, TabBar
-from jj_dlp.frontends.curses.theme_manager import scheme_popup
+from jj_dlp.frontends.curses.tabs.config_tab import ConfigTab, SiteSettingsScreen
+from jj_dlp.frontends.curses.tabs.dashboard import DashboardTab, SitePanelSource
+from jj_dlp.frontends.curses.tabs.eventsub_tab import EventsubSiteSource, EventsubTab
+from jj_dlp.frontends.curses.tabs.file_manager_tab import FileManagerSiteSource, FileManagerTab
+from jj_dlp.frontends.curses.tabs.framework import TabBar
+from jj_dlp.frontends.curses.tabs.log import LogTab
+from jj_dlp.frontends.curses.tabs.pipes import PipesTab
+from jj_dlp.frontends.curses.tabs.priority_tab import PriorityTab
+from jj_dlp.frontends.curses.theme_manager import role_edit, scheme_popup
+from jj_dlp.frontends.curses.theme_manager.popup import open_theme_manager
 
 ColorTuple = Tuple[str, str, bool]
 
 # Input-poll timeout (ms) driving the redraw tick between keypresses.
 TICK_MS = 200
-
-# Placeholder tab titles; Phases 8-13 replace these with real tabs.
-_PLACEHOLDER_TAB_TITLES = [
-    "Dashboard",
-    "Log",
-    "Pipes",
-    "EventSub",
-    "Config",
-    "Priority",
-    "Files",
-]
 
 _CURSES_COLOR_NAMES: Dict[str, int] = {
     "black": curses.COLOR_BLACK,
@@ -72,28 +74,39 @@ class ColorManager:
 
 
 class CursesApp:
-    """Owns the curses screen, active theme, and the draw/input loop."""
+    """Owns the curses screen, active theme, loaded-site tabs, and the draw/input loop."""
 
     def __init__(
         self,
         stdscr,
         data_dir: Path,
-        site_states: Optional[Dict[str, SiteState]] = None,
+        app_state: Optional[Any] = None,
+        sites: Optional[List[Tuple[str, dict, SiteState]]] = None,
+        disk_sampler: Optional[DiskSampler] = None,
         session_theme_id: Optional[str] = None,
+        shutdown_event: Optional[threading.Event] = None,
     ) -> None:
         self.stdscr = stdscr
         self.data_dir = Path(data_dir)
+        self.app_state = app_state
+        self.shutdown_event = shutdown_event
         self.colors = ColorManager()
         self.theme = self._resolve_startup_theme(session_theme_id)
         self.running = True
         self.height = 0
         self.width = 0
-        # Empty until Phase 17 wires real engine-backed SiteState instances in.
-        self.site_states: Dict[str, SiteState] = site_states or {}
-        self.tab_bar = TabBar([EmptyTab(title) for title in _PLACEHOLDER_TAB_TITLES])
+
+        self.site_sources = list(sites or [])
+        self.site_states: Dict[str, SiteState] = {label: state for label, _cfg, state in self.site_sources}
+
         self._init_curses()
         self._apply_palette()
+        self._build_tabs(disk_sampler)
         self._layout()
+
+        self.write_failure_banner = write_failure_alert.WriteFailureAlertBanner(
+            color_fn=self.color, jump_fn=self._jump_to_config
+        )
 
     def _resolve_startup_theme(self, session_theme_id: Optional[str]) -> dict:
         """Use the session-only theme override if given, else the saved active theme."""
@@ -123,6 +136,42 @@ class CursesApp:
         if app_cfg.ui.rgb_mode:
             palette.apply_theme_palette(self.theme)
 
+    def _build_tabs(self, disk_sampler: Optional[DiskSampler]) -> None:
+        """Build every real tab from the loaded sites and wire them into the TabBar."""
+        app_cfg = app_config.load(self.data_dir)
+
+        dash_sources = [SitePanelSource(label, cfg, state) for label, cfg, state in self.site_sources]
+        es_sources = [EventsubSiteSource(label, cfg) for label, cfg, _state in self.site_sources]
+        fm_sources = [FileManagerSiteSource(label, cfg, state) for label, cfg, state in self.site_sources]
+
+        self.dashboard_tab = DashboardTab(
+            disk_sampler=disk_sampler, sites=dash_sources, color_fn=self.color
+        )
+        self.log_tab = LogTab(color_fn=self.color)
+        self.pipes_tab = PipesTab(color_fn=self.color)
+        self.eventsub_tab = EventsubTab(self.data_dir, sites=es_sources, color_fn=self.color)
+        self.config_tab = ConfigTab(self.data_dir, color_fn=self.color)
+        self.priority_tab = PriorityTab(self.data_dir, color_fn=self.color)
+        self.file_manager_tab = FileManagerTab(
+            sites=fm_sources,
+            subfolders_mode=app_cfg.output.subfolders,
+            collapsible_folders=app_cfg.output.collapsible_folders,
+            color_fn=self.color,
+            data_dir=self.data_dir,
+        )
+
+        self.tab_bar = TabBar(
+            [
+                self.dashboard_tab,
+                self.log_tab,
+                self.pipes_tab,
+                self.eventsub_tab,
+                self.config_tab,
+                self.priority_tab,
+                self.file_manager_tab,
+            ]
+        )
+
     def _layout(self) -> None:
         """Recompute screen dimensions. Called at startup and on every resize."""
         self.height, self.width = self.stdscr.getmaxyx()
@@ -133,7 +182,7 @@ class CursesApp:
         return self.colors.attr_for(pair)
 
     def draw(self) -> None:
-        """Draw one frame: the tab strip, the active tab's body, then the footer."""
+        """Draw one frame: the tab strip, the active tab's body, footer, then any overlays."""
         self.stdscr.erase()
         self.tab_bar.draw_bar(self.stdscr, 0, 0, self.width - 1, self.color)
         if self.height > 3:
@@ -142,6 +191,9 @@ class CursesApp:
         if self.height > 2:
             # Row height-2, not height-1: writing the last cell of the last row can raise curses.error.
             footer.draw_footer(self.stdscr, self.height - 2, 0, self.width - 1, self.tab_bar, self.color)
+        entries = write_failure_alert.collect_write_failures(self.site_states)
+        if entries:
+            self.write_failure_banner.draw(self.stdscr, entries)
         self.stdscr.noutrefresh()
         curses.doupdate()
 
@@ -150,8 +202,56 @@ class CursesApp:
         if confirm_exit(self.stdscr, self.site_states.values(), self.color):
             self.running = False
 
+    def _jump_to_config(self, site: str, streamer: str) -> None:
+        """Switch to the Config tab's per-site screen for a write-failure banner entry."""
+        try:
+            index = self.tab_bar.tabs.index(self.config_tab)
+        except ValueError:
+            return
+        self.tab_bar.active_index = index
+        self.config_tab.mode = "site"
+        self.config_tab.site_screen = SiteSettingsScreen(self.data_dir, site, self.color)
+
+    def _focus_write_failures(self) -> None:
+        """Modal loop letting the user navigate/dismiss/jump the write-failure banner."""
+        while True:
+            entries = write_failure_alert.collect_write_failures(self.site_states)
+            if not entries:
+                return
+            self.draw()
+            self.write_failure_banner.draw(self.stdscr, entries)
+            curses.doupdate()
+            key = self.stdscr.getch()
+            if key == 27:
+                return
+            action = self.write_failure_banner.handle_key(key, entries)
+            write_failure_alert.apply_action(action, self.site_states, jump_fn=self._jump_to_config)
+            if action is not None and action[0] == "jump":
+                return
+
+    def _open_management_overlay(self) -> None:
+        """Global management overlay (Doc 1 §17): pick a site, then add/remove/enable-disable."""
+        labels = [label for label, _cfg, _state in self.site_sources]
+        site = manage_menu.choose_site(self.stdscr, labels, self.color)
+        if site is None:
+            return
+        action = manage_menu.choose_action(self.stdscr, self.color)
+        if action == "add":
+            mgmt_add.add_streamer(self.stdscr, self.data_dir, site, self.color)
+        elif action == "remove":
+            mgmt_remove.remove_streamer(self.stdscr, self.data_dir, site, self.color)
+        elif action == "disable":
+            mgmt_disable.toggle_streamer(self.stdscr, self.data_dir, site, self.color)
+
+    def _open_theme_manager(self) -> None:
+        """Global theme-manager overlay; refresh the active theme/palette afterward."""
+        open_theme_manager(self.stdscr, self.data_dir, self.color, edit_role_fn=role_edit.open_role_editor)
+        self.theme = store.get_active_theme(self.data_dir)
+        if app_config.load(self.data_dir).ui.rgb_mode:
+            palette.apply_theme_palette(self.theme)
+
     def handle_key(self, key: int) -> None:
-        """Handle one input event: resize, quit, tab switch, else delegate to the active tab."""
+        """Handle one input event: resize, quit, tab switch, else delegate, else global overlays."""
         if key == curses.KEY_RESIZE:
             curses.update_lines_cols()
             self._layout()
@@ -162,12 +262,21 @@ class CursesApp:
         elif key == curses.KEY_BTAB:
             self.tab_bar.prev_tab()
         else:
-            self.tab_bar.handle_key(key)
+            consumed = self.tab_bar.handle_key(key)
+            if not consumed:
+                if key in (ord("m"), ord("M")):
+                    self._open_management_overlay()
+                elif key in (ord("t"), ord("T")):
+                    self._open_theme_manager()
+                elif key in (ord("f"), ord("F")):
+                    self._focus_write_failures()
 
     def run(self) -> None:
-        """Main draw/input loop: draw a frame, wait for input, repeat until quit."""
+        """Main draw/input loop: draw a frame, wait for input, repeat until quit/shutdown."""
         self.draw()
         while self.running:
+            if self.shutdown_event is not None and self.shutdown_event.is_set():
+                return
             key = self.stdscr.getch()
             if key == -1:
                 # Timed out with no input; redraw to pick up any external state change.
@@ -177,19 +286,48 @@ class CursesApp:
             self.draw()
 
 
-def _entry(stdscr, data_dir: Path) -> None:
+def _maybe_show_changelog(stdscr, data_dir: Path, color_fn) -> None:
+    """Show the post-update changelog once, diffing against the pre-update schema snapshot."""
+    data_dir = Path(data_dir)
+    if not changelog_popup.should_show_changelog(data_dir):
+        return
+    snapshot = data_dir / "schema" / ".previous_fields.json"
+    current = data_dir / "schema" / "fields.json"
+    lines = changelog_popup.build_lines_from_schema_files(snapshot, current) if snapshot.exists() else []
+    changelog_popup.maybe_show_changelog(stdscr, data_dir, lines, color_fn)
+    snapshot.unlink(missing_ok=True)
+
+
+def _entry(
+    stdscr,
+    data_dir: Path,
+    app_state: Optional[Any],
+    sites: Optional[List[Tuple[str, dict, SiteState]]],
+    disk_sampler: Optional[DiskSampler],
+    shutdown_event: Optional[threading.Event],
+) -> None:
     """curses.wrapper target: build and run the app, restoring the palette on exit."""
     curses.curs_set(0)
     if curses.has_colors():
         curses.start_color()
     session_theme_id = scheme_popup.maybe_offer_random_scheme(stdscr, data_dir)
-    app = CursesApp(stdscr, data_dir, session_theme_id=session_theme_id)
+    app = CursesApp(
+        stdscr, data_dir, app_state=app_state, sites=sites, disk_sampler=disk_sampler,
+        session_theme_id=session_theme_id, shutdown_event=shutdown_event,
+    )
+    _maybe_show_changelog(stdscr, data_dir, app.color)
     try:
         app.run()
     finally:
         palette.reset_palette()
 
 
-def main(data_dir: Path) -> None:
+def main(
+    data_dir: Path,
+    app_state: Optional[Any] = None,
+    sites: Optional[List[Tuple[str, dict, SiteState]]] = None,
+    disk_sampler: Optional[DiskSampler] = None,
+    shutdown_event: Optional[threading.Event] = None,
+) -> None:
     """Initialize curses and run the main loop for the given data directory."""
-    curses.wrapper(_entry, data_dir)
+    curses.wrapper(_entry, data_dir, app_state, sites, disk_sampler, shutdown_event)
