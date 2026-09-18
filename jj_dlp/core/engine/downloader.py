@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import shlex
+import signal
 import subprocess
+import sys
 import threading
 from collections import deque
 from pathlib import Path
@@ -69,8 +72,14 @@ class DownloaderProcess:
         self.popen.terminate()
 
     def kill(self) -> None:
-        """Force-kill the process immediately."""
-        self.popen.kill()
+        """Force-kill the process and its process group (PyInstaller yt-dlp spawns a bootloader + worker)."""
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(self.popen.pid)], capture_output=True)
+            return
+        try:
+            os.killpg(os.getpgid(self.popen.pid), signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            self.popen.kill()
 
 
 def _block_name(lq: bool) -> str:
@@ -157,6 +166,7 @@ def launch(cmd: List[str], on_line: Optional[LineCallback] = None) -> Downloader
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
+        start_new_session=sys.platform != "win32",
     )
     handle = DownloaderProcess(popen, cmd)
     threading.Thread(
