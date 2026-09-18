@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
+
+log = logging.getLogger("jj_dlp.deps.ytdlp_bin")
 
 # (bin/ subdirectory, executable filename) per sys.platform value.
 _PLATFORM_LAYOUT = {
@@ -24,4 +27,7 @@ def app_root() -> Path:
 def resolve_yt_dlp_path() -> Path:
     """Return the bundled yt-dlp binary path for the current platform under bin/."""
     subdir, filename = _PLATFORM_LAYOUT.get(sys.platform, _DEFAULT_LAYOUT)
-    return app_root() / "bin" / subdir / filename
+    path = app_root() / "bin" / subdir / filename
+    if not path.exists():
+        log.warning("Bundled yt-dlp binary not found at %s", path)
+    return path
