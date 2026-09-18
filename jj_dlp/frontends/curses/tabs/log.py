@@ -14,7 +14,7 @@ ColorTuple = Tuple[str, str, bool]
 ColorFn = Callable[[str, Optional[ColorTuple]], int]
 
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
-_ERROR_KEYWORDS = ("error", "fail", "crash", "exception")
+_ERROR_LEVELS = ("ERROR", "CRITICAL")
 
 
 def _default_color_fn(_element_id: str, _runtime_pair: Optional[ColorTuple] = None) -> int:
@@ -25,12 +25,6 @@ def _default_color_fn(_element_id: str, _runtime_pair: Optional[ColorTuple] = No
 def _sanitize(text: str) -> str:
     """Strip control characters so a line can't corrupt the curses display."""
     return _CONTROL_RE.sub("", text.replace("\t", "    "))
-
-
-def _is_error_line(tag: str, msg: str) -> bool:
-    """Heuristic: flag a line as an error line by tag/message keywords."""
-    combined = f"{tag} {msg}".lower()
-    return any(word in combined for word in _ERROR_KEYWORDS)
 
 
 class LogTab(Tab):
@@ -46,12 +40,12 @@ class LogTab(Tab):
         self._visible_height = 0
 
     def _visual_lines(self, width: int) -> List[Tuple[str, bool]]:
-        """Build wrapped, sanitized (text, is_error) rows from the stdlib-logging ring buffer."""
+        """Build wrapped, sanitized (text, is_error) rows from the same lines written to debug.log."""
         rows: List[Tuple[str, bool]] = []
         width = max(1, width)
-        for ts, tag, msg in log_buffer.get_recent_lines():
-            is_error = _is_error_line(tag, msg)
-            line = _sanitize(f"[{ts}] [{tag}] {msg}")
+        for line, _tag, levelname in log_buffer.get_recent_lines():
+            is_error = levelname in _ERROR_LEVELS
+            line = _sanitize(line)
             for wrapped in textwrap.wrap(line, width) or [""]:
                 rows.append((wrapped, is_error))
         return rows

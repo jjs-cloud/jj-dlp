@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import collections
-import datetime
 import logging
 import threading
 from pathlib import Path
@@ -12,28 +11,48 @@ from typing import Deque, Dict, List, Optional, Tuple
 RECENT_LINES_MAXLEN = 2000
 LOGGER_NAMESPACE = "jj_dlp"
 
+# Single formatter shared by debug.log and the Log tab, so both render identical text.
+_LINE_FORMATTER = logging.Formatter(
+    "%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+)
+
 _lock = threading.Lock()
 _recent_lines: Deque[Tuple[str, str, str]] = collections.deque(maxlen=RECENT_LINES_MAXLEN)
 _tag_filter: Dict[str, bool] = {}
 _handler: Optional["_RingBufferHandler"] = None
-_file_handler: Optional[logging.FileHandler] = None
 
 
 class _RingBufferHandler(logging.Handler):
-    """Appends each record's (timestamp, tag, message) to the shared ring buffer."""
+    """Formats each record once and fans it out to the ring buffer and, if enabled, debug.log."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._file = None
+
+    def set_file(self, path: Optional[Path]) -> None:
+        """Swap the underlying debug.log file handle, closing any previous one."""
+        with _lock:
+            if self._file is not None:
+                self._file.close()
+                self._file = None
+            if path is not None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                self._file = open(path, "a", encoding="utf-8")
 
     def emit(self, record: logging.LogRecord) -> None:
         tag = record.name.rsplit(".", 1)[-1]
-        msg = self.format(record).replace("\n", " | ")
-        ts = datetime.datetime.fromtimestamp(record.created).strftime("%Y-%m-%d %H:%M:%S")
+        line = self.format(record).replace("\n", " | ")
         with _lock:
-            _recent_lines.append((ts, tag, msg))
+            _recent_lines.append((line, tag, record.levelname))
             _tag_filter.setdefault(tag, True)
+            if self._file is not None:
+                self._file.write(line + "\n")
+                self._file.flush()
 
 
 def configure(data_dir: Path, app_cfg) -> None:
-    """Attach the ring-buffer handler to the jj_dlp logger tree, plus a file handler if debug.enabled."""
-    global _handler, _file_handler
+    """Attach the ring-buffer handler to the jj_dlp logger tree and point it at debug.log if enabled."""
+    global _handler
     data_dir = Path(data_dir)
     debug = app_cfg.get_debug()
     root = logging.getLogger(LOGGER_NAMESPACE)
@@ -41,23 +60,14 @@ def configure(data_dir: Path, app_cfg) -> None:
 
     if _handler is None:
         _handler = _RingBufferHandler()
-        _handler.setFormatter(logging.Formatter("%(message)s"))
+        _handler.setFormatter(_LINE_FORMATTER)
         root.addHandler(_handler)
 
-    if _file_handler is not None:
-        root.removeHandler(_file_handler)
-        _file_handler.close()
-        _file_handler = None
-    if debug.enabled:
-        log_path = data_dir / debug.log_path
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        _file_handler = logging.FileHandler(log_path, encoding="utf-8")
-        _file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-        root.addHandler(_file_handler)
+    _handler.set_file(data_dir / debug.log_path if debug.enabled else None)
 
 
 def get_recent_lines(include_filtered: bool = False) -> List[Tuple[str, str, str]]:
-    """Return recent (timestamp, tag, msg) lines, honoring the tag filter unless overridden."""
+    """Return recent (line, tag, levelname) entries, honoring the tag filter unless overridden."""
     with _lock:
         lines = list(_recent_lines)
         filters = dict(_tag_filter)
