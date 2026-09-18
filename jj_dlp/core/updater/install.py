@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from jj_dlp.core.config import state
+from jj_dlp.core.deps import ytdlp_bin
 from jj_dlp.core.notify import logger
 from jj_dlp.core.updater.check import GITHUB_REPO, REQUEST_TIMEOUT_SEC
 
@@ -92,6 +93,12 @@ def _find_package_root(extracted_dir: Path) -> Path:
     raise RuntimeError(f"could not find a jj_dlp package under {extracted_dir}")
 
 
+def _find_bin_dir(extracted_dir: Path) -> Optional[Path]:
+    """Locate the bundled bin/ directory alongside jj_dlp in an extracted release tree, if present."""
+    candidate = _find_package_root(extracted_dir).parent / "bin"
+    return candidate if candidate.is_dir() else None
+
+
 def _copy_tree_overwrite(source: Path, dest: Path) -> None:
     """Recursively copy source's contents onto dest, overwriting any existing files."""
     for item in source.rglob("*"):
@@ -109,6 +116,10 @@ def finish_update(extracted_dir: Path, data_dir: Path) -> None:
     data_dir = Path(data_dir)
     source_root = _find_package_root(extracted_dir)
     _copy_tree_overwrite(source_root, _install_dir())
+
+    bin_source = _find_bin_dir(extracted_dir)
+    if bin_source is not None:
+        _copy_tree_overwrite(bin_source, ytdlp_bin.app_root() / "bin")
 
     latest_sha = state.get_update_check(data_dir).get("latest_sha_seen")
     state.set_update_check(data_dir, installed_sha=latest_sha)

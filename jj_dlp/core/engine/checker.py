@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
+from jj_dlp.core.deps.ytdlp_bin import resolve_yt_dlp_path
 from jj_dlp.core.engine.site_state import SiteState
 
 log = logging.getLogger("jj_dlp.engine.checker")
@@ -29,7 +30,7 @@ class CheckResult:
 def build_check_command(site_config: dict, streamer: str) -> List[str]:
     """Build the yt-dlp metadata-only check command line for one streamer."""
     url = site_config["url_template"].format(username=streamer)
-    cmd = ["yt-dlp", "--dump-json", "--skip-download", "--no-warnings", url]
+    cmd = [str(resolve_yt_dlp_path()), "--dump-json", "--skip-download", "--no-warnings", url]
     if site_config.get("checker", {}).get("cookies_from_browser"):
         browser = site_config.get("browser", "")
         if browser:

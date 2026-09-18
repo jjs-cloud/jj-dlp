@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable, Deque, List, Optional
 
 from jj_dlp.core.config import schema
+from jj_dlp.core.deps.ytdlp_bin import resolve_yt_dlp_path
 
 log = logging.getLogger("jj_dlp.engine.downloader")
 
@@ -119,7 +120,7 @@ def build_command(
     block_data = site_config.get(block, {})
     url = site_config["url_template"].format(username=streamer)
 
-    cmd = ["yt-dlp"]
+    cmd = [str(resolve_yt_dlp_path())]
     cmd += _flag_args(site_config, block, schema_path)
     cmd += ["-o", output_path]
 
