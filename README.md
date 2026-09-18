@@ -49,23 +49,27 @@ directory (see below) with a fresh `config/app.json`, `schema/fields.json`,
 and the three built-in themes, and walks you through picking which sites to
 load for the session.
 
+## Data directory
+
+jj-dlp keeps everything it writes — `config/`, `schema/`, `state/`,
+`logs/`, and `recordings/` — inside a single `userdata/` folder created
+next to the installed `jj_dlp/` package (i.e. alongside `bin/` and
+`pyproject.toml`), not in any platform-specific home/AppData location.
+Nothing is ever written outside this folder (or wherever `--data-dir`
+points instead). Override it with `--data-dir <path>` on any platform.
+
 ## Platform-specific notes
 
-- **Windows** — data directory defaults to `%APPDATA%\jj-dlp`. `ffmpeg` is
-  installed via `winget`; you may need to restart your terminal (or log
-  out/in) afterward for `PATH` to pick it up. Curses support comes from the
-  `windows-curses` package, installed automatically if missing.
-- **macOS** — data directory defaults to
-  `~/Library/Application Support/jj-dlp`. `ffmpeg` is installed via
-  Homebrew; if Homebrew itself isn't installed, jj-dlp will tell you and
-  stop rather than trying to install Homebrew for you.
-- **Linux** — data directory defaults to `$XDG_DATA_HOME/jj-dlp` (or
-  `~/.local/share/jj-dlp`). `ffmpeg` is installed via whichever of
+- **Windows** — `ffmpeg` is installed via `winget`; you may need to
+  restart your terminal (or log out/in) afterward for `PATH` to pick it
+  up. Curses support comes from the `windows-curses` package, installed
+  automatically if missing.
+- **macOS** — `ffmpeg` is installed via Homebrew; if Homebrew itself
+  isn't installed, jj-dlp will tell you and stop rather than trying to
+  install Homebrew for you.
+- **Linux** — `ffmpeg` is installed via whichever of
   `apt-get`/`dnf`/`yum`/`pacman`/`zypper`/`apk` is detected, `sudo`-prefixed
   if you're not already root.
-
-You can override the data directory on any platform with `--data-dir
-<path>`.
 
 ## How updates work
 

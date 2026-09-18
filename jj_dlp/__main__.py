@@ -14,6 +14,7 @@ from jj_dlp import __version__
 from jj_dlp.core.config import app as app_config
 from jj_dlp.core.config import schema, sites as sites_config, storage
 from jj_dlp.core.deps import curses_dep, ffmpeg_dep, registry  # noqa: F401  registers dependencies
+from jj_dlp.core.deps.ytdlp_bin import app_root
 from jj_dlp.core.engine.app_state import AppState, SingleInstanceError
 from jj_dlp.core.engine.disk import DiskSampler, SiteDiskSource
 from jj_dlp.core.engine.lifecycle import Lifecycle
@@ -44,14 +45,8 @@ def check_dependencies() -> None:
 
 
 def default_data_dir() -> Path:
-    """Return the platform-appropriate default data directory."""
-    if sys.platform == "win32":
-        base = os.environ.get("APPDATA", str(Path.home()))
-        return Path(base) / "jj-dlp"
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "jj-dlp"
-    base = os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
-    return Path(base) / "jj-dlp"
+    """Return the default data directory: userdata/ next to the installed app root."""
+    return app_root() / "userdata"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -61,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--data-dir",
         type=Path,
         default=default_data_dir(),
-        help="Directory holding config/, schema/, state/, logs/, recordings/ (default: platform data dir).",
+        help="Directory holding config/, schema/, state/, logs/, recordings/ (default: userdata/ next to the app).",
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging for this run.")
     parser.add_argument("--version", action="version", version=f"jj-dlp {__version__}")
