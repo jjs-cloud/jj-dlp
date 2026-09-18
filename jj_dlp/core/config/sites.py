@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import Any, List, Optional
 
 from jj_dlp.core.config import schema, storage
 from jj_dlp.core.plugins import get_plugin
+
+log = logging.getLogger("jj_dlp.config.sites")
 
 SITES_RELDIR = Path("config") / "sites"
 PRIORITY_RELPATH = Path("config") / "priority.json"
@@ -137,12 +140,14 @@ def create_site(data_dir: Path, label: str, plugin_id: str) -> dict:
     data_dir = Path(data_dir)
     _validate_label(label)
     if label in list_sites(data_dir):
+        log.warning("Rejected create-site '%s': label already exists", label)
         raise ValueError(f"A site named '{label}' already exists")
     plugin = get_plugin(plugin_id)
     cfg = plugin.default_config()
     cfg["label"] = label
     cfg["plugin"] = plugin_id
     save_site(data_dir, label, cfg)
+    log.info("Created site '%s' (plugin=%s)", label, plugin_id)
     return cfg
 
 
@@ -152,8 +157,10 @@ def rename_site(data_dir: Path, old_label: str, new_label: str) -> None:
     if old_label == new_label:
         return
     if old_label not in list_sites(data_dir):
+        log.warning("Rejected rename-site '%s' -> '%s': no such site", old_label, new_label)
         raise ValueError(f"No such site: {old_label!r}")
     if new_label in list_sites(data_dir):
+        log.warning("Rejected rename-site '%s' -> '%s': label already exists", old_label, new_label)
         raise ValueError(f"A site named '{new_label}' already exists")
     _validate_label(new_label)
 
@@ -164,6 +171,7 @@ def rename_site(data_dir: Path, old_label: str, new_label: str) -> None:
 
     _rename_priority_references(data_dir, old_label, new_label)
     _rename_state_references(data_dir, old_label, new_label)
+    log.info("Renamed site '%s' to '%s'", old_label, new_label)
 
 
 def delete_site(data_dir: Path, label: str) -> None:
@@ -172,6 +180,23 @@ def delete_site(data_dir: Path, label: str) -> None:
     _site_path(data_dir, label).unlink(missing_ok=True)
     _remove_priority_references(data_dir, label)
     _remove_state_references(data_dir, label)
+    log.info("Deleted site '%s'", label)
+
+
+def add_streamer(data_dir: Path, label: str, streamer: str) -> None:
+    """Append a streamer to a site's streamers list, rejecting empty or duplicate names."""
+    data_dir = Path(data_dir)
+    site = load_site(data_dir, label)
+    existing = list(site.get("streamers", [])) + list(site.get("disabled", []))
+    if not streamer:
+        log.warning("Rejected add-streamer on site '%s': empty name", label)
+        raise ValueError("Streamer name cannot be empty.")
+    if streamer in existing:
+        log.warning("Rejected add-streamer '%s' on site '%s': already present", streamer, label)
+        raise ValueError(f"'{streamer}' is already on {label}.")
+    site.setdefault("streamers", []).append(streamer)
+    save_site(data_dir, label, site)
+    log.info("Added streamer '%s' to site '%s'", streamer, label)
 
 
 # --- priority.json / state/*.json reference cleanup ---

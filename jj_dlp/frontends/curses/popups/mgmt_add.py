@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import curses
+import logging
 from typing import Callable, Optional, Tuple
 
 from jj_dlp.core.config import sites as sites_config
+
+log = logging.getLogger("jj_dlp.popups.mgmt_add")
 
 ColorTuple = Tuple[str, str, bool]
 ColorFn = Callable[[str, Optional[ColorTuple]], int]
@@ -102,10 +105,14 @@ def add_streamer(stdscr, data_dir, label: str, color_fn: Optional[ColorFn] = Non
             key = stdscr.getch()
             result = popup.handle_key(key)
             if result == "":
+                log.info("Add-streamer on site '%s' cancelled", label)
                 return None
             if result:
-                site.setdefault("streamers", []).append(result)
-                sites_config.save_site(data_dir, label, site)
+                try:
+                    sites_config.add_streamer(data_dir, label, result)
+                except ValueError as exc:
+                    popup.error = str(exc)
+                    continue
                 return result
     finally:
         curses.curs_set(0)

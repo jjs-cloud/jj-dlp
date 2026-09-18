@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import curses
+import logging
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 from jj_dlp.core.config import sites as sites_config
+
+log = logging.getLogger("jj_dlp.popups.mgmt_disable")
 
 ColorTuple = Tuple[str, str, bool]
 ColorFn = Callable[[str, Optional[ColorTuple]], int]
@@ -32,6 +35,7 @@ def toggle_streamer_status(data_dir: Path, label: str, streamer: str) -> bool:
         disabled.append(streamer)
         now_enabled = False
     sites_config.save_site(data_dir, label, site)
+    log.info("%s streamer '%s' on site '%s'", "Enabled" if now_enabled else "Disabled", streamer, label)
     return now_enabled
 
 

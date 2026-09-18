@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import curses
+import logging
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 from jj_dlp.core.config import priority as priority_config
 from jj_dlp.core.config import sites as sites_config
 from jj_dlp.core.config import state as state_config
+
+log = logging.getLogger("jj_dlp.popups.mgmt_remove")
 
 ColorTuple = Tuple[str, str, bool]
 ColorFn = Callable[[str, Optional[ColorTuple]], int]
@@ -118,6 +121,7 @@ def _remove_streamer_data(data_dir: Path, label: str, streamer: str) -> None:
         sites_config.save_site(data_dir, label, site)
     priority_config.remove_entry(data_dir, label, streamer)
     state_config.remove_streamer_live_status(data_dir, label, streamer)
+    log.info("Removed streamer '%s' from site '%s'", streamer, label)
 
 
 def remove_streamer(stdscr, data_dir: Path, label: str, color_fn: Optional[ColorFn] = None) -> Optional[str]:
