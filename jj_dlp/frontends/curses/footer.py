@@ -13,23 +13,34 @@ ColorFn = Callable[[str, Optional[ColorTuple]], int]
 GLOBAL_HINTS: List[Tuple[str, str]] = [
     ("q", "quit"),
     ("tab", "switch tab"),
+    ("m", "manage"),
+    ("t", "theme"),
     ("h", "help"),
 ]
 
+# Only shown when there's an active write-failure to jump to; not worth the
+# footer space otherwise.
+FAILURES_HINT: Tuple[str, str] = ("f", "failures")
 
-def build_hints(tab_bar: TabBar) -> List[Tuple[str, str]]:
-    """Return the active tab's footer hints followed by the global hints."""
-    return list(tab_bar.footer_hints()) + GLOBAL_HINTS
+
+def build_hints(tab_bar: TabBar, show_failures: bool = False) -> List[Tuple[str, str]]:
+    """Return the active tab's footer hints, the global hints, and the failures hint if active."""
+    hints = list(tab_bar.footer_hints()) + GLOBAL_HINTS
+    if show_failures:
+        hints.append(FAILURES_HINT)
+    return hints
 
 
-def draw_footer(stdscr, y: int, x1: int, x2: int, tab_bar: TabBar, color_fn: ColorFn) -> None:
+def draw_footer(
+    stdscr, y: int, x1: int, x2: int, tab_bar: TabBar, color_fn: ColorFn, show_failures: bool = False
+) -> None:
     """Render the active tab's hints plus the global keys on row y, truncated to fit."""
     width = x2 - x1 + 1
     if width <= 0:
         return
 
     col = x1
-    for key, label in build_hints(tab_bar):
+    for key, label in build_hints(tab_bar, show_failures):
         key_part = f"{key}:"
         text_part = f"{label}  "
         if col + len(key_part) > x2 + 1:

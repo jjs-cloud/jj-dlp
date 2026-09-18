@@ -189,10 +189,12 @@ class CursesApp:
         if self.height > 3:
             self.tab_bar.draw_active(self.stdscr, 1, 0, self.height - 3, self.width - 1)
             easter_eggs.draw_dashboard_decoration(self.stdscr, 1, 0, self.height - 3, self.width - 1, self.color)
+        entries = write_failure_alert.collect_write_failures(self.site_states)
         if self.height > 2:
             # Row height-2, not height-1: writing the last cell of the last row can raise curses.error.
-            footer.draw_footer(self.stdscr, self.height - 2, 0, self.width - 1, self.tab_bar, self.color)
-        entries = write_failure_alert.collect_write_failures(self.site_states)
+            footer.draw_footer(
+                self.stdscr, self.height - 2, 0, self.width - 1, self.tab_bar, self.color, show_failures=bool(entries)
+            )
         if entries:
             self.write_failure_banner.draw(self.stdscr, entries)
         self.stdscr.noutrefresh()
@@ -272,7 +274,8 @@ class CursesApp:
                 elif key in (ord("f"), ord("F")):
                     self._focus_write_failures()
                 elif key in (ord("h"), ord("H")):
-                    show_help(self.stdscr, footer.build_hints(self.tab_bar), self.color)
+                    entries = write_failure_alert.collect_write_failures(self.site_states)
+                    show_help(self.stdscr, footer.build_hints(self.tab_bar, show_failures=bool(entries)), self.color)
 
     def run(self) -> None:
         """Main draw/input loop: draw a frame, wait for input, repeat until quit/shutdown."""
