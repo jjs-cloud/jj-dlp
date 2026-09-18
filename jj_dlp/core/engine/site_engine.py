@@ -27,7 +27,7 @@ from jj_dlp.core.engine import stall as stall_mod
 from jj_dlp.core.engine import write_failure as write_failure_mod
 from jj_dlp.core.engine.checker import Checker
 from jj_dlp.core.engine.site_state import SiteState
-from jj_dlp.core.notify import activity_log, desktop, ntfy, pipe_capture
+from jj_dlp.core.notify import desktop, ntfy, pipe_capture
 
 log = logging.getLogger("jj_dlp.engine.site_engine")
 
@@ -158,6 +158,7 @@ class SiteEngine:
         self.config = config
         self.site_state = site_state
         self.plugin = plugin
+        self._site_log = logging.getLogger(f"jj_dlp.site.{label}")
 
         self.coordinator = recording_mod.RecordingCoordinator(app_cfg, schema_path)
         self.quality = quality_mod.QualityMonitor(app_cfg, config, site_state, on_restart=self._restart)
@@ -228,7 +229,7 @@ class SiteEngine:
         self.write_failure.on_process_exit(streamer, output_path, self._started_at.get(streamer, time.time()))
         self.coordinator.on_process_exit(self.label, streamer, self.site_state)
         self.segments.clear(streamer)
-        activity_log.log_activity(self.label, f"{streamer} stopped recording")
+        self._site_log.info("%s stopped recording", streamer)
 
     def _restart(self, streamer: str, path: str) -> None:
         """Shared restart callback for the stall/quality/segment monitors: relaunch at path."""
@@ -286,4 +287,4 @@ class SiteEngine:
         ntfy.notify_recording_started(
             self.label, streamer, effective.ntfy_enabled, self.app_cfg.notifications.ntfy_topic
         )
-        activity_log.log_activity(self.label, f"{streamer} started recording")
+        self._site_log.info("%s started recording", streamer)

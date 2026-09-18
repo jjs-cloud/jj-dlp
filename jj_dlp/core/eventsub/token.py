@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 import urllib.error
@@ -10,7 +11,7 @@ import urllib.parse
 import urllib.request
 from typing import Dict, Optional, Tuple
 
-from jj_dlp.core.notify import logger
+log = logging.getLogger("jj_dlp.eventsub.token")
 
 TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 REQUEST_TIMEOUT_SEC = 10
@@ -56,13 +57,13 @@ def _refresh(client_id: str, client_secret: str) -> str:
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SEC) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        logger.dbg(f"eventsub token fetch failed: {exc}", tag="eventsub")
+        log.warning("eventsub token fetch failed: %s", exc)
         raise TokenError(str(exc)) from exc
 
     access_token: Optional[str] = payload.get("access_token")
     expires_in = payload.get("expires_in")
     if not access_token or not isinstance(expires_in, (int, float)):
-        logger.dbg(f"eventsub token response missing fields: {payload}", tag="eventsub")
+        log.warning("eventsub token response missing fields: %s", payload)
         raise TokenError("malformed token response")
 
     expires_at = time.time() + expires_in - EXPIRY_SAFETY_MARGIN_SEC

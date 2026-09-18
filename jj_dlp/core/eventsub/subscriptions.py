@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -13,7 +14,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from jj_dlp.core.config import state
 from jj_dlp.core.eventsub import token
-from jj_dlp.core.notify import logger
+
+log = logging.getLogger("jj_dlp.eventsub.subscriptions")
 
 USERS_URL = "https://api.twitch.tv/helix/users"
 SUBSCRIPTIONS_URL = "https://api.twitch.tv/helix/eventsub/subscriptions"
@@ -46,7 +48,7 @@ def _request_json(req: urllib.request.Request) -> Optional[dict]:
             body = resp.read().decode("utf-8")
             return json.loads(body) if body else {}
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        logger.dbg(f"eventsub request failed: {req.full_url}: {exc}", tag="eventsub")
+        log.warning("eventsub request failed: %s: %s", req.full_url, exc)
         return None
 
 
@@ -105,7 +107,7 @@ def _delete_subscription(client_id: str, access_token: str, sub_id: str) -> None
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SEC):
             pass
     except (urllib.error.URLError, OSError) as exc:
-        logger.dbg(f"eventsub unsubscribe failed for {sub_id}: {exc}", tag="eventsub")
+        log.warning("eventsub unsubscribe failed for %s: %s", sub_id, exc)
 
 
 def _index_remote(
@@ -147,13 +149,13 @@ def reconcile(
         creds["callback_url"],
     )
     if not client_id or not client_secret or not callback_url:
-        logger.dbg(f"eventsub reconcile skipped for {site}: missing client_id/secret/callback_url", tag="eventsub")
+        log.warning("eventsub reconcile skipped for %s: missing client_id/secret/callback_url", site)
         return
 
     try:
         access_token = token.get_token(client_id, client_secret)
     except token.TokenError as exc:
-        logger.dbg(f"eventsub reconcile aborted for {site}: {exc}", tag="eventsub")
+        log.warning("eventsub reconcile aborted for %s: %s", site, exc)
         return
 
     secret = derive_secret(client_secret, site)
@@ -177,7 +179,7 @@ def reconcile(
     for login in wanted_logins:
         user_id = get_user_id(client_id, access_token, login)
         if not user_id:
-            logger.dbg(f"eventsub: could not resolve user id for {login}", tag="eventsub")
+            log.warning("eventsub: could not resolve user id for %s", login)
             continue
 
         online_sub = remote_index.get((user_id, "stream.online"))
@@ -196,6 +198,6 @@ def reconcile(
         if online_id:
             state.set_subscription_id(data_dir, site, login, online_id)
         else:
-            logger.dbg(f"eventsub: failed to subscribe {login}", tag="eventsub")
+            log.warning("eventsub: failed to subscribe %s", login)
 
-    logger.dbg(f"eventsub reconcile complete for {site}", tag="eventsub")
+    log.info("eventsub reconcile complete for %s", site)

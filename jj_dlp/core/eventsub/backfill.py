@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import urllib.error
 import urllib.parse
@@ -12,7 +13,8 @@ from typing import Callable, Dict, List, Optional, Set
 from jj_dlp.core.engine.checker import Checker
 from jj_dlp.core.engine.site_state import SiteState
 from jj_dlp.core.eventsub import token
-from jj_dlp.core.notify import logger
+
+log = logging.getLogger("jj_dlp.eventsub.backfill")
 
 STREAMS_URL = "https://api.twitch.tv/helix/streams"
 REQUEST_TIMEOUT_SEC = 10
@@ -45,7 +47,7 @@ def get_live_logins(client_id: str, access_token: str, logins: List[str]) -> Set
             with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SEC) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
         except (urllib.error.URLError, OSError, ValueError) as exc:
-            logger.dbg(f"eventsub backfill: streams request failed: {exc}", tag="eventsub")
+            log.warning("eventsub backfill: streams request failed: %s", exc)
             continue
         for stream in payload.get("data") or []:
             login = stream.get("user_login")
@@ -76,7 +78,7 @@ def run_once(
     try:
         access_token = token.get_token(client_id, client_secret)
     except token.TokenError as exc:
-        logger.dbg(f"eventsub backfill aborted for {site}: {exc}", tag="eventsub")
+        log.warning("eventsub backfill aborted for %s: %s", site, exc)
         return
 
     candidates = [s for s in streamers if not site_state.is_recording(s)]
@@ -136,7 +138,7 @@ def build_backfill_runner(
     """Construct a BackfillRunner for a twitch site from its plugin_settings, or None if unconfigured."""
     creds = _eventsub_creds(plugin_settings)
     if not creds["client_id"] or not creds["client_secret"]:
-        logger.dbg(f"eventsub backfill not started for {site}: missing client_id/client_secret", tag="eventsub")
+        log.warning("eventsub backfill not started for %s: missing client_id/client_secret", site)
         return None
     return BackfillRunner(
         site=site,

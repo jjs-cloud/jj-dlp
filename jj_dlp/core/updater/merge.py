@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import copy
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from jj_dlp.core.config import app as app_config
 from jj_dlp.core.config import schema
 from jj_dlp.core.config import sites as sites_config
-from jj_dlp.core.notify import logger
 from jj_dlp.core.plugins import get_plugin
+
+log = logging.getLogger("jj_dlp.updater.merge")
 
 _MISSING = object()
 
@@ -78,7 +80,7 @@ def merge_site_config(data_dir: Path, label: str, schema_path: Optional[Path] = 
     try:
         plugin = get_plugin(plugin_id)
     except KeyError:
-        logger.dbg(f"unknown plugin '{plugin_id}' for site '{label}'; skipping merge", tag="updater")
+        log.warning("unknown plugin '%s' for site '%s'; skipping merge", plugin_id, label)
         return old_data
 
     new_defaults = plugin.default_config()

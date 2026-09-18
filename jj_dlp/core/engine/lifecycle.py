@@ -10,7 +10,7 @@ import time
 from typing import Optional
 
 from jj_dlp.core.engine.app_state import AppState
-from jj_dlp.core.notify import logger as notify_logger
+from jj_dlp.core.notify import crash as notify_crash
 
 log = logging.getLogger("jj_dlp.engine.lifecycle")
 
@@ -162,6 +162,6 @@ class Lifecycle:
                 exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
             )
             if args.exc_value is not None:
-                notify_logger.log_crash(args.exc_value)
+                notify_crash.log_crash(args.exc_value)
 
         threading.excepthook = _hook

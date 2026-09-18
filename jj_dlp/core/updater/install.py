@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import subprocess
 import sys
@@ -14,8 +15,9 @@ from typing import Any, Dict, List, Optional
 
 from jj_dlp.core.config import state
 from jj_dlp.core.deps import ytdlp_bin
-from jj_dlp.core.notify import logger
 from jj_dlp.core.updater.check import GITHUB_REPO, REQUEST_TIMEOUT_SEC
+
+log = logging.getLogger("jj_dlp.updater.install")
 
 FINISH_UPDATE_FLAG = "--finish-update"
 RELEASE_BY_TAG_URL = "https://api.github.com/repos/{repo}/releases/tags/{tag}"
@@ -70,7 +72,7 @@ def download_and_extract(tag: str) -> Path:
 def relaunch_for_update(extracted_dir: Path, extra_argv: Optional[List[str]] = None) -> None:
     """Spawn a fresh process with --finish-update <extracted_dir>, then exit this one."""
     argv = [sys.executable, "-m", "jj_dlp"] + (extra_argv or []) + [FINISH_UPDATE_FLAG, str(extracted_dir)]
-    logger.dbg(f"relaunching to finish update: {argv}", tag="updater")
+    log.info("relaunching to finish update: %s", argv)
     subprocess.Popen(argv, close_fds=True, start_new_session=True)
     sys.exit(0)
 
@@ -123,7 +125,7 @@ def finish_update(extracted_dir: Path, data_dir: Path) -> None:
 
     latest_sha = state.get_update_check(data_dir).get("latest_sha_seen")
     state.set_update_check(data_dir, installed_sha=latest_sha)
-    logger.dbg(f"update finished, installed_sha={latest_sha}", tag="updater")
+    log.info("update finished, installed_sha=%s", latest_sha)
 
     shutil.rmtree(extracted_dir.parent, ignore_errors=True)
 

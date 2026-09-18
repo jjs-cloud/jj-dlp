@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import urllib.error
 import urllib.request
 
-from jj_dlp.core.notify import logger
+log = logging.getLogger("jj_dlp.notify.ntfy")
 
 NTFY_BASE_URL = "https://ntfy.sh"
 REQUEST_TIMEOUT_SEC = 10
@@ -37,4 +38,4 @@ def _post(topic: str, message: str) -> None:
         with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SEC):
             pass
     except (urllib.error.URLError, OSError) as exc:
-        logger.dbg(f"ntfy notification failed: {exc}", tag="notify")
+        log.warning("ntfy notification failed: %s", exc)

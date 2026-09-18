@@ -7,7 +7,6 @@ from typing import Optional
 
 from jj_dlp.core.config import app as app_config
 from jj_dlp.core.engine.app_state import AppState
-from jj_dlp.core.notify import logger as notify_logger
 from jj_dlp.core.web.server import WebServer, build_server
 
 log = logging.getLogger("jj_dlp.web")
@@ -22,7 +21,7 @@ def start_web_server(app_state: AppState) -> Optional[WebServer]:
         return None
     server = build_server(web_ui, app_state, app_state.data_dir)
     server.start()
-    notify_logger.dbg(f"Web UI reachable at {server.url}", tag="web")
+    log.info("Web UI reachable at %s", server.url)
     return server
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 import urllib.error
@@ -12,7 +13,8 @@ from typing import Any, Dict, List, Optional
 
 from jj_dlp.core.config import app as app_config
 from jj_dlp.core.config import state
-from jj_dlp.core.notify import logger
+
+log = logging.getLogger("jj_dlp.updater.check")
 
 # owner/repo slug queried on the GitHub Releases API; update for the real repo.
 GITHUB_REPO = "jj-dlp/jj-dlp"
@@ -52,13 +54,13 @@ def is_update_available(data_dir: Path, config: Optional[app_config.AppConfig] =
     try:
         releases = _fetch_releases(GITHUB_REPO)
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        logger.dbg(f"update check request failed: {exc}", tag="updater")
+        log.warning("update check request failed: %s", exc)
         state.set_update_check(data_dir, last_check_ts=now)
         return False
 
     release = _latest_release_for_branch(releases, branch)
     if release is None:
-        logger.dbg(f"no releases found for branch '{branch}'", tag="updater")
+        log.info("no releases found for branch '%s'", branch)
         state.set_update_check(data_dir, last_check_ts=now)
         return False
 
@@ -94,8 +96,8 @@ def run_forever(
     while not stop_event.is_set():
         try:
             maybe_check(data_dir, config)
-        except Exception as exc:  # noqa: BLE001 - never let the checker thread die
-            logger.dbg(f"update checker error: {exc}", tag="updater")
+        except Exception:  # noqa: BLE001 - never let the checker thread die
+            log.exception("update checker error")
         stop_event.wait(LOOP_POLL_SEC)
 
 

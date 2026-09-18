@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import platform
 import shutil
 import subprocess
@@ -9,7 +10,7 @@ import threading
 import time
 from typing import Dict, Tuple
 
-from jj_dlp.core.notify import logger
+log = logging.getLogger("jj_dlp.notify.desktop")
 
 _lock = threading.Lock()
 _last_fired: Dict[Tuple[str, str], float] = {}
@@ -55,15 +56,15 @@ def _show_popup(title: str, message: str, timeout_sec: int) -> None:
         elif system == "Windows":
             _show_windows(title, message, timeout_sec)
         else:
-            logger.dbg(f"no desktop notifier for platform {system!r}", tag="notify")
-    except Exception as exc:
-        logger.dbg(f"desktop notification failed: {exc}", tag="notify")
+            log.warning("no desktop notifier for platform %r", system)
+    except Exception:
+        log.exception("desktop notification failed")
 
 
 def _show_linux(title: str, message: str, timeout_sec: int) -> None:
     """Show a notification via notify-send, if it's installed."""
     if shutil.which("notify-send") is None:
-        logger.dbg("notify-send not found, skipping popup", tag="notify")
+        log.warning("notify-send not found, skipping popup")
         return
     subprocess.run(
         ["notify-send", "-t", str(int(timeout_sec * 1000)), title, message],

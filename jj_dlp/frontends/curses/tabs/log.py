@@ -7,7 +7,7 @@ import re
 import textwrap
 from typing import Callable, List, Optional, Tuple
 
-from jj_dlp.core.notify import activity_log, logger
+from jj_dlp.core.notify import log_buffer
 from jj_dlp.frontends.curses.tabs.framework import Tab
 
 ColorTuple = Tuple[str, str, bool]
@@ -46,12 +46,10 @@ class LogTab(Tab):
         self._visible_height = 0
 
     def _visual_lines(self, width: int) -> List[Tuple[str, bool]]:
-        """Build wrapped, sanitized (text, is_error) rows from the combined activity log."""
+        """Build wrapped, sanitized (text, is_error) rows from the stdlib-logging ring buffer."""
         rows: List[Tuple[str, bool]] = []
         width = max(1, width)
-        for ts, tag, msg in activity_log.get_combined_lines():
-            if not logger.is_tag_enabled(tag):
-                continue
+        for ts, tag, msg in log_buffer.get_recent_lines():
             is_error = _is_error_line(tag, msg)
             line = _sanitize(f"[{ts}] [{tag}] {msg}")
             for wrapped in textwrap.wrap(line, width) or [""]:
@@ -123,7 +121,7 @@ class LogTab(Tab):
 
 
 class _TagFilterPopup:
-    """Checkbox list of known log tags, toggled on/off directly in notify/logger.py."""
+    """Checkbox list of known log tags, toggled on/off directly in notify/log_buffer.py."""
 
     def __init__(self, tags: List[str], color_fn: ColorFn) -> None:
         self.tags = tags
@@ -134,7 +132,7 @@ class _TagFilterPopup:
         """Return one checkbox row per known tag, or a placeholder if there are none."""
         if not self.tags:
             return ["(no tags yet)"]
-        return [f"[{'x' if logger.is_tag_enabled(t) else ' '}] {t}" for t in self.tags]
+        return [f"[{'x' if log_buffer.is_tag_enabled(t) else ' '}] {t}" for t in self.tags]
 
     def draw(self, stdscr) -> None:
         """Render the checkbox list centered on the screen."""
@@ -175,13 +173,13 @@ class _TagFilterPopup:
             self.index = (self.index + 1) % len(self.tags)
         elif key == ord(" "):
             tag = self.tags[self.index]
-            logger.set_tag_enabled(tag, not logger.is_tag_enabled(tag))
+            log_buffer.set_tag_enabled(tag, not log_buffer.is_tag_enabled(tag))
         return False
 
 
 def _open_tag_filter_popup(stdscr, color_fn: ColorFn) -> None:
     """Run the tag-filter popup's own input loop until the user closes it."""
-    popup = _TagFilterPopup(logger.get_known_tags(), color_fn)
+    popup = _TagFilterPopup(log_buffer.get_known_tags(), color_fn)
     popup.draw(stdscr)
     while True:
         key = stdscr.getch()

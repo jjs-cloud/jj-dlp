@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import curses
+import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,9 +11,10 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from jj_dlp.core.engine import file_ops, file_scan
 from jj_dlp.core.engine.site_state import SiteState
-from jj_dlp.core.notify import logger
 from jj_dlp.frontends.curses.popups.file_manager.menu import open_file_menu
 from jj_dlp.frontends.curses.tabs.framework import Tab
+
+log = logging.getLogger("jj_dlp.frontends.file_manager")
 
 ColorTuple = Tuple[str, str, bool]
 ColorFn = Callable[[str, Optional[ColorTuple]], int]
@@ -319,7 +321,7 @@ class FileManagerTab(Tab):
             file_ops.open_file(row.path)
             self._set_status("")
         except file_ops.FileOpError as exc:
-            logger.dbg(str(exc), tag="file_manager")
+            log.warning(str(exc))
             self._set_status(str(exc))
 
     def _open_selected_folder(self) -> None:
@@ -331,7 +333,7 @@ class FileManagerTab(Tab):
             file_ops.open_containing_folder(row.path)
             self._set_status("")
         except file_ops.FileOpError as exc:
-            logger.dbg(str(exc), tag="file_manager")
+            log.warning(str(exc))
             self._set_status(str(exc))
 
     def _delete_selected(self, stdscr) -> None:
@@ -350,7 +352,7 @@ class FileManagerTab(Tab):
                 file_ops.move_to_trash(row.path)
             self._set_status(f"Deleted {name}")
         except file_ops.FileOpError as exc:
-            logger.dbg(str(exc), tag="file_manager")
+            log.warning(str(exc))
             self._set_status(str(exc))
         self._refresh_display(force_scan=True)
 

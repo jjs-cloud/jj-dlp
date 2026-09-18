@@ -16,7 +16,6 @@ from jj_dlp.core.config import state as config_state
 from jj_dlp.core.engine.checker import Checker
 from jj_dlp.core.engine.site_state import SiteState
 from jj_dlp.core.eventsub.subscriptions import derive_secret
-from jj_dlp.core.notify import logger
 
 log = logging.getLogger("jj_dlp.eventsub.webhook")
 
@@ -93,7 +92,7 @@ def _make_handler_class(
             message_type = self.headers.get(MESSAGE_TYPE_HEADER, "")
 
             if not verify_signature(secret, message_id, timestamp, body, signature):
-                logger.dbg("eventsub webhook: rejected request with bad signature", tag="eventsub")
+                log.warning("eventsub webhook: rejected request with bad signature")
                 self._respond(403, b"")
                 return
 
@@ -109,7 +108,7 @@ def _make_handler_class(
                 return
 
             if message_type == TYPE_REVOCATION:
-                logger.dbg(f"eventsub subscription revoked: {payload.get('subscription', {})}", tag="eventsub")
+                log.warning("eventsub subscription revoked: %s", payload.get("subscription", {}))
                 self._respond(200, b"")
                 return
 
@@ -131,8 +130,8 @@ def _make_handler_class(
                 callback = on_online if sub_type == "stream.online" else on_offline
                 try:
                     callback(login)
-                except Exception as exc:  # noqa: BLE001 - a bad hook must not break the webhook
-                    logger.dbg(f"eventsub callback failed for {login}: {exc}", tag="eventsub")
+                except Exception:  # noqa: BLE001 - a bad hook must not break the webhook
+                    log.exception("eventsub callback failed for %s", login)
 
             self._respond(200, b"")
 
@@ -214,7 +213,7 @@ def build_webhook_server(
     client_secret = cfg.get("client_secret", "")
     port = cfg.get("webhook_port", 8888)
     if not client_secret:
-        logger.dbg(f"eventsub webhook not started for {site}: missing client_secret", tag="eventsub")
+        log.warning("eventsub webhook not started for %s: missing client_secret", site)
         return None
     secret = derive_secret(client_secret, site)
     return EventSubWebhookServer(

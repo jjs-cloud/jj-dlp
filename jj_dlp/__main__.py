@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import logging
 import os
 import shutil
 import sys
@@ -20,7 +19,8 @@ from jj_dlp.core.engine.disk import DiskSampler, SiteDiskSource
 from jj_dlp.core.engine.lifecycle import Lifecycle
 from jj_dlp.core.engine.site_engine import SiteEngine
 from jj_dlp.core.engine.site_state import SiteState
-from jj_dlp.core.notify import logger as notify_logger
+from jj_dlp.core.notify import crash as notify_crash
+from jj_dlp.core.notify import log_buffer
 from jj_dlp.core.plugins import get_plugin
 from jj_dlp.core.theme import presets as theme_presets
 from jj_dlp.core.updater import check as updater_check
@@ -99,17 +99,6 @@ def bootstrap_data_dir(data_dir: Path) -> Path:
     return schema_path
 
 
-def _configure_logging(data_dir: Path, debug: bool) -> None:
-    """Route the stdlib logging root logger to logs/app.log, respecting --debug."""
-    log_path = Path(data_dir) / "logs" / "app.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(
-        filename=str(log_path),
-        level=logging.DEBUG if debug else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-
-
 def handle_finish_update(extracted_path: Path, data_dir: Path) -> None:
     """Finish an in-progress update: snapshot old schema, install files, refresh schema, merge config."""
     data_dir = Path(data_dir)
@@ -159,7 +148,7 @@ def _start_site_engines(
 def run_app(data_dir: Path, debug: bool) -> None:
     """Bootstrap config, start the engine for every selected site, then run the curses frontend."""
     schema_path = bootstrap_data_dir(data_dir)
-    _configure_logging(data_dir, debug)
+    notify_crash.configure(data_dir)
 
     app_state = AppState(data_dir)
     try:
@@ -181,7 +170,7 @@ def run_app(data_dir: Path, debug: bool) -> None:
         app_cfg = app_config.load(data_dir, schema_path)
         if debug:
             app_cfg.debug.enabled = True
-        notify_logger.configure(data_dir, app_cfg)
+        log_buffer.configure(data_dir, app_cfg)
 
         updater_check.start_background(data_dir, app_cfg, stop_event=lifecycle.shutdown_event)
         web_server = start_web_server(app_state)
