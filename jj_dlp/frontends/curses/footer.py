@@ -13,7 +13,7 @@ ColorFn = Callable[[str, Optional[ColorTuple]], int]
 GLOBAL_HINTS: List[Tuple[str, str]] = [
     ("q", "quit"),
     ("tab", "switch tab"),
-    ("?", "help"),
+    ("h", "help"),
 ]
 
 

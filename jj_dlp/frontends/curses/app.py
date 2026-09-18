@@ -16,6 +16,7 @@ from jj_dlp.frontends.curses.popups import changelog as changelog_popup
 from jj_dlp.frontends.curses.popups import manage_menu, mgmt_add, mgmt_disable, mgmt_remove
 from jj_dlp.frontends.curses.popups import write_failure_alert
 from jj_dlp.frontends.curses.popups.exit_confirm import confirm_exit
+from jj_dlp.frontends.curses.popups.help import show_help
 from jj_dlp.frontends.curses.tabs.config_tab import ConfigTab, SiteSettingsScreen
 from jj_dlp.frontends.curses.tabs.dashboard import DashboardTab, SitePanelSource
 from jj_dlp.frontends.curses.tabs.eventsub_tab import EventsubSiteSource, EventsubTab
@@ -270,6 +271,8 @@ class CursesApp:
                     self._open_theme_manager()
                 elif key in (ord("f"), ord("F")):
                     self._focus_write_failures()
+                elif key in (ord("h"), ord("H")):
+                    show_help(self.stdscr, footer.build_hints(self.tab_bar), self.color)
 
     def run(self) -> None:
         """Main draw/input loop: draw a frame, wait for input, repeat until quit/shutdown."""
