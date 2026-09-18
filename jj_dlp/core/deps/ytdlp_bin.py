@@ -27,7 +27,7 @@ def app_root() -> Path:
 def resolve_yt_dlp_path() -> Path:
     """Return the bundled yt-dlp binary path for the current platform under bin/."""
     subdir, filename = _PLATFORM_LAYOUT.get(sys.platform, _DEFAULT_LAYOUT)
-    path = app_root() / "bin" / subdir / filename
+    path = app_root() / "bin" / subdir / "yt-dlp" / filename
     if not path.exists():
         log.warning("Bundled yt-dlp binary not found at %s", path)
     return path
