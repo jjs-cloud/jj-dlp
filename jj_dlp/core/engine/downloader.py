@@ -73,6 +73,7 @@ class DownloaderProcess:
 
     def kill(self) -> None:
         """Force-kill the process and its process group (PyInstaller yt-dlp spawns a bootloader + worker)."""
+        log.info("Killing downloader process pid %d", self.popen.pid)
         if sys.platform == "win32":
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(self.popen.pid)], capture_output=True)
             return

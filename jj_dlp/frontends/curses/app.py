@@ -244,7 +244,7 @@ class CursesApp:
         elif action == "remove":
             mgmt_remove.remove_streamer(self.stdscr, self.data_dir, site, self.color)
         elif action == "disable":
-            mgmt_disable.toggle_streamer(self.stdscr, self.data_dir, site, self.color)
+            mgmt_disable.toggle_streamer(self.stdscr, self.data_dir, site, self.color, app_state=self.app_state)
 
     def _open_theme_manager(self) -> None:
         """Global theme-manager overlay; refresh the active theme/palette afterward."""

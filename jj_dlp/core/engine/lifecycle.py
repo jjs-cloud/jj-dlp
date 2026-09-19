@@ -65,7 +65,11 @@ class Lifecycle:
         return thread
 
     def _install_signal_handlers(self) -> None:
-        """Install SIGINT/SIGTERM handlers that request a graceful shutdown."""
+        """Install SIGINT/SIGTERM/SIGHUP handlers that request a graceful shutdown.
+
+        SIGHUP is what closing the terminal window sends on Linux/macOS (not SIGTERM),
+        so it needs its own handler or that path skips shutdown entirely.
+        """
 
         def _handler(signum: int, frame) -> None:
             log.info("Received signal %d, requesting shutdown.", signum)
@@ -74,6 +78,8 @@ class Lifecycle:
         signal.signal(signal.SIGINT, _handler)
         if hasattr(signal, "SIGTERM"):
             signal.signal(signal.SIGTERM, _handler)
+        if hasattr(signal, "SIGHUP"):
+            signal.signal(signal.SIGHUP, _handler)
 
     def _install_windows_console_handler(self) -> None:
         """Install a Windows console control handler for close/break/shutdown events."""

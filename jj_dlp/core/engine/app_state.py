@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import signal
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -40,8 +39,6 @@ class AppState:
         self.data_dir = Path(data_dir)
         self.loaded_sites: List[str] = []
         self.recording_decision_lock = threading.Lock()
-        self._pids: Dict[int, str] = {}
-        self._pids_lock = threading.Lock()
         self._site_states: Dict[str, SiteState] = {}
         self._checkers: Dict[str, Any] = {}
         self._active_services: Dict[str, Tuple[Any, Any]] = {}
@@ -103,32 +100,14 @@ class AppState:
         for label in list(self._active_services):
             self.stop_site_services(label)
 
-    def register_pid(self, pid: int, label: str = "") -> None:
-        """Start tracking a downloader/ffmpeg process PID, optionally tagged."""
-        with self._pids_lock:
-            self._pids[pid] = label
-
-    def unregister_pid(self, pid: int) -> None:
-        """Stop tracking a process PID once it has exited normally."""
-        with self._pids_lock:
-            self._pids.pop(pid, None)
-
-    def tracked_pids(self) -> Dict[int, str]:
-        """Return a snapshot of every currently tracked PID and its label."""
-        with self._pids_lock:
-            return dict(self._pids)
-
     def emergency_kill_all(self) -> None:
-        """Force-terminate every tracked process immediately, for shutdown/crash paths."""
-        with self._pids_lock:
-            pids = list(self._pids.keys())
-        for pid in pids:
-            try:
-                sig = signal.SIGTERM if os.name == "nt" else signal.SIGKILL
-                os.kill(pid, sig)
-            except OSError as exc:
-                log.warning("Failed to kill tracked pid %d: %s", pid, exc)
-            self.unregister_pid(pid)
+        """Force-terminate every registered site's active processes, for shutdown/crash paths."""
+        for label, site_state in self.site_states().items():
+            for streamer, process in site_state.active_processes().items():
+                try:
+                    process.kill()
+                except OSError as exc:
+                    log.warning("Failed to kill %s/%s pid %s: %s", label, streamer, process.pid, exc)
 
     def _read_lock_pid(self) -> Optional[int]:
         """Read the PID recorded in the lock file, or None if unreadable."""

@@ -190,8 +190,10 @@ class SiteEngine:
             thread.start()
 
     def stop(self) -> None:
-        """Signal every background loop to stop and wait briefly for them to exit."""
+        """Signal every background loop to stop, kill active recordings, and wait briefly for them to exit."""
         self._stop_event.set()
+        for streamer, process in self.site_state.active_processes().items():
+            process.kill()
         for thread in self._threads:
             thread.join(timeout=5)
 

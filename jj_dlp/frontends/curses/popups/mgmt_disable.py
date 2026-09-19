@@ -5,7 +5,7 @@ from __future__ import annotations
 import curses
 import logging
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 from jj_dlp.core.config import sites as sites_config
 
@@ -20,7 +20,19 @@ def _default_color_fn(_element_id: str, _runtime_pair: Optional[ColorTuple] = No
     return curses.A_NORMAL
 
 
-def toggle_streamer_status(data_dir: Path, label: str, streamer: str) -> bool:
+def _kill_active_process(app_state: Optional[Any], label: str, streamer: str) -> None:
+    """Kill streamer's currently-registered process on label, if app_state has one tracked."""
+    if app_state is None:
+        return
+    site_state = app_state.get_site_state(label)
+    if site_state is None:
+        return
+    process = site_state.get_process(streamer)
+    if process is not None:
+        process.kill()
+
+
+def toggle_streamer_status(data_dir: Path, label: str, streamer: str, app_state: Optional[Any] = None) -> bool:
     """Move a streamer between a site's streamers and disabled lists; returns new enabled state."""
     site = sites_config.load_site(data_dir, label)
     streamers = site.setdefault("streamers", [])
@@ -36,6 +48,8 @@ def toggle_streamer_status(data_dir: Path, label: str, streamer: str) -> bool:
         now_enabled = False
     sites_config.save_site(data_dir, label, site)
     log.info("%s streamer '%s' on site '%s'", "Enabled" if now_enabled else "Disabled", streamer, label)
+    if not now_enabled:
+        _kill_active_process(app_state, label, streamer)
     return now_enabled
 
 
@@ -115,7 +129,9 @@ class DisableStreamerPicker:
         self.index = min(self.index, len(self._rows()) - 1)
 
 
-def toggle_streamer(stdscr, data_dir: Path, label: str, color_fn: Optional[ColorFn] = None) -> None:
+def toggle_streamer(
+    stdscr, data_dir: Path, label: str, color_fn: Optional[ColorFn] = None, app_state: Optional[Any] = None
+) -> None:
     """Run the enable/disable picker, toggling streamers on Enter until the user is done."""
     site = sites_config.load_site(data_dir, label)
     picker = DisableStreamerPicker(
@@ -128,5 +144,5 @@ def toggle_streamer(stdscr, data_dir: Path, label: str, color_fn: Optional[Color
         if chosen == "":
             return
         if chosen:
-            now_enabled = toggle_streamer_status(data_dir, label, chosen)
+            now_enabled = toggle_streamer_status(data_dir, label, chosen, app_state=app_state)
             picker.apply_toggle(chosen, now_enabled)

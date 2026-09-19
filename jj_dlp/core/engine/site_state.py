@@ -81,6 +81,11 @@ class SiteState:
         with self._lock:
             return streamer in self._processes
 
+    def active_processes(self) -> Dict[str, Any]:
+        """Return a snapshot copy of every currently registered streamer -> process."""
+        with self._lock:
+            return dict(self._processes)
+
     # --- in-progress output path ---
 
     def set_in_progress_path(self, streamer: str, path: Optional[str]) -> None:
