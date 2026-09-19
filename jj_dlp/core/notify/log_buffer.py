@@ -23,11 +23,12 @@ _handler: Optional["_RingBufferHandler"] = None
 
 
 class _RingBufferHandler(logging.Handler):
-    """Formats each record once and fans it out to the ring buffer and, if enabled, debug.log."""
+    """Formats each record once and fans it out to debug.log and, unless DEBUG-level and gated, the ring buffer."""
 
     def __init__(self) -> None:
         super().__init__()
         self._file = None
+        self._debug_enabled = False
 
     def set_file(self, path: Optional[Path]) -> None:
         """Swap the underlying debug.log file handle, closing any previous one."""
@@ -39,22 +40,27 @@ class _RingBufferHandler(logging.Handler):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 self._file = open(path, "a", encoding="utf-8")
 
+    def set_debug_enabled(self, enabled: bool) -> None:
+        """Control whether DEBUG-level records are admitted to the ring buffer (Log tab)."""
+        with _lock:
+            self._debug_enabled = enabled
+
     def emit(self, record: logging.LogRecord) -> None:
         tag = record.name.rsplit(".", 1)[-1]
         line = self.format(record).replace("\n", " | ")
         with _lock:
-            _recent_lines.append((line, tag, record.levelname))
-            _tag_filter.setdefault(tag, True)
+            if record.levelno > logging.DEBUG or self._debug_enabled:
+                _recent_lines.append((line, tag, record.levelname))
+                _tag_filter.setdefault(tag, True)
             if self._file is not None:
                 self._file.write(line + "\n")
                 self._file.flush()
 
 
-def configure(data_dir: Path, app_cfg) -> None:
-    """Attach the ring-buffer handler to the jj_dlp logger tree and point it at debug.log if enabled."""
+def configure(data_dir: Path, app_cfg, debug: bool = False) -> None:
+    """Attach the ring-buffer handler to the jj_dlp logger tree; debug.log always writes, the Log tab honors the passed-in debug flag, never persisted config."""
     global _handler
     data_dir = Path(data_dir)
-    debug = app_cfg.get_debug()
     root = logging.getLogger(LOGGER_NAMESPACE)
     root.setLevel(logging.DEBUG)
 
@@ -63,7 +69,8 @@ def configure(data_dir: Path, app_cfg) -> None:
         _handler.setFormatter(_LINE_FORMATTER)
         root.addHandler(_handler)
 
-    _handler.set_file(data_dir / debug.log_path if debug.enabled else None)
+    _handler.set_debug_enabled(debug)
+    _handler.set_file(data_dir / app_cfg.get_debug().log_path)
 
 
 def get_recent_lines(include_filtered: bool = False) -> List[Tuple[str, str, str]]:

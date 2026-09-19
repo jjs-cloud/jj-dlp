@@ -58,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=default_data_dir(),
         help="Directory holding config/, schema/, state/, logs/, recordings/ (default: userdata/ next to the app).",
     )
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging for this run.")
+    parser.add_argument("--debug", action="store_true", help="Show debug-level log lines in the Log tab for this run.")
     parser.add_argument("--version", action="version", version=f"jj-dlp {__version__}")
     parser.add_argument(
         "--finish-update",
@@ -163,9 +163,7 @@ def run_app(data_dir: Path, debug: bool) -> None:
         from jj_dlp.frontends.curses import picker
 
         app_cfg = app_config.load(data_dir, schema_path)
-        if debug:
-            app_cfg.debug.enabled = True
-        log_buffer.configure(data_dir, app_cfg)
+        log_buffer.configure(data_dir, app_cfg, debug=debug)
 
         updater_check.start_background(data_dir, app_cfg, stop_event=lifecycle.shutdown_event)
         web_server = start_web_server(app_state)
