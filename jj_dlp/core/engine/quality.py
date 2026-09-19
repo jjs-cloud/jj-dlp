@@ -32,6 +32,9 @@ class _StreamerQualityTrack:
 
 def is_ffmpeg_error_line(line: str) -> bool:
     """Return whether a downloader output line looks like an ffmpeg error."""
+    # yt-dlp's own [debug] verbose banner (e.g. "Encodings: ... error cp1252") isn't an ffmpeg error.
+    if line.lstrip().startswith("[debug]"):
+        return False
     return bool(_FFMPEG_ERROR_PATTERN.search(line))
 
 

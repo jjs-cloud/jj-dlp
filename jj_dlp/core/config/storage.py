@@ -96,10 +96,13 @@ def load_config(
     if data is not None and (validate is None or validate(data)):
         return data
 
-    if data is None:
-        log.warning("Config file %s missing or unreadable; trying backups.", path)
+    # Missing file is expected on first run; failed validation on an existing file is a real problem.
+    missing = data is None
+    log_fn = log.debug if missing else log.warning
+    if missing:
+        log_fn("Config file %s missing or unreadable; trying backups.", path)
     else:
-        log.warning("Config file %s failed validation; trying backups.", path)
+        log_fn("Config file %s failed validation; trying backups.", path)
 
     backup = _newest_backup(path)
     while backup is not None:
@@ -112,7 +115,7 @@ def load_config(
         remaining = [b for b in remaining if b != backup]
         backup = remaining[-1] if remaining else None
 
-    log.warning("No valid backup for %s; using defaults.", path)
+    log_fn("No valid backup for %s; using defaults.", path)
     return defaults()
 
 
