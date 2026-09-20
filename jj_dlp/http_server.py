@@ -213,6 +213,10 @@ def _save_sessions(force: bool = False) -> None:
             return
         _last_save_ts = now
         with _SESSION_LOCK:
+            # Drop expired entries so a long-running server doesn't accumulate
+            # stale sessions forever in memory and in the cache file.
+            for sid in [s for s, exp in _SESSIONS.items() if exp < now]:
+                del _SESSIONS[sid]
             snapshot = dict(_SESSIONS)
         try:
             path = _sessions_path()

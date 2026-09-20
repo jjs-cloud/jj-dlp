@@ -1482,6 +1482,9 @@ class FileManagerTab:
         self._move_filename_cursor = len(self._move_filename_buf)
         path = self._move_target or ""
         group_path = self._records.get(path, {}).get("group_path")
+        do_subfolder = self._move_checks.get("subfolder", True)
+        streamer = self._derive_streamer_name(path, group_path) if do_subfolder else None
+        self._move_dest_dir = os.path.join(dest, streamer) if do_subfolder else dest
         self._move_filename_streamer = self._derive_streamer_name(path, group_path)
         self._move_filename_open = True
 
@@ -1533,8 +1536,8 @@ class FileManagerTab:
         db = self.dashboard
         h, w = stdscr.getmaxyx()
 
-        box_w = min(83, w - 4)
-        box_h = min(9, h - 4)
+        box_w = min(100, w - 4)
+        box_h = min(7, h - 4)
         by1 = (h - box_h) // 2
         bx1 = (w - box_w) // 2
         by2 = by1 + box_h
@@ -1549,22 +1552,21 @@ class FileManagerTab:
                        " Enter: Start Move  Esc: Cancel ",
                        theme.attr(db, "file_manager_filemanagertab_draw_move_filename_p_invhead"))
 
-        row = by1 + 1
+        # Single line showing the full destination path with the filename editable at the end
+        row = by1 + 2
+        dest_dir = self._move_dest_dir or ""
+        full_dir_display = f"Destination: {dest_dir}{os.sep}"
+        # Print the static directory part
         db.safe_addstr(stdscr, row, bx1 + 2,
-                       f"Streamer: {self._move_filename_streamer}",
+                       full_dir_display[:box_w - 4],
                        theme.attr(db, "file_manager_filemanagertab_draw_move_filename_p_dim"))
-        row += 2
-        db.safe_addstr(stdscr, row, bx1 + 2,
-                       f"Destination: {self._move_filename_dest or ''}"[:box_w - 4],
-                       theme.attr(db, "file_manager_filemanagertab_draw_move_filename_p_dim"))
-        row += 2
-        db.safe_addstr(stdscr, row, bx1 + 2, "Filename:",
-                       theme.attr(db, "file_manager_filemanagertab_draw_move_filename_p_warn"))
-        row += 1
+        # Print the editable filename part with cursor
         buf = self._move_filename_buf
         cur = self._move_filename_cursor
         display = buf[:cur] + "_" + buf[cur:]
-        db.safe_addstr(stdscr, row, bx1 + 2,
+        # Compute x position after the static part
+        x_offset = bx1 + 2 + len(full_dir_display)
+        db.safe_addstr(stdscr, row, x_offset,
                        display[:box_w - 4],
                        theme.attr(db, "file_manager_filemanagertab_draw_move_filename_p_normal_2"))
 
@@ -2780,8 +2782,17 @@ class FileManagerTab:
         info = (f" Delete mode: {delete_lbl} (T to toggle)   "
                 f"Sort: {_FM_SORT_LABELS.get(self._sort_key, self._sort_key)} ")
         info_attr = theme.attr(db, "file_manager_filemanagertab_draw_delete") if self._delete_mode == DELETE_MODE_PERMANENT else theme.attr(db, "file_manager_filemanagertab_draw_dim_4")
-        db.safe_addstr(stdscr, y2, x1 + 2, info[:avail_w], info_attr)
 
+        # Add file counter on the right side of the bottom border line
+        total_files = sum(1 for r in self._rows if r[0] == "file")
+        counter_str = f"Total: {total_files}"
+        counter_width = len(counter_str)
+        # Reserve space for the counter plus a one-space margin
+        info_max_width = max(0, avail_w - counter_width - 2)
+        db.safe_addstr(stdscr, y2, x1 + 2, info[:info_max_width], info_attr)
+        counter_x = x2 - counter_width - 1  # leave one space from right border
+        db.safe_addstr(stdscr, y2, counter_x, counter_str, info_attr)
+        
         if self._status_msg and (time.time() - self._status_msg_ts) < STATUS_MSG_TTL_S:
             db.safe_addstr(stdscr, y1 + 2, x1 + 2, self._status_msg[:avail_w],
                            theme.attr(db, "file_manager_filemanagertab_draw_warn"))

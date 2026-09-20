@@ -18,7 +18,7 @@ _API_BASE   = "https://api.github.com/repos/jjs-cloud/jj-dlp"
 # ── Updater version ───────────────────────────────────────────────────────────
 # Incremented independently of the main jj-dlp version so we can tell which
 # updater logic is actually running during an update.
-UPDATER_VERSION = "2.4.2"
+UPDATER_VERSION = "2.4.4"
 
 # ── Lazy package imports ──────────────────────────────────────────────────────
 # Relative imports are deferred to call time so this file is also safe to
@@ -45,50 +45,49 @@ def _logger():
     except ImportError:
         return _NullLogger()
 
-def _load_config_keys(source_dir=None):
-    """Return the CONFIG_KEYS tuple.
+def _load_preserved_keys(source_dir=None):
+    """Return config_editor's PRESERVED_KEYS list (names only).
 
-    Merge logic that needs CONFIG_KEYS (currently just preserved-key lookup)
-    runs inside the stage2 subprocess, which always executes this very file
-    (updater.py) directly out of the freshly-extracted source_dir as
-    __main__. In that context, `__file__` already points at the fresh copy
-    on disk, so the plain absolute-import fallback below resolves
-    `jj_dlp.config_editor` against the fresh package automatically — no
-    synthetic sys.modules package or spec_from_file_location trick is needed
-    to dodge stale, already-imported CONFIG_KEYS.
+    Merge logic that needs the preserved-key list runs inside the stage2
+    subprocess, which always executes this very file (updater.py) directly
+    out of the freshly-extracted source_dir as __main__. In that context,
+    `__file__` already points at the fresh copy on disk, so the plain
+    absolute-import fallback below resolves `jj_dlp.config_editor` against
+    the fresh package automatically — no synthetic sys.modules package or
+    spec_from_file_location trick is needed to dodge a stale, already-imported
+    PRESERVED_KEYS.
 
     `source_dir` is kept as a parameter for call-site compatibility but is
     no longer used directly; it's implied by where this file lives when
     running as __main__.
     """
     try:
-        from .config_editor import CONFIG_KEYS as _ck
-        return _ck
+        from .config_editor import PRESERVED_KEYS as _pk
+        return _pk
     except ImportError:
         try:
             _pkg_dir = os.path.dirname(os.path.abspath(__file__))
             _proj_root = os.path.dirname(_pkg_dir)
             if _proj_root not in sys.path:
                 sys.path.insert(0, _proj_root)
-            from jj_dlp.config_editor import CONFIG_KEYS as _ck
-            return _ck
+            from jj_dlp.config_editor import PRESERVED_KEYS as _pk
+            return _pk
         except Exception as e:
-            _logger().dbg(f"[UPDATER] _get_config_keys fallback import failed: {e}")
+            _logger().dbg(f"[UPDATER] _get_preserved_keys fallback import failed: {e}")
             return None
 
 
 def _get_preserved_keys(source_dir=None) -> list:
-    """Return the list of preserved key names, derived from CONFIG_KEYS.
+    """Return the list of preserved key names (config_editor.PRESERVED_KEYS,
+    which already covers both CONFIG_KEYS and DOWNLOADER_FLAG_KEYS).
 
-    Uses the same source_dir-aware loading as _load_config_keys, for the same
-    reason: during an update this runs before the new files are copied over
-    the old install, so importing the installed package would silently
-    return stale data (see _load_config_keys docstring).
+    Uses the same source_dir-aware loading as _load_preserved_keys, for the
+    same reason: during an update this runs before the new files are copied
+    over the old install, so importing the installed package would silently
+    return stale data (see _load_preserved_keys docstring).
     """
-    _ck = _load_config_keys(source_dir)
-    if not _ck:
-        return []
-    return [k.name for k in _ck if k.preserve]
+    _pk = _load_preserved_keys(source_dir)
+    return list(_pk) if _pk else []
 
 
 class UpdateError(Exception):
@@ -201,6 +200,16 @@ def get_base_dir():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _safe_extract_zip(zip_ref: zipfile.ZipFile, extract_dir: str) -> None:
+    """Extract *zip_ref* into *extract_dir*, rejecting entries that would land outside it."""
+    extract_root = os.path.realpath(extract_dir)
+    for member in zip_ref.infolist():
+        member_path = os.path.realpath(os.path.join(extract_root, member.filename))
+        if member_path != extract_root and not member_path.startswith(extract_root + os.sep):
+            raise UpdateError(f"unsafe path in update archive: {member.filename!r}")
+    zip_ref.extractall(extract_root)
+
+
 def perform_update():
     _logger().dbg(f"[UPDATER] perform_update: starting — updater version {UPDATER_VERSION}")
     print(f"\n--- jj-dlp Updater (v{UPDATER_VERSION}) ---")
@@ -237,7 +246,7 @@ def perform_update():
     os.makedirs(extract_dir, exist_ok=True)
     try:
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(extract_dir)
+            _safe_extract_zip(zip_ref, extract_dir)
         _logger().dbg(f"[UPDATER] perform_update: extracted zip to {extract_dir}")
     except Exception as e:
         _logger().dbg(f"[UPDATER] perform_update: extraction failed: {e}")
@@ -432,8 +441,8 @@ def create_diff(old_content, new_content, file_path, diff_dir):
 # Because this file is executed as a plain script (not as a package member),
 # relative imports at module scope aren't in play here; this block performs
 # the copy/install work using only stdlib + the helper functions defined
-# above (already in module scope by the time __main__ runs). CONFIG_KEYS
-# lookups via _load_config_keys() DO resolve correctly against the fresh
+# above (already in module scope by the time __main__ runs). PRESERVED_KEYS
+# lookups via _load_preserved_keys() DO resolve correctly against the fresh
 # on-disk package, since __file__ here already points into source_dir.
 #
 if __name__ == "__main__":
@@ -543,8 +552,6 @@ if __name__ == "__main__":
             _src_cfgs = os.path.join(_source_dir, "configs")
             if os.path.exists(_src_cfgs):
                 _new_cfgs += [os.path.join(_src_cfgs, f) for f in os.listdir(_src_cfgs) if f.endswith(".conf")]
-            if os.path.exists(os.path.join(_source_dir, "jj-dlp.conf")):
-                _new_cfgs.append(os.path.join(_source_dir, "jj-dlp.conf"))
             _new_cfg_map = {os.path.basename(p): p for p in _new_cfgs}
 
             # ── Merge each user config ────────────────────────────────────────
@@ -557,8 +564,7 @@ if __name__ == "__main__":
                     _old_txt = _f.read()
                 with open(_ncfg, "r", encoding="utf-8") as _f:
                     _new_txt = _f.read()
-                _streamers = get_old_config_section(_ucfg, "Streamers")
-                _blocked   = get_old_config_section(_ucfg, "Block")
+                _old_sections = {sec: get_old_config_section(_ucfg, sec) for sec in PRESERVED_SECTIONS}
 
                 # inline inject_preserved_keys using _PKEYS
                 _parser = configparser.ConfigParser(allow_no_value=True, interpolation=None)
@@ -577,8 +583,8 @@ if __name__ == "__main__":
                         if _pat.search(_new_txt):
                             _new_txt = _pat.sub(lambda m, v=_oval: f"{m.group(1)} {v}", _new_txt)
 
-                _new_txt = replace_section(_new_txt, "Streamers", _streamers)
-                _new_txt = replace_section(_new_txt, "Block", _blocked)
+                for _sec, _old_content in _old_sections.items():
+                    _new_txt = replace_section(_new_txt, _sec, _old_content)
                 create_diff(_old_txt, _new_txt, _ucfg, _diff_dir)
                 with open(_ncfg, "w", encoding="utf-8") as _f:
                     _f.write(_new_txt)

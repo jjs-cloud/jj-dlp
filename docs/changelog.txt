@@ -1,3 +1,13 @@
+v1.29.0
+
+- updated the color schemes
+- when moving files in the File Manager tab, the destination filepath now appears on a single line
+- added a total files counter to the File Manager tab (bottom right)
+- further refined the "Not being recorded" notif. (run directory scan fallback even if active_file is known, wait one stall_check_interval between size checks)
+
+====================
+====================
+
 v1.28.10
 
 - made it easier to edit the number/date fields in various STREAMER SETTINGS menus. (split, intro delay, schedule)
