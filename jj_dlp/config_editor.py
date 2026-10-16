@@ -278,9 +278,9 @@ DASHBOARD_LAYOUT_MODES: tuple[str, ...] = ("PANELS", "LIST")
 
 
 def _coerce_dashboard_mode_value(raw: str) -> str:
-    """Coerce a raw DASHBOARD_MODE string to PANELS or LIST (default PANELS)."""
+    """Coerce a raw DASHBOARD_MODE string to PANELS or LIST (falls back to the key's default)."""
     val = (raw or "").strip().strip('"\'').upper()
-    return val if val in DASHBOARD_LAYOUT_MODES else "PANELS"
+    return val if val in DASHBOARD_LAYOUT_MODES else _KEY_DEFAULTS["DASHBOARD_MODE"].strip().upper()
 
 
 def _coerce_global_value(kdef: "_KeyDef", raw: str) -> object:
