@@ -1322,7 +1322,7 @@ class JJDlpDashboard:
         # Bottom line: "Next check: [site] 34s [site] 45s ..."
         warn_attr = theme.attr(self, "main_jjdlpdashboard_draw_list_view_warn")
         dim_attr  = theme.attr(self, "main_jjdlpdashboard_draw_list_view_dim")
-        dots = "." * ((self.tick // (self.FLASH_CYCLE // 2)) % 3 + 1)
+        dots = (".  ", " . ", "  .")[(self.tick // (self.FLASH_CYCLE // 2)) % 3]  # moving dot
         segs = [("Next check:", warn_attr)]
         for snap in snaps:
             nxt = max(0.0, snap["next_in"])
