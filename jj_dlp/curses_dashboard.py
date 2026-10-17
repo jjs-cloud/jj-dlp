@@ -1221,7 +1221,8 @@ class JJDlpDashboard:
             return self._list_col_widths((panel_w - gap * (n - 1)) // n,
                                          site_full, name_full, bar_pref)
 
-        n_cols = -(-total // max_rows) if max_rows and total > max_rows else 1
+        # Minimum 2 columns; falls back to 1 only when 2 don't fit the width.
+        n_cols = max(2, -(-total // max_rows) if max_rows and total > max_rows else 1)
         while n_cols > 1 and not layout_for(n_cols)[1]:
             n_cols -= 1
         widths    = layout_for(n_cols)[0]
