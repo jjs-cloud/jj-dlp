@@ -156,8 +156,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("NOTIFY_CONFIRM_FILE",      scope="global",                    default="true",                       preserve=True, type="bool",  comment="Confirm the recording has actually started before sending a live notification.  Note: When enabled, the notifications will be delayed by a few seconds until the file has been confirmed."),
     _KeyDef("NOTIFY_NO_CONFIRM_FILE",   scope="global",                    default="true",                       preserve=True, type="bool",  comment="If the recording file cannot be confirmed (does not exist or no file growth) within one STALL_TIMEOUT, send a warning notification that the file could not be confirmed (true/false)."),
     _KeyDef("SITE_SORT",                scope="global",                    default="added_first",                preserve=True,               comment="The order to display streamers on each site panel.   This can also be adjusted by pressing the S key on the Dashboard tab."),
-    _KeyDef("COMPACT_VIEW",             scope="global",                    default="auto",                       preserve=True,               comment="When streamers overflow the panel, compact view shows them in 2 columns without progress bars. (auto/true/false)"),
-    _KeyDef("DASHBOARD_MODE",           scope="global",                    default="LIST",                       preserve=True, type="str",   comment="Dashboard tab layout. PANELS: one panel per site. LIST: every streamer in one list (Default: PANELS)"),
+    _KeyDef("DASHBOARD_MODE",           scope="global",                    default="LIST",                       preserve=True, type="str",   comment="Dashboard tab layout. PANELS: one panel per site. LIST: every streamer in one list. List mode will be used when there are too many streamers to display in a panel. (Default: LIST)"),
     _KeyDef("WEB_UI",                   scope="global",                    default="false",                      preserve=True, type="bool",  comment="Enable the Web UI, viewable from any browser on your local network by navigating to http://your-ip-address:8765 or from the same machine at http://127.0.0.1:8765. Requires WEB_UI_USER and WEB_UI_PASS to also be set. Note: Use this tool on your local network only.  Access over the internet is not supported yet. (true/false)"),
     _KeyDef("WEB_UI_PORT",              scope="global",                    default="8765",                       preserve=True, type="int",   comment="Port for the web dashboard. Default: 8765"),
     _KeyDef("WEB_UI_USER",              scope="global",                    default="",                           preserve=True,               comment="Username required to log into the web dashboard (HTTP Basic Auth). Required if WEB_UI is enabled."),
@@ -340,8 +339,6 @@ def load_global_config(path: str) -> dict:
     cfg["subfolders"] = _coerce_subfolders_value(general.get("SUBFOLDERS", ""))
     cfg["dashboard"] = _coerce_dashboard_value(general.get("DASHBOARD", ""))
     cfg["dashboard_mode"] = _coerce_dashboard_mode_value(general.get("DASHBOARD_MODE", ""))
-    if not cfg["compact_view"]:
-        cfg["compact_view"] = "auto"
     cfg["graph_scale"] = max(1, cfg["graph_scale"])
 
     return cfg
