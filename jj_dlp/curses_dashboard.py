@@ -795,8 +795,10 @@ class JJDlpDashboard:
         header_y = y1
         # Site label on top border
         label_text = f"  {cfg_label}  "
-        self.safe_addstr(self.stdscr, header_y, x1 + 2, label_text,
-                    theme.attr(self, "main_jjdlpdashboard_draw_site_panel_chrome_1"))
+        label_attr = theme.site_label_attr(
+            theme.attr(self, "main_jjdlpdashboard_draw_site_panel_chrome_1"),
+            _panel_cfg.get("site_label_color"))
+        self.safe_addstr(self.stdscr, header_y, x1 + 2, label_text, label_attr)
 
         # Status badge row
         badge_y = y1 + 1
@@ -1166,7 +1168,7 @@ class JJDlpDashboard:
             bar_max, bar_w, hl_days = 6 * 3600, 14, 0
 
         return {
-            "label": label, "streamers": streamers, "live_since": live_since,
+            "label": label, "label_color": cfg.get("site_label_color"), "streamers": streamers, "live_since": live_since,
             "last_live": last_live, "blocked": blocked, "next_in": next_in,
             "ad_alerts": ad_alerts, "ff_errors": ff_errors, "recording": recording,
             "intro_pending": intro_pending, "res": res, "res_fallback": res_fallback,
@@ -1268,7 +1270,8 @@ class JJDlpDashboard:
                 self.safe_addstr(self.stdscr, y, col, text[:width].ljust(width)[:avail], attr)
             col += width + 1
 
-        put(snap["label"], site_w, theme.attr(self, "main_jjdlpdashboard_draw_list_view_chrome"))
+        put(snap["label"], site_w, theme.site_label_attr(
+            theme.attr(self, "main_jjdlpdashboard_draw_list_view_chrome"), snap.get("label_color")))
         put(s, name_w, name_attr)
         put(status_str, 8, status_attr)
         put(bar_str, bar_w, bar_attr)

@@ -669,6 +669,59 @@ def _color_const_to_name(value):
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# SITE_LABEL_COLOR — selectable site-label colors (list and panels modes).
+# ─────────────────────────────────────────────────────────────────────────
+SITE_LABEL_DEFAULT = 'DEFAULT'   # no override: use the theme's own label color
+
+# Name -> curses color index (0-7 base, 16-255 xterm 256-color), in selector order.
+SITE_LABEL_COLORS = {
+    'BLACK': 0, 'RED': 1, 'GREEN': 2, 'YELLOW': 3,
+    'BLUE': 4, 'MAGENTA': 5, 'CYAN': 6, 'WHITE': 7,
+    'ORANGE': 208, 'DARK_ORANGE': 202, 'GOLD': 220, 'AMBER': 214, 'PEACH': 216,
+    'SALMON': 209, 'CORAL': 203, 'BROWN': 130, 'TAN': 180,
+    'HOT_PINK': 198, 'PINK': 211, 'ORCHID': 213, 'PURPLE': 129, 'VIOLET': 99,
+    'INDIGO': 54, 'LAVENDER': 183,
+    'SKY_BLUE': 39, 'LIGHT_BLUE': 75, 'NAVY': 18, 'TEAL': 30, 'AQUA': 51,
+    'LIME': 118, 'MINT': 121, 'FOREST': 28, 'OLIVE': 100, 'KHAKI': 143,
+    'MAROON': 88, 'CREAM': 230, 'LIGHT_GREY': 250, 'GREY': 244, 'DARK_GREY': 240,
+}
+_SITE_LABEL_NAMES = list(SITE_LABEL_COLORS)
+_SITE_LABEL_PAIR_BASE = 20   # pairs 1-13 are the role pairs
+
+
+def normalize_site_label_color(raw):
+    """Return a SITE_LABEL_COLOR value as an upper-case name with quotes/spaces stripped."""
+    return str(raw or '').strip().strip('"\'').strip().upper()
+
+
+def _site_label_pair(name):
+    """Return the curses pair for a label color name, or None if unknown or unsupported here."""
+    idx = SITE_LABEL_COLORS.get(name)
+    if idx is None:
+        return None
+    pair = _SITE_LABEL_PAIR_BASE + _SITE_LABEL_NAMES.index(name)
+    try:
+        if idx >= curses.COLORS or pair >= curses.COLOR_PAIRS:
+            return None
+    except (AttributeError, curses.error):
+        return None
+    return pair
+
+
+def site_label_options():
+    """Return DEFAULT plus every label color this terminal supports, in selector order."""
+    return [SITE_LABEL_DEFAULT] + [n for n in _SITE_LABEL_NAMES if _site_label_pair(n) is not None]
+
+
+def site_label_attr(base_attr, color_name):
+    """Recolor base_attr to color_name, keeping its bold; unset/unknown/unsupported returns base_attr."""
+    pair = _site_label_pair(normalize_site_label_color(color_name))
+    if pair is None:
+        return base_attr
+    return curses.color_pair(pair) | (base_attr & curses.A_BOLD)
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # Persistence
 # ─────────────────────────────────────────────────────────────────────────
 def _theme_json_path():
@@ -962,6 +1015,15 @@ def apply_palette(dashboard):
             curses.init_pair(pair_num, fg, bg)
         except curses.error:
             pass
+
+    # Site-label color pairs, on the same ambient background as the CHROME pair.
+    for name, color_idx in SITE_LABEL_COLORS.items():
+        pair_num = _site_label_pair(name)
+        if pair_num is not None:
+            try:
+                curses.init_pair(pair_num, color_idx, ambient_bg)
+            except curses.error:
+                pass
 
     # clearok(True) forces the next refresh() on this window
     # to do a full, uncached repaint, so the freshly defined pair colors

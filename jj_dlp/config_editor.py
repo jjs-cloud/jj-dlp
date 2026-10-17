@@ -168,6 +168,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
 
     # ── Site keys (per-site .conf) ────────────────────────────────────────────
     _KeyDef("SITE_LABEL",               scope="site",                      default="",                           preserve=True,               comment="The display name of this site."),
+    _KeyDef("SITE_LABEL_COLOR",         scope="site",                      default="DEFAULT",                    preserve=True,               comment="The color of this site's label on the dashboard."),
     _KeyDef("SITE_ORDER",               scope="site",                      default="999",                        preserve=True,               comment="The position on the dashboard to display this site's panel (e.g. 0 for top-left, 1 for top-right, 2 for bottom-left, 3 for bottom-right, etc.)"),
     _KeyDef("CHECK_INTERVAL",           scope="site",                      default="60",                         preserve=False,              comment="How often to check if streamers are live (in seconds).  (Default: 60) (note: keep this <= STALL_TIMEOUT to avoid false write-failure alerts)"),
     _KeyDef("OUTPUT_DIR",               scope="site",                      default="recordings",                 preserve=True,               comment='Folder where recordings will be saved.  Can be an absolute path or relative path.  example: "C:\\recordings" or "recordings"'),
@@ -2679,6 +2680,10 @@ def _validate_value(key: str, value: str) -> tuple[bool, str]:
                 return False, "Must be >= 0"
         except ValueError:
             return False, "Must be an integer"
+    if key == "SITE_LABEL_COLOR":
+        name = theme.normalize_site_label_color(value)
+        if name != theme.SITE_LABEL_DEFAULT and name not in theme.SITE_LABEL_COLORS:
+            return False, "Must be DEFAULT or a color name"
     if key == "GRAPH_SCALE":
         try:
             if int(value) < 1:
@@ -3765,6 +3770,9 @@ class ConfigEditor:
         self.popup_buf = ""
         self.popup_cursor = 0
         self.popup_error = ""
+        self.popup_color_opts = []   # non-empty while the SITE_LABEL_COLOR selector is open
+        self.popup_color_idx = 0
+        self.popup_color_note = ""
         self.lines = []
         self.items = []
         self.current_site_path = None
@@ -4079,6 +4087,20 @@ class ConfigEditor:
         elif self.priority_editor._settings_popup is not None:
             self.priority_editor._settings_popup.draw(stdscr)
 
+    def _open_color_selector(self, item) -> None:
+        """Start the SITE_LABEL_COLOR selector on the saved color (DEFAULT if unavailable)."""
+        opts = theme.site_label_options()
+        saved = theme.normalize_site_label_color(item.value)
+        self.popup_color_opts = opts
+        self.popup_color_idx = opts.index(saved) if saved in opts else 0
+        self.popup_buf = opts[self.popup_color_idx]
+        self.popup_color_note = ""
+        if saved and saved not in opts:
+            if saved in theme.SITE_LABEL_COLORS:
+                self.popup_color_note = f"{saved} unsupported here; using DEFAULT."
+            else:
+                self.popup_color_note = f"'{saved}' is not a valid color; using DEFAULT."
+
     def draw_popup(self, stdscr):
         h, w = stdscr.getmaxyx()
 
@@ -4125,19 +4147,34 @@ class ConfigEditor:
 
         self.dashboard.safe_addstr(stdscr, row, bx1 + 2, "New Value:", theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_warn_2"))
 
-        # Insertion-point cursor, like OutputDirectorySettingsPopup's "Path:" field.
         val_x   = bx1 + 13
-        max_len = max(1, bx2 - val_x - 1)
-        buf     = self.popup_buf
-        cur     = min(self.popup_cursor, len(buf))
-        shown   = buf[:cur] + "_" + buf[cur:]
-        if len(shown) > max_len:
-            start = max(0, cur - max_len + 1)
-            shown = shown[start:start + max_len]
-        self.dashboard.safe_addstr(stdscr, row, val_x, shown[:max_len], theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_normal_2"))
+        val_attr = theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_normal_2")
+        if self.popup_color_opts:
+            # Color selector: "< NAME >  (n/total)" with the name drawn in its own color.
+            name = self.popup_color_opts[self.popup_color_idx]
+            name_attr = theme.site_label_attr(val_attr, name)
+            self.dashboard.safe_addstr(stdscr, row, val_x, "\u25c4 ", val_attr)
+            self.dashboard.safe_addstr(stdscr, row, val_x + 2, name, name_attr)
+            self.dashboard.safe_addstr(stdscr, row, val_x + 2 + len(name),
+                                       f" \u25ba  ({self.popup_color_idx + 1}/{len(self.popup_color_opts)})", val_attr)
+            if self.popup_color_note:
+                self.dashboard.safe_addstr(stdscr, row + 1, bx1 + 2, self.popup_color_note[:inner_w],
+                                           theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_dim"))
+        else:
+            # Insertion-point cursor, like OutputDirectorySettingsPopup's "Path:" field.
+            max_len = max(1, bx2 - val_x - 1)
+            buf     = self.popup_buf
+            cur     = min(self.popup_cursor, len(buf))
+            shown   = buf[:cur] + "_" + buf[cur:]
+            if len(shown) > max_len:
+                start = max(0, cur - max_len + 1)
+                shown = shown[start:start + max_len]
+            self.dashboard.safe_addstr(stdscr, row, val_x, shown[:max_len], val_attr)
 
         if self.popup_error:
             self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, f" Error: {self.popup_error} ", theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_warn_3"))
+        elif self.popup_color_opts:
+            self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, " \u2190\u2192: Choose color | Enter: Save | Esc: Cancel ", theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_invhead"))
         else:
             self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel  \u2190\u2192/Home/End:Move ", theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_invhead"))
 
@@ -4186,11 +4223,20 @@ class ConfigEditor:
         # OutputDirectorySettingsPopup's "Path:" field, instead of append-only.
         if self.popup_mode:
             cur = self.popup_cursor
-            if key == 27:
+            if self.popup_color_opts and key in (curses.KEY_LEFT, curses.KEY_RIGHT):
+                step = -1 if key == curses.KEY_LEFT else 1
+                self.popup_color_idx = (self.popup_color_idx + step) % len(self.popup_color_opts)
+                self.popup_buf = self.popup_color_opts[self.popup_color_idx]
+                self.popup_color_note = ""
+                self.popup_error = ""
+            elif self.popup_color_opts and key not in (27, ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
+                pass   # selector ignores typing and cursor keys
+            elif key == 27:
                 self.popup_mode = False
                 self.popup_buf = ""
                 self.popup_cursor = 0
                 self.popup_error = ""
+                self.popup_color_opts = []
                 self.editing_item = None
             elif key in (curses.KEY_BACKSPACE, 127, 8):
                 if cur > 0:
@@ -4228,6 +4274,7 @@ class ConfigEditor:
                 self.popup_buf = ""
                 self.popup_cursor = 0
                 self.popup_error = ""
+                self.popup_color_opts = []
                 self.editing_item = None
             elif 32 <= key < 127:
                 self.popup_buf = self.popup_buf[:cur] + chr(key) + self.popup_buf[cur:]
@@ -4254,6 +4301,8 @@ class ConfigEditor:
                 else:
                     self.popup_buf = self.editing_item.key
                 self.popup_cursor = len(self.popup_buf)
+                if self.editing_item.has_equals and self.editing_item.key.upper() == "SITE_LABEL_COLOR":
+                    self._open_color_selector(self.editing_item)
                 self.popup_mode = True
             return True
 
