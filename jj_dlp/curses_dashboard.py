@@ -3211,7 +3211,8 @@ class JJDlpDashboard:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def _curses_choose_config(stdscr, app: "AppState", found: List[str]) -> List[str]:
+def _curses_choose_config(stdscr, app: "AppState", found: List[str],
+                          preselect: Optional[List[str]] = None) -> List[str]:
     """
     MenuWorks-style config file chooser.
     Space = toggle [x],  Enter = confirm,  Q = quit.
@@ -3225,7 +3226,8 @@ def _curses_choose_config(stdscr, app: "AppState", found: List[str]) -> List[str
     stdscr.keypad(True)
 
     # ── Phase 1: config file selection ───────────────────────────────────────
-    selected  = set(range(len(found)))   # start with all config files selected
+    # Start with the preselected configs checked (all of them if none given).
+    selected  = {i for i, f in enumerate(found) if preselect and f in preselect} or set(range(len(found)))
     cursor    = 0
     n         = len(found)
     do_not_show_config = False
@@ -3312,6 +3314,7 @@ def _curses_choose_config(stdscr, app: "AppState", found: List[str]) -> List[str
                 # Save chosen config files to global.json
                 def _mutate(gdata):
                     gdata["startup_configs"] = chosen_files
+                    gdata["known_configs"] = list(found)
                 app.update_global_json(_mutate)
 
                 if do_not_show_config:
@@ -3343,6 +3346,7 @@ def run_dashboard(app: "AppState", global_cfg: Optional[dict] = None):
     return curses.wrapper(_run)
 
 
-def choose_config(app: "AppState", found: List[str]) -> List[str]:
+def choose_config(app: "AppState", found: List[str],
+                  preselect: Optional[List[str]] = None) -> List[str]:
     """Run the startup multi-select config chooser inside curses.wrapper."""
-    return curses.wrapper(_curses_choose_config, app, found)
+    return curses.wrapper(_curses_choose_config, app, found, preselect)

@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder
 """
-__version__ = "1.29.1"
+__version__ = "1.29.2"
 
 import subprocess
 import textwrap
@@ -5625,6 +5625,12 @@ def main() -> None:
         if len(found) == 1:
             print(f"Using: {found[0]}")
             chosen = [found[0]]
+            # Record the lone config as known so a later second config counts as new.
+            def _record_known(gd):
+                if gd.get("known_configs") == found:
+                    return False
+                gd["known_configs"] = list(found)
+            app.update_global_json(_record_known)
         else:
             # Load global.conf to check if we should show the UI
             global_cfg = load_global_config()
@@ -5634,12 +5640,19 @@ def main() -> None:
             global_data = app.load_global_json()
             saved_configs = global_data.get("startup_configs", [])
 
-            if not ask_for_config and saved_configs and all(c in found for c in saved_configs):
+            # A missing known_configs counts every config as new (one-time chooser).
+            known_configs = global_data.get("known_configs")
+            if not isinstance(known_configs, list):
+                known_configs = []
+            new_configs = [c for c in found if c not in known_configs]
+
+            if not new_configs and not ask_for_config and saved_configs and all(c in found for c in saved_configs):
                 chosen = saved_configs
             else:
-                # Multi-select chooser
+                # Multi-select chooser, pre-selecting saved choices plus any new configs
                 from . import curses_dashboard
-                chosen = curses_dashboard.choose_config(app, found)
+                preselect = [c for c in found if c in saved_configs or c in new_configs]
+                chosen = curses_dashboard.choose_config(app, found, preselect)
 
         config_paths = [os.path.join(cwd, f) for f in chosen]
 
