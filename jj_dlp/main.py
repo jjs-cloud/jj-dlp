@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder
 """
-__version__ = "1.29.0"
+__version__ = "1.29.1"
 
 import subprocess
 import textwrap
@@ -36,8 +36,8 @@ from .logger import (
     configure_debug_log as _configure_debug_log,
 )
 
-from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS, _compute_config_id, SORT_OPTIONS, _SORT_LABELS, get_config_file_lock
-from .config_editor import DOWNLOADER_FLAG_KEYS
+from .config_editor import CONFIG_KEYS, _KEY_DEFAULTS, SORT_OPTIONS, _SORT_LABELS, get_config_file_lock
+from .config_editor import DOWNLOADER_FLAG_KEYS, init_streamer_settings, load_priority_entries, get_streamer_settings
 from .config_editor import load_global_config as _load_global_config_typed
 from . import simulation as _simulation
 from .twitch_eventsub import maybe_backfill_last_live
@@ -109,8 +109,8 @@ class AppState:
                 raw = f.read()
             data = json.loads(raw)
             if isinstance(data, dict):
-                n_prio = len(data.get("priorities", {}))
-                dbg(f"[GLOBAL_JSON][DIAG] load OK: path={path!r} size={len(raw)} priorities_keys={n_prio}")
+                n_prio = len(data.get("streamer_settings", {}))
+                dbg(f"[GLOBAL_JSON][DIAG] load OK: path={path!r} size={len(raw)} settings_sites={n_prio}")
                 return data
             dbg(f"[GLOBAL_JSON][DIAG] load: parsed JSON was not a dict (type={type(data).__name__}) — returning {{}}")
         except FileNotFoundError:
@@ -171,7 +171,7 @@ class AppState:
             # any point up to here leaves the original global.json untouched;
             # a crash after this line leaves the new file fully written.
             os.replace(tmp_path, path)
-            dbg(f"[GLOBAL_JSON][DIAG] save OK: path={path!r} priorities_keys={len(data.get('priorities', {}))}")
+            dbg(f"[GLOBAL_JSON][DIAG] save OK: path={path!r} settings_sites={len(data.get('streamer_settings', {}))}")
         except Exception as e:
             dbg(f"[GLOBAL_JSON][DIAG] save FAILED: path={path!r} error={e!r}")
             try:
@@ -187,10 +187,6 @@ class AppState:
             if mutate_fn(gdata) is not False:
                 self.save_global_json(gdata)
             return gdata
-
-    def get_config_id(self) -> str:
-        """Return a stable short ID for the current set of loaded config file paths."""
-        return _compute_config_id([site.config_path for site in self.sites])
 
     # ── Process-wide activity log ────────────────────────────────────────────
 
@@ -2232,7 +2228,7 @@ def _send_ntfy_notification(streamer: str, site_label: str, is_recording: bool =
 def _resolve_ntfy_enabled(app: "AppState", streamer: str, site_label: str, cfg: dict) -> bool:
     """Resolve whether the ntfy channel is enabled for *streamer*.
 
-    Per-streamer entries in global.json's "priorities" section can override
+    Per-streamer records in global.json's "streamer_settings" section can override
     the site's NTFY_NOTIFICATIONS setting on a per-streamer basis (set via
     the dashboard's NotificationSettingsPopup). Falls back to the site
     config's ntfy_notifications value when no such override exists.
@@ -2241,14 +2237,7 @@ def _resolve_ntfy_enabled(app: "AppState", streamer: str, site_label: str, cfg: 
     try:
         with app.global_json_lock:
             gdata = app.load_global_json()
-        config_id = app.get_config_id()
-        entries = gdata.get("priorities", {}).get(config_id, {}).get("entries", [])
-        dbg(f"[NTFY] config_id={config_id!r} found {len(entries)} priority entries "
-            f"for this config set")
-        for e in entries:
-            if e.get("streamer") == streamer and e.get("site") == site_label:
-                streamer_notif = e.get("notifications_enabled")
-                break
+        streamer_notif = get_streamer_settings(gdata, site_label, streamer).get("notifications_enabled")
         dbg(f"[NTFY] streamer-level override lookup result: {streamer_notif!r} "
             f"(None means no per-streamer entry / fall back to site config)")
     except Exception as ex:
@@ -3074,10 +3063,7 @@ def _maybe_trigger_lq(app: "AppState", triggering_site: "SiteState", triggering_
     # ── Load priority map from global.json ────────────────────────────────────
     with app.global_json_lock:
         global_data = app.load_global_json()
-    config_id = app.get_config_id()
-    saved_entries = (global_data.get("priorities", {})
-                                .get(config_id, {})
-                                .get("entries", []))
+    saved_entries = load_priority_entries(global_data)
     priority_map: Dict[Tuple[str, str], dict] = {}
     for e in saved_entries:
         key = (e.get("streamer", ""), e.get("site", ""))
@@ -3180,7 +3166,7 @@ def _resolve_split_after(cfg: dict, entry_info: dict) -> dict:
     streamer's per-streamer Split override (set via the SPLIT settings
     popup) on top of the site's SPLIT_AFTER config value.
 
-    entry_info is the priorities[...][entries] dict-like info for the
+    entry_info is the per-streamer settings dict (see load_priority_entries()) for the
     streamer. Three states, driven by "split_mode":
       - "inherit" (or key absent) — no override; the site's SPLIT_AFTER is
         left untouched and the *same* cfg object is returned (no copy).
@@ -3228,7 +3214,7 @@ def _resolve_auto_suffix(cfg: dict, entry_info: dict) -> dict:
     settings popup) on top of the site's AUTO_SUFFIX config value.
 
     Mirrors _resolve_split_after()'s tri-state handling. entry_info is the
-    priorities[...][entries] dict-like info for the streamer, driven by
+    per-streamer settings dict (see load_priority_entries()) for the streamer, driven by
     "auto_suffix_mode":
       - "inherit" (or key absent) — no override; the site's AUTO_SUFFIX is
         left untouched and the *same* cfg object is returned (no copy).
@@ -3253,7 +3239,7 @@ def _resolve_output_dir(cfg: dict, entry_info: dict) -> dict:
     Directory settings popup) on top of the site's OUTPUT_DIR / global
     SUBFOLDERS config values.
 
-    entry_info is the priorities[...][entries] dict-like info for the
+    entry_info is the per-streamer settings dict (see load_priority_entries()) for the
     streamer. Two independent overrides, both optional:
 
       - "output_dir_mode" — "inherit" (or key absent) leaves the global
@@ -4678,8 +4664,7 @@ def start_recording_if_needed(app: "AppState", live_now: List[str], cfg: dict, s
     with app.global_json_lock:
         global_data = app.load_global_json()
 
-    config_id = app.get_config_id()
-    saved_entries = global_data.get("priorities", {}).get(config_id, {}).get("entries", [])
+    saved_entries = load_priority_entries(global_data)
     
     priority_map = {}
     for e in saved_entries:
@@ -4875,16 +4860,14 @@ def _process_streamer_schedules(app: "AppState", site: "SiteState") -> None:
     For recurring schedules the most-recent occurrence of start/end is
     computed dynamically and the same logic is applied.
     """
-    config_id = app.get_config_id()
-    now       = datetime.now()
+    now = datetime.now()
 
     # Read entries outside the write-lock so _modify_config_streamer can run
     # without risk of deadlock (it touches .conf files, not global.json).
     with app.global_json_lock:
         gdata = app.load_global_json()
 
-    prio_block = gdata.get("priorities", {}).get(config_id, {})
-    entries    = prio_block.get("entries", [])
+    entries = load_priority_entries(gdata)
     if not entries:
         return
 
@@ -4904,6 +4887,12 @@ def _process_streamer_schedules(app: "AppState", site: "SiteState") -> None:
     except Exception as e:
         dbg(f"normalize_label: {e}")
         current_site_label = normalize_label(os.path.basename(site.config_path))
+
+    try:
+        current_streamers = set(site.get_cached_config().get("streamers", []))
+    except Exception as e:
+        dbg(f"_process_streamer_schedules: {e}")
+        current_streamers = set()
     
     # Collect actions: list of (streamer, site_label, conf_action, log_label)
     # conf_action is "add" (enable) or "disable".
@@ -4914,12 +4903,17 @@ def _process_streamer_schedules(app: "AppState", site: "SiteState") -> None:
 
     for entry in entries:
         streamer    = entry.get("streamer", "")
-        site_label  = normalize_label(entry.get("site", ""))
+        raw_site    = entry.get("site", "")
+        site_label  = normalize_label(raw_site)
         if not streamer:
             continue
 
         # Skip entries that belong to a different site
         if site_label != current_site_label:
+            continue
+
+        # Skip streamers no longer in this site's config so a stale schedule can't re-add them.
+        if streamer not in current_streamers:
             continue
 
         sched = entry.get("schedule", {})
@@ -4975,7 +4969,7 @@ def _process_streamer_schedules(app: "AppState", site: "SiteState") -> None:
                         f"(now≥start; last_enable={last_enable or 'never'})",
                         site.config_path,
                     )
-                    pending.append((streamer, site_label, "add", "enabled"))
+                    pending.append((streamer, raw_site, "add", "enabled"))
                 else:
                     dbg(
                         f"[SCHEDULE] {streamer!r}: → enable skipped "
@@ -4997,7 +4991,7 @@ def _process_streamer_schedules(app: "AppState", site: "SiteState") -> None:
                         f"(now≥end; last_disable={last_disable or 'never'})",
                         site.config_path,
                     )
-                    pending.append((streamer, site_label, "disable", "disabled"))
+                    pending.append((streamer, raw_site, "disable", "disabled"))
                 else:
                     dbg(
                         f"[SCHEDULE] {streamer!r}: → disable skipped "
@@ -5090,7 +5084,7 @@ def _process_streamer_schedules(app: "AppState", site: "SiteState") -> None:
                         f"last_enable={last_enable or 'never'})",
                         site.config_path,
                     )
-                    pending.append((streamer, site_label, "add", "enabled"))
+                    pending.append((streamer, raw_site, "add", "enabled"))
                 else:
                     dbg(
                         f"[SCHEDULE] {streamer!r}: → enable skipped "
@@ -5114,7 +5108,7 @@ def _process_streamer_schedules(app: "AppState", site: "SiteState") -> None:
                         f"last_disable={last_disable or 'never'})",
                         site.config_path,
                     )
-                    pending.append((streamer, site_label, "disable", "disabled"))
+                    pending.append((streamer, raw_site, "disable", "disabled"))
                 else:
                     dbg(
                         f"[SCHEDULE] {streamer!r}: → disable skipped "
@@ -5141,20 +5135,12 @@ def _process_streamer_schedules(app: "AppState", site: "SiteState") -> None:
 
     # Persist attempt timestamps (re-read to avoid racing with other writers).
     def _mutate(gdata):
-        entries = (gdata.get("priorities", {})
-                       .get(config_id, {})
-                       .get("entries", []))
-        for streamer, site_label, conf_action, log_label in pending:
-            for e in entries:
-                if e.get("streamer") == streamer and e.get("site") == site_label:
-                    sched = e.setdefault("schedule", {})
-                    if log_label == "enabled":
-                        sched["last_enable_attempt"] = attempt_ts
-                    else:
-                        sched["last_disable_attempt"] = attempt_ts
-                    break
-        if "priorities" in gdata and config_id in gdata["priorities"]:
-            gdata["priorities"][config_id]["entries"] = entries
+        for streamer, raw_site, conf_action, log_label in pending:
+            rec = gdata.get("streamer_settings", {}).get(raw_site, {}).get(streamer)
+            if rec is None:
+                continue
+            sched = rec.setdefault("schedule", {})
+            sched["last_enable_attempt" if log_label == "enabled" else "last_disable_attempt"] = attempt_ts
     app.update_global_json(_mutate)
 
     # Trigger an immediate liveness recheck so the new enable/disable state is
@@ -5767,6 +5753,12 @@ def main() -> None:
 
     # Sort sites by site_order so they appear in the desired positions in the dashboard
     sites.sort(key=lambda s: s.site_order)
+
+    # Migrate legacy priorities and add newly loaded streamers to the global order.
+    try:
+        init_streamer_settings(app, sites)
+    except Exception as e:
+        dbg(f"[CONFIG] init_streamer_settings failed: {type(e).__name__}: {e}")
 
     for site in sites:
         # Monitor thread (liveness check loop)
