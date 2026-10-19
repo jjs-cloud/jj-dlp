@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder
 """
-__version__ = "1.29.2"
+__version__ = "1.29.3"
 
 import subprocess
 import textwrap
