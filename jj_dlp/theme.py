@@ -518,19 +518,6 @@ SITE_REGISTRY = {
     'main_jjdlpdashboard_draw_site_panel_rec_1': {'file': 'main.py', 'label': 'REC:{rec_cnt}', 'default_role': 'REC', 'default_bold': True},
     'main_jjdlpdashboard_draw_site_panel_dim_1': {'file': 'main.py', 'label': 'OFF:{off_cnt}', 'default_role': 'DIM', 'default_bold': False},
     'main_jjdlpdashboard_draw_site_panel_disabled_1': {'file': 'main.py', 'label': 'DIS:{dis_cnt}', 'default_role': 'DISABLED', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_chrome_2': {'file': 'main.py', 'label': 'Site Panel (Compact) — Column Separator', 'default_role': 'CHROME', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_disabled_2': {'file': 'main.py', 'label': 'Site Panel (Compact) — Name (Disabled)', 'default_role': 'DISABLED', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_disabled_3': {'file': 'main.py', 'label': 'Site Panel (Compact) — Status Badge (Disabled, Flash On)', 'default_role': 'DISABLED', 'default_bold': True},
-    'main_jjdlpdashboard_draw_site_panel_disabled_4': {'file': 'main.py', 'label': 'Site Panel (Compact) — Status Badge (Disabled, Flash Off)', 'default_role': 'DISABLED', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_disabled_5': {'file': 'main.py', 'label': 'Site Panel (Compact) — Status Badge (Disabled, Never Live)', 'default_role': 'DISABLED', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_live_2': {'file': 'main.py', 'label': 'Site Panel (Compact) — Name (Live)', 'default_role': 'REC', 'default_bold': True},
-    'main_jjdlpdashboard_draw_site_panel_live_3': {'file': 'main.py', 'label': 'Site Panel (Compact) — Status Badge (Recording, Flash On)', 'default_role': 'LIVE', 'default_bold': True},
-    'main_jjdlpdashboard_draw_site_panel_rec_2': {'file': 'main.py', 'label': 'Site Panel (Compact) — Status Badge (Recording, Flash Off)', 'default_role': 'REC', 'default_bold': True},
-    'main_jjdlpdashboard_draw_site_panel_live_4': {'file': 'main.py', 'label': 'Site Panel (Compact) — Status Badge (Live, Not Recording)', 'default_role': 'LIVE', 'default_bold': True},
-    'main_jjdlpdashboard_draw_site_panel_dim_2': {'file': 'main.py', 'label': 'Site Panel (Compact) — Name (Offline)', 'default_role': 'NORMAL', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_dim_3': {'file': 'main.py', 'label': 'Site Panel (Compact) — Status Badge (Offline)', 'default_role': 'DIM', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_live_5': {'file': 'main.py', 'label': 'Site Panel (Compact) — Last Live, Recently Live', 'default_role': 'NORMAL', 'default_bold': False},
-    'main_jjdlpdashboard_draw_site_panel_dim_4': {'file': 'main.py', 'label': 'Site Panel (Compact) — Last Live, Older', 'default_role': 'DIM', 'default_bold': False},
     'main_jjdlpdashboard_draw_site_panel_disabled_6': {'file': 'main.py', 'label': 'Site Panel (Normal) — Name (Disabled)', 'default_role': 'DISABLED', 'default_bold': False},
     'main_jjdlpdashboard_draw_site_panel_disabled_7': {'file': 'main.py', 'label': 'Site Panel (Normal) — Progress Bar (Disabled)', 'default_role': 'DISABLED', 'default_bold': False},
     'main_jjdlpdashboard_draw_site_panel_disabled_8': {'file': 'main.py', 'label': 'Site Panel (Normal) — Status Badge (Disabled, Flash On)', 'default_role': 'DISABLED', 'default_bold': True},
@@ -548,6 +535,10 @@ SITE_REGISTRY = {
     'main_jjdlpdashboard_draw_site_panel_live_10': {'file': 'main.py', 'label': 'Site Panel (Normal) — Last Live, Recently Live', 'default_role': 'LOGO', 'default_bold': False},
     'main_jjdlpdashboard_draw_site_panel_dim_8': {'file': 'main.py', 'label': 'Site Panel (Normal) — Last Live, Older', 'default_role': 'NORMAL', 'default_bold': True},
     'main_jjdlpdashboard_draw_site_panel_warn': {'file': 'main.py', 'label': 'Next check: {_nxt_str}', 'default_role': 'WARN', 'default_bold': True},
+    'main_jjdlpdashboard_draw_list_view_border': {'file': 'main.py', 'label': 'Site List — Border', 'default_role': 'CHROME', 'default_bold': False},
+    'main_jjdlpdashboard_draw_list_view_chrome': {'file': 'main.py', 'label': 'Site List — Site Column', 'default_role': 'CHROME', 'default_bold': False},
+    'main_jjdlpdashboard_draw_list_view_warn': {'file': 'main.py', 'label': 'Site List — Next Check (Label and Times)', 'default_role': 'WARN', 'default_bold': True},
+    'main_jjdlpdashboard_draw_list_view_dim': {'file': 'main.py', 'label': 'Site List — Next Check Site Names', 'default_role': 'NORMAL', 'default_bold': False},
     'main_jjdlpdashboard_draw_log_tab_dim_1': {'file': 'main.py', 'label': 'Activity Log — \'Site:\' Label', 'default_role': 'NORMAL', 'default_bold': True},
     'main_jjdlpdashboard_draw_log_tab_hilight': {'file': 'main.py', 'label': 'Activity Log — Site Tab (Selected)', 'default_role': 'HILIGHT', 'default_bold': False},
     'main_jjdlpdashboard_draw_log_tab_chrome': {'file': 'main.py', 'label': 'Activity Log — Site Tab (Unselected)', 'default_role': 'CHROME', 'default_bold': True},
@@ -662,6 +653,59 @@ def _color_const_to_name(value):
         if _color_name_to_const(name) == value:
             return name
     return 'WHITE'
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# SITE_LABEL_COLOR — selectable site-label colors (list and panels modes).
+# ─────────────────────────────────────────────────────────────────────────
+SITE_LABEL_DEFAULT = 'DEFAULT'   # no override: use the theme's own label color
+
+# Name -> curses color index (0-7 base, 16-255 xterm 256-color), in selector order.
+SITE_LABEL_COLORS = {
+    'BLACK': 0, 'RED': 1, 'GREEN': 2, 'YELLOW': 3,
+    'BLUE': 4, 'MAGENTA': 5, 'CYAN': 6, 'WHITE': 7,
+    'ORANGE': 208, 'DARK_ORANGE': 202, 'GOLD': 220, 'AMBER': 214, 'PEACH': 216,
+    'SALMON': 209, 'CORAL': 203, 'BROWN': 130, 'TAN': 180,
+    'HOT_PINK': 198, 'PINK': 211, 'ORCHID': 213, 'PURPLE': 129, 'VIOLET': 99,
+    'INDIGO': 54, 'LAVENDER': 183,
+    'SKY_BLUE': 39, 'LIGHT_BLUE': 75, 'NAVY': 18, 'TEAL': 30, 'AQUA': 51,
+    'LIME': 118, 'MINT': 121, 'FOREST': 28, 'OLIVE': 100, 'KHAKI': 143,
+    'MAROON': 88, 'CREAM': 230, 'LIGHT_GREY': 250, 'GREY': 244, 'DARK_GREY': 240,
+}
+_SITE_LABEL_NAMES = list(SITE_LABEL_COLORS)
+_SITE_LABEL_PAIR_BASE = 20   # pairs 1-13 are the role pairs
+
+
+def normalize_site_label_color(raw):
+    """Return a SITE_LABEL_COLOR value as an upper-case name with quotes/spaces stripped."""
+    return str(raw or '').strip().strip('"\'').strip().upper()
+
+
+def _site_label_pair(name):
+    """Return the curses pair for a label color name, or None if unknown or unsupported here."""
+    idx = SITE_LABEL_COLORS.get(name)
+    if idx is None:
+        return None
+    pair = _SITE_LABEL_PAIR_BASE + _SITE_LABEL_NAMES.index(name)
+    try:
+        if idx >= curses.COLORS or pair >= curses.COLOR_PAIRS:
+            return None
+    except (AttributeError, curses.error):
+        return None
+    return pair
+
+
+def site_label_options():
+    """Return DEFAULT plus every label color this terminal supports, in selector order."""
+    return [SITE_LABEL_DEFAULT] + [n for n in _SITE_LABEL_NAMES if _site_label_pair(n) is not None]
+
+
+def site_label_attr(base_attr, color_name):
+    """Recolor base_attr to color_name, keeping its bold; unset/unknown/unsupported returns base_attr."""
+    pair = _site_label_pair(normalize_site_label_color(color_name))
+    if pair is None:
+        return base_attr
+    return curses.color_pair(pair) | (base_attr & curses.A_BOLD)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -958,6 +1002,15 @@ def apply_palette(dashboard):
             curses.init_pair(pair_num, fg, bg)
         except curses.error:
             pass
+
+    # Site-label color pairs, on the same ambient background as the CHROME pair.
+    for name, color_idx in SITE_LABEL_COLORS.items():
+        pair_num = _site_label_pair(name)
+        if pair_num is not None:
+            try:
+                curses.init_pair(pair_num, color_idx, ambient_bg)
+            except curses.error:
+                pass
 
     # clearok(True) forces the next refresh() on this window
     # to do a full, uncached repaint, so the freshly defined pair colors

@@ -1,3 +1,4 @@
+import copy
 import os
 import shutil
 import curses
@@ -156,7 +157,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("NOTIFY_CONFIRM_FILE",      scope="global",                    default="true",                       preserve=True, type="bool",  comment="Confirm the recording has actually started before sending a live notification.  Note: When enabled, the notifications will be delayed by a few seconds until the file has been confirmed."),
     _KeyDef("NOTIFY_NO_CONFIRM_FILE",   scope="global",                    default="true",                       preserve=True, type="bool",  comment="If the recording file cannot be confirmed (does not exist or no file growth) within one STALL_TIMEOUT, send a warning notification that the file could not be confirmed (true/false)."),
     _KeyDef("SITE_SORT",                scope="global",                    default="added_first",                preserve=True,               comment="The order to display streamers on each site panel.   This can also be adjusted by pressing the S key on the Dashboard tab."),
-    _KeyDef("COMPACT_VIEW",             scope="global",                    default="auto",                       preserve=True,               comment="When streamers overflow the panel, compact view shows them in 2 columns without progress bars. (auto/true/false)"),
+    _KeyDef("DASHBOARD_MODE",           scope="global",                    default="LIST",                       preserve=True, type="str",   comment="Dashboard tab layout. PANELS: one panel per site. LIST: every streamer in one list. List mode will be used when there are too many streamers to display in a panel. (Default: LIST)"),
     _KeyDef("WEB_UI",                   scope="global",                    default="false",                      preserve=True, type="bool",  comment="Enable the Web UI, viewable from any browser on your local network by navigating to http://your-ip-address:8765 or from the same machine at http://127.0.0.1:8765. Requires WEB_UI_USER and WEB_UI_PASS to also be set. Note: Use this tool on your local network only.  Access over the internet is not supported yet. (true/false)"),
     _KeyDef("WEB_UI_PORT",              scope="global",                    default="8765",                       preserve=True, type="int",   comment="Port for the web dashboard. Default: 8765"),
     _KeyDef("WEB_UI_USER",              scope="global",                    default="",                           preserve=True,               comment="Username required to log into the web dashboard (HTTP Basic Auth). Required if WEB_UI is enabled."),
@@ -167,6 +168,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
 
     # ── Site keys (per-site .conf) ────────────────────────────────────────────
     _KeyDef("SITE_LABEL",               scope="site",                      default="",                           preserve=True,               comment="The display name of this site."),
+    _KeyDef("SITE_LABEL_COLOR",         scope="site",                      default="DEFAULT",                    preserve=True,               comment="The color of this site's label on the dashboard."),
     _KeyDef("SITE_ORDER",               scope="site",                      default="999",                        preserve=True,               comment="The position on the dashboard to display this site's panel (e.g. 0 for top-left, 1 for top-right, 2 for bottom-left, 3 for bottom-right, etc.)"),
     _KeyDef("CHECK_INTERVAL",           scope="site",                      default="60",                         preserve=False,              comment="How often to check if streamers are live (in seconds).  (Default: 60) (note: keep this <= STALL_TIMEOUT to avoid false write-failure alerts)"),
     _KeyDef("OUTPUT_DIR",               scope="site",                      default="recordings",                 preserve=True,               comment='Folder where recordings will be saved.  Can be an absolute path or relative path.  example: "C:\\recordings" or "recordings"'),
@@ -272,6 +274,16 @@ def _coerce_dashboard_value(raw: str) -> str:
     return val if val in DASHBOARD_MODES else "curses"
 
 
+# Valid DASHBOARD_MODE values (dashboard tab layout).
+DASHBOARD_LAYOUT_MODES: tuple[str, ...] = ("PANELS", "LIST")
+
+
+def _coerce_dashboard_mode_value(raw: str) -> str:
+    """Coerce a raw DASHBOARD_MODE string to PANELS or LIST (falls back to the key's default)."""
+    val = (raw or "").strip().strip('"\'').upper()
+    return val if val in DASHBOARD_LAYOUT_MODES else _KEY_DEFAULTS["DASHBOARD_MODE"].strip().upper()
+
+
 def _coerce_global_value(kdef: "_KeyDef", raw: str) -> object:
     """Coerce a raw global.conf string into the runtime type declared by kdef.type."""
     raw = (raw or "").strip().strip('"\'')
@@ -327,8 +339,7 @@ def load_global_config(path: str) -> dict:
     cfg["update_branch"] = cfg["update_branch"].lower()
     cfg["subfolders"] = _coerce_subfolders_value(general.get("SUBFOLDERS", ""))
     cfg["dashboard"] = _coerce_dashboard_value(general.get("DASHBOARD", ""))
-    if not cfg["compact_view"]:
-        cfg["compact_view"] = "auto"
+    cfg["dashboard_mode"] = _coerce_dashboard_mode_value(general.get("DASHBOARD_MODE", ""))
     cfg["graph_scale"] = max(1, cfg["graph_scale"])
 
     return cfg
@@ -367,22 +378,121 @@ SORT_DEFAULT: str  = "added_first"
 
 
 
-def _compute_config_id(config_paths: "list[str]") -> str:
-    """Compute a stable short ID for a combination of loaded config file paths."""
+def _legacy_config_id(config_paths: "list[str]") -> str:
+    """Compute the old per-combo priorities key (only used to migrate legacy data)."""
     h = hashlib.sha256()
     for p in sorted(config_paths):
         h.update(p.encode("utf-8"))
     return h.hexdigest()[:16]
 
 
-def _compute_config_sha(config_path: str) -> str:
-    """Compute a short SHA of a config file's raw content (for change detection)."""
-    try:
-        with open(config_path, "rb") as f:
-            return hashlib.sha256(f.read()).hexdigest()[:16]
-    except Exception as e:
-        _dbg(f"_compute_config_sha: {e}")
-        return ""
+_NO_PRIORITY = 999999
+
+
+def _order_keys(gdata: dict) -> list:
+    """Return streamer_order as (site, streamer) tuples, skipping malformed items."""
+    return [tuple(p) for p in gdata.get("streamer_order", [])
+            if isinstance(p, (list, tuple)) and len(p) == 2]
+
+
+def get_streamer_settings(gdata: dict, site: str, streamer: str) -> dict:
+    """Return the saved settings record for one streamer, or {} if none."""
+    return gdata.get("streamer_settings", {}).get(site, {}).get(streamer, {})
+
+
+def load_priority_entries(gdata: dict) -> list:
+    """Return every streamer's settings dict with streamer, site and priority (order index) added."""
+    settings = gdata.get("streamer_settings", {})
+    entries, seen = [], set()
+    for i, key in enumerate(_order_keys(gdata)):
+        if key in seen:
+            continue
+        seen.add(key)
+        site, streamer = key
+        entries.append({**settings.get(site, {}).get(streamer, {}),
+                        "streamer": streamer, "site": site, "priority": i})
+    for site, by_streamer in settings.items():
+        for streamer, rec in by_streamer.items():
+            if (site, streamer) not in seen:
+                entries.append({**rec, "streamer": streamer, "site": site, "priority": _NO_PRIORITY})
+    return entries
+
+
+def _append_missing_to_order(gdata: dict, keys) -> bool:
+    """Append (site, streamer) keys missing from streamer_order; returns True if any were added."""
+    order = gdata.setdefault("streamer_order", [])
+    known = set(_order_keys(gdata))
+    added = False
+    for site, streamer in keys:
+        if (site, streamer) not in known:
+            known.add((site, streamer))
+            order.append([site, streamer])
+            added = True
+    return added
+
+
+def _migrate_legacy_priorities(gdata: dict, current_config_id: str) -> bool:
+    """Fold legacy per-combo priorities blocks into streamer_settings/streamer_order (runs once)."""
+    if "streamer_settings" in gdata:
+        return False
+    legacy = gdata.get("priorities", {})
+    block_ids = [current_config_id] if current_config_id in legacy else []
+    block_ids += [b for b in reversed(list(legacy)) if b != current_config_id]
+
+    settings, order, seen = {}, [], set()
+    for block_id in block_ids:
+        for e in legacy[block_id].get("entries", []):
+            site, streamer = e.get("site", ""), e.get("streamer", "")
+            if not streamer or (site, streamer) in seen:
+                continue
+            seen.add((site, streamer))
+            order.append([site, streamer])
+            settings.setdefault(site, {})[streamer] = {
+                k: v for k, v in e.items()
+                if k not in ("streamer", "site", "config_sha", "priority")
+            }
+    gdata["streamer_settings"] = settings
+    gdata["streamer_order"] = order
+    gdata.pop("last_edited_priorities_config_id", None)
+    return True
+
+
+def init_streamer_settings(app, sites) -> None:
+    """Migrate legacy priorities once, then add any newly loaded streamers to the global order."""
+    keys = []
+    for site in sites:
+        cfg = site.get_cached_config()
+        label = cfg.get("site_label", os.path.basename(site.config_path))
+        keys.extend((label, s.lower()) for s in cfg.get("streamers", []))
+    current_id = _legacy_config_id([s.config_path for s in sites])
+
+    def _mutate(gdata):
+        changed = _migrate_legacy_priorities(gdata, current_id)
+        return _append_missing_to_order(gdata, keys) or changed
+
+    app.update_global_json(_mutate)
+
+
+def _has_streamer_override(e: dict) -> bool:
+    """True if the streamer record overrides any site-level setting."""
+    schedule_enabled = bool(e.get("schedule", {}).get("enabled", False))
+
+    split_mode = e.get("split_mode")
+    if split_mode is None:
+        has_split = bool(e.get("split_enabled", False)) and int(e.get("split_after", 0) or 0) > 0
+    else:
+        has_split = split_mode in ("on", "off")
+
+    output_mode = e.get("output_dir_mode")
+    has_output_dir = (output_mode is not None and output_mode != "inherit") \
+        or bool(e.get("output_dir_custom_enabled", False))
+
+    return (schedule_enabled or has_split
+            or e.get("notifications_enabled") is not None
+            or bool(e.get("lq_enabled", False))
+            or bool(e.get("intro_delay_enabled", False))
+            or e.get("auto_suffix_mode") in ("on", "off")
+            or has_output_dir)
 
 
 class PriorityEntry(NamedTuple):
@@ -390,7 +500,6 @@ class PriorityEntry(NamedTuple):
     streamer:         str   # lowercase username
     site:             str   # SITE_LABEL from the config that owns this streamer
     config_path:      str   # absolute path to the .conf file
-    config_sha:       str   # short SHA of that .conf file at last load
     bypass:           bool  # True → always-record (displayed in green, sorted to top)
     has_override:     bool = False  # True → streamer has ANY streamer-level override
                                      # active (Schedule, Split, Notifications, or
@@ -420,7 +529,7 @@ def _get_site_default_cfg(dashboard, entry: "PriorityEntry") -> dict:
 
 class PriorityEntryStore:
     """Read/write access to one streamer's record inside
-    priorities[config_id]['entries'] in global.json.
+    streamer_settings[site][streamer] in global.json.
 
     Every per-streamer settings popup (Quality, Notifications, Auto-Suffix,
     Subfolders, Split, Intro Delay, Schedule) persists into the same
@@ -429,10 +538,9 @@ class PriorityEntryStore:
     of being reimplemented (and possibly forgotten) in each popup.
     """
 
-    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
+    def __init__(self, dashboard, entry: "PriorityEntry"):
         self.dashboard = dashboard
         self.entry     = entry
-        self.config_id = config_id
 
     def load(self) -> dict:
         """Return a copy of this streamer's saved record, or {} if none."""
@@ -440,8 +548,7 @@ class PriorityEntryStore:
             app = self.dashboard.app
             with app.global_json_lock:
                 gdata = app.load_global_json()
-            found = self._find(self._entries(gdata))
-            return dict(found) if found else {}
+            return dict(get_streamer_settings(gdata, self.entry.site, self.entry.streamer))
         except Exception as e:
             _dbg(f"PriorityEntryStore.load: {e}")
             return {}
@@ -471,36 +578,16 @@ class PriorityEntryStore:
 
     # ── internals ────────────────────────────────────────────────────────
 
-    def _entries(self, gdata: dict) -> list:
-        return gdata.get("priorities", {}).get(self.config_id, {}).get("entries", [])
-
-    def _find(self, entries: list) -> "Optional[dict]":
-        return next(
-            (e for e in entries
-             if e.get("streamer") == self.entry.streamer and e.get("site") == self.entry.site),
-            None,
-        )
-
     def _mutate(self, fn, create_if_missing: bool) -> None:
         try:
             def _apply(gdata):
-                entries = self._entries(gdata)
-                target  = self._find(entries)
+                by_streamer = gdata.setdefault("streamer_settings", {}).setdefault(self.entry.site, {})
+                target = by_streamer.get(self.entry.streamer)
                 if target is None:
                     if not create_if_missing:
                         return False
-                    target = {
-                        "streamer":   self.entry.streamer,
-                        "site":       self.entry.site,
-                        "config_sha": self.entry.config_sha,
-                        "priority":   len(entries),
-                        "bypass":     self.entry.bypass,
-                    }
-                    entries.append(target)
+                    target = by_streamer[self.entry.streamer] = {"bypass": self.entry.bypass}
                 fn(target)
-                gdata.setdefault("priorities", {}).setdefault(
-                    self.config_id, {"config_files": [], "entries": []}
-                )["entries"] = entries
             self.dashboard.app.update_global_json(_apply)
         except Exception as e:
             _dbg(f"PriorityEntryStore._mutate: {e}")
@@ -547,11 +634,11 @@ _ALL_STREAMER_SETTING_KEYS: "tuple[str, ...]" = (
 )
 
 
-def _reset_streamer_setting_keys(dashboard, config_id: str, entry: "PriorityEntry",
+def _reset_streamer_setting_keys(dashboard, entry: "PriorityEntry",
                                   keys: "tuple[str, ...]") -> None:
     """Remove *keys* from entry's record in global.json, reverting those
     settings back to inherited / site-default behavior."""
-    PriorityEntryStore(dashboard, entry, config_id).reset(*keys)
+    PriorityEntryStore(dashboard, entry).reset(*keys)
 
 
 class ConfirmResetPopup:
@@ -619,7 +706,6 @@ class PriorityEditor:
         self._selected_idx:  int = 0
         self._scroll_offset: int = 0
         self._loaded:        bool = False
-        self._config_id:     str  = ""
         self._settings_popup: "Optional[StreamerSettingsPopup]" = None
 
     # ── Public interface ───────────────────────────────────────────────────────
@@ -636,119 +722,41 @@ class PriorityEditor:
     # ── Data management ────────────────────────────────────────────────────────
 
     def _refresh(self) -> None:
-        """Rebuild the entry list from current sites + saved global.json data."""
+        """Rebuild the entry list from the loaded sites plus saved settings and global streamer order."""
         sites = self.dashboard.sites
         if not sites:
             self._entries = []
-            self._config_id = ""
             return
 
-        # Collect (streamer, site_label, config_path, config_sha) from every site.
-        raw: "list[tuple[str,str,str,str]]" = []
+        raw: "list[tuple[str,str,str]]" = []   # (streamer, site_label, config_path)
         for site in sites:
             cfg        = site.get_cached_config()
             site_label = cfg.get("site_label", os.path.basename(site.config_path))
-            streamers  = cfg.get("streamers", [])
-            sha        = _compute_config_sha(site.config_path)
-            for s in streamers:
-                raw.append((s.lower(), site_label, site.config_path, sha))
+            for s in cfg.get("streamers", []):
+                raw.append((s.lower(), site_label, site.config_path))
 
-        # Compute the config_id for this exact combination of loaded files.
-        config_paths   = [site.config_path for site in sites]
-        self._config_id = _compute_config_id(config_paths)
-
-        # Load saved priority data for this config_id.
         app = self.dashboard.app
+        app.update_global_json(lambda g: _append_missing_to_order(g, [(lbl, s) for s, lbl, _ in raw]))
         with app.global_json_lock:
             global_data = app.load_global_json()
-        priorities_block = global_data.get("priorities", {})
-        # First time we've ever seen this config_id (e.g. fresh clone, no
-        # priority/bypass action has been taken yet) → there is no saved
-        # block at all.  If we don't persist something now, downstream
-        # consumers that only *update* existing entries (e.g.
-        # StreamerSettingsPopup._save(), _process_streamer_schedules()) will
-        # silently find nothing to work with until the user happens to
-        # reorder or bypass a streamer.  Seed it immediately so scheduling
-        # works out of the box.
-        needs_seed    = self._config_id not in priorities_block
-        saved_block   = priorities_block.get(self._config_id, {})
-        saved_entries = saved_block.get("entries", [])
+        settings = global_data.get("streamer_settings", {})
+        position: dict = {}
+        for i, key in enumerate(_order_keys(global_data)):
+            position.setdefault(key, i)
 
-        if needs_seed:
-            _dbg(
-                f"[CONFIG][DIAG] needs_seed=True for config_id={self._config_id!r} "
-                f"(known priorities keys: {list(priorities_block.keys())}) — "
-                f"about to write DEFAULTS for {len(raw)} streamer(s), which will "
-                f"OVERWRITE any existing priority/bypass ordering for this config_id "
-                f"if it existed under a different key. config_paths={config_paths!r}"
-            )
-
-        # Build a lookup: (streamer, site) → saved dict
-        saved_map: "dict[tuple,dict]" = {}
-        for i, e in enumerate(saved_entries):
-            key = (e.get("streamer", ""), e.get("site", ""))
-
-            schedule_enabled = bool(e.get("schedule", {}).get("enabled", False))
-
-            # Split: prefer the new tri-state "split_mode" ("on" | "off");
-            # an "inherit" mode is represented by the key being absent.
-            # Fall back to interpreting legacy pre-tri-state data, where the
-            # only overridable state was "enabled with a positive minute
-            # value" — anything else meant inherit (there was no "force off").
-            split_mode = e.get("split_mode")
-            if split_mode is None:
-                legacy_split_enabled = bool(e.get("split_enabled", False))
-                legacy_split_after   = int(e.get("split_after", 0) or 0)
-                has_split_override = legacy_split_enabled and legacy_split_after > 0
-            else:
-                has_split_override = split_mode in ("on", "off")
-
-            # Notifications: presence of the key at all (regardless of
-            # True/False) means an explicit streamer-level choice was made.
-            has_notif_override = e.get("notifications_enabled") is not None
-
-            has_lq_override = bool(e.get("lq_enabled", False))
-
-            has_intro_delay_override = bool(e.get("intro_delay_enabled", False))
-
-            # Auto-Suffix: tri-state "auto_suffix_mode" ("on" | "off");
-            # "inherit" is represented by the key being absent.
-            has_auto_suffix_override = e.get("auto_suffix_mode") in ("on", "off")
-
-            # Subfolders (OutputDirectorySettingsPopup): tri-state
-            # "output_dir_mode" ("inherit" or absent = no override) plus an
-            # independent custom OUTPUT_DIR override toggle.
-            has_output_dir_override = (
-                e.get("output_dir_mode") is not None
-                and e.get("output_dir_mode") != "inherit"
-            ) or bool(e.get("output_dir_custom_enabled", False))
-
-            saved_map[key] = {
-                "bypass":       e.get("bypass", False),
-                "priority":     i,
-                "has_override": (schedule_enabled or has_split_override
-                                  or has_notif_override or has_lq_override
-                                  or has_intro_delay_override
-                                  or has_auto_suffix_override
-                                  or has_output_dir_override),
-            }
-
-        # Build enriched list with saved priority / bypass values.
         enriched = []
-        for (streamer, site_label, config_path, config_sha) in raw:
-            key      = (streamer, site_label)
-            saved    = saved_map.get(key, {"bypass": False, "priority": 999999})
+        for (streamer, site_label, config_path) in raw:
+            rec = settings.get(site_label, {}).get(streamer, {})
             enriched.append({
                 "streamer":     streamer,
                 "site":         site_label,
                 "config_path":  config_path,
-                "config_sha":   config_sha,
-                "bypass":       saved["bypass"],
-                "has_override": saved.get("has_override", False),
-                "priority":     saved["priority"],
+                "bypass":       bool(rec.get("bypass", False)),
+                "has_override": _has_streamer_override(rec),
+                "priority":     position.get((site_label, streamer), _NO_PRIORITY),
             })
 
-        # Sort: bypass entries first (by saved order), then normal entries (by saved order).
+        # Sort: bypass entries first, then normal entries, each by global order.
         bypass_part = sorted([e for e in enriched if     e["bypass"]], key=lambda x: x["priority"])
         normal_part = sorted([e for e in enriched if not e["bypass"]], key=lambda x: x["priority"])
 
@@ -757,7 +765,6 @@ class PriorityEditor:
                 streamer     = e["streamer"],
                 site         = e["site"],
                 config_path  = e["config_path"],
-                config_sha   = e["config_sha"],
                 bypass       = e["bypass"],
                 has_override = e["has_override"],
             )
@@ -770,49 +777,28 @@ class PriorityEditor:
         else:
             self._selected_idx = 0
 
-        # Seed global.json for a config_id we've never saved before, so that
-        # everything downstream (schedule popup, scheduler loop) has a real
-        # entries list to work with immediately, rather than only after the
-        # user manually reorders/bypasses a streamer.
-        if needs_seed and self._entries:
-            self._save()
-
     def _save(self) -> None:
-        """Persist current entry ordering and bypass flags to global.json.
-        
-        Existing per-entry data (e.g. schedule settings) is preserved so that
-        reordering or toggling bypass never wipes schedule configuration.
-        """
-        if not self._config_id:
-            return
-        config_paths = [site.config_path for site in self.dashboard.sites]
+        """Write the visible order into streamer_order (in place) and the bypass flags into streamer_settings."""
+        visible = [(e.site, e.streamer) for e in self._entries]
+        bypass  = {(e.site, e.streamer): e.bypass for e in self._entries}
 
         def _mutate(gdata):
-            priorities = gdata.setdefault("priorities", {})
-            # Build a lookup of any extra fields already stored (e.g. schedule)
-            # so we can carry them forward rather than losing them on every save.
-            existing_entries = priorities.get(self._config_id, {}).get("entries", [])
-            existing_map: dict = {}
-            for ex in existing_entries:
-                key = (ex.get("streamer", ""), ex.get("site", ""))
-                existing_map[key] = ex
+            _append_missing_to_order(gdata, visible)
+            order   = gdata["streamer_order"]
+            vis_set = set(visible)
+            slots   = [i for i, p in enumerate(order)
+                       if isinstance(p, (list, tuple)) and len(p) == 2 and tuple(p) in vis_set]
+            for slot, key in zip(slots, visible):
+                order[slot] = list(key)
 
-            entries_data = []
-            for i, e in enumerate(self._entries):
-                entry_dict = dict(existing_map.get((e.streamer, e.site), {}))
-                entry_dict.update({
-                    "streamer":   e.streamer,
-                    "site":       e.site,
-                    "config_sha": e.config_sha,
-                    "priority":   i,
-                    "bypass":     e.bypass,
-                })
-                entries_data.append(entry_dict)
-
-            priorities[self._config_id] = {
-                "config_files": config_paths,
-                "entries":      entries_data,
-            }
+            settings = gdata.setdefault("streamer_settings", {})
+            for (site, streamer), flag in bypass.items():
+                rec = settings.setdefault(site, {}).get(streamer)
+                if rec is None:
+                    if not flag:
+                        continue
+                    rec = settings[site][streamer] = {}
+                rec["bypass"] = flag
         self.dashboard.app.update_global_json(_mutate)
 
         # Invalidate the sort manager's priority cache so the panel re-sorts immediately.
@@ -850,7 +836,7 @@ class PriorityEditor:
         if not (0 <= idx < len(self._entries)):
             return
         e       = self._entries[idx]
-        new_e   = PriorityEntry(e.streamer, e.site, e.config_path, e.config_sha, not e.bypass, e.has_override)
+        new_e   = PriorityEntry(e.streamer, e.site, e.config_path, not e.bypass, e.has_override)
         lst     = list(self._entries)
         lst.pop(idx)
         # Insert at the boundary between bypass and normal sections.
@@ -900,7 +886,6 @@ class PriorityEditor:
                 self._settings_popup = StreamerSettingsPopup(
                     self.dashboard,
                     self._entries[self._selected_idx],
-                    self._config_id,
                 )
             return True
         return False
@@ -1001,10 +986,9 @@ class StreamerSettingsPopup:
 
     Opened by PriorityEditor when the user presses Enter on a streamer.
     """
-    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
+    def __init__(self, dashboard, entry: "PriorityEntry"):
         self.dashboard = dashboard
         self.entry     = entry
-        self.config_id = config_id
 
         self.options = ["Schedule", "Quality", "Split", "Intro Delay", "Notifications", "Auto-Suffix", "Subfolders"]
         self._sel: int = 0
@@ -1018,7 +1002,7 @@ class StreamerSettingsPopup:
         self._confirm_reset: "Optional[ConfirmResetPopup]" = None
 
     def _reset_all(self) -> None:
-        _reset_streamer_setting_keys(self.dashboard, self.config_id, self.entry, _ALL_STREAMER_SETTING_KEYS)
+        _reset_streamer_setting_keys(self.dashboard, self.entry, _ALL_STREAMER_SETTING_KEYS)
 
     def handle_key(self, key) -> bool:
         if self._confirm_reset is not None:
@@ -1095,43 +1079,36 @@ class StreamerSettingsPopup:
                 self._schedule_popup = ScheduleSettingsPopup(
                     self.dashboard,
                     self.entry,
-                    self.config_id,
                 )
             elif self.options[self._sel] == "Quality":
                 self._quality_popup = QualitySettingsPopup(
                     self.dashboard,
                     self.entry,
-                    self.config_id,
                 )
             elif self.options[self._sel] == "Split":
                 self._split_popup = SplitSettingsPopup(
                     self.dashboard,
                     self.entry,
-                    self.config_id,
                 )
             elif self.options[self._sel] == "Intro Delay":
                 self._intro_delay_popup = IntroDelaySettingsPopup(
                     self.dashboard,
                     self.entry,
-                    self.config_id,
                 )
             elif self.options[self._sel] == "Notifications":
                 self._notifications_popup = NotificationSettingsPopup(
                     self.dashboard,
                     self.entry,
-                    self.config_id,
                 )
             elif self.options[self._sel] == "Auto-Suffix":
                 self._auto_suffix_popup = AutoSuffixSettingsPopup(
                     self.dashboard,
                     self.entry,
-                    self.config_id,
                 )
             elif self.options[self._sel] == "Subfolders":
                 self._output_dir_popup = OutputDirectorySettingsPopup(
                     self.dashboard,
                     self.entry,
-                    self.config_id,
                 )
         return False
 
@@ -1207,11 +1184,10 @@ class SettingsPopupBase:
     TAG_SYSTEM: str = ""
     TEXT_FIELDS: "tuple[str, ...]" = ()
 
-    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
+    def __init__(self, dashboard, entry: "PriorityEntry"):
         self.dashboard = dashboard
         self.entry     = entry
-        self.config_id = config_id
-        self._store    = PriorityEntryStore(dashboard, entry, config_id)
+        self._store    = PriorityEntryStore(dashboard, entry)
         self._confirm_reset: "Optional[ConfirmResetPopup]" = None
         self._load()
 
@@ -1536,7 +1512,7 @@ class AutoSuffixSettingsPopup(TriStateOverridePopup):
 class OutputDirectorySettingsPopup(SettingsPopupBase):
     """Per-streamer override for OUTPUT_DIR / SUBFOLDERS.
 
-    Two independent settings, stored in the same priorities[...][entries]
+    Two independent settings, stored in the same streamer_settings
     record used by the other per-streamer popups:
 
       - "output_dir_mode" — subfolder-nesting override. "inherit"
@@ -1563,7 +1539,7 @@ class OutputDirectorySettingsPopup(SettingsPopupBase):
     TAG_NORMAL = "config_editor_outputdirectorysett_draw_normal_1"
     TAG_SYSTEM = "config_editor_outputdirectorysett_draw_system"
 
-    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
+    def __init__(self, dashboard, entry: "PriorityEntry"):
         self.mode:           str  = "inherit"
         self.custom_enabled: bool = False
         self.custom_path:    str  = ""
@@ -1572,7 +1548,7 @@ class OutputDirectorySettingsPopup(SettingsPopupBase):
         self._path_cursor:  int = 0
         self._error:        str = ""
 
-        super().__init__(dashboard, entry, config_id)
+        super().__init__(dashboard, entry)
 
     def _reset(self) -> None:
         self._sel = 0
@@ -1802,7 +1778,7 @@ class SplitSettingsPopup(SettingsPopupBase):
     """Modal popup for per-streamer split-after-X-minutes settings.
 
     Opened by StreamerSettingsPopup when the user presses Enter on Split.
-    Data is stored inside the existing priorities[config_id][entries]
+    Data is stored inside the existing streamer_settings
     structure in global.json, alongside lq_enabled/schedule — no new
     top-level key is created.
 
@@ -1830,7 +1806,7 @@ class SplitSettingsPopup(SettingsPopupBase):
     TAG_SYSTEM = "config_editor_splitsettingspopup_draw_system"
     TEXT_FIELDS = (_FIELD_MINUTES,)
 
-    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
+    def __init__(self, dashboard, entry: "PriorityEntry"):
         self.mode:        str  = "inherit"   # "inherit" | "on" | "off"
         self.split_after: int  = 0
 
@@ -1838,7 +1814,7 @@ class SplitSettingsPopup(SettingsPopupBase):
         self._text_cursor: int = 0
         self._error:        str = ""
 
-        super().__init__(dashboard, entry, config_id)
+        super().__init__(dashboard, entry)
 
     def _reset(self) -> None:
         self._sel = 0
@@ -1982,7 +1958,7 @@ class IntroDelaySettingsPopup(SettingsPopupBase):
     """Modal popup for per-streamer intro-delay settings.
 
     Opened by StreamerSettingsPopup when the user presses Enter on Intro
-    Delay. Data is stored inside the existing priorities[config_id][entries]
+    Delay. Data is stored inside the existing streamer_settings
     structure in global.json, alongside split/lq/schedule overrides.
     """
 
@@ -1996,7 +1972,7 @@ class IntroDelaySettingsPopup(SettingsPopupBase):
     TAG_SYSTEM = "config_editor_introdelaysettingspo_draw_system"
     TEXT_FIELDS = (_FIELD_MINUTES,)
 
-    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
+    def __init__(self, dashboard, entry: "PriorityEntry"):
         self.enabled: bool = False
         self.minutes: int  = 0
         self.split:   bool = False
@@ -2005,7 +1981,7 @@ class IntroDelaySettingsPopup(SettingsPopupBase):
         self._text_cursor: int = 0
         self._error:        str = ""
 
-        super().__init__(dashboard, entry, config_id)
+        super().__init__(dashboard, entry)
 
     def _reset(self) -> None:
         self._sel = 0
@@ -2137,7 +2113,7 @@ class ScheduleSettingsPopup(SettingsPopupBase):
     """Modal popup for per-streamer schedule settings.
 
     Opened by StreamerSettingsPopup when the user presses Enter on Schedule.
-    All data is stored inside the existing priorities[config_id][entries]
+    All data is stored inside the existing streamer_settings
     structure in global.json — no new top-level key is created.
     """
 
@@ -2163,7 +2139,7 @@ class ScheduleSettingsPopup(SettingsPopupBase):
     # based _get_text()/_set_text() below work without per-field mapping.
     TEXT_FIELDS = (_FIELD_OO_START, _FIELD_OO_END, _FIELD_REC_START, _FIELD_REC_END)
 
-    def __init__(self, dashboard, entry: "PriorityEntry", config_id: str):
+    def __init__(self, dashboard, entry: "PriorityEntry"):
         # Working copies of schedule settings
         self.schedule_enabled: bool      = False
         self.mode:             str       = "one_off"    # "one_off" | "recurring"
@@ -2179,7 +2155,7 @@ class ScheduleSettingsPopup(SettingsPopupBase):
         self._day_cursor:  int = 0      # sub-cursor within the Days row
         self._error:        str = ""
 
-        super().__init__(dashboard, entry, config_id)
+        super().__init__(dashboard, entry)
 
     def _reset(self) -> None:
         self._sel = 0
@@ -2203,7 +2179,7 @@ class ScheduleSettingsPopup(SettingsPopupBase):
         self.recurring_end    = rec.get("end_time",   "")
 
     def _save(self) -> None:
-        """Write current working state back to global.json under priorities[…][entries]."""
+        """Write current working state back to global.json under streamer_settings."""
         def _apply(target):
             sched = target.setdefault("schedule", {})
             sched["enabled"] = self.schedule_enabled
@@ -2624,13 +2600,9 @@ class SiteSortManager:
             return self._prio_cache
         try:
             app = self.dashboard.app
-            sites     = self.dashboard.sites
-            config_id = _compute_config_id([s.config_path for s in sites])
             with app.global_json_lock:
                 global_data = app.load_global_json()
-            entries = (global_data.get("priorities", {})
-                                  .get(config_id, {})
-                                  .get("entries", []))
+            entries = load_priority_entries(global_data)
             pmap = {}
             for e in entries:
                 k = (e.get("streamer", ""), e.get("site", ""))
@@ -2667,6 +2639,10 @@ def _validate_value(key: str, value: str) -> tuple[bool, str]:
                 return False, "Must be >= 0"
         except ValueError:
             return False, "Must be an integer"
+    if key == "SITE_LABEL_COLOR":
+        name = theme.normalize_site_label_color(value)
+        if name != theme.SITE_LABEL_DEFAULT and name not in theme.SITE_LABEL_COLORS:
+            return False, "Must be DEFAULT or a color name"
     if key == "GRAPH_SCALE":
         try:
             if int(value) < 1:
@@ -2684,6 +2660,9 @@ def _validate_value(key: str, value: str) -> tuple[bool, str]:
     if key == "DASHBOARD":
         if value.lower() not in DASHBOARD_MODES:
             return False, f"Must be one of: {', '.join(DASHBOARD_MODES)}"
+    if key == "DASHBOARD_MODE":
+        if value.strip().upper() not in DASHBOARD_LAYOUT_MODES:
+            return False, f"Must be one of: {', '.join(DASHBOARD_LAYOUT_MODES)}"
     if key == "WEB_UI_PORT":
         try:
             port = int(value)
@@ -3750,6 +3729,9 @@ class ConfigEditor:
         self.popup_buf = ""
         self.popup_cursor = 0
         self.popup_error = ""
+        self.popup_color_opts = []   # non-empty while the SITE_LABEL_COLOR selector is open
+        self.popup_color_idx = 0
+        self.popup_color_note = ""
         self.lines = []
         self.items = []
         self.current_site_path = None
@@ -4064,6 +4046,20 @@ class ConfigEditor:
         elif self.priority_editor._settings_popup is not None:
             self.priority_editor._settings_popup.draw(stdscr)
 
+    def _open_color_selector(self, item) -> None:
+        """Start the SITE_LABEL_COLOR selector on the saved color (DEFAULT if unavailable)."""
+        opts = theme.site_label_options()
+        saved = theme.normalize_site_label_color(item.value)
+        self.popup_color_opts = opts
+        self.popup_color_idx = opts.index(saved) if saved in opts else 0
+        self.popup_buf = opts[self.popup_color_idx]
+        self.popup_color_note = ""
+        if saved and saved not in opts:
+            if saved in theme.SITE_LABEL_COLORS:
+                self.popup_color_note = f"{saved} unsupported here; using DEFAULT."
+            else:
+                self.popup_color_note = f"'{saved}' is not a valid color; using DEFAULT."
+
     def draw_popup(self, stdscr):
         h, w = stdscr.getmaxyx()
 
@@ -4110,19 +4106,34 @@ class ConfigEditor:
 
         self.dashboard.safe_addstr(stdscr, row, bx1 + 2, "New Value:", theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_warn_2"))
 
-        # Insertion-point cursor, like OutputDirectorySettingsPopup's "Path:" field.
         val_x   = bx1 + 13
-        max_len = max(1, bx2 - val_x - 1)
-        buf     = self.popup_buf
-        cur     = min(self.popup_cursor, len(buf))
-        shown   = buf[:cur] + "_" + buf[cur:]
-        if len(shown) > max_len:
-            start = max(0, cur - max_len + 1)
-            shown = shown[start:start + max_len]
-        self.dashboard.safe_addstr(stdscr, row, val_x, shown[:max_len], theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_normal_2"))
+        val_attr = theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_normal_2")
+        if self.popup_color_opts:
+            # Color selector: "< NAME >  (n/total)" with the name drawn in its own color.
+            name = self.popup_color_opts[self.popup_color_idx]
+            name_attr = theme.site_label_attr(val_attr, name)
+            self.dashboard.safe_addstr(stdscr, row, val_x, "\u25c4 ", val_attr)
+            self.dashboard.safe_addstr(stdscr, row, val_x + 2, name, name_attr)
+            self.dashboard.safe_addstr(stdscr, row, val_x + 2 + len(name),
+                                       f" \u25ba  ({self.popup_color_idx + 1}/{len(self.popup_color_opts)})", val_attr)
+            if self.popup_color_note:
+                self.dashboard.safe_addstr(stdscr, row + 1, bx1 + 2, self.popup_color_note[:inner_w],
+                                           theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_dim"))
+        else:
+            # Insertion-point cursor, like OutputDirectorySettingsPopup's "Path:" field.
+            max_len = max(1, bx2 - val_x - 1)
+            buf     = self.popup_buf
+            cur     = min(self.popup_cursor, len(buf))
+            shown   = buf[:cur] + "_" + buf[cur:]
+            if len(shown) > max_len:
+                start = max(0, cur - max_len + 1)
+                shown = shown[start:start + max_len]
+            self.dashboard.safe_addstr(stdscr, row, val_x, shown[:max_len], val_attr)
 
         if self.popup_error:
             self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, f" Error: {self.popup_error} ", theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_warn_3"))
+        elif self.popup_color_opts:
+            self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, " \u2190\u2192: Choose color | Enter: Save | Esc: Cancel ", theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_invhead"))
         else:
             self.dashboard.safe_addstr(stdscr, by2, bx1 + 2, " Enter: Save | Esc: Cancel  \u2190\u2192/Home/End:Move ", theme.attr(self.dashboard, "config_editor_configeditor_draw_popup_invhead"))
 
@@ -4171,11 +4182,20 @@ class ConfigEditor:
         # OutputDirectorySettingsPopup's "Path:" field, instead of append-only.
         if self.popup_mode:
             cur = self.popup_cursor
-            if key == 27:
+            if self.popup_color_opts and key in (curses.KEY_LEFT, curses.KEY_RIGHT):
+                step = -1 if key == curses.KEY_LEFT else 1
+                self.popup_color_idx = (self.popup_color_idx + step) % len(self.popup_color_opts)
+                self.popup_buf = self.popup_color_opts[self.popup_color_idx]
+                self.popup_color_note = ""
+                self.popup_error = ""
+            elif self.popup_color_opts and key not in (27, ord('\n'), ord('\r'), curses.KEY_ENTER, 459):
+                pass   # selector ignores typing and cursor keys
+            elif key == 27:
                 self.popup_mode = False
                 self.popup_buf = ""
                 self.popup_cursor = 0
                 self.popup_error = ""
+                self.popup_color_opts = []
                 self.editing_item = None
             elif key in (curses.KEY_BACKSPACE, 127, 8):
                 if cur > 0:
@@ -4213,6 +4233,7 @@ class ConfigEditor:
                 self.popup_buf = ""
                 self.popup_cursor = 0
                 self.popup_error = ""
+                self.popup_color_opts = []
                 self.editing_item = None
             elif 32 <= key < 127:
                 self.popup_buf = self.popup_buf[:cur] + chr(key) + self.popup_buf[cur:]
@@ -4239,6 +4260,8 @@ class ConfigEditor:
                 else:
                     self.popup_buf = self.editing_item.key
                 self.popup_cursor = len(self.popup_buf)
+                if self.editing_item.has_equals and self.editing_item.key.upper() == "SITE_LABEL_COLOR":
+                    self._open_color_selector(self.editing_item)
                 self.popup_mode = True
             return True
 

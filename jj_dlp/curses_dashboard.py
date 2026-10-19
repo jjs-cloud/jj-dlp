@@ -20,7 +20,7 @@ from . import theme
 from . import graph as _graph
 from . import logger as _logger
 from .file_manager import FileManagerTab
-from .config_editor import SiteSortManager
+from .config_editor import SiteSortManager, _coerce_dashboard_mode_value
 from .logger import dbg, get_debug_log_path
 
 from .main import (
@@ -795,8 +795,10 @@ class JJDlpDashboard:
         header_y = y1
         # Site label on top border
         label_text = f"  {cfg_label}  "
-        self.safe_addstr(self.stdscr, header_y, x1 + 2, label_text,
-                    theme.attr(self, "main_jjdlpdashboard_draw_site_panel_chrome_1"))
+        label_attr = theme.site_label_attr(
+            theme.attr(self, "main_jjdlpdashboard_draw_site_panel_chrome_1"),
+            _panel_cfg.get("site_label_color"))
+        self.safe_addstr(self.stdscr, header_y, x1 + 2, label_text, label_attr)
 
         # Status badge row
         badge_y = y1 + 1
@@ -822,220 +824,117 @@ class JJDlpDashboard:
         row_start    = y1 + 3
         max_rows     = y2 - row_start - 1   # leave 1 row at bottom for countdown
 
-        # Resolve COMPACT_VIEW mode
-        _compact_cfg = self.global_cfg.get("compact_view", "auto")
-        _compact_forced = (_compact_cfg == "true")
-        _compact_disabled = (_compact_cfg == "false")
-        _compact_auto = (not _compact_forced and not _compact_disabled)
-        # In normal view, 1 streamer per row. In compact, 2 per row.
-        num_streamers = len(all_s)
-        _use_compact = _compact_forced or (_compact_auto and num_streamers > max_rows)
+        # Normal: 1 column with progress bar, duration, last_live
+        # Column widths — bar_w honours PROGRESS_BAR_WIDTH but won't overflow the row.
+        # Row layout: [name_w] 1 [status=8] 1 [bar_w] 1 [dur=9] 1 [last_live_w]
+        # So the actual space available for the bar is what's left after the fixed columns.
+        name_w      = max(10, min(18, panel_width // 4))
+        last_live_w = 12
+        _fixed_cols = name_w + 1 + 8 + 1 + 1 + DURATION_WIDTH + 1 + last_live_w  # everything except bar
+        bar_w       = max(4, min(_bar_cfg_w, panel_width - _fixed_cols))
 
-        if _use_compact:
-            # Compact: 2 columns, no progress bar, no duration, shows last_live
-            half_w = max(20, (panel_width - 2) // 2)
-            last_live_w_compact = 7
-            # Size the name column to the longest actual name (capped), so short
-            # names don't leave a big gap before the status tag.
-            _max_name_len = max((len(s) for s in all_s), default=6)
-            name_w_compact = max(6, min(_max_name_len + 1, half_w - 16))
-            _col_gap = 2
-            _sep_col = x1 + 2 + half_w + (_col_gap // 2)
-            _rows_used = min(max_rows, (len(all_s) + 1) // 2)
-            for _sy in range(row_start, row_start + _rows_used):
-                self.safe_addstr(self.stdscr, _sy, _sep_col, "│",
-                            theme.attr(self, "main_jjdlpdashboard_draw_site_panel_chrome_2"))
-            for i, s in enumerate(all_s):
-                row_idx = i // 2
-                col_idx = i % 2
-                if row_idx >= max_rows:
-                    break
-                row_y = row_start + row_idx
-                is_dis = s in blocked
-                since = live_since.get(s)
-                is_rec = s in recording and s not in intro_delay_pending
+        for i, s in enumerate(all_s):
+            if i >= max_rows:
+                break
+            row_y    = row_start + i
+            is_dis   = s in blocked
+            since    = live_since.get(s)
+            is_rec   = s in recording and s not in intro_delay_pending
 
-                # "Last Live" value for this streamer
-                ll_ts = last_live.get(s)
-                if is_rec and recording_res.get(s) is not None:
-                    _suffix = "*" if s in recording_res_is_fallback else ""
-                    last_live_str = f"{recording_res.get(s)}p{_suffix}"
-                elif ll_ts is not None:
-                    ll_ago = int(now - ll_ts)
-                    if ll_ago < 60:
-                        last_live_str = f"{ll_ago}s ago"
-                    elif ll_ago < 3600:
-                        last_live_str = f"{ll_ago//60}m ago"
-                    elif ll_ago < 86400:
-                        last_live_str = f"{ll_ago//3600}h ago"
-                    else:
-                        last_live_str = f"{ll_ago//86400}d ago"
+            # "Last Live" value for this streamer
+            ll_ts = last_live.get(s)
+            if is_rec and recording_res.get(s) is not None:
+                _suffix = "*" if s in recording_res_is_fallback else ""
+                last_live_str = f"{recording_res.get(s)}p{_suffix}"
+            elif ll_ts is not None:
+                ll_ago = int(now - ll_ts)
+                if ll_ago < 60:
+                    last_live_str = f"{ll_ago}s ago"
+                elif ll_ago < 3600:
+                    last_live_str = f"{ll_ago//60}m ago"
+                elif ll_ago < 86400:
+                    last_live_str = f"{ll_ago//3600}h ago"
                 else:
-                    last_live_str = ""
+                    last_live_str = f"{ll_ago//86400}d ago"
+            else:
+                last_live_str = ""
 
-                if is_dis:
-                    name_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_2")
-                    if since is not None:
-                        if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
-                            status_str = "[● Live]"
-                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_3")
-                        else:
-                            status_str = "[x  DIS]"
-                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_4")
-                    else:
-                        status_str = "[x  DIS]"
-                        status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_5")
-                elif since is not None:
-                    name_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_2")
-                    if is_rec:
-                        if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
-                            status_str = "[● Live]"
-                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_3")
-                        else:
-                            status_str = "[►  REC] "
-                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_rec_2")
-                    else:
-                        status_str = "[● Live]"
-                        status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_4")
-                    if not (is_rec and recording_res.get(s) is not None):
-                        last_live_str = ""  # currently live, no "last live"
-                else:
-                    name_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_2")
-                    status_str = "[○  off]"
-                    status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_3")
-
-                col = x1 + 2 + col_idx * (half_w + _col_gap)
-                self.safe_addstr(self.stdscr, row_y, col,
-                            s[:name_w_compact].ljust(name_w_compact), name_attr)
-                col += name_w_compact + 1
-                self.safe_addstr(self.stdscr, row_y, col,
-                            status_str[:8].ljust(8), status_attr)
-                col += 9
-                if last_live_str:
-                    if (ll_ts is not None
-                            and _last_live_highlight_days > 0
-                            and (now - ll_ts) <= _last_live_highlight_days * 86400):
-                        ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_5")
-                    else:
-                        ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_4")
-                    # Clamp to the panel's inner boundary so this never draws
-                    # into/through the right border on narrow terminals.
-                    _avail = max(0, (x2 - 1) - col)
-                    self.safe_addstr(self.stdscr, row_y, col,
-                                last_live_str[:min(last_live_w_compact, _avail)],
-                                ll_attr)
-        else:
-            # Normal: 1 column with progress bar, duration, last_live
-            # Column widths — bar_w honours PROGRESS_BAR_WIDTH but won't overflow the row.
-            # Row layout: [name_w] 1 [status=8] 1 [bar_w] 1 [dur=9] 1 [last_live_w]
-            # So the actual space available for the bar is what's left after the fixed columns.
-            name_w      = max(10, min(18, panel_width // 4))
-            last_live_w = 12
-            _fixed_cols = name_w + 1 + 8 + 1 + 1 + DURATION_WIDTH + 1 + last_live_w  # everything except bar
-            bar_w       = max(4, min(_bar_cfg_w, panel_width - _fixed_cols))
-
-            for i, s in enumerate(all_s):
-                if i >= max_rows:
-                    break
-                row_y    = row_start + i
-                is_dis   = s in blocked
-                since    = live_since.get(s)
-                is_rec   = s in recording and s not in intro_delay_pending
-
-                # "Last Live" value for this streamer
-                ll_ts = last_live.get(s)
-                if is_rec and recording_res.get(s) is not None:
-                    _suffix = "*" if s in recording_res_is_fallback else ""
-                    last_live_str = f"{recording_res.get(s)}p{_suffix}"
-                elif ll_ts is not None:
-                    ll_ago = int(now - ll_ts)
-                    if ll_ago < 60:
-                        last_live_str = f"{ll_ago}s ago"
-                    elif ll_ago < 3600:
-                        last_live_str = f"{ll_ago//60}m ago"
-                    elif ll_ago < 86400:
-                        last_live_str = f"{ll_ago//3600}h ago"
-                    else:
-                        last_live_str = f"{ll_ago//86400}d ago"
-                else:
-                    last_live_str = ""
-
-                if is_dis:
-                    name_attr   = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_6")
-                    bar_attr    = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_7")
-                    if since is not None:
-                        elapsed     = now - since
-                        bar_str     = _live_bar_dashed(elapsed, bar_w, _bar_max_secs)
-                        dur_str     = _fmt_duration(elapsed)
-                        if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
-                            status_str  = "[● Live]"
-                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_8")
-                        else:
-                            status_str  = "[x  DIS]"
-                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_9")
-                    else:
-                        bar_str     = _live_bar_dashed(0, bar_w, _bar_max_secs)
-                        dur_str     = ""
-                        status_str  = "[x  DIS]"
-                        status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_10")
-                elif since is not None:
+            if is_dis:
+                name_attr   = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_6")
+                bar_attr    = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_7")
+                if since is not None:
                     elapsed     = now - since
-                    name_attr   = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_6")
-                    if is_rec:
-                        if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
-                            status_str  = "[● Live]"
-                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_7")
-                        else:
-                            status_str  = "[►  REC] "
-                            status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_rec_3")
-                    else:
-                        status_str  = "[● Live]"
-                        status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_8")
-                    bar_str     = (_live_bar_dashed(elapsed, bar_w, _bar_max_secs)
-                                   if recording_res.get(s) is None
-                                   else _live_bar(elapsed, bar_w, _bar_max_secs))
-                    bar_attr    = (theme.attr(self, "main_jjdlpdashboard_split_after_rows_warn_2")
-                                   if s in ad_alert_streamers or s in ffmpeg_error_streamers
-                                   else theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_9"))
+                    bar_str     = _live_bar_dashed(elapsed, bar_w, _bar_max_secs)
                     dur_str     = _fmt_duration(elapsed)
-                    if not (is_rec and recording_res.get(s) is not None):
-                        last_live_str = ""  # currently live, no "last live"
-                else:
-                    name_attr   = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_5")
-                    status_str  = "[○  off]"
-                    status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_6")
-                    bar_str     = "─" * bar_w
-                    bar_attr    = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_7")
-                    dur_str     = ""
-
-                col = x1 + 2
-                self.safe_addstr(self.stdscr, row_y, col,
-                            s[:name_w].ljust(name_w), name_attr)
-                col += name_w + 1
-                self.safe_addstr(self.stdscr, row_y, col,
-                            status_str[:8].ljust(8), status_attr)
-                col += 9
-                self.safe_addstr(self.stdscr, row_y, col, bar_str, bar_attr)
-                col += bar_w + 1
-                if dur_str:
-                    self.safe_addstr(self.stdscr, row_y, col,
-                                dur_str[:DURATION_WIDTH].ljust(DURATION_WIDTH), theme.attr(self, "main_jjdlpdashboard_draw_site_panel_chrome_3"))
-                else:
-                    self.safe_addstr(self.stdscr, row_y, col, " " * DURATION_WIDTH, 0)
-                col += DURATION_WIDTH + 1
-                if last_live_str:
-                    if (ll_ts is not None
-                            and _last_live_highlight_days > 0
-                            and (now - ll_ts) <= _last_live_highlight_days * 86400):
-                        ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_10")
+                    if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
+                        status_str  = "[● Live]"
+                        status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_8")
                     else:
-                        ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_8")
-                    # Clamp to the panel's inner boundary so this never draws
-                    # into/through the right border on narrow terminals.
-                    _avail = max(0, (x2 - 1) - col)
-                    self.safe_addstr(self.stdscr, row_y, col,
-                                last_live_str[:min(last_live_w, _avail)],
-                                ll_attr)
+                        status_str  = "[x  DIS]"
+                        status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_9")
+                else:
+                    bar_str     = _live_bar_dashed(0, bar_w, _bar_max_secs)
+                    dur_str     = ""
+                    status_str  = "[x  DIS]"
+                    status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_10")
+            elif since is not None:
+                elapsed     = now - since
+                name_attr   = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_6")
+                if is_rec:
+                    if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
+                        status_str  = "[● Live]"
+                        status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_7")
+                    else:
+                        status_str  = "[►  REC] "
+                        status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_rec_3")
+                else:
+                    status_str  = "[● Live]"
+                    status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_8")
+                bar_str     = (_live_bar_dashed(elapsed, bar_w, _bar_max_secs)
+                               if recording_res.get(s) is None
+                               else _live_bar(elapsed, bar_w, _bar_max_secs))
+                bar_attr    = (theme.attr(self, "main_jjdlpdashboard_split_after_rows_warn_2")
+                               if s in ad_alert_streamers or s in ffmpeg_error_streamers
+                               else theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_9"))
+                dur_str     = _fmt_duration(elapsed)
+                if not (is_rec and recording_res.get(s) is not None):
+                    last_live_str = ""  # currently live, no "last live"
+            else:
+                name_attr   = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_5")
+                status_str  = "[○  off]"
+                status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_6")
+                bar_str     = "─" * bar_w
+                bar_attr    = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_7")
+                dur_str     = ""
+
+            col = x1 + 2
+            self.safe_addstr(self.stdscr, row_y, col,
+                        s[:name_w].ljust(name_w), name_attr)
+            col += name_w + 1
+            self.safe_addstr(self.stdscr, row_y, col,
+                        status_str[:8].ljust(8), status_attr)
+            col += 9
+            self.safe_addstr(self.stdscr, row_y, col, bar_str, bar_attr)
+            col += bar_w + 1
+            if dur_str:
+                self.safe_addstr(self.stdscr, row_y, col,
+                            dur_str[:DURATION_WIDTH].ljust(DURATION_WIDTH), theme.attr(self, "main_jjdlpdashboard_draw_site_panel_chrome_3"))
+            else:
+                self.safe_addstr(self.stdscr, row_y, col, " " * DURATION_WIDTH, 0)
+            col += DURATION_WIDTH + 1
+            if last_live_str:
+                if (ll_ts is not None
+                        and _last_live_highlight_days > 0
+                        and (now - ll_ts) <= _last_live_highlight_days * 86400):
+                    ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_10")
+                else:
+                    ll_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_dim_8")
+                # Clamp to the panel's inner boundary so this never draws
+                # into/through the right border on narrow terminals.
+                _avail = max(0, (x2 - 1) - col)
+                self.safe_addstr(self.stdscr, row_y, col,
+                            last_live_str[:min(last_live_w, _avail)],
+                            ll_attr)
 
         # ── Countdown ──
         nxt = max(0.0, next_in)
@@ -1066,6 +965,10 @@ class JJDlpDashboard:
 
         To reorder panels, just reorder self.sites in __init__.
         """
+        if _coerce_dashboard_mode_value(self.global_cfg.get("dashboard_mode")) == "LIST":
+            self.draw_dashboard_list(y1, x1, y2, x2)
+            return
+
         n       = len(self.sites)
         cols    = min(2, n)
         if cols == 0:
@@ -1079,11 +982,13 @@ class JJDlpDashboard:
         base_max_streamers = max(0, base_panel_h - 5)
 
         site_zones = []
+        site_counts = []
         for site in self.sites:
             cfg = site.get_cached_config()
             panel_resize = cfg.get("panel_resize", True)
             with site.dash_lock:
                 num_streamers = len(site.dash_all_streamers)
+            site_counts.append(num_streamers)
             
             if panel_resize and num_streamers >= base_max_streamers:
                 site_zones.append(2)
@@ -1107,13 +1012,15 @@ class JJDlpDashboard:
         panel_w = total_w // cols
         panel_h = total_h // total_rows
 
+        panels = []
+        overflow = False
         for idx, site in enumerate(self.sites):
             col, start_row, span = site_positions[idx]
 
             px1 = x1 + col * panel_w
             px2 = px1 + panel_w - (0 if col == cols - 1 else 1)
             py1 = y1 + start_row * panel_h
-            
+
             end_row = start_row + span
             py2 = py1 + span * panel_h - (0 if end_row == total_rows else 1)
 
@@ -1121,10 +1028,231 @@ class JJDlpDashboard:
             px2 = min(px2, x2)
             py2 = min(py2, y2)
 
-            # Check if this is the active site
-            is_selected = (idx == self.selected_site_idx)
-            
+            # A panel shows (height - 4) streamer rows
+            if site_counts[idx] > max(0, py2 - py1 - 4):
+                overflow = True
+            panels.append((site, py1, px1, py2, px2, idx == self.selected_site_idx))
+
+        # Any panel overflowing after resize switches the tab to LIST
+        if overflow:
+            self.draw_dashboard_list(y1, x1, y2, x2, auto_switched=True)
+            return
+        for site, py1, px1, py2, px2, is_selected in panels:
             self.draw_site_panel(site, py1, px1, py2, px2, is_selected)
+
+    # ── Dashboard tab: LIST mode ────────────────────────────────────────────
+    _LIST_COL_GAP = 3
+
+    def _list_site_snapshot(self, site: "SiteState", now: float) -> dict:
+        """Collect one site's streamer display data for the LIST view."""
+        cfg = site.get_cached_config()
+        with site.dash_lock:
+            label     = cfg.get("site_label") or os.path.basename(site.config_path)
+            all_s     = list(site.dash_all_streamers)
+            last_live = dict(site.dash_last_live)
+            blocked   = set(site.dash_blocked)
+            next_in   = site.dash_next_check_in
+        live_since = site.snapshot_live_since()
+        with site.dash_lock:
+            ad_alerts = set(site.ad_alerts.keys())
+            ff_errors = {s for s, c in site.ffmpeg_error_counts.items() if c > 0}
+        with site.lock:
+            recording     = set(site.currently_recording)
+            intro_pending = set(site.intro_delay_pending)
+            res = {
+                s: h for s, h in site.recording_resolution.items()
+                if (now - site.recording_attempt_started.get(s, 0)) >= _QUALITY_DISPLAY_GRACE_SECS
+            }
+            res_fallback = set(res.keys()) - set(site.display_resolution.keys())
+            res.update(site.display_resolution)
+
+        streamers = self.sort_manager.get_sorted_streamers(site, all_s, live_since, last_live)
+        try:
+            bar_max = cfg.get("progress_bar_max_hours", 6) * 3600
+            bar_w   = max(4, cfg.get("progress_bar_width", 14))
+            hl_days = cfg.get("last_live_highlight", 0)
+        except Exception as e:
+            dbg(f"list view: bad site config, using defaults: {e}")
+            bar_max, bar_w, hl_days = 6 * 3600, 14, 0
+
+        return {
+            "label": label, "label_color": cfg.get("site_label_color"), "streamers": streamers, "live_since": live_since,
+            "last_live": last_live, "blocked": blocked, "next_in": next_in,
+            "ad_alerts": ad_alerts, "ff_errors": ff_errors, "recording": recording,
+            "intro_pending": intro_pending, "res": res, "res_fallback": res_fallback,
+            "bar_max": bar_max, "bar_w": bar_w, "hl_days": hl_days,
+        }
+
+    @staticmethod
+    def _list_col_widths(avail: int, site_full: int, name_full: int, bar_pref: int):
+        """Return ((site_w, name_w, bar_w, dur_w, ll_w), fits) for one list column of width avail."""
+        site_w = max(4, min(site_full, 14))
+        name_w = max(8, min(name_full, 18))
+        dur_w, ll_w = 12, 12
+        bar_w = max(4, min(bar_pref, avail - (site_w + name_w + 8 + dur_w + ll_w + 5)))
+        over = site_w + name_w + 8 + dur_w + ll_w + 5 + bar_w - avail
+        if over > 0:
+            cut = min(over, ll_w - 9)
+            ll_w, over = ll_w - cut, over - cut
+        if over > 0:
+            cut = min(over, name_w - 8)
+            name_w, over = name_w - cut, over - cut
+        if over > 0:
+            cut = min(over, site_w - 4)
+            site_w, over = site_w - cut, over - cut
+        return (site_w, name_w, bar_w, dur_w, ll_w), over <= 0
+
+    def _draw_list_row(self, y, x, x_limit, snap: dict, s: str, widths, now: float) -> None:
+        """Draw one LIST row: Site | Name | Status | Bar | Duration | Last Live."""
+        site_w, name_w, bar_w, dur_w, ll_w = widths
+        is_dis  = s in snap["blocked"]
+        since   = snap["live_since"].get(s)
+        is_rec  = s in snap["recording"] and s not in snap["intro_pending"]
+        res     = snap["res"].get(s)
+        ll_ts   = snap["last_live"].get(s)
+        bar_max = snap["bar_max"]
+        flash_on = (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2)
+        _t = "main_jjdlpdashboard_draw_site_panel_"
+
+        if is_rec and res is not None:
+            last_live_str = f"{res}p{'*' if s in snap['res_fallback'] else ''}"
+        elif ll_ts is not None:
+            ago = int(now - ll_ts)
+            if ago < 60:
+                last_live_str = f"{ago}s ago"
+            elif ago < 3600:
+                last_live_str = f"{ago // 60}m ago"
+            elif ago < 86400:
+                last_live_str = f"{ago // 3600}h ago"
+            else:
+                last_live_str = f"{ago // 86400}d ago"
+        else:
+            last_live_str = ""
+
+        if is_dis:
+            name_attr = theme.attr(self, _t + "disabled_6")
+            bar_attr  = theme.attr(self, _t + "disabled_7")
+            if since is not None:
+                elapsed  = now - since
+                bar_str  = _live_bar_dashed(elapsed, bar_w, bar_max)
+                dur_str  = _fmt_duration(elapsed)
+                if flash_on:
+                    status_str, status_attr = "[● Live]", theme.attr(self, _t + "disabled_8")
+                else:
+                    status_str, status_attr = "[x  DIS]", theme.attr(self, _t + "disabled_9")
+            else:
+                bar_str  = _live_bar_dashed(0, bar_w, bar_max)
+                dur_str  = ""
+                status_str, status_attr = "[x  DIS]", theme.attr(self, _t + "disabled_10")
+        elif since is not None:
+            elapsed   = now - since
+            name_attr = theme.attr(self, _t + "live_6")
+            if is_rec:
+                if flash_on:
+                    status_str, status_attr = "[● Live]", theme.attr(self, _t + "live_7")
+                else:
+                    status_str, status_attr = "[►  REC] ", theme.attr(self, _t + "rec_3")
+            else:
+                status_str, status_attr = "[● Live]", theme.attr(self, _t + "live_8")
+            bar_str  = _live_bar_dashed(elapsed, bar_w, bar_max) if res is None \
+                       else _live_bar(elapsed, bar_w, bar_max)
+            bar_attr = (theme.attr(self, "main_jjdlpdashboard_split_after_rows_warn_2")
+                        if s in snap["ad_alerts"] or s in snap["ff_errors"]
+                        else theme.attr(self, _t + "live_9"))
+            dur_str  = _fmt_duration(elapsed)
+            if not (is_rec and res is not None):
+                last_live_str = ""
+        else:
+            name_attr = theme.attr(self, _t + "dim_5")
+            status_str, status_attr = "[○  off]", theme.attr(self, _t + "dim_6")
+            bar_str  = "─" * bar_w
+            bar_attr = theme.attr(self, _t + "dim_7")
+            dur_str  = ""
+
+        col = x
+
+        def put(text, width, attr):
+            nonlocal col
+            avail = x_limit - col
+            if avail > 0:
+                self.safe_addstr(self.stdscr, y, col, text[:width].ljust(width)[:avail], attr)
+            col += width + 1
+
+        put(snap["label"], site_w, theme.site_label_attr(
+            theme.attr(self, "main_jjdlpdashboard_draw_list_view_chrome"), snap.get("label_color")))
+        put(s, name_w, name_attr)
+        put(status_str, 8, status_attr)
+        put(bar_str, bar_w, bar_attr)
+        put(dur_str, dur_w, theme.attr(self, _t + "chrome_3"))
+        if last_live_str:
+            recent = (ll_ts is not None and snap["hl_days"] > 0
+                      and (now - ll_ts) <= snap["hl_days"] * 86400)
+            put(last_live_str, ll_w, theme.attr(self, _t + ("live_10" if recent else "dim_8")))
+
+    def draw_dashboard_list(self, y1, x1, y2, x2, auto_switched: bool = False):
+        """Draw LIST mode: site selector, one streamer list grouped by site, next-check line."""
+        if not self.sites:
+            return
+        now     = time.time()
+        snaps   = [self._list_site_snapshot(site, now) for site in self.sites]
+        entries = [(snap, s) for snap in snaps for s in snap["streamers"]]
+
+        self._draw_pipe_tab_bar(y1, x1, x2)
+        by1 = y1 + 1
+        self.draw_box(self.stdscr, by1, x1, y2, x2, self.C_CHROME,
+                      "main_jjdlpdashboard_draw_list_view_border")
+        if auto_switched:
+            # Small indicator on the top border
+            note = " AUTO: panels full "
+            nx = max(x1 + 2, x2 - 2 - len(note))
+            self.safe_addstr(self.stdscr, by1, nx, note[:max(0, x2 - 1 - nx)],
+                             theme.attr(self, "main_jjdlpdashboard_draw_list_view_warn"))
+
+        panel_w   = x2 - x1 - 2
+        row_start = by1 + 1
+        max_rows  = max(0, y2 - 1 - row_start)
+        total     = len(entries)
+        gap       = self._LIST_COL_GAP
+        site_full = max((len(sn["label"]) for sn in snaps if sn["streamers"]), default=4)
+        name_full = max((len(s) for _, s in entries), default=8)
+        bar_pref  = max((sn["bar_w"] for sn in snaps), default=14)
+
+        def layout_for(n):
+            return self._list_col_widths((panel_w - gap * (n - 1)) // n,
+                                         site_full, name_full, bar_pref)
+
+        # Minimum 2 columns; falls back to 1 only when 2 don't fit the width.
+        n_cols = max(2, -(-total // max_rows) if max_rows and total > max_rows else 1)
+        while n_cols > 1 and not layout_for(n_cols)[1]:
+            n_cols -= 1
+        widths    = layout_for(n_cols)[0]
+        col_avail = (panel_w - gap * (n_cols - 1)) // n_cols
+        per_col   = min(max_rows, -(-total // n_cols)) if total else 0
+
+        if per_col:
+            for idx, (snap, s) in enumerate(entries):
+                if idx >= per_col * n_cols:
+                    break
+                c, r = divmod(idx, per_col)
+                cx = x1 + 2 + c * (col_avail + gap)
+                self._draw_list_row(row_start + r, cx, cx + col_avail, snap, s, widths, now)
+
+        # Bottom line: "Next check: [site] 34s [site] 45s ..."
+        warn_attr = theme.attr(self, "main_jjdlpdashboard_draw_list_view_warn")
+        dim_attr  = theme.attr(self, "main_jjdlpdashboard_draw_list_view_dim")
+        dots = (".  ", " . ", "  .")[(self.tick // (self.FLASH_CYCLE // 2)) % 3]  # moving dot
+        segs = [("Next check:", warn_attr)]
+        for snap in snaps:
+            nxt = max(0.0, snap["next_in"])
+            segs.append((f" [{snap['label']}]", dim_attr))
+            segs.append((f" {dots if nxt <= 0 else f'{nxt:.0f}s'}", warn_attr))
+        sx = x1 + 2
+        for text, attr in segs:
+            avail = (x2 - 1) - sx
+            if avail <= 0:
+                break
+            self.safe_addstr(self.stdscr, y2 - 1, sx, text[:avail], attr)
+            sx += len(text)
 
     # ── Line-wrap helper ─────────────────────────────────────────────────────
     _CONTROL_CHAR_RE = _re.compile(r'[\x00-\x08\x0b-\x1f\x7f]')
@@ -2625,6 +2753,10 @@ class JJDlpDashboard:
                 f"{new_cfg.get('GRAPH_SCALE', '1')!r} — keeping current scale"
             )
 
+        # DASHBOARD_MODE: switch the Dashboard tab layout immediately.
+        self.global_cfg["dashboard_mode"] = _coerce_dashboard_mode_value(
+            new_cfg.get("DASHBOARD_MODE", ""))
+
     # ── Changelog popup helpers ───────────────────────────────────────────────
     def _should_show_changelog(self) -> bool:
         """Return True when the changelog should be shown at startup.
@@ -3079,7 +3211,8 @@ class JJDlpDashboard:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def _curses_choose_config(stdscr, app: "AppState", found: List[str]) -> List[str]:
+def _curses_choose_config(stdscr, app: "AppState", found: List[str],
+                          preselect: Optional[List[str]] = None) -> List[str]:
     """
     MenuWorks-style config file chooser.
     Space = toggle [x],  Enter = confirm,  Q = quit.
@@ -3093,7 +3226,8 @@ def _curses_choose_config(stdscr, app: "AppState", found: List[str]) -> List[str
     stdscr.keypad(True)
 
     # ── Phase 1: config file selection ───────────────────────────────────────
-    selected  = set(range(len(found)))   # start with all config files selected
+    # Start with the preselected configs checked (all of them if none given).
+    selected  = {i for i, f in enumerate(found) if preselect and f in preselect} or set(range(len(found)))
     cursor    = 0
     n         = len(found)
     do_not_show_config = False
@@ -3180,6 +3314,7 @@ def _curses_choose_config(stdscr, app: "AppState", found: List[str]) -> List[str
                 # Save chosen config files to global.json
                 def _mutate(gdata):
                     gdata["startup_configs"] = chosen_files
+                    gdata["known_configs"] = list(found)
                 app.update_global_json(_mutate)
 
                 if do_not_show_config:
@@ -3211,6 +3346,7 @@ def run_dashboard(app: "AppState", global_cfg: Optional[dict] = None):
     return curses.wrapper(_run)
 
 
-def choose_config(app: "AppState", found: List[str]) -> List[str]:
+def choose_config(app: "AppState", found: List[str],
+                  preselect: Optional[List[str]] = None) -> List[str]:
     """Run the startup multi-select config chooser inside curses.wrapper."""
-    return curses.wrapper(_curses_choose_config, app, found)
+    return curses.wrapper(_curses_choose_config, app, found, preselect)

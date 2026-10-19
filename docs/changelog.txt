@@ -1,3 +1,15 @@
+v1.29.3
+
+- added a new display mode called "list" mode
+    - jj-dlp now defaults to this mode
+    - you can switch to the old display mode ("panels" mode) in Config > GLOBAL SETTINGS > DASHBOARD_MODE
+- removed "compact mode" in favor of the new "list" mode
+- added kick.com as a new default site in jj-dlp
+- imporoved the STREAMER SETTINGS ux when adding or removing sites from jj-dlp
+
+====================
+====================
+
 v1.29.0
 
 - updated the color schemes
