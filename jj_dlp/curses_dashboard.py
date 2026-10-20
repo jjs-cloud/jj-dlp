@@ -1094,7 +1094,7 @@ class JJDlpDashboard:
         """Return ((site_w, name_w, bar_w, dur_w, ll_w), fits) for one list column of width avail."""
         site_w = max(4, min(site_full, 14))
         name_w = max(8, min(name_full, 18))
-        dur_w, ll_w = 7, 10
+        dur_w, ll_w = 7, 9
         bar_w = max(4, min(bar_pref, avail - (site_w + name_w + 8 + dur_w + ll_w + 5)))
         over = site_w + name_w + 8 + dur_w + ll_w + 5 + bar_w - avail
         if over > 0:
