@@ -1047,7 +1047,7 @@ class JJDlpDashboard:
             self.draw_site_panel(site, py1, px1, py2, px2, is_selected)
 
     # ── Dashboard tab: LIST mode ────────────────────────────────────────────
-    _LIST_COL_GAP = 3
+    _LIST_COL_GAP = 0
 
     def _list_site_snapshot(self, site: "SiteState", now: float) -> dict:
         """Collect one site's streamer display data for the LIST view."""
@@ -1094,7 +1094,7 @@ class JJDlpDashboard:
         """Return ((site_w, name_w, bar_w, dur_w, ll_w), fits) for one list column of width avail."""
         site_w = max(4, min(site_full, 14))
         name_w = max(8, min(name_full, 18))
-        dur_w, ll_w = 7, 12
+        dur_w, ll_w = 7, 10
         bar_w = max(4, min(bar_pref, avail - (site_w + name_w + 8 + dur_w + ll_w + 5)))
         over = site_w + name_w + 8 + dur_w + ll_w + 5 + bar_w - avail
         if over > 0:
@@ -1224,7 +1224,8 @@ class JJDlpDashboard:
         bar_pref  = max((sn["bar_w"] for sn in snaps), default=14)
 
         def layout_for(n):
-            return self._list_col_widths((panel_w - gap * (n - 1)) // n,
+            sep = 1 if n > 1 else 0  # one cell per column reserved for the separator line
+            return self._list_col_widths((panel_w - gap * (n - 1)) // n - sep,
                                          site_full, name_full, bar_pref)
 
         # Minimum 2 columns; falls back to 1 only when 2 don't fit the width.
@@ -1234,6 +1235,7 @@ class JJDlpDashboard:
         widths    = layout_for(n_cols)[0]
         col_avail = (panel_w - gap * (n_cols - 1)) // n_cols
         per_col   = min(max_rows, -(-total // n_cols)) if total else 0
+        sep_attr  = theme.attr(self, "main_jjdlpdashboard_draw_list_view_border", self.C_CHROME)
 
         if per_col:
             for idx, (snap, s) in enumerate(entries):
@@ -1241,7 +1243,12 @@ class JJDlpDashboard:
                     break
                 c, r = divmod(idx, per_col)
                 cx = x1 + 2 + c * (col_avail + gap)
-                self._draw_list_row(row_start + r, cx, cx + col_avail, snap, s, widths, now)
+                self._draw_list_row(row_start + r, cx, cx + col_avail - (n_cols > 1), snap, s, widths, now)
+            # Vertical separator line at the end of each non-last column.
+            for c in range(n_cols - 1):
+                sx = x1 + 2 + c * (col_avail + gap) + col_avail - 1
+                for r in range(per_col):
+                    self.safe_addstr(self.stdscr, row_start + r, sx, "│", sep_attr)
 
         # Bottom line: "Next check: [site] 34s [site] 45s ..."
         warn_attr = theme.attr(self, "main_jjdlpdashboard_draw_list_view_warn")
