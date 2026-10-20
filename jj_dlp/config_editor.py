@@ -167,7 +167,7 @@ CONFIG_KEYS: tuple[_KeyDef, ...] = (
     _KeyDef("COLLAPSIBLE_FOLDERS",      scope="global",                    default="true",                       preserve=True, type="bool",  comment="Group files in the File Manager by their subfolder (if present) and make them collapsible/expandable. (true/false)"),
 
     # ── Site keys (per-site .conf) ────────────────────────────────────────────
-    _KeyDef("SITE_LABEL",               scope="site",                      default="",                           preserve=True,               comment="The display name of this site."),
+    _KeyDef("SITE_LABEL",               scope="site",                      default="",                           preserve=False,              comment="The display name of this site."),
     _KeyDef("SITE_LABEL_COLOR",         scope="site",                      default="DEFAULT",                    preserve=True,               comment="The color of this site's label on the dashboard."),
     _KeyDef("SITE_ORDER",               scope="site",                      default="999",                        preserve=True,               comment="The position on the dashboard to display this site's panel (e.g. 0 for top-left, 1 for top-right, 2 for bottom-left, 3 for bottom-right, etc.)"),
     _KeyDef("CHECK_INTERVAL",           scope="site",                      default="60",                         preserve=False,              comment="How often to check if streamers are live (in seconds).  (Default: 60) (note: keep this <= STALL_TIMEOUT to avoid false write-failure alerts)"),
