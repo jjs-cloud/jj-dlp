@@ -84,6 +84,12 @@ def _fmt_duration(seconds: float) -> str:
         return f"{m}m {s:02d}s"
     return f"{s}s"
 
+def _fmt_hm(seconds: float) -> str:
+    """Format seconds as '10h 08m' (or '5m' under an hour), without seconds."""
+    h, rem = divmod(int(seconds), 3600)
+    m = rem // 60
+    return f"{h}h {m:02d}m" if h else f"{m}m"
+
 def _live_bar(seconds: float, width: int = 14, max_secs: int = 6 * 3600) -> str:
     filled = min(int(width * seconds / max(1, max_secs)), width)
     return "█" * filled + "░" * (width - filled)
@@ -746,8 +752,8 @@ class JJDlpDashboard:
         _panel_cfg = site.get_cached_config()
         _normal_w = None
 
-        # Width of the live-duration column (enough for "999h 59m 59s" without truncation)
-        DURATION_WIDTH = 12
+        # Width of the live-since column (fits "99h 59m")
+        DURATION_WIDTH = 7
 
         with site.dash_lock:
             cfg_label    = _panel_cfg.get("site_label",
@@ -865,7 +871,7 @@ class JJDlpDashboard:
                 if since is not None:
                     elapsed     = now - since
                     bar_str     = _live_bar_dashed(elapsed, bar_w, _bar_max_secs)
-                    dur_str     = _fmt_duration(elapsed)
+                    dur_str     = _fmt_hm(elapsed)
                     if (self.tick % self.FLASH_CYCLE) < (self.FLASH_CYCLE // 2):
                         status_str  = "[● Live]"
                         status_attr = theme.attr(self, "main_jjdlpdashboard_draw_site_panel_disabled_8")
@@ -896,7 +902,7 @@ class JJDlpDashboard:
                 bar_attr    = (theme.attr(self, "main_jjdlpdashboard_split_after_rows_warn_2")
                                if s in ad_alert_streamers or s in ffmpeg_error_streamers
                                else theme.attr(self, "main_jjdlpdashboard_draw_site_panel_live_9"))
-                dur_str     = _fmt_duration(elapsed)
+                dur_str     = _fmt_hm(elapsed)
                 if not (is_rec and recording_res.get(s) is not None):
                     last_live_str = ""  # currently live, no "last live"
             else:
@@ -1088,7 +1094,7 @@ class JJDlpDashboard:
         """Return ((site_w, name_w, bar_w, dur_w, ll_w), fits) for one list column of width avail."""
         site_w = max(4, min(site_full, 14))
         name_w = max(8, min(name_full, 18))
-        dur_w, ll_w = 12, 12
+        dur_w, ll_w = 7, 12
         bar_w = max(4, min(bar_pref, avail - (site_w + name_w + 8 + dur_w + ll_w + 5)))
         over = site_w + name_w + 8 + dur_w + ll_w + 5 + bar_w - avail
         if over > 0:
@@ -1135,7 +1141,7 @@ class JJDlpDashboard:
             if since is not None:
                 elapsed  = now - since
                 bar_str  = _live_bar_dashed(elapsed, bar_w, bar_max)
-                dur_str  = _fmt_duration(elapsed)
+                dur_str  = _fmt_hm(elapsed)
                 if flash_on:
                     status_str, status_attr = "[● Live]", theme.attr(self, _t + "disabled_8")
                 else:
@@ -1159,7 +1165,7 @@ class JJDlpDashboard:
             bar_attr = (theme.attr(self, "main_jjdlpdashboard_split_after_rows_warn_2")
                         if s in snap["ad_alerts"] or s in snap["ff_errors"]
                         else theme.attr(self, _t + "live_9"))
-            dur_str  = _fmt_duration(elapsed)
+            dur_str  = _fmt_hm(elapsed)
             if not (is_rec and res is not None):
                 last_live_str = ""
         else:
