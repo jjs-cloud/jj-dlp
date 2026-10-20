@@ -2,7 +2,7 @@
 """
 jj-dlp  —  multi-site stream recorder
 """
-__version__ = "1.29.3"
+__version__ = "1.29.4"
 
 import subprocess
 import textwrap
@@ -5249,6 +5249,7 @@ def monitor_site(app: "AppState", site: "SiteState") -> None:
     # global.json, so a restart within 24h of the last fire is a no-op and
     # a restart after 24h fires again automatically.
     _gql_backfill_done = False
+    _no_streamers_logged = False  # log the empty-streamers error only once
 
     while not site._stop_event.is_set():
         # Evaluate schedule-based enable/disable for all streamers before the
@@ -5269,8 +5270,11 @@ def monitor_site(app: "AppState", site: "SiteState") -> None:
             site.dash_next_check_in = 0.0
 
         if not streamers:
-            site.log_line("ERROR: No streamers configured.")
+            if not _no_streamers_logged:
+                site.log_line("ERROR: No streamers configured.")
+                _no_streamers_logged = True
         else:
+            _no_streamers_logged = False
             # Diagnostic generation for this reconciliation cycle. Increment
             # before obtaining live_info so every subsequent session log can
             # be tied to one specific checker cycle.
